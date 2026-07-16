@@ -513,10 +513,17 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     out_dir = Path(out_dir); out_dir.mkdir(exist_ok=True)
     phrases, titles = plan["phrases"], {}
     if lang == "en":
-        step("Traduciendo subtítulos al inglés…")
-        phrases = translate_mod.translate_phrases(phrases)
         hl_titles = [h.get("title", "") for h in plan["highlights"]]
-        titles = dict(zip(hl_titles, translate_mod.translate_texts(hl_titles)))
+        if plan.get("phrases_en"):                     # pre-translated (and possibly
+            phrases = plan["phrases_en"]               # user-EDITED) in the studio
+            ten = plan.get("titles_en") or []
+            titles = dict(zip(hl_titles, ten)) if len(ten) == len(hl_titles) else {}
+            if not titles:
+                titles = dict(zip(hl_titles, translate_mod.translate_texts(hl_titles)))
+        else:
+            step("Traduciendo subtítulos al inglés…")
+            phrases = translate_mod.translate_phrases(phrases)
+            titles = dict(zip(hl_titles, translate_mod.translate_texts(hl_titles)))
     ass = SPIKE / "work" / f"{stem}.ass"
     build_ass(phrases, ass, ow, oh, style, anim)           # rebuild from edited captions
     beats = plan.get("beats") if dynamic else None
@@ -600,8 +607,10 @@ def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim
     blurred bg, zoom, studio audio, music, chosen style/format/lang) — preview before export."""
     ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
     stem = plan["stem"]
-    phrases = (translate_mod.translate_phrases(plan["phrases"]) if lang == "en"
-               else plan["phrases"])
+    if lang == "en":
+        phrases = plan.get("phrases_en") or translate_mod.translate_phrases(plan["phrases"])
+    else:
+        phrases = plan["phrases"]
     ass = SPIKE / "work" / f"{stem}.ass"
     build_ass(phrases, ass, ow, oh, style, anim)
     out = Path(out)

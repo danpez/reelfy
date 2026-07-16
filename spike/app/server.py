@@ -148,6 +148,33 @@ def tracks():
     return [p.stem for p in sorted(d.glob("*.m4a"))] if d.exists() else []
 
 
+@app.get("/music/{track}")
+def music(track: str):
+    f = SPIKE / "assets/music" / f"{Path(track).stem}.m4a"
+    if not f.exists():
+        raise HTTPException(404, "No existe")
+    return FileResponse(f, media_type="audio/mp4", headers={"Accept-Ranges": "bytes"})
+
+
+@app.post("/translate/{job_id}")
+async def translate(job_id: str, req: Request):
+    """Translate captions + short titles to EN for LIVE preview/editing in the studio.
+    The (possibly edited) EN phrases are then sent back inside the plan at export."""
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job no encontrado")
+    body = await req.json()
+    plan = body.get("plan") or job["plan"]
+    try:
+        phrases_en = await run_in_threadpool(pipeline.translate_mod.translate_phrases,
+                                             plan["phrases"])
+        titles = [h.get("title", "") for h in plan.get("highlights", [])]
+        titles_en = await run_in_threadpool(pipeline.translate_mod.translate_texts, titles)
+    except Exception as e:  # noqa
+        raise HTTPException(500, f"Traducción falló: {e}")
+    return {"phrases_en": phrases_en, "titles_en": titles_en}
+
+
 @app.get("/status/{job_id}")
 def status(job_id: str):
     job = JOBS.get(job_id)
