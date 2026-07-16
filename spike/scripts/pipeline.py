@@ -38,7 +38,7 @@ BASE_COLOR = "&H00FFFFFF"    # white (ASS is &HAABBGGRR)
 ACTIVE_COLOR = "&H0000E5FF"  # amber highlight for the spoken word
 OUTLINE = 5
 MARGIN_H = 140              # side margins so text never overflows
-MARGIN_V = 620               # captions higher, clear of TikTok bottom UI (safe zone)
+MARGIN_V = 430               # captions in lower third (chest), clear of face & bottom UI
 MAX_WORDS_PER_LINE = 3       # short phrases, like Submagic/Opus
 GAP_SPLIT_MS = 700           # start a new phrase after a pause this long
 
@@ -115,8 +115,17 @@ def ass_time(t):
 
 
 def build_ass(phrases, ass_path):
-    """One Dialogue event per (phrase, active-word) so the spoken word highlights
-    in sync — the timing-quality demo."""
+    """Word-by-word highlight captions, ROCK-STABLE position.
+
+    Bug fixed: highlighting the active word by SCALING it (\\fscx) changed the text
+    width every word, so a centered line re-centered/re-wrapped -> the caption
+    appeared to jump around mid-phrase. Now the highlight is COLOR-ONLY (glyph
+    metrics never change) so the phrase stays pinned; only the color moves.
+    Also: events are globally de-overlapped + min-duration'd + capped on long pauses,
+    so captions never duplicate or vanish.
+    """
+    MIN_DUR = 0.06
+    MAX_HOLD = 1.2   # after this much silence the caption clears (natural)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {W}
@@ -130,26 +139,33 @@ Style: Base,{FONT},{FONT_SIZE},{BASE_COLOR},&H00000000,&H80000000,1,{OUTLINE},2,
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    lines = []
+    events = []   # [start, end, text]
     for ph in phrases:
         for i, active in enumerate(ph):
             parts = []
             for w in ph:
                 token = w["text"].replace("{", "(").replace("}", ")")
                 if w is active:
-                    parts.append(f"{{\\c{ACTIVE_COLOR}\\fscx112\\fscy112}}{token}{{\\r}}")
+                    parts.append(f"{{\\c{ACTIVE_COLOR}}}{token}{{\\r}}")  # COLOR ONLY
                 else:
                     parts.append(token)
-            text = " ".join(parts)
-            # Gapless within a phrase: hold each word until the next word starts, so
-            # the caption never flickers and the highlight advances exactly on the beat.
             start = active["start"]
             end = ph[i + 1]["start"] if i + 1 < len(ph) else active["end"]
-            if end <= start:
-                end = active["end"]
-            lines.append(
-                f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Base,,0,0,0,,{text}"
-            )
+            events.append([start, end, " ".join(parts)])
+
+    events.sort(key=lambda e: e[0])
+    lines = []
+    for j, ev in enumerate(events):
+        s, _, txt = ev
+        nxt = events[j + 1][0] if j + 1 < len(events) else None
+        end = ev[1]
+        if nxt is not None:
+            end = min(end, nxt)                      # never overlap next -> no duplicates
+            if nxt - s > MAX_HOLD:                   # long pause -> let it clear
+                end = min(end, s + MAX_HOLD)
+        if end - s < MIN_DUR:                        # superseded by a ~simultaneous word: drop
+            continue                                #   (avoids overlap AND flicker/dup)
+        lines.append(f"Dialogue: 0,{ass_time(s)},{ass_time(end)},Base,,0,0,0,,{txt}")
     Path(ass_path).write_text(header + "\n".join(lines) + "\n")
 
 
@@ -201,18 +217,10 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None):
             "tonemap=tonemap=hable:desat=0",
             "zscale=transfer=bt709:matrix=bt709:primaries=bt709:range=tv",
         ]
-    base = ",".join(chain + ["format=yuv420p"])   # tracked, tonemapped 1080x1920
-    # "Air": inset the subject over a blurred, zoomed fill of itself (full-bleed
-    # margins on all sides, no black bars), then burn captions in the safe zone.
-    bg_w, bg_h = (round(W * 1.12) // 2) * 2, (round(H * 1.12) // 2) * 2
-    fg_w = (round(W * AIR_SCALE) // 2) * 2
-    vf = (
-        f"{base},split=2[bg][fg];"
-        f"[bg]scale={bg_w}:{bg_h},crop={W}:{H},gblur=sigma=32,eq=brightness=-0.06:saturation=0.92[bgb];"
-        f"[fg]scale={fg_w}:-2[fgs];"
-        f"[bgb][fgs]overlay=x=(W-w)/2:y=(H-h)*{SUBJECT_Y}[cmp];"
-        f"[cmp]subtitles={ass_path}"
-    )
+    # Plain full-height crop (widest 9:16 FOV possible from a 16:9 source = most
+    # "air" without letterbox bars). No blurred inset. Captions burned on top.
+    chain += ["format=yuv420p", f"subtitles={ass_path}"]
+    vf = ",".join(chain)
     run([FFMPEG, "-y", "-hwaccel", "videotoolbox", "-i", str(video), "-vf", vf,
          "-c:v", "h264_videotoolbox", "-b:v", "12M",
          "-c:a", "aac", "-b:a", "128k", str(out)])
@@ -240,9 +248,9 @@ def make_highlights(json_path, full_out, n, out_dir, stem, dynamic=False):
         cut_clip(full_out, c["start"], c["end"], clip_out)
         if dynamic:
             tmp = out_dir / f"{stem}_short{k}_dyn.mp4"
-            kept, removed = edit_mod.tighten(clip_out, tmp)
+            removed, nz = edit_mod.dynamic(clip_out, tmp, out_dir)
             tmp.replace(clip_out)
-            print(f"      dynamic: -{removed:.1f}s silencios, punch-in zoom")
+            print(f"      dynamic: -{removed:.1f}s silencios, {nz} punch-in zooms (corte duro)")
         results.append((clip_out, c))
     return results
 
