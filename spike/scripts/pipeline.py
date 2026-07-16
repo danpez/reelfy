@@ -53,7 +53,8 @@ STYLES = {
 }
 
 # output format presets (label -> (w, h))
-FORMATS = {"9:16": (1080, 1920), "1:1": (1080, 1080), "4:5": (1080, 1350)}
+FORMATS = {"9:16": (1080, 1920), "1:1": (1080, 1080), "4:5": (1080, 1350),
+           "16:9": (1920, 1080)}
 
 # ---- framing: FIXED blurred background + dynamic foreground video on top ----
 # The bg is a static cover-crop of the scene, blurred, NEVER panned/zoomed (fixed).

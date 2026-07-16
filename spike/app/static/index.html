@@ -214,8 +214,9 @@
               <button data-v="pop" class="sel">Pop</button><button data-v="fade">Fade</button><button data-v="none">No</button></div></div>
           </div>
           <div class="optrow">
-            <div><label>Formato export</label><div class="seg" id="segFmt">
-              <button data-v="9:16" class="sel">9:16</button><button data-v="1:1">1:1</button><button data-v="4:5">4:5</button></div></div>
+            <div><label>Formato</label><div class="seg" id="segFmt">
+              <button data-v="9:16" class="sel">9:16</button><button data-v="1:1">1:1</button>
+              <button data-v="4:5">4:5</button><button data-v="16:9">16:9</button></div></div>
             <div><label>Idioma</label><div class="seg" id="segLang">
               <button data-v="es" class="sel">ES</button><button data-v="en">EN</button></div></div>
           </div>
@@ -371,10 +372,23 @@ function setBar(sel,pct){ $(sel).style.width=Math.max(2,pct)+"%"; }
 
 /* ============ EDITOR ============ */
 const V=$("#srcVid"), CV=$("#cv"), CTX=CV.getContext("2d");
-const OS=document.createElement("canvas"); OS.width=34; OS.height=60;   // low-res -> upscale = blur (Safari-safe)
+const OS=document.createElement("canvas");   // low-res -> upscale = blur (Safari-safe)
 const OCTX=OS.getContext("2d");
-const CAPSTYLE={clasico:{size:39,active:"#ffb020",upper:false},amarillo:{size:42,active:"#ffe14d",upper:true},
-                neon:{size:40,active:"#ff50f0",upper:false},minimal:{size:35,active:"#ffffff",upper:false}};
+// canvas preview dims + export width per format (fonts in ASS scale by PlayResX)
+const FMTS={"9:16":{cw:540,ch:960,ow:1080,max:340},"1:1":{cw:720,ch:720,ow:1080,max:380},
+            "4:5":{cw:648,ch:810,ow:1080,max:360},"16:9":{cw:960,ch:540,ow:1920,max:560}};
+let CW=540,CH=960,OW=1080;
+function setFormat(v){
+  FMT=v; const f=FMTS[v]||FMTS["9:16"];
+  CW=f.cw; CH=f.ch; OW=f.ow;
+  CV.width=CW; CV.height=CH;
+  CV.style.aspectRatio=`${CW} / ${CH}`; CV.style.maxWidth=f.max+"px";
+  OS.height=48; OS.width=Math.max(2,Math.round(48*CW/CH));
+}
+setFormat("9:16");
+// base sizes are tuned at 78px on a 1080-wide export; scale to canvas+export width
+const CAPSTYLE={clasico:{size:78,active:"#ffb020",upper:false},amarillo:{size:84,active:"#ffe14d",upper:true},
+                neon:{size:80,active:"#ff50f0",upper:false},minimal:{size:70,active:"#ffffff",upper:false}};
 let flatWords=[], liveWordEl=null;
 
 async function loadTracks(){
@@ -384,7 +398,7 @@ async function loadTracks(){
 }
 function openEditor(){
   show("#s-editor");
-  seg("#segStyle",v=>STYLE=v); seg("#segAnim",v=>ANIM=v); seg("#segFmt",v=>FMT=v);
+  seg("#segStyle",v=>STYLE=v); seg("#segAnim",v=>ANIM=v); seg("#segFmt",setFormat);
   seg("#segLang",setLang);
   loadTracks();
   $("#music").onchange=e=>{ $("#musrow").style.display=e.target.checked?"flex":"none"; syncMusic(); renderMusicLane(); };
@@ -432,16 +446,23 @@ function ensureAudio(){
   AC=new (window.AudioContext||window.webkitAudioContext)();
   const src=AC.createMediaElementSource(V);
   const dry=AC.createGain(), wet=AC.createGain();
-  const hp=AC.createBiquadFilter(); hp.type="highpass"; hp.frequency.value=80;
+  // LIVE studio approximation (pronounced, so the toggle is clearly audible):
+  // rumble cut -> presence boost -> strong compression -> makeup -> NOISE GATE
+  // (the gate mutes room noise between words = perceptual denoise).
+  const hp=AC.createBiquadFilter(); hp.type="highpass"; hp.frequency.value=100;
+  const pres=AC.createBiquadFilter(); pres.type="peaking";
+  pres.frequency.value=3000; pres.Q.value=0.9; pres.gain.value=4;
   const comp=AC.createDynamicsCompressor();
-  comp.threshold.value=-18; comp.ratio.value=3; comp.attack.value=0.005; comp.release.value=0.06;
-  const mk=AC.createGain(); mk.gain.value=1.6;
+  comp.threshold.value=-24; comp.ratio.value=4; comp.attack.value=0.004; comp.release.value=0.09;
+  const mk=AC.createGain(); mk.gain.value=2.0;
+  const gate=AC.createGain(); gate.gain.value=1;
   const an=AC.createAnalyser(); an.fftSize=512;
   src.connect(dry); dry.connect(AC.destination);
-  src.connect(hp); hp.connect(comp); comp.connect(mk); mk.connect(wet); wet.connect(AC.destination);
+  src.connect(hp); hp.connect(pres); pres.connect(comp); comp.connect(mk);
+  mk.connect(gate); gate.connect(wet); wet.connect(AC.destination);
   src.connect(an);
   const mg=AC.createGain(); mg.gain.value=0; mg.connect(AC.destination);
-  ND={dry,wet,mg,an,buf:new Uint8Array(an.fftSize)};
+  ND={dry,wet,mg,gate,an,buf:new Uint8Array(an.fftSize)};
   applyEnhance();
 }
 function applyEnhance(){ if(!ND)return; const on=$("#enhance").checked;
@@ -483,20 +504,20 @@ function draw(){
     const s=Math.max(OS.width/vw, OS.height/vh), bw=vw*s, bh=vh*s;
     OCTX.drawImage(V,(OS.width-bw)/2,(OS.height-bh)/2,bw,bh);
     CTX.imageSmoothingEnabled=true; CTX.imageSmoothingQuality="high";
-    CTX.drawImage(OS,0,0,540,960);
-    CTX.fillStyle="rgba(8,10,14,.28)"; CTX.fillRect(0,0,540,960);
-    // fg: tracked crop, inset 84%, zoom punch
-    const cw=Math.min(vw, vh*(540/960)), ch=vh;
+    CTX.drawImage(OS,0,0,CW,CH);
+    CTX.fillStyle="rgba(8,10,14,.28)"; CTX.fillRect(0,0,CW,CH);
+    // fg: tracked crop of the CHOSEN aspect, inset 84%, zoom punch
+    const cw=Math.min(vw, vh*(CW/CH)), ch=Math.min(vh, vw*(CH/CW));
     let cx=(vw-cw)/2;
-    if(PLAN.camera&&PLAN.camera.length){
+    if(cw<vw-2 && PLAN.camera&&PLAN.camera.length){
       const i=Math.min(PLAN.camera.length-1, Math.max(0,Math.floor(t*30)));
       cx=Math.min(Math.max(PLAN.camera[i]*vw-cw/2,0), vw-cw);
     }
     let z=1;
     if($("#dynamic").checked&&(PLAN.beats||[]).some(b=>t>=b&&t<b+1.1)) z=1.10;
-    const sw=cw/z, sh=ch/z, sx=cx+(cw-sw)/2, sy=(ch-sh)/2;
-    const fw=540*0.84, fh=960*0.84;
-    CTX.drawImage(V, sx,sy,sw,sh, (540-fw)/2,(960-fh)/2, fw,fh);
+    const sw=cw/z, sh=ch/z, sx=cx+(cw-sw)/2, sy=((vh-ch)/2)+(ch-sh)/2;
+    const fw=CW*0.84, fh=CH*0.84;
+    CTX.drawImage(V, sx,sy,sw,sh, (CW-fw)/2,(CH-fh)/2, fw,fh);
     drawCaption(t);
     drawHook(t);
   }
@@ -511,20 +532,21 @@ function drawCaption(t){
   const ph=P().find(p=>p.length&&t>=p[0].start&&t<p[p.length-1].end+0.05);
   if(!ph) return;
   const st=CAPSTYLE[STYLE]||CAPSTYLE.clasico;
+  const fsz=st.size*CW/OW;                      // mirror ASS: size relative to export width
   const age=t-ph[0].start;
   let scale=1, alpha=1;
   if(ANIM==="pop"){ scale=popScale(age); alpha=Math.min(1,age/0.12); }
   else if(ANIM==="fade"){ alpha=Math.min(1,age/0.15); }
   CTX.save();
   CTX.globalAlpha=alpha;
-  const y=960-215;
-  CTX.translate(270,y); CTX.scale(scale,scale); CTX.translate(-270,-y);
-  CTX.font=`700 ${st.size}px Arial`;
-  CTX.textBaseline="alphabetic"; CTX.lineJoin="round"; CTX.lineWidth=st.size/6; CTX.strokeStyle="#000";
+  const y=CH*0.776;
+  CTX.translate(CW/2,y); CTX.scale(scale,scale); CTX.translate(-CW/2,-y);
+  CTX.font=`700 ${fsz}px Arial`;
+  CTX.textBaseline="alphabetic"; CTX.lineJoin="round"; CTX.lineWidth=fsz/6; CTX.strokeStyle="#000";
   const words=ph.map(w=>st.upper?w.text.toUpperCase():w.text);
   const widths=words.map(x=>CTX.measureText(x).width), sp=CTX.measureText(" ").width;
   const totalW=widths.reduce((a,b)=>a+b,0)+sp*(words.length-1);
-  let x=(540-totalW)/2;
+  let x=(CW-totalW)/2;
   ph.forEach((w,i)=>{
     const active=t>=w.start&&t<w.end;
     CTX.strokeText(words[i],x,y);
@@ -545,18 +567,17 @@ function drawHook(t){
   const scale=popScale(age);
   const alpha=age<0.12?age/0.12:age>3.0?Math.max(0,(3.4-age)/0.4):1;
   CTX.save(); CTX.globalAlpha=alpha;
-  const size=34; CTX.font=`800 ${size}px Arial`;
-  // wrap to <=2 lines
-  const maxW=540*0.86, lines=[]; let cur="";
+  const size=0.072*CW*1080/OW; CTX.font=`800 ${size}px Arial`;
+  const maxW=CW*0.86, lines=[]; let cur="";
   title.split(" ").forEach(w=>{ const t2=(cur+" "+w).trim();
     if(cur&&CTX.measureText(t2).width>maxW){lines.push(cur);cur=w;}else cur=t2; });
   if(cur)lines.push(cur); const shown=lines.slice(0,2);
-  const y0=110;
-  CTX.translate(270,y0); CTX.scale(scale,scale); CTX.translate(-270,-y0);
+  const y0=CH*0.115;
+  CTX.translate(CW/2,y0); CTX.scale(scale,scale); CTX.translate(-CW/2,-y0);
   shown.forEach((ln,i)=>{
-    const y=y0+i*(size*1.15), x=(540-CTX.measureText(ln).width)/2;
+    const y=y0+i*(size*1.15), x=(CW-CTX.measureText(ln).width)/2;
     CTX.shadowColor="#ffb020"; CTX.shadowBlur=22;
-    CTX.lineJoin="round"; CTX.lineWidth=7; CTX.strokeStyle="#000";
+    CTX.lineJoin="round"; CTX.lineWidth=size/5; CTX.strokeStyle="#000";
     CTX.strokeText(ln,x,y);
     CTX.shadowBlur=0;
     CTX.fillStyle="#fff"; CTX.fillText(ln,x,y);
@@ -572,13 +593,19 @@ function highlightLiveWord(t){
   liveWordEl=el;
 }
 function duckMusic(){
-  if(!ND||!M||!$("#music").checked) return;
+  if(!ND) return;
   ND.an.getByteTimeDomainData(ND.buf);
   let s=0; for(let i=0;i<ND.buf.length;i++){const d=(ND.buf[i]-128)/128; s+=d*d;}
   const rms=Math.sqrt(s/ND.buf.length);
-  const base=(+$("#mvol").value)/100;
-  const target=V.paused?0:(base*(rms>0.028?0.3:1));
-  ND.mg.gain.value+=(target-ND.mg.gain.value)*0.12;
+  // noise gate for the LIVE studio chain: fast open on speech, slow close on noise
+  const gt=rms>0.012?1:0.18;
+  ND.gate.gain.value+=(gt-ND.gate.gain.value)*(gt>ND.gate.gain.value?0.55:0.05);
+  // music ducking under the voice
+  if(M&&$("#music").checked){
+    const base=(+$("#mvol").value)/100;
+    const target=V.paused?0:(base*(rms>0.028?0.3:1));
+    ND.mg.gain.value+=(target-ND.mg.gain.value)*0.12;
+  }
 }
 
 /* ---- transport ---- */
