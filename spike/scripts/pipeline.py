@@ -349,6 +349,36 @@ def add_music(video_in, video_out, track="ambient", volume=0.26):
          "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest", str(video_out)])
 
 
+def make_hook_ass(title, w, h, out, dur=3.0):
+    """A big animated hook title (top area, boxed, fade in/out) for the first `dur`s."""
+    size = max(30, int(w * 0.060))
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {w}
+PlayResY: {h}
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV
+Style: Hook,{FONT},{size},&H00FFFFFF,&H00000000,&HA8140F0A,1,3,10,0,8,{int(w*0.08)},{int(w*0.08)},{int(h*0.11)}
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,{ass_time(dur)},Hook,,0,0,0,,{{\\fad(300,400)}}{(title or '').upper()}
+"""
+    Path(out).write_text(header)
+    return out
+
+
+def add_hook(video_in, video_out, title, w, h):
+    """Burn an animated hook title over the first seconds (re-encode; fast for a short)."""
+    ass = Path(video_out).with_suffix(".hook.ass")
+    make_hook_ass(title, w, h, ass)
+    run([FFMPEG, "-y", "-i", str(video_in), "-vf", f"subtitles={ass}",
+         "-c:v", "h264_videotoolbox", "-b:v", "12M", "-c:a", "aac", "-b:a", "128k", str(video_out)])
+    ass.unlink(missing_ok=True)
+
+
 def cut_clip(full_out, start, end, clip_out, on_pct=None):
     """Cut a highlight [start,end] from the fully-rendered vertical (captions and
     tracking already baked, so timing stays correct). Re-encode for frame accuracy."""
@@ -408,7 +438,7 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
 
 def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="clasico",
                      anim="none", fmt="9:16", music=False, music_track="ambient",
-                     music_volume=0.26, on_step=None, on_pct=None):
+                     music_volume=0.26, hook=False, on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -443,6 +473,9 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
         if dynamic:
             tmp = out_dir / f"{stem}_short{k}_dyn.mp4"
             edit_mod.tighten(clip, tmp); tmp.replace(clip)
+        if hook and h.get("title"):
+            tmp = out_dir / f"{stem}_short{k}_hook.mp4"
+            add_hook(clip, tmp, h["title"], ow, oh); tmp.replace(clip)
         thumb = out_dir / f"{stem}_short{k}_thumb.jpg"
         try:
             thumb_mod.make_thumbnail(clip, thumb, h.get("title", ""))

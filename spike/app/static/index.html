@@ -191,6 +191,7 @@
       <label class="swlabel"><input type="checkbox" class="toggle" id="dynamic" checked> Dinamismo</label>
       <label class="swlabel"><input type="checkbox" class="toggle" id="enhance" checked> 🎙️ Audio de estudio</label>
       <label class="swlabel"><input type="checkbox" class="toggle" id="music"> 🎵 Música de fondo</label>
+      <label class="swlabel"><input type="checkbox" class="toggle" id="hook" checked> ✨ Hook en el video</label>
       <span style="flex:1"></span>
       <button class="btn ghost" id="cancel">Cancelar</button>
       <button class="btn ghost" id="preview">👁 Previsualizar muestra</button>
@@ -325,7 +326,7 @@ $("#modal").onclick=e=>{if(e.target===$("#modal")){$("#modal").classList.remove(
 $("#render").onclick=async()=>{
   show("#s-rendering");
   try{ await fetch("/render/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,anim:ANIM,format:FMT,...musOpts()})}); }
+    body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,anim:ANIM,format:FMT,hook:$("#hook").checked,...musOpts()})}); }
   catch(e){ return fail("No se pudo iniciar el render."); }
   poll();
 };
