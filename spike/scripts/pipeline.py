@@ -166,7 +166,7 @@ def ass_time(t):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def build_ass(phrases, ass_path, w=W, h=H, style="clasico"):
+def build_ass(phrases, ass_path, w=W, h=H, style="clasico", anim="none"):
     """Word-by-word highlight captions, ROCK-STABLE position.
 
     Highlight is COLOR-ONLY (glyph metrics never change) so the phrase stays pinned;
@@ -191,7 +191,16 @@ Style: Base,{FONT},{st["size"]},{BASE_COLOR},&H00000000,&H80000000,1,{st["outlin
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    events = []   # [start, end, text]
+    # entrance animation applied ONLY to the first event of each phrase (not per word,
+    # so it never re-triggers / never causes reflow). Active word resets color to white
+    # (not \r) so a line-level scale animation survives across words.
+    ANIM = {
+        "none": "",
+        "fade": r"{\fad(150,0)}",
+        "pop":  r"{\fad(70,0)\t(0,150,\fscx112\fscy112)\t(150,270,\fscx100\fscy100)}",
+        "slide": r"{\fad(120,0)\t(0,220,\frz0)}",  # subtle settle
+    }
+    events = []   # [start, end, text, is_first_of_phrase]
     for ph in phrases:
         for i, active in enumerate(ph):
             parts = []
@@ -200,17 +209,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 if st["upper"]:
                     token = token.upper()
                 if w_ is active:
-                    parts.append(f"{{\\c{active_color}}}{token}{{\\r}}")  # COLOR ONLY
+                    parts.append(f"{{\\c{active_color}}}{token}{{\\c{BASE_COLOR}}}")
                 else:
                     parts.append(token)
             start = active["start"]
             end = ph[i + 1]["start"] if i + 1 < len(ph) else active["end"]
-            events.append([start, end, " ".join(parts)])
+            events.append([start, end, " ".join(parts), i == 0])
 
     events.sort(key=lambda e: e[0])
+    anim_tag = ANIM.get(anim, "")
     lines = []
     for j, ev in enumerate(events):
-        s, _, txt = ev
+        s, _, txt, first = ev
         nxt = events[j + 1][0] if j + 1 < len(events) else None
         end = ev[1]
         if nxt is not None:
@@ -219,7 +229,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 end = min(end, s + MAX_HOLD)
         if end - s < MIN_DUR:                        # superseded by a ~simultaneous word: drop
             continue                                #   (avoids overlap AND flicker/dup)
-        lines.append(f"Dialogue: 0,{ass_time(s)},{ass_time(end)},Base,,0,0,0,,{txt}")
+        pre = anim_tag if (first and anim_tag) else ""
+        lines.append(f"Dialogue: 0,{ass_time(s)},{ass_time(end)},Base,,0,0,0,,{pre}{txt}")
     Path(ass_path).write_text(header + "\n".join(lines) + "\n")
 
 
@@ -396,8 +407,8 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
 
 
 def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="clasico",
-                     fmt="9:16", music=False, music_track="ambient", music_volume=0.26,
-                     on_step=None, on_pct=None):
+                     anim="none", fmt="9:16", music=False, music_track="ambient",
+                     music_volume=0.26, on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -409,7 +420,7 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     stem = plan["stem"]; video = Path(plan["video"]); camera = plan.get("camera")
     out_dir = Path(out_dir); out_dir.mkdir(exist_ok=True)
     ass = SPIKE / "work" / f"{stem}.ass"
-    build_ass(plan["phrases"], ass, ow, oh, style)         # rebuild from edited captions
+    build_ass(plan["phrases"], ass, ow, oh, style, anim)   # rebuild from edited captions
     beats = plan.get("beats") if dynamic else None
 
     step("Montando el video…")
@@ -443,14 +454,14 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     return clips
 
 
-def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", fmt="9:16",
-                   music=False, music_track="ambient", music_volume=0.26):
+def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim="none",
+                   fmt="9:16", music=False, music_track="ambient", music_volume=0.26):
     """Fast, low-res sample of the first `secs` (the real look: captions, tracking,
     blurred bg, zoom, studio audio, music, chosen style/format) — preview before export."""
     ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
     stem = plan["stem"]
     ass = SPIKE / "work" / f"{stem}.ass"
-    build_ass(plan["phrases"], ass, ow, oh, style)
+    build_ass(plan["phrases"], ass, ow, oh, style, anim)
     out = Path(out)
     tmp = out.with_name(out.stem + "_raw.mp4") if music else out
     reframe_and_burn(Path(plan["video"]), ass, tmp, cmds_path=plan["cmds_path"],
