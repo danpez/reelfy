@@ -47,7 +47,7 @@ def _analyze(job_id, video, glossary, n):
         job.update(phase="error", error=f"Análisis falló: {e}")
 
 
-def _render(job_id, plan, dynamic, enhance, style, fmt):
+def _render(job_id, plan, dynamic, enhance, style, fmt, music):
     job = JOBS[job_id]
     n_shorts = max(1, sum(1 for h in plan.get("highlights", []) if h.get("enabled", True)))
     t0 = time.time()
@@ -66,7 +66,8 @@ def _render(job_id, plan, dynamic, enhance, style, fmt):
     try:
         def step(m): job.update(message=m)
         clips = pipeline.render_from_plan(plan, OUTPUT, dynamic=dynamic, enhance_audio=enhance,
-                                          style=style, fmt=fmt, on_step=step, on_pct=overall)
+                                          style=style, fmt=fmt, music=music,
+                                          on_step=step, on_pct=overall)
         job.update(phase="done", pct=100, message="¡Listo!", clips=clips, eta=0)
     except Exception as e:  # noqa
         job.update(phase="error", error=f"Render falló: {e}")
@@ -104,8 +105,9 @@ async def render(job_id: str, req: Request):
     enhance = bool(body.get("enhance_audio", True))
     style = body.get("style", "clasico")
     fmt = body.get("format", "9:16")
+    music = bool(body.get("music", False))
     job.update(phase="rendering", pct=0, message="Preparando el render…", plan=plan)
-    threading.Thread(target=_render, args=(job_id, plan, dynamic, enhance, style, fmt),
+    threading.Thread(target=_render, args=(job_id, plan, dynamic, enhance, style, fmt, music),
                      daemon=True).start()
     return {"ok": True}
 
@@ -122,8 +124,9 @@ async def preview(job_id: str, req: Request):
     out = OUTPUT / f"{job_id}_preview.mp4"
     enhance = bool(body.get("enhance_audio", True))
     style = body.get("style", "clasico"); fmt = body.get("format", "9:16")
+    music = bool(body.get("music", False))
     try:
-        await run_in_threadpool(pipeline.render_preview, plan, out, 7, enhance, style, fmt)
+        await run_in_threadpool(pipeline.render_preview, plan, out, 7, enhance, style, fmt, music)
     except Exception as e:  # noqa
         raise HTTPException(500, f"Preview falló: {e}")
     return {"file": out.name}
@@ -152,6 +155,14 @@ def video(filename: str):
     if not f.exists():
         raise HTTPException(404, "No existe")
     return FileResponse(f, media_type="video/mp4", headers={"Accept-Ranges": "bytes"})
+
+
+@app.get("/image/{filename}")
+def image(filename: str):
+    f = OUTPUT / Path(filename).name
+    if not f.exists():
+        raise HTTPException(404, "No existe")
+    return FileResponse(f, media_type="image/jpeg")
 
 
 if __name__ == "__main__":

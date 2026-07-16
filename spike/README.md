@@ -64,6 +64,17 @@ pip install auto-editor 'scenedetect[opencv]' opencv-python numpy
 # 4) LLM local para highlights (Fase 2)
 brew install ollama && ollama serve &   # servidor local
 ollama pull qwen2.5:7b                   # ~4.7 GB
+
+# 5) música de fondo (assets/, ignorado por git) — pista ambient generada (royalty-free);
+#    agrega tus pistas royalty-free como assets/music/<nombre>.m4a
+mkdir -p assets/music && ffmpeg-full -y \
+  -f lavfi -i "sine=frequency=220:duration=32" -f lavfi -i "sine=frequency=261.6:duration=32" \
+  -f lavfi -i "sine=frequency=329.6:duration=32" -f lavfi -i "sine=frequency=440:duration=32" \
+  -filter_complex "[0][1][2][3]amix=inputs=4:normalize=1,tremolo=f=0.12:d=0.5,aecho=0.8:0.7:55|110:0.35|0.2,lowpass=f=1100,afade=t=in:d=2,afade=t=out:st=30:d=2,volume=2.2" \
+  -c:a aac -b:a 160k assets/music/ambient.m4a
+
+# 6) pillow (miniaturas)
+pip install pillow
 ```
 
 ## Cómo correr

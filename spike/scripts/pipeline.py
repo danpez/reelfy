@@ -23,6 +23,7 @@ import reframe_track
 import highlights as hl
 import align as align_mod
 import edit as edit_mod
+import thumbnail as thumb_mod
 
 SPIKE = Path(__file__).resolve().parent.parent
 WCLI = SPIKE / "whisper.cpp/build/bin/whisper-cli"
@@ -320,6 +321,23 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
         run(cmd)
 
 
+MUSIC_DIR = SPIKE / "assets/music"
+
+
+def add_music(video_in, video_out, track="ambient", volume=0.26):
+    """Mix a royalty-free bed under the voice with sidechain DUCKING (music drops
+    while you speak). Video is stream-copied -> only audio re-encodes -> fast."""
+    m = MUSIC_DIR / f"{track}.m4a"
+    if not m.exists():
+        Path(video_in).replace(video_out); return
+    filt = (f"[1:a]volume={volume}[bg];"
+            f"[bg][0:a]sidechaincompress=threshold=0.02:ratio=6:attack=15:release=250[duck];"
+            f"[0:a][duck]amix=inputs=2:duration=first:dropout_transition=0[a]")
+    run([FFMPEG, "-y", "-i", str(video_in), "-stream_loop", "-1", "-i", str(m),
+         "-filter_complex", filt, "-map", "0:v", "-map", "[a]",
+         "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest", str(video_out)])
+
+
 def cut_clip(full_out, start, end, clip_out, on_pct=None):
     """Cut a highlight [start,end] from the fully-rendered vertical (captions and
     tracking already baked, so timing stays correct). Re-encode for frame accuracy."""
@@ -378,7 +396,7 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
 
 
 def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="clasico",
-                     fmt="9:16", on_step=None, on_pct=None):
+                     fmt="9:16", music=False, music_track="ambient", on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -398,6 +416,10 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     reframe_and_burn(video, ass, full, cmds_path=plan["cmds_path"], beats=beats,
                      enhance_audio=enhance_audio, out_w=ow, out_h=oh, camera=camera,
                      on_pct=(lambda p: on_pct("full", p)) if on_pct else None)
+    if music:
+        step("Añadiendo música de fondo…")
+        tmp = out_dir / f"{plan['stem']}_mus.mp4"
+        add_music(full, tmp, music_track); tmp.replace(full)
     clips = [{"name": "Video completo", "file": full.name}]
 
     enabled = [h for h in plan["highlights"] if h.get("enabled", True)]
@@ -409,20 +431,32 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
         if dynamic:
             tmp = out_dir / f"{stem}_short{k}_dyn.mp4"
             edit_mod.tighten(clip, tmp); tmp.replace(clip)
-        clips.append({"name": f"Short {k}: {h.get('title', '')}".strip(" :"), "file": clip.name})
+        thumb = out_dir / f"{stem}_short{k}_thumb.jpg"
+        try:
+            thumb_mod.make_thumbnail(clip, thumb, h.get("title", ""))
+        except Exception as e:  # noqa
+            print(f"   thumbnail failed: {e}"); thumb = None
+        clips.append({"name": f"Short {k}: {h.get('title', '')}".strip(" :"),
+                      "file": clip.name,
+                      "thumb": thumb.name if thumb and thumb.exists() else None})
     return clips
 
 
-def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", fmt="9:16"):
+def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", fmt="9:16",
+                   music=False, music_track="ambient"):
     """Fast, low-res sample of the first `secs` (the real look: captions, tracking,
-    blurred bg, zoom, studio audio, chosen style/format) — preview before export."""
+    blurred bg, zoom, studio audio, music, chosen style/format) — preview before export."""
     ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
     stem = plan["stem"]
     ass = SPIKE / "work" / f"{stem}.ass"
     build_ass(plan["phrases"], ass, ow, oh, style)
-    reframe_and_burn(Path(plan["video"]), ass, out, cmds_path=plan["cmds_path"],
+    out = Path(out)
+    tmp = out.with_name(out.stem + "_raw.mp4") if music else out
+    reframe_and_burn(Path(plan["video"]), ass, tmp, cmds_path=plan["cmds_path"],
                      beats=plan.get("beats"), preview_secs=secs, enhance_audio=enhance_audio,
                      out_w=ow, out_h=oh, camera=plan.get("camera"))
+    if music:
+        add_music(tmp, out, music_track); tmp.unlink(missing_ok=True)
     return out
 
 

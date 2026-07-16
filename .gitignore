@@ -12,6 +12,7 @@ __pycache__/
 
 # Spike: heavy artifacts (models, source videos, renders, intermediate work, build)
 spike/models/
+spike/assets/
 spike/input/*
 !spike/input/.gitkeep
 spike/output/*

@@ -181,6 +181,7 @@
     <div class="actionbar">
       <label class="swlabel"><input type="checkbox" class="toggle" id="dynamic" checked> Dinamismo</label>
       <label class="swlabel"><input type="checkbox" class="toggle" id="enhance" checked> 🎙️ Audio de estudio</label>
+      <label class="swlabel"><input type="checkbox" class="toggle" id="music"> 🎵 Música de fondo</label>
       <span style="flex:1"></span>
       <button class="btn ghost" id="cancel">Cancelar</button>
       <button class="btn ghost" id="preview">👁 Previsualizar muestra</button>
@@ -294,7 +295,7 @@ $("#preview").onclick=async()=>{
   const b=$("#preview"); const old=b.innerHTML; b.disabled=true; b.innerHTML='<span class="spinner"></span> Generando muestra…';
   try{
     const r=await(await fetch("/preview/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,format:FMT})})).json();
+      body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,format:FMT,music:$("#music").checked})})).json();
     if(r.file){ $("#pvOut").src="/video/"+r.file+"?t="+Date.now(); $("#modal").classList.add("on"); }
     else fail(r.detail||"No se pudo generar la muestra.");
   }catch(e){ alert("No se pudo generar la muestra."); }
@@ -306,7 +307,7 @@ $("#modal").onclick=e=>{if(e.target===$("#modal")){$("#modal").classList.remove(
 $("#render").onclick=async()=>{
   show("#s-rendering");
   try{ await fetch("/render/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,format:FMT})}); }
+    body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,format:FMT,music:$("#music").checked})}); }
   catch(e){ return fail("No se pudo iniciar el render."); }
   poll();
 };
@@ -315,8 +316,10 @@ $("#cancel").onclick=()=>location.reload();
 function results(clips){
   const g=$("#clips"); g.innerHTML="";
   clips.forEach((c,i)=>{const el=document.createElement("div");el.className="clip";el.style.animationDelay=(i*.06)+"s";
-    el.innerHTML=`<video src="/video/${c.file}" controls preload="metadata"></video>
-      <div class="m"><b>${c.name}</b><a class="dl" href="/video/${c.file}" download>Descargar ↓</a></div>`;
+    const poster=c.thumb?` poster="/image/${c.thumb}"`:"";
+    el.innerHTML=`<video src="/video/${c.file}"${poster} controls preload="metadata"></video>
+      <div class="m"><b>${c.name}</b><a class="dl" href="/video/${c.file}" download>Video ↓</a></div>`
+      +(c.thumb?`<div class="m" style="border-top:1px solid var(--line)"><span style="color:var(--muted);font-size:12px">Miniatura + hook</span><a class="dl" href="/image/${c.thumb}" download>Imagen ↓</a></div>`:"");
     g.appendChild(el);});
   show("#s-results");
 }
