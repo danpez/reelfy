@@ -7,6 +7,9 @@ node_modules/
 dist/
 build/
 
+__pycache__/
+*.pyc
+
 # Spike: heavy artifacts (models, source videos, renders, intermediate work, build)
 spike/models/
 spike/input/*

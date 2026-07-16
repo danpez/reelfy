@@ -18,6 +18,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import reframe_track
+
 SPIKE = Path(__file__).resolve().parent.parent
 WCLI = SPIKE / "whisper.cpp/build/bin/whisper-cli"
 MODEL = SPIKE / "whisper.cpp/models/ggml-large-v3-turbo.bin"
@@ -48,11 +51,18 @@ def extract_audio(video, wav):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def transcribe(wav, out_prefix):
-    """whisper.cpp with word-level timestamps -> JSON."""
-    run([str(WCLI), "-m", str(MODEL), "-f", str(wav),
-         "-l", "es", "-ml", "1", "-sow", "-oj", "-of", str(out_prefix)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def transcribe(wav, out_prefix, glossary=""):
+    """whisper.cpp with word-level timestamps -> JSON.
+
+    `glossary` is a custom-vocabulary initial prompt (brand/proper-noun names)
+    biasing the model — a real product feature. Carried through the whole audio.
+    Fixed the visible 'Keruvin'->'Kerobin' error in testing.
+    """
+    cmd = [str(WCLI), "-m", str(MODEL), "-f", str(wav),
+           "-l", "es", "-ml", "1", "-sow", "-oj", "-of", str(out_prefix)]
+    if glossary:
+        cmd += ["--prompt", glossary, "--carry-initial-prompt"]
+    run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return Path(f"{out_prefix}.json")
 
 
@@ -136,21 +146,38 @@ def is_hdr(video):
     return r.stdout.strip() in ("arib-std-b67", "smpte2084")
 
 
-def reframe_and_burn(video, ass_path, out, fps=30):
-    """Cover-crop to 9:16 and burn the ASS captions. Center-crop only (spike).
+def probe_dims(video):
+    r = subprocess.run(
+        ["/opt/homebrew/bin/ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(video)],
+        capture_output=True, text=True)
+    nums = [int(n) for n in r.stdout.strip().split("x") if n.strip()]
+    return nums[0], nums[1]
 
-    Apple Silicon fast path (~6x vs CPU/libx264, measured 3.3x realtime on 4K HDR):
+
+def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None):
+    """Reframe to 9:16 and burn the ASS captions.
+
+    Apple Silicon fast path (~5.4x vs CPU/libx264, render 3.3x realtime on 4K HDR):
       - VideoToolbox hardware DECODE (`-hwaccel videotoolbox`)
-      - scale+crop to 1080x1920 BEFORE tonemap -> tonemap runs on ~4x fewer pixels
+      - crop/scale to 1080x1920 BEFORE tonemap -> tonemap runs on ~4x fewer pixels
       - VideoToolbox hardware ENCODE (`h264_videotoolbox`)
     Vulkan/libplacebo GPU tonemap is NOT usable here (no loadable Vulkan runtime).
+
+    Subject tracking (track=True): a YuNet face trajectory drives a `sendcmd`-panned
+    crop that follows the speaker instead of a fixed center-crop.
     """
-    # Reduce to final frame size first so the CPU tonemap is cheap.
-    chain = [
-        f"scale={W}:{H}:force_original_aspect_ratio=increase",
-        f"crop={W}:{H}",
-        f"fps={fps}",
-    ]
+    src_w, src_h = probe_dims(video)
+    chain = []
+    if track:
+        cw, ch, cmds = reframe_track.build(video, src_w, src_h, cmds_path)
+        if cmds:  # dynamic pan then downscale
+            chain += [f"sendcmd=f={cmds}",
+                      f"crop={cw}:{ch}:x=0:y=(ih-{ch})/2",
+                      f"scale={W}:{H}"]
+    if not chain:  # static center-crop fallback
+        chain += [f"scale={W}:{H}:force_original_aspect_ratio=increase", f"crop={W}:{H}"]
+    chain += [f"fps={fps}"]
     if is_hdr(video):
         print("   HDR detected -> tonemapping HLG/PQ to SDR bt709 (post-downscale)")
         chain += [
@@ -169,6 +196,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("video", help="input video path")
     ap.add_argument("-o", "--out", default=None)
+    ap.add_argument("-g", "--glossary", default="",
+                    help="custom vocabulary / proper nouns to bias transcription "
+                         "(e.g. 'Keruvin Store, Al Haramain, Oud, Lattafa')")
+    ap.add_argument("--no-track", action="store_true",
+                    help="disable subject tracking (use fixed center-crop)")
     args = ap.parse_args()
 
     video = Path(args.video).resolve()
@@ -182,14 +214,18 @@ def main():
     wav = work / f"{stem}.wav"
     prefix = work / stem
     ass = work / f"{stem}.ass"
+    cmds = work / f"{stem}.crop.txt"
 
     print("== [1/4] extract audio =="); extract_audio(video, wav)
-    print("== [2/4] transcribe (whisper.cpp, es, word-level) =="); jp = transcribe(wav, prefix)
+    glossary = (f"Nombres propios y términos: {args.glossary}."
+                if args.glossary else "")
+    print("== [2/4] transcribe (whisper.cpp, es, word-level) =="); jp = transcribe(wav, prefix, glossary)
     words = load_words(jp)
     phrases = group_phrases(words)
     print(f"   {len(words)} words -> {len(phrases)} caption phrases")
     print("== [3/4] build word-highlight ASS =="); build_ass(phrases, ass)
-    print("== [4/4] reframe 9:16 + burn captions =="); reframe_and_burn(video, ass, out)
+    print("== [4/4] reframe 9:16 (subject-tracking) + burn captions ==")
+    reframe_and_burn(video, ass, out, track=not args.no_track, cmds_path=str(cmds))
     print(f"\n✅ output: {out}")
 
 
