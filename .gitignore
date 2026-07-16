@@ -6,3 +6,20 @@ node_modules/
 *.log
 dist/
 build/
+
+# Spike: heavy artifacts (models, source videos, renders, intermediate work, build)
+spike/models/
+spike/input/*
+!spike/input/.gitkeep
+spike/output/*
+!spike/output/.gitkeep
+spike/work/*
+!spike/work/.gitkeep
+spike/.venv/
+spike/whisper.cpp/
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.bin
+*.gguf
