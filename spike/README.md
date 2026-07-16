@@ -99,8 +99,14 @@ Input: `IMG_5637.MOV` — iPhone 16 Pro Max, **4K HDR (HLG 10-bit), 60 fps, 3 mi
 - ✅ **Glosario de nombres propios** (`--glossary`): whisper `--prompt` + `--carry-initial-prompt` sesga el vocabulario. Corrigió "Kerobin"→**"Keruvin Store"** y "Outh"→"Oud" en el video real. Feature real del producto (vocabulario por marca/usuario).
 - ✅ **Subject-tracking en el reframe** (`reframe_track.py`): detección de cara con **YuNet (OpenCV, Apache-2.0 — NO YOLO/AGPL)** a 4 fps → trayectoria suavizada (media móvil + clamp de velocidad) → crop 9:16 paneado por `sendcmd` que sigue al hablante. En el frame de los 45s (antes pegado al borde) ahora queda **centrado**. Pipeline con tracking: **82 s** para 3 min (incluye el paso de detección).
 
+**Pulido de calidad (2026-07-15, ronda 2):**
+- ✅ **Sync de captions con DTW** (`--dtw large.v3.turbo`): timestamps por token vía alineación de atención cruzada, mucho más precisos que la heurística por defecto (corrige los desfases <1s).
+- ✅ **Captions gapless**: cada palabra se sostiene hasta el inicio de la siguiente dentro de la frase → sin parpadeo, el resalte avanza justo en el beat.
+- ✅ **Tracking fluido**: detección a 6 fps → suavizado zero-phase (media móvil sin lag) → **interpolación a nivel de frame de salida (30 fps)** con dead-zone + clamp de velocidad. Pasó de pasos discretos a **movimiento continuo (máx ~1.7px/frame @1080)**. Antes saltaba cada ~7 frames; ahora es un paneo tipo cámara virtual.
+
 **Limitaciones restantes:**
-- Tracking solo horizontal (X); pan calmado tipo cámara virtual. Para escenas con varios interlocutores o cortes bruscos habría que segmentar por escena (PySceneDetect) y trackear por segmento.
+- Tracking solo horizontal (X); pan calmado. Para varios interlocutores/cortes bruscos: segmentar por escena (PySceneDetect) y trackear por segmento.
+- Verificación de fluidez/sync fino requiere VER el video en movimiento (los frames estáticos solo confirman encuadre + palabra-timestamp).
 - **Render lento (RESUELTO):** el pipeline completo bajó de **6:25 → 71 s** para el mismo 3 min de 4K HDR = **5.4× más rápido**, sin pérdida de calidad. Fix: **decode por hardware (`-hwaccel videotoolbox`) + scale/crop ANTES del tonemap (tonemap a 1080×1920, ~4× menos píxeles) + encode `h264_videotoolbox`**. Solo el render pasó de ~0.52× a **3.33× realtime**. Nota: libplacebo/Vulkan NO es usable (sin runtime Vulkan/MoltenVK cargable) → la aceleración es por VideoToolbox.
 
 **Próximas validaciones:**

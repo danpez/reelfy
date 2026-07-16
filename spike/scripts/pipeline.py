@@ -58,8 +58,11 @@ def transcribe(wav, out_prefix, glossary=""):
     biasing the model — a real product feature. Carried through the whole audio.
     Fixed the visible 'Keruvin'->'Kerobin' error in testing.
     """
+    # --dtw: token-level timestamps via cross-attention alignment (DTW).
+    # Much tighter caption sync than the default heuristic timing.
     cmd = [str(WCLI), "-m", str(MODEL), "-f", str(wav),
-           "-l", "es", "-ml", "1", "-sow", "-oj", "-of", str(out_prefix)]
+           "-l", "es", "-ml", "1", "-sow", "--dtw", "large.v3.turbo",
+           "-oj", "-of", str(out_prefix)]
     if glossary:
         cmd += ["--prompt", glossary, "--carry-initial-prompt"]
     run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -122,7 +125,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = []
     for ph in phrases:
-        for active in ph:
+        for i, active in enumerate(ph):
             parts = []
             for w in ph:
                 token = w["text"].replace("{", "(").replace("}", ")")
@@ -131,8 +134,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 else:
                     parts.append(token)
             text = " ".join(parts)
+            # Gapless within a phrase: hold each word until the next word starts, so
+            # the caption never flickers and the highlight advances exactly on the beat.
+            start = active["start"]
+            end = ph[i + 1]["start"] if i + 1 < len(ph) else active["end"]
+            if end <= start:
+                end = active["end"]
             lines.append(
-                f"Dialogue: 0,{ass_time(active['start'])},{ass_time(active['end'])},Base,,0,0,0,,{text}"
+                f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Base,,0,0,0,,{text}"
             )
     Path(ass_path).write_text(header + "\n".join(lines) + "\n")
 

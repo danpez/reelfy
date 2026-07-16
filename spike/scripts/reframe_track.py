@@ -22,10 +22,13 @@ FFMPEG = "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
 SPIKE = Path(__file__).resolve().parent.parent
 YUNET = SPIKE / "models/face_detection_yunet_2023mar.onnx"
 
-SAMPLE_FPS = 4          # face detections per second
+SAMPLE_FPS = 6           # face detections per second
 DET_W, DET_H = 960, 540  # low-res detection frame size
-SMOOTH_WIN = 9          # moving-average window (in samples ~= 2.25s)
-MAX_VEL_FRAC = 0.010    # max crop-center move per sample (fraction of width) -> calm pan
+OUT_FPS = 30             # output frame rate (sendcmd emitted per output frame -> fluid)
+SMOOTH_SEC = 1.2         # zero-phase moving-average window in seconds (calm pan)
+MAX_VEL_PXF = 6.0        # max crop-x move per OUTPUT frame, in source px (anti-whip;
+                         # smoothing does the anti-jitter, this only caps fast catch-up)
+DEADZONE_PX = 6          # ignore sub-threshold jitter of the smoothed center (source px)
 
 
 def crop_dims(src_w, src_h, target_w=1080, target_h=1920):
@@ -64,29 +67,48 @@ def detect_face_track(video, src_w, src_h):
     return xs
 
 
-def smooth(xs):
-    """Moving average + max-velocity clamp for a calm pan."""
+def _zero_phase_ma(a, win):
+    """Zero-phase (forward+backward) moving average -> smoothing without lag."""
+    win = max(1, int(win) | 1)                     # odd
+    k = np.ones(win) / win
+    pad = win // 2
+    f = np.convolve(np.pad(a, pad, mode="edge"), k, "valid")
+    b = np.convolve(np.pad(f[::-1], pad, mode="edge"), k, "valid")[::-1]
+    return b[:len(a)]
+
+
+def build_crop_x(xs, src_w, cw):
+    """Smoothed face-x fractions -> per-OUTPUT-frame integer crop x (source px).
+
+    Pipeline: zero-phase smooth (calm, no lag) -> resample sample_fps to out_fps
+    (linear, so motion is continuous not stepped) -> dead-zone + per-frame velocity
+    clamp (kills micro-jitter and whip-pans). Returns a list, one x per output frame.
+    """
     if not xs:
-        return xs
-    a = np.array(xs, float)
-    k = np.ones(SMOOTH_WIN) / SMOOTH_WIN
-    a = np.convolve(np.pad(a, SMOOTH_WIN // 2, mode="edge"), k, "valid")[:len(xs)]
-    out = [a[0]]
-    for v in a[1:]:
-        d = np.clip(v - out[-1], -MAX_VEL_FRAC, MAX_VEL_FRAC)
-        out.append(out[-1] + d)
+        return []
+    a = _zero_phase_ma(np.array(xs, float), SMOOTH_SEC * SAMPLE_FPS)
+    # sample-rate timeline -> output-frame timeline (dense -> fluid)
+    dur = (len(a) - 1) / SAMPLE_FPS
+    n_out = max(1, int(round(dur * OUT_FPS)) + 1)
+    t_out = np.arange(n_out) / OUT_FPS
+    t_in = np.arange(len(a)) / SAMPLE_FPS
+    cx = np.interp(t_out, t_in, a) * src_w - cw / 2      # crop-left, face centered
+    xmax = src_w - cw
+    cx = np.clip(cx, 0, xmax)
+    # dead-zone + velocity clamp on the final per-frame path
+    out = [float(cx[0])]
+    for v in cx[1:]:
+        prev = out[-1]
+        if abs(v - prev) < DEADZONE_PX:              # ignore tiny jitter
+            out.append(prev); continue
+        d = float(np.clip(v - prev, -MAX_VEL_PXF, MAX_VEL_PXF))
+        out.append(prev + d)
     return out
 
 
-def write_sendcmd(xs, src_w, cw, cmds_path):
-    """Map smoothed face-x fractions -> full-res crop x, write a sendcmd script."""
-    xmax = src_w - cw
-    lines = []
-    for i, fx in enumerate(xs):
-        t = i / SAMPLE_FPS
-        cx = fx * src_w - cw / 2          # crop left so face is centered
-        x = int(min(max(cx, 0), xmax))
-        lines.append(f"{t:.3f} crop x {x};")
+def write_sendcmd(crop_x, cmds_path):
+    """One sendcmd entry per output frame -> sub-pixel-smooth pan (no visible steps)."""
+    lines = [f"{i / OUT_FPS:.3f} crop x {int(round(x))};" for i, x in enumerate(crop_x)]
     Path(cmds_path).write_text("\n".join(lines) + "\n")
     return cmds_path
 
@@ -97,8 +119,11 @@ def build(video, src_w, src_h, cmds_path):
     cw, ch = crop_dims(src_w, src_h)
     if cw >= src_w:                        # no horizontal room to pan
         return cw, ch, None
-    xs = smooth(detect_face_track(video, src_w, src_h))
-    write_sendcmd(xs, src_w, cw, cmds_path)
-    rng = (min(xs), max(xs)) if xs else (0, 0)
-    print(f"   tracked {len(xs)} samples, face-x range {rng[0]*100:.0f}%..{rng[1]*100:.0f}%")
+    xs = detect_face_track(video, src_w, src_h)
+    crop_x = build_crop_x(xs, src_w, cw)
+    write_sendcmd(crop_x, cmds_path)
+    if xs:
+        rng = (min(xs) * 100, max(xs) * 100)
+        print(f"   tracked {len(xs)} samples @ {SAMPLE_FPS}fps -> {len(crop_x)} per-frame cmds, "
+              f"face-x {rng[0]:.0f}%..{rng[1]:.0f}%")
     return cw, ch, cmds_path
