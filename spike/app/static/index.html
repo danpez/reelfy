@@ -5,162 +5,278 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reelfy</title>
 <style>
-  :root{
-    --bg:#0d0f14; --panel:#161a23; --panel2:#1e2330; --line:#2a3040;
-    --text:#eef1f6; --muted:#9aa4b8; --brand:#ff5a3c; --brand2:#ffb020; --ok:#37d67a;
-  }
+  :root{--bg:#0d0f14;--panel:#161a23;--panel2:#1e2330;--line:#2a3040;--text:#eef1f6;
+        --muted:#9aa4b8;--brand:#ff5a3c;--brand2:#ffb020;--ok:#37d67a}
   *{box-sizing:border-box}
   body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
        background:radial-gradient(1200px 600px at 50% -10%,#1a1f2b,var(--bg)) fixed;color:var(--text)}
-  .wrap{max-width:820px;margin:0 auto;padding:40px 20px 80px}
-  header{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+  .wrap{max-width:920px;margin:0 auto;padding:36px 20px 90px}
+  header{display:flex;align-items:baseline;gap:12px;margin-bottom:4px}
   .logo{font-size:30px;font-weight:800;letter-spacing:-.5px}
   .logo .fy{background:linear-gradient(90deg,var(--brand),var(--brand2));-webkit-background-clip:text;background-clip:text;color:transparent}
-  .tag{color:var(--muted);font-size:15px;margin:0 0 28px}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px}
-  .drop{border:2px dashed var(--line);border-radius:14px;padding:44px 20px;text-align:center;
-        cursor:pointer;transition:.15s;background:var(--panel2)}
-  .drop:hover,.drop.hot{border-color:var(--brand);background:#20140f}
-  .drop .big{font-size:18px;font-weight:600}
-  .drop .sub{color:var(--muted);font-size:14px;margin-top:6px}
-  .file{display:none;margin-top:16px;align-items:center;gap:10px;font-size:14px;color:var(--muted)}
-  .opts{margin-top:20px;display:grid;gap:16px}
+  .tag{color:var(--muted);font-size:15px;margin:0 0 24px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px;margin-bottom:18px}
+  .screen{display:none}.screen.on{display:block}
+  h3{margin:0 0 14px;font-size:16px}
   label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
   input[type=text],input[type=number]{width:100%;background:var(--panel2);border:1px solid var(--line);
         border-radius:10px;padding:11px 12px;color:var(--text);font-size:14px}
-  .row{display:flex;gap:16px}.row>div{flex:1}
-  .toggle{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none}
-  .toggle input{width:38px;height:22px;appearance:none;background:var(--line);border-radius:20px;position:relative;cursor:pointer;transition:.2s}
-  .toggle input:checked{background:var(--brand)}
-  .toggle input::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;background:#fff;border-radius:50%;transition:.2s}
-  .toggle input:checked::after{left:18px}
-  .btn{margin-top:22px;width:100%;border:0;border-radius:12px;padding:15px;font-size:16px;font-weight:700;
-       color:#fff;cursor:pointer;background:linear-gradient(90deg,var(--brand),var(--brand2))}
+  .row{display:flex;gap:16px;flex-wrap:wrap}.row>div{flex:1;min-width:140px}
+  .btn{border:0;border-radius:12px;padding:14px 20px;font-size:15px;font-weight:700;color:#fff;cursor:pointer;
+       background:linear-gradient(90deg,var(--brand),var(--brand2))}
   .btn:disabled{opacity:.5;cursor:default}
-  .hint{color:var(--muted);font-size:12px;margin-top:8px}
+  .btn.ghost{background:none;border:1px solid var(--line);color:var(--muted);font-weight:600}
+  .hint{color:var(--muted);font-size:12px;margin-top:10px}
+  /* drop + preview */
+  .drop{border:2px dashed var(--line);border-radius:14px;padding:40px 20px;text-align:center;cursor:pointer;
+        transition:.15s;background:var(--panel2)}
+  .drop:hover,.drop.hot{border-color:var(--brand);background:#20140f}
+  .drop .big{font-size:18px;font-weight:600}.drop .sub{color:var(--muted);font-size:14px;margin-top:6px}
+  .prevWrap{display:none;gap:18px;margin-top:6px}
+  .prevWrap video{width:170px;aspect-ratio:9/16;object-fit:cover;background:#000;border-radius:12px;border:1px solid var(--line)}
+  .prevMeta{flex:1;min-width:200px}
+  .opts{display:grid;gap:14px;margin-top:16px}
   /* progress */
-  .prog{display:none;margin-top:6px}
-  .bar{height:10px;background:var(--panel2);border-radius:20px;overflow:hidden;border:1px solid var(--line)}
-  .bar>i{display:block;height:100%;width:2%;background:linear-gradient(90deg,var(--brand),var(--brand2));transition:width .5s}
-  .pmsg{margin-top:12px;font-size:14px;color:var(--text)}
-  .psub{color:var(--muted);font-size:12px;margin-top:4px}
+  .bar{height:12px;background:var(--panel2);border-radius:20px;overflow:hidden;border:1px solid var(--line)}
+  .bar>i{display:block;height:100%;width:2%;background:linear-gradient(90deg,var(--brand),var(--brand2));transition:width .4s}
+  .pmsg{margin-top:12px;font-size:15px}
+  .pstat{display:flex;gap:18px;margin-top:8px;color:var(--muted);font-size:13px}
+  .pstat b{color:var(--text)}
+  /* review */
+  .grid2{display:grid;grid-template-columns:190px 1fr;gap:20px}
+  @media(max-width:640px){.grid2{grid-template-columns:1fr}}
+  .srcVid{width:100%;aspect-ratio:9/16;object-fit:cover;background:#000;border-radius:12px;border:1px solid var(--line)}
+  .tl{position:relative;height:44px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;margin:6px 0 4px;overflow:hidden}
+  .tl .hl{position:absolute;top:6px;bottom:6px;background:linear-gradient(90deg,rgba(255,90,60,.85),rgba(255,176,32,.85));
+          border-radius:6px;cursor:pointer;font-size:11px;color:#fff;padding:3px 6px;overflow:hidden;white-space:nowrap;border:1px solid rgba(255,255,255,.25)}
+  .tl .hl.off{opacity:.28;background:var(--line)}
+  .tl .beat{position:absolute;top:0;bottom:0;width:2px;background:rgba(255,255,255,.35)}
+  .tlLbl{color:var(--muted);font-size:12px;display:flex;justify-content:space-between}
+  .subs{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:12px;padding:6px;background:var(--panel2)}
+  .ph{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;border-radius:8px}
+  .ph:hover{background:#232a39}
+  .ph .t{color:var(--muted);font-size:11px;min-width:44px;padding-top:3px;font-variant-numeric:tabular-nums}
+  .ph .words{flex:1;line-height:1.7}
+  .w{display:inline-block;padding:1px 5px;border-radius:6px;background:#232a39;margin:2px 2px;cursor:text;outline:none}
+  .w:focus{background:#33405a;box-shadow:0 0 0 2px var(--brand2)}
+  .hlrow{display:flex;align-items:center;gap:10px;padding:8px 6px;border-bottom:1px solid var(--line);font-size:14px}
+  .hlrow:last-child{border-bottom:0}
+  .hlrow .badge{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .toggle{position:relative;width:38px;height:22px;appearance:none;background:var(--line);border-radius:20px;cursor:pointer;transition:.2s;flex:none}
+  .toggle:checked{background:var(--brand)}
+  .toggle::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;background:#fff;border-radius:50%;transition:.2s}
+  .toggle:checked::after{left:18px}
+  .actions{display:flex;gap:12px;margin-top:18px;align-items:center}
   /* results */
-  .results{display:none;margin-top:24px}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:18px}
+  .clips{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:18px}
   .clip{background:var(--panel2);border:1px solid var(--line);border-radius:14px;overflow:hidden}
-  .clip video{width:100%;display:block;background:#000;aspect-ratio:9/16;object-fit:contain}
-  .clip .meta{display:flex;align-items:center;justify-content:space-between;padding:10px 12px}
-  .clip .meta b{font-size:14px}
-  .dl{color:var(--brand2);text-decoration:none;font-size:13px;font-weight:600}
-  .err{display:none;margin-top:16px;color:#ff6b6b;font-size:14px}
-  .again{margin-top:18px;background:none;border:1px solid var(--line);color:var(--muted);border-radius:10px;padding:10px 16px;cursor:pointer}
+  .clip video{width:100%;aspect-ratio:9/16;object-fit:contain;background:#000;display:block}
+  .clip .m{display:flex;justify-content:space-between;align-items:center;padding:9px 11px;gap:8px}
+  .clip .m b{font-size:13px}.dl{color:var(--brand2);text-decoration:none;font-size:13px;font-weight:600;white-space:nowrap}
+  .err{color:#ff6b6b;font-size:14px}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header><div class="logo">Reel<span class="fy">fy</span></div></header>
-  <p class="tag">Sube un video y la IA te saca los mejores shorts, listos para publicar.</p>
+  <p class="tag">Sube un video → revisa y ajusta → exporta los shorts. Todo en tu Mac.</p>
 
-  <div class="card" id="setup">
-    <div class="drop" id="drop">
-      <div class="big">🎬 Arrastra tu video aquí</div>
-      <div class="sub">o haz clic para elegirlo · MP4 o MOV</div>
-    </div>
-    <div class="file" id="file"><span>📄</span><span id="fname"></span></div>
-
-    <div class="opts">
-      <div>
-        <label>Nombres propios / marcas (opcional — mejora los subtítulos)</label>
-        <input type="text" id="glossary" placeholder="Ej: Keruvin Store, Al Haramain, Oud">
+  <!-- 1. SETUP -->
+  <div class="screen on" id="s-setup">
+    <div class="card">
+      <div class="drop" id="drop">
+        <div class="big">🎬 Arrastra tu video</div>
+        <div class="sub">o haz clic para elegirlo · MP4 o MOV</div>
       </div>
-      <div class="row">
-        <div>
-          <label>¿Cuántos shorts?</label>
-          <input type="number" id="highlights" value="2" min="1" max="5">
-        </div>
-        <div>
-          <label>Dinamismo</label>
-          <div class="toggle"><input type="checkbox" id="dynamic" checked><span>Cortar silencios + zoom</span></div>
+      <div class="prevWrap" id="prevWrap">
+        <video id="prevVid" muted playsinline controls></video>
+        <div class="prevMeta">
+          <div id="pv-name" style="font-weight:600;margin-bottom:4px"></div>
+          <div class="hint" id="pv-info"></div>
         </div>
       </div>
+      <div class="opts">
+        <div>
+          <label>Nombres propios / marcas (opcional — mejora los subtítulos)</label>
+          <input type="text" id="glossary" placeholder="Ej: Keruvin Store, Al Haramain, Oud">
+        </div>
+        <div class="row">
+          <div><label>¿Cuántos shorts?</label><input type="number" id="highlights" value="2" min="1" max="5"></div>
+        </div>
+      </div>
+      <div style="margin-top:20px"><button class="btn" id="go" disabled>Analizar video</button></div>
+      <div class="hint">Analizar es rápido: transcribe, sincroniza y elige momentos, sin renderizar todavía.</div>
     </div>
-    <button class="btn" id="go" disabled>Generar shorts</button>
-    <div class="hint">Todo se procesa en tu Mac, sin nube. Un video de ~3 min tarda un par de minutos.</div>
   </div>
 
-  <div class="prog card" id="prog">
-    <div class="bar"><i id="fill"></i></div>
-    <div class="pmsg" id="pmsg">Iniciando…</div>
-    <div class="psub" id="psub">Reelfy está trabajando. Puedes dejar esta ventana abierta.</div>
+  <!-- 2. ANALYZING -->
+  <div class="screen" id="s-analyzing">
+    <div class="card">
+      <h3>Analizando tu video…</h3>
+      <div class="bar"><i id="a-fill"></i></div>
+      <div class="pmsg" id="a-msg">Iniciando…</div>
+      <div class="hint">Reelfy está entendiendo el contenido. En un momento podrás revisar y ajustar.</div>
+    </div>
   </div>
 
-  <div class="err card" id="err"></div>
-
-  <div class="results" id="results">
-    <div class="grid" id="grid"></div>
-    <button class="again" id="again">← Procesar otro video</button>
+  <!-- 3. REVIEW -->
+  <div class="screen" id="s-review">
+    <div class="card">
+      <h3>Revisa y ajusta</h3>
+      <div class="grid2">
+        <div>
+          <video class="srcVid" id="srcVid" controls playsinline></video>
+          <div class="hint" style="margin-top:8px">Vista previa del original.</div>
+        </div>
+        <div>
+          <label>Línea de tiempo — <span style="color:var(--brand2)">shorts</span> (clic para activar/desactivar) · ticks = énfasis/zoom</label>
+          <div class="tl" id="tl"></div>
+          <div class="tlLbl"><span>0:00</span><span id="tl-end"></span></div>
+          <label style="margin-top:14px">Shorts sugeridos</label>
+          <div id="hls"></div>
+        </div>
+      </div>
+      <label style="margin-top:18px">Subtítulos — clic en cualquier palabra para corregirla ✏️</label>
+      <div class="subs" id="subs"></div>
+      <div class="actions">
+        <label style="display:flex;align-items:center;gap:8px;margin:0;color:var(--text);font-size:14px;cursor:pointer">
+          <input type="checkbox" class="toggle" id="dynamic" checked> Dinamismo (cortar silencios + zoom)
+        </label>
+        <span style="flex:1"></span>
+        <button class="btn ghost" id="cancel">Cancelar</button>
+        <button class="btn" id="render">Renderizar y exportar</button>
+      </div>
+    </div>
   </div>
+
+  <!-- 4. RENDERING -->
+  <div class="screen" id="s-rendering">
+    <div class="card">
+      <h3>Exportando…</h3>
+      <div class="bar"><i id="r-fill"></i></div>
+      <div class="pmsg" id="r-msg">Montando…</div>
+      <div class="pstat">
+        <span>Progreso: <b id="r-pct">0%</b></span>
+        <span>Transcurrido: <b id="r-el">0s</b></span>
+        <span>Faltan aprox.: <b id="r-eta">—</b></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. RESULTS -->
+  <div class="screen" id="s-results">
+    <div class="card">
+      <h3>¡Listo! 🎉</h3>
+      <div class="clips" id="clips"></div>
+      <div style="margin-top:18px"><button class="btn ghost" id="again">← Procesar otro video</button></div>
+    </div>
+  </div>
+
+  <div class="card err screen" id="s-error" style="display:none"><span id="err-msg"></span>
+    <div style="margin-top:14px"><button class="btn ghost" id="retry">← Volver</button></div></div>
 </div>
 
 <script>
-const $ = s => document.querySelector(s);
-let picked = null;
+const $=s=>document.querySelector(s), show=id=>{document.querySelectorAll('.screen').forEach(e=>e.classList.remove('on'));
+  const el=$(id); el.classList.add('on'); el.style.display='block';};
+let picked=null, JOB=null, PLAN=null, fmtT=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
 
+/* ---- setup + preview ---- */
 const drop=$("#drop"), inp=Object.assign(document.createElement("input"),{type:"file",accept:"video/*"});
 drop.onclick=()=>inp.click();
-inp.onchange=()=>{ if(inp.files[0]) setFile(inp.files[0]); };
+inp.onchange=()=>inp.files[0]&&pick(inp.files[0]);
 ["dragover","dragenter"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add("hot")}));
 ["dragleave","drop"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove("hot")}));
-drop.addEventListener("drop",ev=>{ if(ev.dataTransfer.files[0]) setFile(ev.dataTransfer.files[0]); });
-function setFile(f){ picked=f; $("#fname").textContent=f.name; $("#file").style.display="flex"; $("#go").disabled=false; }
+drop.addEventListener("drop",ev=>ev.dataTransfer.files[0]&&pick(ev.dataTransfer.files[0]));
+function pick(f){
+  picked=f; const url=URL.createObjectURL(f);
+  $("#prevVid").src=url; $("#pv-name").textContent=f.name;
+  $("#pv-info").textContent=`${(f.size/1048576).toFixed(1)} MB`;
+  $("#prevWrap").style.display="flex"; $("#go").disabled=false;
+  $("#prevVid").onloadedmetadata=function(){ $("#pv-info").textContent=
+    `${(f.size/1048576).toFixed(1)} MB · ${fmtT(this.duration)} · ${this.videoWidth}×${this.videoHeight}`; };
+}
 
 $("#go").onclick=async()=>{
-  if(!picked) return;
-  $("#setup").style.display="none"; $("#prog").style.display="block"; $("#err").style.display="none";
   const fd=new FormData();
-  fd.append("video",picked);
-  fd.append("glossary",$("#glossary").value);
+  fd.append("video",picked); fd.append("glossary",$("#glossary").value);
   fd.append("highlights",$("#highlights").value);
-  fd.append("dynamic",$("#dynamic").checked);
-  let r;
-  try{ r=await(await fetch("/process",{method:"POST",body:fd})).json(); }
-  catch(e){ return fail("No se pudo iniciar el procesamiento."); }
+  show("#s-analyzing");
+  let r; try{ r=await(await fetch("/analyze",{method:"POST",body:fd})).json(); }
+  catch(e){ return fail("No se pudo iniciar el análisis."); }
   if(r.detail) return fail(r.detail);
-  poll(r.job_id);
+  JOB=r.job_id; poll();
 };
 
-async function poll(id){
-  try{
-    const j=await(await fetch("/status/"+id)).json();
-    $("#fill").style.width=Math.max(2,j.pct)+"%";
-    $("#pmsg").textContent=j.message||"Procesando…";
-    if(j.state==="error") return fail(j.error||"Falló el procesamiento.");
-    if(j.state==="done") return done(j.clips);
-  }catch(e){}
-  setTimeout(()=>poll(id),1200);
+/* ---- unified polling ---- */
+async function poll(){
+  let j; try{ j=await(await fetch("/status/"+JOB)).json(); }catch(e){ return setTimeout(poll,1200); }
+  if(j.phase==="analyzing"){ $("#a-fill").style.width=Math.max(2,j.pct)+"%"; $("#a-msg").textContent=j.message; }
+  else if(j.phase==="review" && (!PLAN)){ PLAN=j.plan; buildReview(); return; }
+  else if(j.phase==="rendering"){ show("#s-rendering");
+    $("#r-fill").style.width=Math.max(2,j.pct)+"%"; $("#r-msg").textContent=j.message||"Montando…";
+    $("#r-pct").textContent=Math.round(j.pct)+"%"; $("#r-el").textContent=(j.elapsed||0)+"s";
+    $("#r-eta").textContent=j.eta!=null?j.eta+"s":"—"; }
+  else if(j.phase==="done"){ return results(j.clips); }
+  else if(j.phase==="error"){ return fail(j.error); }
+  setTimeout(poll,1000);
 }
 
-function done(clips){
-  $("#prog").style.display="none";
-  const g=$("#grid"); g.innerHTML="";
-  const onlyFull = clips.length===1 && /completo/i.test(clips[0].name);
-  if(onlyFull){
-    const note=document.createElement("div");
-    note.style.cssText="grid-column:1/-1;color:var(--muted);font-size:14px;margin-bottom:4px";
-    note.textContent="No encontré un momento lo bastante destacable para un short — aquí tienes el video completo ya procesado (subtítulos + reencuadre + dinamismo).";
-    g.appendChild(note);
-  }
-  clips.forEach(c=>{
-    const el=document.createElement("div"); el.className="clip";
-    el.innerHTML=`<video src="/video/${c.file}" controls preload="metadata"></video>
-      <div class="meta"><b>${c.name}</b><a class="dl" href="/video/${c.file}" download>Descargar ↓</a></div>`;
-    g.appendChild(el);
-  });
-  $("#results").style.display="block";
+/* ---- review screen ---- */
+function buildReview(){
+  show("#s-review");
+  $("#srcVid").src="/source/"+JOB;
+  const dur=PLAN.duration; $("#tl-end").textContent=fmtT(dur);
+  // timeline
+  const tl=$("#tl"); tl.innerHTML="";
+  (PLAN.beats||[]).forEach(b=>{ const t=document.createElement("div"); t.className="beat";
+    t.style.left=(b/dur*100)+"%"; tl.appendChild(t); });
+  PLAN.highlights.forEach((h,i)=>{ const el=document.createElement("div"); el.className="hl"+(h.enabled?"":" off");
+    el.style.left=(h.start/dur*100)+"%"; el.style.width=Math.max(4,(h.end-h.start)/dur*100)+"%";
+    el.textContent=(i+1); el.title=h.title;
+    el.onclick=()=>{ h.enabled=!h.enabled; el.classList.toggle("off",!h.enabled);
+      document.querySelector(`#hl-${i}`).checked=h.enabled; }; tl.appendChild(el); });
+  // highlight list
+  const hls=$("#hls"); hls.innerHTML="";
+  PLAN.highlights.forEach((h,i)=>{ const r=document.createElement("div"); r.className="hlrow";
+    r.innerHTML=`<input type="checkbox" class="toggle" id="hl-${i}" ${h.enabled?"checked":""}>
+      <div style="flex:1"><b>${i+1}. ${h.title||"Short"}</b><div class="badge">${fmtT(h.start)}–${fmtT(h.end)} · ${Math.round(h.end-h.start)}s</div></div>`;
+    r.querySelector("input").onchange=e=>{ h.enabled=e.target.checked;
+      const b=tl.querySelectorAll(".hl")[i]; if(b)b.classList.toggle("off",!h.enabled); };
+    hls.appendChild(r); });
+  if(!PLAN.highlights.length) hls.innerHTML='<div class="hint">No se encontró un momento destacable; se exportará el video completo.</div>';
+  // editable subtitles (word-level, preserves timing)
+  const subs=$("#subs"); subs.innerHTML="";
+  PLAN.phrases.forEach((ph,pi)=>{ const row=document.createElement("div"); row.className="ph";
+    const t=document.createElement("div"); t.className="t"; t.textContent=fmtT(ph[0].start); row.appendChild(t);
+    const ws=document.createElement("div"); ws.className="words";
+    ph.forEach((w,wi)=>{ const s=document.createElement("span"); s.className="w"; s.contentEditable="true";
+      s.textContent=w.text; s.oninput=()=>{ PLAN.phrases[pi][wi].text=s.textContent.trim(); }; ws.appendChild(s); });
+    row.appendChild(ws); subs.appendChild(row); });
 }
-function fail(msg){ $("#prog").style.display="none"; $("#err").style.display="block"; $("#err").textContent="⚠️ "+msg;
-  $("#setup").style.display="block"; }
+
+$("#render").onclick=async()=>{
+  show("#s-rendering");
+  try{ await fetch("/render/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked})}); }
+  catch(e){ return fail("No se pudo iniciar el render."); }
+  poll();
+};
+$("#cancel").onclick=()=>location.reload();
+
+/* ---- results ---- */
+function results(clips){
+  const g=$("#clips"); g.innerHTML="";
+  if(clips.length===1) g.insertAdjacentHTML("beforebegin","");
+  clips.forEach(c=>{ const el=document.createElement("div"); el.className="clip";
+    el.innerHTML=`<video src="/video/${c.file}" controls preload="metadata"></video>
+      <div class="m"><b>${c.name}</b><a class="dl" href="/video/${c.file}" download>Descargar ↓</a></div>`;
+    g.appendChild(el); });
+  show("#s-results");
+}
 $("#again").onclick=()=>location.reload();
+$("#retry").onclick=()=>location.reload();
+function fail(m){ show("#s-error"); $("#s-error").style.display="block"; $("#err-msg").textContent="⚠️ "+(m||"Error"); }
 </script>
 </body>
 </html>

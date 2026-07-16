@@ -58,6 +58,31 @@ def run(cmd, **kw):
     return subprocess.run(cmd, check=True, **kw)
 
 
+def run_ffmpeg_progress(cmd, total_dur, on_pct):
+    """Run ffmpeg emitting real progress (out_time) -> on_pct(0..100)."""
+    full = [cmd[0], "-progress", "pipe:1", "-nostats"] + cmd[1:]
+    p = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    for line in p.stdout:
+        if line.startswith("out_time_us=") and total_dur and on_pct:
+            try:
+                on_pct(min(100.0, int(line.split("=")[1]) / 1e6 / total_dur * 100))
+            except ValueError:
+                pass
+    p.wait()
+    if p.returncode != 0:
+        raise RuntimeError("ffmpeg failed")
+
+
+def probe_duration(video):
+    r = subprocess.run(["/opt/homebrew/bin/ffprobe", "-v", "error", "-show_entries",
+                        "format=duration", "-of", "default=nk=1:nw=1", str(video)],
+                       capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
 def extract_audio(video, wav):
     run([FFMPEG, "-y", "-i", str(video), "-ar", "16000", "-ac", "1",
          "-c:a", "pcm_s16le", str(wav)],
@@ -200,7 +225,8 @@ def _tonemap(video):
     return []
 
 
-def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None):
+def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None,
+                     on_pct=None):
     """Composite a FIXED blurred background + a dynamic foreground video, burn captions.
 
     Layers (Kevin's design — the frame/margins never move; only the video moves):
@@ -243,97 +269,117 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
           f"[fgsrc]{','.join(fg)}[fg];"
           f"[bg][fg]overlay=x=(W-w)/2:y=(H-h)/2[c];"
           f"[c]subtitles={ass_path}")
-    run([FFMPEG, "-y", "-hwaccel", "videotoolbox", "-i", str(video), "-vf", vf,
-         "-c:v", "h264_videotoolbox", "-b:v", "12M",
-         "-c:a", "aac", "-b:a", "128k", str(out)])
+    cmd = [FFMPEG, "-y", "-hwaccel", "videotoolbox", "-i", str(video), "-vf", vf,
+           "-c:v", "h264_videotoolbox", "-b:v", "12M", "-c:a", "aac", "-b:a", "128k", str(out)]
+    if on_pct:
+        run_ffmpeg_progress(cmd, probe_duration(video), on_pct)
+    else:
+        run(cmd)
 
 
-def cut_clip(full_out, start, end, clip_out):
+def cut_clip(full_out, start, end, clip_out, on_pct=None):
     """Cut a highlight [start,end] from the fully-rendered vertical (captions and
     tracking already baked, so timing stays correct). Re-encode for frame accuracy."""
-    run([FFMPEG, "-y", "-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", str(full_out),
-         "-c:v", "h264_videotoolbox", "-b:v", "12M", "-c:a", "aac", "-b:a", "128k",
-         str(clip_out)])
+    cmd = [FFMPEG, "-y", "-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", str(full_out),
+           "-c:v", "h264_videotoolbox", "-b:v", "12M", "-c:a", "aac", "-b:a", "128k", str(clip_out)]
+    if on_pct:
+        run_ffmpeg_progress(cmd, max(0.1, end - start), on_pct)
+    else:
+        run(cmd)
 
 
-def make_highlights(json_path, full_out, n, out_dir, stem, dynamic=False):
-    """Select n highlights via local LLM and cut each into its own short.
-    If dynamic, also trim silences + add a breathing punch-in zoom (Phase 2b)."""
-    sents = hl.build_sentences(hl.load_words(json_path))
-    print(f"   {len(sents)} sentences -> asking local LLM ({hl.MODEL}) for {n} highlight(s)...")
-    clips = hl.select_highlights(sents, n=n)
-    results = []
-    for k, c in enumerate(clips, 1):
-        clip_out = out_dir / f"{stem}_short{k}.mp4"
-        print(f"   short {k}: {c['start']:.1f}-{c['end']:.1f}s ({c['end']-c['start']:.0f}s) "
-              f"\"{c['title']}\" — {c['reason']}")
-        cut_clip(full_out, c["start"], c["end"], clip_out)
-        if dynamic:   # zoom punches are baked in the full render; here just trim silences
+def analyze(video, glossary="", n=2, align=True, on_step=None):
+    """Light phase (no heavy render): audio -> transcribe -> align -> phrases +
+    highlights + emphasis beats + tracking trajectory. Returns an EDITABLE plan dict
+    (JSON-serializable) the UI can review/tweak before rendering."""
+    def step(p, m):
+        print(f"   [{p}%] {m}")
+        if on_step:
+            on_step(p, m)
+
+    video = Path(video).resolve()
+    work = SPIKE / "work"; work.mkdir(exist_ok=True)
+    stem = video.stem
+    wav = work / f"{stem}.wav"; prefix = work / stem; cmds = work / f"{stem}.crop.txt"
+
+    step(6, "Extrayendo audio…"); extract_audio(video, wav)
+    gloss = f"Nombres propios y términos: {glossary}." if glossary.strip() else ""
+    step(18, "Transcribiendo (español)…"); jp = transcribe(wav, prefix, gloss)
+    words = load_words(jp)
+    if align:
+        step(42, "Afinando la sincronía de subtítulos…")
+        try:
+            words = align_mod.align_words(wav, words)
+        except Exception as e:  # noqa
+            print(f"   alignment failed ({e}); whisper timings")
+    phrases = group_phrases(words)
+    step(66, "Eligiendo los mejores momentos (IA)…")
+    highlights = hl.select_highlights(hl.build_sentences(words), n=n)
+    for h in highlights:
+        h["enabled"] = True
+    step(80, "Detectando momentos de énfasis…")
+    beats, _ = edit_mod.emphasis_beats(wav)
+    step(90, "Calculando el seguimiento de cámara…")
+    src_w, src_h = probe_dims(video)
+    reframe_track.build(video, src_w, src_h, str(cmds))
+    step(100, "Análisis listo")
+    return {
+        "stem": stem, "video": str(video), "wav": str(wav),
+        "dims": [src_w, src_h], "duration": probe_duration(video),
+        "cmds_path": str(cmds),
+        "phrases": [[{"text": w["text"], "start": w["start"], "end": w["end"]} for w in ph]
+                    for ph in phrases],
+        "highlights": highlights,
+        "beats": beats,
+    }
+
+
+def render_from_plan(plan, out_dir, dynamic=True, on_step=None, on_pct=None):
+    """Heavy phase: apply the (possibly edited) plan -> full vertical + enabled shorts.
+    on_pct(stage, percent) reports real ffmpeg progress per stage."""
+    def step(m):
+        print(f"   {m}")
+        if on_step:
+            on_step(m)
+
+    stem = plan["stem"]; video = Path(plan["video"])
+    out_dir = Path(out_dir); out_dir.mkdir(exist_ok=True)
+    ass = SPIKE / "work" / f"{stem}.ass"
+    build_ass(plan["phrases"], ass)                        # rebuild from edited captions
+    beats = plan.get("beats") if dynamic else None
+
+    step("Montando el video vertical…")
+    full = out_dir / f"{stem}_reelfy.mp4"
+    reframe_and_burn(video, ass, full, cmds_path=plan["cmds_path"], beats=beats,
+                     on_pct=(lambda p: on_pct("full", p)) if on_pct else None)
+    clips = [{"name": "Video completo", "file": full.name}]
+
+    enabled = [h for h in plan["highlights"] if h.get("enabled", True)]
+    for k, h in enumerate(enabled, 1):
+        step(f"Cortando short {k}…")
+        clip = out_dir / f"{stem}_short{k}.mp4"
+        cut_clip(full, h["start"], h["end"], clip,
+                 on_pct=(lambda p, k=k: on_pct(f"short{k}", p)) if on_pct else None)
+        if dynamic:
             tmp = out_dir / f"{stem}_short{k}_dyn.mp4"
-            kept, removed = edit_mod.tighten(clip_out, tmp)
-            tmp.replace(clip_out)
-            print(f"      dynamic: -{removed:.1f}s silencios (zoom ya horneado)")
-        results.append((clip_out, c))
-    return results
+            edit_mod.tighten(clip, tmp); tmp.replace(clip)
+        clips.append({"name": f"Short {k}: {h.get('title', '')}".strip(" :"), "file": clip.name})
+    return clips
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("video", help="input video path")
+    ap.add_argument("video")
     ap.add_argument("-o", "--out", default=None)
-    ap.add_argument("-g", "--glossary", default="",
-                    help="custom vocabulary / proper nouns to bias transcription "
-                         "(e.g. 'Keruvin Store, Al Haramain, Oud, Lattafa')")
-    ap.add_argument("--no-track", action="store_true",
-                    help="disable subject tracking (use fixed center-crop)")
-    ap.add_argument("--highlights", type=int, default=0, metavar="N",
-                    help="also select N best highlight clips via local LLM and cut shorts")
-    ap.add_argument("--no-align", action="store_true",
-                    help="skip wav2vec2 forced alignment (use whisper's own timings)")
-    ap.add_argument("--dynamic", action="store_true",
-                    help="add dynamism to shorts: trim silences + breathing punch-in zoom")
+    ap.add_argument("-g", "--glossary", default="")
+    ap.add_argument("--highlights", type=int, default=2)
+    ap.add_argument("--no-align", action="store_true")
+    ap.add_argument("--dynamic", action="store_true")
     args = ap.parse_args()
-
-    video = Path(args.video).resolve()
-    if not video.exists():
-        sys.exit(f"input not found: {video}")
-    work = SPIKE / "work"; work.mkdir(exist_ok=True)
-    out = Path(args.out).resolve() if args.out else SPIKE / "output" / f"{video.stem}_reelfy.mp4"
-    out.parent.mkdir(exist_ok=True)
-
-    stem = video.stem
-    wav = work / f"{stem}.wav"
-    prefix = work / stem
-    ass = work / f"{stem}.ass"
-    cmds = work / f"{stem}.crop.txt"
-
-    print("== [1/4] extract audio =="); extract_audio(video, wav)
-    glossary = (f"Nombres propios y términos: {args.glossary}."
-                if args.glossary else "")
-    print("== [2/5] transcribe (whisper.cpp, es, word-level) =="); jp = transcribe(wav, prefix, glossary)
-    words = load_words(jp)
-    if not args.no_align:
-        print("== [3/5] forced alignment (wav2vec2, tight caption sync) ==")
-        try:
-            words = align_mod.align_words(wav, words)
-        except Exception as e:
-            print(f"   alignment failed ({e}); falling back to whisper timings")
-    phrases = group_phrases(words)
-    print(f"   {len(words)} words -> {len(phrases)} caption phrases")
-    print("== [4/5] build word-highlight ASS =="); build_ass(phrases, ass)
-    beats = None
-    if args.dynamic:
-        print("   emphasis beats (audio energy) for punch-in zoom...")
-        beats, _ = edit_mod.emphasis_beats(wav)
-    print("== [5/5] fixed blurred bg + tracked/zoomed fg + burn captions ==")
-    reframe_and_burn(video, ass, out, track=not args.no_track, cmds_path=str(cmds), beats=beats)
-    print(f"\n✅ full: {out}")
-
-    if args.highlights:
-        print(f"== [5] highlights (local LLM) ==")
-        for clip_out, _ in make_highlights(jp, out, args.highlights, out.parent, stem,
-                                           dynamic=args.dynamic):
-            print(f"✅ short: {clip_out}")
+    plan = analyze(args.video, args.glossary, args.highlights, align=not args.no_align)
+    out_dir = Path(args.out).parent if args.out else SPIKE / "output"
+    for c in render_from_plan(plan, out_dir, dynamic=args.dynamic):
+        print(f"✅ {c['name']} -> {c['file']}")
 
 
 if __name__ == "__main__":
