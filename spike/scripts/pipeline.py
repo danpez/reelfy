@@ -42,6 +42,17 @@ MARGIN_V = 430               # captions in lower third (chest), clear of face & 
 MAX_WORDS_PER_LINE = 3       # short phrases, like Submagic/Opus
 GAP_SPLIT_MS = 700           # start a new phrase after a pause this long
 
+# caption style presets (ASS colours are &HAABBGGRR). base text is always white/bold.
+STYLES = {
+    "clasico":  dict(size=78, active="&H0000E5FF", outline=5, upper=False),  # white + amber
+    "amarillo": dict(size=84, active="&H0000F0FF", outline=6, upper=True),   # ALL CAPS + yellow
+    "neon":     dict(size=80, active="&H00F050FF", outline=5, upper=False),  # white + magenta
+    "minimal":  dict(size=70, active="&H00FFFFFF", outline=4, upper=False),  # clean, no colour pop
+}
+
+# output format presets (label -> (w, h))
+FORMATS = {"9:16": (1080, 1920), "1:1": (1080, 1080), "4:5": (1080, 1350)}
+
 # ---- framing: FIXED blurred background + dynamic foreground video on top ----
 # The bg is a static cover-crop of the scene, blurred, NEVER panned/zoomed (fixed).
 # ALL motion (tracking pan, zoom punches) lives in the foreground layer only, so the
@@ -154,27 +165,27 @@ def ass_time(t):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def build_ass(phrases, ass_path):
+def build_ass(phrases, ass_path, w=W, h=H, style="clasico"):
     """Word-by-word highlight captions, ROCK-STABLE position.
 
-    Bug fixed: highlighting the active word by SCALING it (\\fscx) changed the text
-    width every word, so a centered line re-centered/re-wrapped -> the caption
-    appeared to jump around mid-phrase. Now the highlight is COLOR-ONLY (glyph
-    metrics never change) so the phrase stays pinned; only the color moves.
-    Also: events are globally de-overlapped + min-duration'd + capped on long pauses,
-    so captions never duplicate or vanish.
+    Highlight is COLOR-ONLY (glyph metrics never change) so the phrase stays pinned;
+    events globally de-overlapped + min-duration'd + capped on long pauses so captions
+    never duplicate or vanish. `style` picks a preset; `w,h` match the output format.
     """
+    st = STYLES.get(style, STYLES["clasico"])
+    active_color = st["active"]
+    margin_v = round(h * 0.224)   # lower third, scales with the chosen aspect
     MIN_DUR = 0.06
     MAX_HOLD = 1.2   # after this much silence the caption clears (natural)
     header = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: {W}
-PlayResY: {H}
+PlayResX: {w}
+PlayResY: {h}
 WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Outline, Shadow, Alignment, MarginL, MarginR, MarginV
-Style: Base,{FONT},{FONT_SIZE},{BASE_COLOR},&H00000000,&H80000000,1,{OUTLINE},2,2,{MARGIN_H},{MARGIN_H},{MARGIN_V}
+Style: Base,{FONT},{st["size"]},{BASE_COLOR},&H00000000,&H80000000,1,{st["outline"]},2,2,{MARGIN_H},{MARGIN_H},{margin_v}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -183,10 +194,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     for ph in phrases:
         for i, active in enumerate(ph):
             parts = []
-            for w in ph:
-                token = w["text"].replace("{", "(").replace("}", ")")
-                if w is active:
-                    parts.append(f"{{\\c{ACTIVE_COLOR}}}{token}{{\\r}}")  # COLOR ONLY
+            for w_ in ph:
+                token = w_["text"].replace("{", "(").replace("}", ")")
+                if st["upper"]:
+                    token = token.upper()
+                if w_ is active:
+                    parts.append(f"{{\\c{active_color}}}{token}{{\\r}}")  # COLOR ONLY
                 else:
                     parts.append(token)
             start = active["start"]
@@ -235,33 +248,36 @@ def _tonemap(video):
 
 
 def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None,
-                     on_pct=None, preview_secs=None, enhance_audio=False):
+                     on_pct=None, preview_secs=None, enhance_audio=False,
+                     out_w=W, out_h=H, camera=None):
     """Composite a FIXED blurred background + a dynamic foreground video, burn captions.
 
-    Layers (Kevin's design — the frame/margins never move; only the video moves):
-      - BG: static cover-crop of the scene, blurred + darkened. No pan, no zoom -> fixed.
-      - FG: the subject, YuNet-tracked pan + optional emphasis punch-in zoom (zoom is on
-        the CONTENT; the fg display rect stays fixed, so margins are rock-steady).
-      - Captions on top, fixed position.
-    Apple Silicon fast path: VideoToolbox decode/encode; tonemap at low res.
+    Layers (frame/margins never move; only the video moves): static blurred BG cover +
+    tracked/zoomed FG inset + captions. `out_w/out_h` set the aspect (9:16/1:1/4:5);
+    `camera` (fraction trajectory) re-emits the pan crop for that aspect.
+    Apple Silicon fast path: VideoToolbox decode/encode; tonemap + blur at low res.
     """
+    ow, oh = out_w, out_h
     src_w, src_h = probe_dims(video)
     tm = _tonemap(video)
     if tm:
         print("   HDR -> tonemap HLG/PQ to SDR (both layers)")
-    fg_w = (round(W * FG_SCALE) // 2) * 2
-    fg_h = (round(H * FG_SCALE) // 2) * 2
+    fg_w = (round(ow * FG_SCALE) // 2) * 2
+    fg_h = (round(oh * FG_SCALE) // 2) * 2
 
-    # --- foreground: tracked (or static) 9:16 crop scaled to the inset size ---
+    # --- foreground: tracked (or static) crop (of the output aspect) scaled to inset ---
     cmds = None
     if track:
-        cw, ch = reframe_track.crop_dims(src_w, src_h)
-        if cw >= src_w:                                   # portrait source: no horizontal pan
+        cw, ch = reframe_track.crop_dims(src_w, src_h, ow, oh)
+        if cw >= src_w:                                   # no horizontal room to pan
             cmds = None
-        elif cmds_path and Path(cmds_path).exists():      # reuse tracking from analyze()
-            cmds = cmds_path
-        else:                                             # compute it now (CLI / no analyze)
-            cw, ch, cmds = reframe_track.build(video, src_w, src_h, cmds_path)
+        elif camera:                                      # regen pan for THIS aspect
+            cmds = str(Path(ass_path).with_suffix(f".{ow}x{oh}.crop.txt"))
+            reframe_track.write_cmds(camera, src_w, cw, cmds)
+        elif cmds_path and Path(cmds_path).exists() and (ow, oh) == (W, H):
+            cmds = cmds_path                              # reuse default-9:16 tracking
+        else:
+            cw, ch, cmds, _ = reframe_track.build(video, src_w, src_h, cmds_path)
     if cmds:
         fg = [f"sendcmd=f={cmds}", f"crop@fgc={cw}:{ch}:x=0:y=(ih-{ch})/2", f"scale={fg_w}:{fg_h}"]
     else:
@@ -274,12 +290,10 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
                f"crop={fg_w}:{fg_h}"]
     fg += ["format=yuv420p"]
 
-    # --- background: static blurred cover-fill of the scene (fixed framing) ---
-    # Blur at LOW RES (it's blurred anyway) then upscale -> ~15x cheaper than blurring
-    # the full 1080x1920 every frame. This was the render's main CPU cost.
-    bw, bh = 270, 480
+    # --- background: static blurred cover-fill (blur at low res -> ~15x cheaper) ---
+    bw = 270; bh = (round(bw * oh / ow) // 2) * 2
     bg = ([f"scale={bw}:{bh}:force_original_aspect_ratio=increase", f"crop={bw}:{bh}", f"fps={fps}"]
-          + tm + [f"gblur=sigma={BG_BLUR/3.6:.0f}", f"scale={W}:{H}",
+          + tm + [f"gblur=sigma={BG_BLUR/3.6:.0f}", f"scale={ow}:{oh}",
                   f"eq=brightness={BG_DARKEN}:saturation=0.9", "format=yuv420p"])
 
     vf = (f"split=2[bgsrc][fgsrc];"
@@ -289,7 +303,8 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
           f"[c]subtitles={ass_path}")
     bitrate = "12M"
     if preview_secs:                      # fast low-res sample of the first seconds
-        vf += ",scale=540:960"
+        pv_h = (round(540 * oh / ow) // 2) * 2
+        vf += f",scale=540:{pv_h}"
         bitrate = "6M"
     cmd = [FFMPEG, "-y", "-hwaccel", "videotoolbox", "-i", str(video), "-vf", vf,
            "-c:v", "h264_videotoolbox", "-b:v", bitrate]
@@ -349,12 +364,12 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
     beats, _ = edit_mod.emphasis_beats(wav)
     step(90, "Calculando el seguimiento de cámara…")
     src_w, src_h = probe_dims(video)
-    reframe_track.build(video, src_w, src_h, str(cmds))
+    _, _, _, camera = reframe_track.build(video, src_w, src_h, str(cmds))
     step(100, "Análisis listo")
     return {
         "stem": stem, "video": str(video), "wav": str(wav),
         "dims": [src_w, src_h], "duration": probe_duration(video),
-        "cmds_path": str(cmds),
+        "cmds_path": str(cmds), "camera": camera,
         "phrases": [[{"text": w["text"], "start": w["start"], "end": w["end"]} for w in ph]
                     for ph in phrases],
         "highlights": highlights,
@@ -362,24 +377,26 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
     }
 
 
-def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, on_step=None, on_pct=None):
-    """Heavy phase: apply the (possibly edited) plan -> full vertical + enabled shorts.
+def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="clasico",
+                     fmt="9:16", on_step=None, on_pct=None):
+    """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
         print(f"   {m}")
         if on_step:
             on_step(m)
 
-    stem = plan["stem"]; video = Path(plan["video"])
+    ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
+    stem = plan["stem"]; video = Path(plan["video"]); camera = plan.get("camera")
     out_dir = Path(out_dir); out_dir.mkdir(exist_ok=True)
     ass = SPIKE / "work" / f"{stem}.ass"
-    build_ass(plan["phrases"], ass)                        # rebuild from edited captions
+    build_ass(plan["phrases"], ass, ow, oh, style)         # rebuild from edited captions
     beats = plan.get("beats") if dynamic else None
 
-    step("Montando el video vertical…")
+    step("Montando el video…")
     full = out_dir / f"{stem}_reelfy.mp4"
     reframe_and_burn(video, ass, full, cmds_path=plan["cmds_path"], beats=beats,
-                     enhance_audio=enhance_audio,
+                     enhance_audio=enhance_audio, out_w=ow, out_h=oh, camera=camera,
                      on_pct=(lambda p: on_pct("full", p)) if on_pct else None)
     clips = [{"name": "Video completo", "file": full.name}]
 
@@ -396,14 +413,16 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, on_step=N
     return clips
 
 
-def render_preview(plan, out, secs=7, enhance_audio=False):
+def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", fmt="9:16"):
     """Fast, low-res sample of the first `secs` (the real look: captions, tracking,
-    blurred bg, zoom, studio audio) so the user can preview before the full export."""
+    blurred bg, zoom, studio audio, chosen style/format) — preview before export."""
+    ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
     stem = plan["stem"]
     ass = SPIKE / "work" / f"{stem}.ass"
-    build_ass(plan["phrases"], ass)
+    build_ass(plan["phrases"], ass, ow, oh, style)
     reframe_and_burn(Path(plan["video"]), ass, out, cmds_path=plan["cmds_path"],
-                     beats=plan.get("beats"), preview_secs=secs, enhance_audio=enhance_audio)
+                     beats=plan.get("beats"), preview_secs=secs, enhance_audio=enhance_audio,
+                     out_w=ow, out_h=oh, camera=plan.get("camera"))
     return out
 
 

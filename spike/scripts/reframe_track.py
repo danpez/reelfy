@@ -76,61 +76,50 @@ def _zero_phase_ma(a, win):
     return b[:len(a)]
 
 
-def build_crop_x(xs, src_w, cw):
-    """Face-x detections -> per-OUTPUT-frame integer crop x, moved by a virtual camera.
-
-    1) denoise raw detections (zero-phase MA) and resample to output fps,
-    2) a target with hysteresis dead-zone (camera only re-targets once the subject
-       drifts beyond DEADZONE, then holds the new anchor) -> no constant micro-chasing,
-    3) a critically-damped spring integrates camera->target -> smooth ease in/out,
-       no overshoot, no steps (buttery "operator following the subject").
+def camera_track(xs):
+    """Face-x detections -> per-OUTPUT-frame virtual-camera CENTER as a fraction of
+    the source width (0..1). Format-INDEPENDENT: the crop-left for any aspect is
+    derived later from this + the crop width. Spring + hysteresis dead-zone = smooth,
+    no overshoot, no steps, no micro-chasing.
     """
     if not xs:
         return []
     a = _zero_phase_ma(np.array(xs, float), PRESMOOTH_SEC * SAMPLE_FPS)
     dur = (len(a) - 1) / SAMPLE_FPS
     n = max(1, int(round(dur * OUT_FPS)) + 1)
-    face = np.interp(np.arange(n) / OUT_FPS, np.arange(len(a)) / SAMPLE_FPS, a)  # face-x frac/frame
-
-    dead = DEADZONE_FRAC
-    dt = 1.0 / OUT_FPS
-    omega = 2 * np.pi * CAM_FREQ_HZ
-    xmax = src_w - cw
-
-    target = face[0]
-    x = face[0] * src_w - cw / 2          # camera crop-left (px)
-    v = 0.0
-    out = []
+    face = np.interp(np.arange(n) / OUT_FPS, np.arange(len(a)) / SAMPLE_FPS, a)
+    dead, dt, omega = DEADZONE_FRAC, 1.0 / OUT_FPS, 2 * np.pi * CAM_FREQ_HZ
+    target, x, v, out = face[0], float(face[0]), 0.0, []
     for f in face:
-        if abs(f - target) > dead:        # hysteresis: only re-anchor on real movement
+        if abs(f - target) > dead:        # hysteresis: re-anchor only on real movement
             target = f - np.sign(f - target) * dead
-        tgt_px = min(max(target * src_w - cw / 2, 0), xmax)
-        acc = omega * omega * (tgt_px - x) - 2 * omega * v   # critically damped
-        v += acc * dt
+        v += (omega * omega * (target - x) - 2 * omega * v) * dt   # critically damped
         x += v * dt
-        out.append(min(max(x, 0), xmax))
+        out.append(float(min(max(x, 0), 1)))
     return out
 
 
-def write_sendcmd(crop_x, cmds_path):
-    """One sendcmd entry per output frame -> sub-pixel-smooth pan (no visible steps).
-    Targets the named instance `crop@fgc` so it hits the FG crop, not the BG crop."""
-    lines = [f"{i / OUT_FPS:.3f} crop@fgc x {int(round(x))};" for i, x in enumerate(crop_x)]
+def write_cmds(centers, src_w, cw, cmds_path):
+    """Camera centers (fractions) + a crop width -> per-frame sendcmd crop x.
+    Regenerable for ANY output aspect from the same centers."""
+    xmax = src_w - cw
+    lines = [f"{i / OUT_FPS:.3f} crop@fgc x {int(round(min(max(c * src_w - cw / 2, 0), xmax)))};"
+             for i, c in enumerate(centers)]
     Path(cmds_path).write_text("\n".join(lines) + "\n")
     return cmds_path
 
 
 def build(video, src_w, src_h, cmds_path):
-    """Full trajectory build. Returns (crop_w, crop_h, cmds_path) or (cw,ch,None)
-    if no horizontal tracking is needed (portrait source)."""
+    """Detect + smooth the camera trajectory, write cmds for the default 9:16 crop.
+    Returns (crop_w, crop_h, cmds_path, centers). centers is format-independent so the
+    plan can re-emit cmds for 1:1 / 4:5 without re-detecting."""
     cw, ch = crop_dims(src_w, src_h)
-    if cw >= src_w:                        # no horizontal room to pan
-        return cw, ch, None
+    if cw >= src_w:                        # portrait: no horizontal pan
+        return cw, ch, None, []
     xs = detect_face_track(video, src_w, src_h)
-    crop_x = build_crop_x(xs, src_w, cw)
-    write_sendcmd(crop_x, cmds_path)
+    centers = camera_track(xs)
+    write_cmds(centers, src_w, cw, cmds_path)
     if xs:
-        rng = (min(xs) * 100, max(xs) * 100)
-        print(f"   tracked {len(xs)} samples @ {SAMPLE_FPS}fps -> {len(crop_x)} per-frame cmds, "
-              f"face-x {rng[0]:.0f}%..{rng[1]:.0f}%")
-    return cw, ch, cmds_path
+        print(f"   tracked {len(xs)} samples @ {SAMPLE_FPS}fps -> {len(centers)} cmds, "
+              f"face-x {min(xs)*100:.0f}%..{max(xs)*100:.0f}%")
+    return cw, ch, cmds_path, centers

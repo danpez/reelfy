@@ -91,6 +91,11 @@
   .w:hover{background:#2f394d}
   .w:focus{background:#34435f;box-shadow:0 0 0 2px var(--brand2)}
   .w.gap{margin-right:14px}
+  .seg{display:inline-flex;gap:3px;background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:4px}
+  .seg button{border:0;background:none;color:var(--muted);padding:7px 13px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;transition:.15s}
+  .seg button:hover{color:var(--text)}
+  .seg button.sel{background:linear-gradient(90deg,var(--brand),var(--brand2));color:#fff}
+  .optrow{display:flex;gap:26px;flex-wrap:wrap;margin-top:18px}
   .actionbar{position:sticky;bottom:0;margin-top:20px;padding-top:16px;border-top:1px solid var(--line);
              display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:linear-gradient(180deg,transparent,var(--panel) 40%)}
   .swlabel{display:flex;align-items:center;gap:9px;color:var(--text);font-size:14px;cursor:pointer;user-select:none}
@@ -164,6 +169,13 @@
         <div id="hls"></div>
       </div>
     </div>
+    <div class="optrow">
+      <div><label>Estilo de subtítulos</label><div class="seg" id="segStyle">
+        <button data-v="clasico" class="sel">Clásico</button><button data-v="amarillo">Amarillo</button>
+        <button data-v="neon">Neón</button><button data-v="minimal">Minimal</button></div></div>
+      <div><label>Formato</label><div class="seg" id="segFmt">
+        <button data-v="9:16" class="sel">9:16</button><button data-v="1:1">1:1</button><button data-v="4:5">4:5</button></div></div>
+    </div>
     <label style="margin-top:20px">Subtítulos — clic en cualquier palabra para corregirla ✏️</label>
     <div class="subs" id="subs"></div>
     <div class="actionbar">
@@ -208,7 +220,9 @@
 const $=s=>document.querySelector(s);
 function show(id){document.querySelectorAll('.screen').forEach(e=>e.classList.remove('on'));$(id).classList.add('on');}
 const fmtT=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
-let picked=null, JOB=null, PLAN=null;
+let picked=null, JOB=null, PLAN=null, STYLE="clasico", FMT="9:16";
+function seg(id,set){const el=$(id);el.querySelectorAll("button").forEach(b=>b.onclick=()=>{
+  el.querySelectorAll("button").forEach(x=>x.classList.remove("sel"));b.classList.add("sel");set(b.dataset.v);});}
 
 /* setup + client-side preview */
 const drop=$("#drop"), inp=Object.assign(document.createElement("input"),{type:"file",accept:"video/*"});
@@ -250,6 +264,7 @@ function setBar(sel,pct){ $(sel).style.width=Math.max(2,pct)+"%"; }
 
 function buildReview(){
   show("#s-review");
+  seg("#segStyle",v=>STYLE=v); seg("#segFmt",v=>FMT=v);
   $("#srcVid").src="/source/"+JOB;
   const dur=PLAN.duration; $("#tl-end").textContent=fmtT(dur);
   const tl=$("#tl"); tl.innerHTML="";
@@ -279,7 +294,7 @@ $("#preview").onclick=async()=>{
   const b=$("#preview"); const old=b.innerHTML; b.disabled=true; b.innerHTML='<span class="spinner"></span> Generando muestra…';
   try{
     const r=await(await fetch("/preview/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked})})).json();
+      body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,format:FMT})})).json();
     if(r.file){ $("#pvOut").src="/video/"+r.file+"?t="+Date.now(); $("#modal").classList.add("on"); }
     else fail(r.detail||"No se pudo generar la muestra.");
   }catch(e){ alert("No se pudo generar la muestra."); }
@@ -291,7 +306,7 @@ $("#modal").onclick=e=>{if(e.target===$("#modal")){$("#modal").classList.remove(
 $("#render").onclick=async()=>{
   show("#s-rendering");
   try{ await fetch("/render/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked})}); }
+    body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,format:FMT})}); }
   catch(e){ return fail("No se pudo iniciar el render."); }
   poll();
 };
