@@ -122,6 +122,12 @@ Input: `IMG_5637.MOV` — iPhone 16 Pro Max, **4K HDR (HLG 10-bit), 60 fps, 3 mi
 - ✅ **Captions gapless**: cada palabra se sostiene hasta el inicio de la siguiente dentro de la frase → sin parpadeo, el resalte avanza justo en el beat.
 - ✅ **Tracking fluido**: detección a 6 fps → suavizado zero-phase (media móvil sin lag) → **interpolación a nivel de frame de salida (30 fps)** con dead-zone + clamp de velocidad. Pasó de pasos discretos a **movimiento continuo (máx ~1.7px/frame @1080)**. Antes saltaba cada ~7 frames; ahora es un paneo tipo cámara virtual.
 
+**Pulido de calidad (2026-07-16, ronda 4):**
+- ✅ **Captions rock-stable**: el resalte de la palabra activa era por ESCALA (`\fscx`) → cambiaba el ancho → la frase se re-centraba/re-envolvía (se movía). Ahora es SOLO COLOR (métricas constantes) + de-solape global + descartar eventos superseded → sin movimiento, duplicados ni desapariciones.
+- ✅ **Aire = fondo difuminado FIJO + foreground dinámico** (diseño de Kevin): BG estático (cover-crop difuminado/oscurecido, sin pan/zoom) + FG (sujeto tracked + punch-in zoom sobre el contenido, rect fijo → margen no se mueve). `FG_SCALE=0.84` controla cuánto aire. Constantes `BG_BLUR`, `BG_DARKEN`, `ZOOM_IN`, `ZOOM_HOLD`.
+- ✅ **Dinamismo por cortes duros**: punch-in zoom en picos de energía (librosa RMS), horneado en el FG del render; `--dynamic` en shorts recorta silencios.
+- ⚠️ **FIX importante** (patrón reutilizable): con `split` hay 2 filtros crop → `sendcmd` mandaba `crop x` al crop equivocado. Solución: nombrar el crop del fg (`crop@fgc`) y apuntarle; `sendcmd` debe ir ANTES de `fps`.
+
 **Limitaciones restantes:**
 - Tracking solo horizontal (X); pan calmado. Para varios interlocutores/cortes bruscos: segmentar por escena (PySceneDetect) y trackear por segmento.
 - Verificación de fluidez/sync fino requiere VER el video en movimiento (los frames estáticos solo confirman encuadre + palabra-timestamp).
