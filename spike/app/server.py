@@ -22,6 +22,7 @@ import pipeline  # noqa: E402
 
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Request  # noqa: E402
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse  # noqa: E402
+from starlette.concurrency import run_in_threadpool  # noqa: E402
 
 INPUT = SPIKE / "input"; OUTPUT = SPIKE / "output"
 STATIC = Path(__file__).resolve().parent / "static"
@@ -103,6 +104,23 @@ async def render(job_id: str, req: Request):
     job.update(phase="rendering", pct=0, message="Preparando el render…", plan=plan)
     threading.Thread(target=_render, args=(job_id, plan, dynamic), daemon=True).start()
     return {"ok": True}
+
+
+@app.post("/preview/{job_id}")
+async def preview(job_id: str, req: Request):
+    """Render a fast low-res sample of the first seconds so the user sees the real
+    look (captions/tracking/blur/zoom) before committing to the full export."""
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job no encontrado")
+    body = await req.json()
+    plan = body.get("plan") or job["plan"]
+    out = OUTPUT / f"{job_id}_preview.mp4"
+    try:
+        await run_in_threadpool(pipeline.render_preview, plan, out, 7)
+    except Exception as e:  # noqa
+        raise HTTPException(500, f"Preview falló: {e}")
+    return {"file": out.name}
 
 
 @app.get("/status/{job_id}")

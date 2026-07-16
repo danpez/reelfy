@@ -226,7 +226,7 @@ def _tonemap(video):
 
 
 def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None,
-                     on_pct=None):
+                     on_pct=None, preview_secs=None):
     """Composite a FIXED blurred background + a dynamic foreground video, burn captions.
 
     Layers (Kevin's design — the frame/margins never move; only the video moves):
@@ -246,7 +246,13 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
     # --- foreground: tracked (or static) 9:16 crop scaled to the inset size ---
     cmds = None
     if track:
-        cw, ch, cmds = reframe_track.build(video, src_w, src_h, cmds_path)
+        cw, ch = reframe_track.crop_dims(src_w, src_h)
+        if cw >= src_w:                                   # portrait source: no horizontal pan
+            cmds = None
+        elif cmds_path and Path(cmds_path).exists():      # reuse tracking from analyze()
+            cmds = cmds_path
+        else:                                             # compute it now (CLI / no analyze)
+            cw, ch, cmds = reframe_track.build(video, src_w, src_h, cmds_path)
     if cmds:
         fg = [f"sendcmd=f={cmds}", f"crop@fgc={cw}:{ch}:x=0:y=(ih-{ch})/2", f"scale={fg_w}:{fg_h}"]
     else:
@@ -260,19 +266,29 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
     fg += ["format=yuv420p"]
 
     # --- background: static blurred cover-fill of the scene (fixed framing) ---
-    bg = ([f"scale={W}:{H}:force_original_aspect_ratio=increase", f"crop={W}:{H}", f"fps={fps}"]
-          + tm + [f"gblur=sigma={BG_BLUR}", f"eq=brightness={BG_DARKEN}:saturation=0.9",
-                  "format=yuv420p"])
+    # Blur at LOW RES (it's blurred anyway) then upscale -> ~15x cheaper than blurring
+    # the full 1080x1920 every frame. This was the render's main CPU cost.
+    bw, bh = 270, 480
+    bg = ([f"scale={bw}:{bh}:force_original_aspect_ratio=increase", f"crop={bw}:{bh}", f"fps={fps}"]
+          + tm + [f"gblur=sigma={BG_BLUR/3.6:.0f}", f"scale={W}:{H}",
+                  f"eq=brightness={BG_DARKEN}:saturation=0.9", "format=yuv420p"])
 
     vf = (f"split=2[bgsrc][fgsrc];"
           f"[bgsrc]{','.join(bg)}[bg];"
           f"[fgsrc]{','.join(fg)}[fg];"
           f"[bg][fg]overlay=x=(W-w)/2:y=(H-h)/2[c];"
           f"[c]subtitles={ass_path}")
+    bitrate = "12M"
+    if preview_secs:                      # fast low-res sample of the first seconds
+        vf += ",scale=540:960"
+        bitrate = "6M"
     cmd = [FFMPEG, "-y", "-hwaccel", "videotoolbox", "-i", str(video), "-vf", vf,
-           "-c:v", "h264_videotoolbox", "-b:v", "12M", "-c:a", "aac", "-b:a", "128k", str(out)]
+           "-c:v", "h264_videotoolbox", "-b:v", bitrate, "-c:a", "aac", "-b:a", "128k"]
+    if preview_secs:
+        cmd += ["-t", str(preview_secs)]
+    cmd += [str(out)]
     if on_pct:
-        run_ffmpeg_progress(cmd, probe_duration(video), on_pct)
+        run_ffmpeg_progress(cmd, preview_secs or probe_duration(video), on_pct)
     else:
         run(cmd)
 
@@ -365,6 +381,17 @@ def render_from_plan(plan, out_dir, dynamic=True, on_step=None, on_pct=None):
             edit_mod.tighten(clip, tmp); tmp.replace(clip)
         clips.append({"name": f"Short {k}: {h.get('title', '')}".strip(" :"), "file": clip.name})
     return clips
+
+
+def render_preview(plan, out, secs=7):
+    """Fast, low-res sample of the first `secs` (the real look: captions, tracking,
+    blurred bg, zoom) so the user can preview before the full export."""
+    stem = plan["stem"]
+    ass = SPIKE / "work" / f"{stem}.ass"
+    build_ass(plan["phrases"], ass)
+    reframe_and_burn(Path(plan["video"]), ass, out, cmds_path=plan["cmds_path"],
+                     beats=plan.get("beats"), preview_secs=secs)
+    return out
 
 
 def main():
