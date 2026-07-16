@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import reframe_track
+import highlights as hl
 
 SPIKE = Path(__file__).resolve().parent.parent
 WCLI = SPIKE / "whisper.cpp/build/bin/whisper-cli"
@@ -201,6 +202,29 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None):
          "-c:a", "aac", "-b:a", "128k", str(out)])
 
 
+def cut_clip(full_out, start, end, clip_out):
+    """Cut a highlight [start,end] from the fully-rendered vertical (captions and
+    tracking already baked, so timing stays correct). Re-encode for frame accuracy."""
+    run([FFMPEG, "-y", "-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", str(full_out),
+         "-c:v", "h264_videotoolbox", "-b:v", "12M", "-c:a", "aac", "-b:a", "128k",
+         str(clip_out)])
+
+
+def make_highlights(json_path, full_out, n, out_dir, stem):
+    """Select n highlights via local LLM and cut each into its own short."""
+    sents = hl.build_sentences(hl.load_words(json_path))
+    print(f"   {len(sents)} sentences -> asking local LLM ({hl.MODEL}) for {n} highlight(s)...")
+    clips = hl.select_highlights(sents, n=n)
+    results = []
+    for k, c in enumerate(clips, 1):
+        clip_out = out_dir / f"{stem}_short{k}.mp4"
+        print(f"   short {k}: {c['start']:.1f}-{c['end']:.1f}s ({c['end']-c['start']:.0f}s) "
+              f"\"{c['title']}\" — {c['reason']}")
+        cut_clip(full_out, c["start"], c["end"], clip_out)
+        results.append((clip_out, c))
+    return results
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("video", help="input video path")
@@ -210,6 +234,8 @@ def main():
                          "(e.g. 'Keruvin Store, Al Haramain, Oud, Lattafa')")
     ap.add_argument("--no-track", action="store_true",
                     help="disable subject tracking (use fixed center-crop)")
+    ap.add_argument("--highlights", type=int, default=0, metavar="N",
+                    help="also select N best highlight clips via local LLM and cut shorts")
     args = ap.parse_args()
 
     video = Path(args.video).resolve()
@@ -235,7 +261,12 @@ def main():
     print("== [3/4] build word-highlight ASS =="); build_ass(phrases, ass)
     print("== [4/4] reframe 9:16 (subject-tracking) + burn captions ==")
     reframe_and_burn(video, ass, out, track=not args.no_track, cmds_path=str(cmds))
-    print(f"\n✅ output: {out}")
+    print(f"\n✅ full: {out}")
+
+    if args.highlights:
+        print(f"== [5] highlights (local LLM) ==")
+        for clip_out, _ in make_highlights(jp, out, args.highlights, out.parent, stem):
+            print(f"✅ short: {clip_out}")
 
 
 if __name__ == "__main__":

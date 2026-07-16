@@ -32,6 +32,8 @@ input.mp4
 
 Fase 1 del spike = pasos (1)(2)(6) — el corazón del wedge (captions con timing). Pasos (3)(4)(5) se suman después.
 
+**Fase 2 (highlights):** el transcript se agrupa en oraciones con timestamps y un **LLM local (ollama, qwen2.5:7b)** elige los mejores fragmentos contiguos para shorts (título/gancho + razón). El pipeline renderiza el vertical completo y **corta cada highlight** en su propio short (`_short1.mp4`, `_short2.mp4`), con tracking + captions ya incrustados. Local, ~6s de selección, $0. `scripts/highlights.py`.
+
 ## Stack instalado
 
 - **whisper.cpp** (compilado con Metal) — `spike/whisper.cpp/build/bin/whisper-cli`
@@ -56,6 +58,10 @@ mkdir -p models && curl -sL -o models/face_detection_yunet_2023mar.onnx \
 brew install ffmpeg-full cmake
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install auto-editor 'scenedetect[opencv]' opencv-python numpy
+
+# 4) LLM local para highlights (Fase 2)
+brew install ollama && ollama serve &   # servidor local
+ollama pull qwen2.5:7b                   # ~4.7 GB
 ```
 
 ## Cómo correr
@@ -63,7 +69,8 @@ pip install auto-editor 'scenedetect[opencv]' opencv-python numpy
 ```bash
 cd spike
 ./scripts/run.sh input/mi-video.mp4 \
-  --glossary "Keruvin Store, Al Haramain, Oud"   # opcional: nombres propios
+  --glossary "Keruvin Store, Al Haramain, Oud" \  # opcional: nombres propios
+  --highlights 2                                   # opcional: corta los 2 mejores shorts (LLM local)
 # --no-track  para desactivar el subject-tracking (crop fijo centrado)
 ```
 
@@ -114,9 +121,10 @@ Input: `IMG_5637.MOV` — iPhone 16 Pro Max, **4K HDR (HLG 10-bit), 60 fps, 3 mi
 - ~~Probar `initial_prompt` con glosario (Keruvin + marcas) para nombres propios.~~ ✅ HECHO.
 - ~~Subject-tracking en el reframe (detector permisivo).~~ ✅ HECHO (YuNet).
 - ~~Optimizar render con VideoToolbox / downscale antes del tonemap.~~ ✅ HECHO (5.4× → 71s para 3min).
+- ~~Fase 2: selección de highlights por LLM.~~ ✅ HECHO (ollama qwen2.5:7b local; de 3min → 2 shorts elegidos por IA en ~6s).
 - Head-to-head vs OpusClip/Submagic (pendiente — requiere subir el mismo video).
 - Explorar alineación forzada (WhisperX) solo si aparece drift en clips más largos.
-- Fase 2: auto-editor (silencios) + PySceneDetect (escenas) + selección de highlights por LLM.
+- Pendiente Fase 2b: auto-editor (cortar silencios/muletillas dentro del clip) + PySceneDetect (tracking por escena para varios interlocutores).
 
 ## Reglas heredadas del research
 
