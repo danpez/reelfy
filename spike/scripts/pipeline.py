@@ -69,9 +69,9 @@ ZOOM_HOLD = 1.10             # punch-in hold (s)
 # gentle compression -> EBU R128 loudness to the social standard (-14 LUFS) ----
 _RNNOISE = SPIKE / "models/rnnoise.rnnn"
 AUDIO_STUDIO = (
-    f"highpass=f=80,arnndn=m={_RNNOISE},deesser,"
-    "acompressor=threshold=-18dB:ratio=3:attack=5:release=60:makeup=2,"
-    "loudnorm=I=-14:TP=-1.5:LRA=11,"
+    f"highpass=f=80,arnndn=m={_RNNOISE}:mix=0.85,deesser,"   # mix<1: keep some natural
+    "acompressor=threshold=-18dB:ratio=3:attack=5:release=60:makeup=2,"  # signal -> less
+    "loudnorm=I=-14:TP=-1.5:LRA=11,"                         # metallic denoise artifact
     "aresample=48000"   # loudnorm upsamples internally; pin back to 48 kHz
 )
 
@@ -263,7 +263,7 @@ def _tonemap(video):
 
 def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None,
                      on_pct=None, preview_secs=None, enhance_audio=False,
-                     out_w=W, out_h=H, camera=None):
+                     out_w=W, out_h=H, camera=None, keeps=None):
     """Composite a FIXED blurred background + a dynamic foreground video, burn captions.
 
     Layers (frame/margins never move; only the video moves): static blurred BG cover +
@@ -315,6 +315,18 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
           f"[fgsrc]{','.join(fg)}[fg];"
           f"[bg][fg]overlay=x=(W-w)/2:y=(H-h)/2[c];"
           f"[c]subtitles={ass_path}")
+    # ZERO-CASCADE silence trim: select/aselect fused into THIS render (after captions,
+    # so burned subs follow their frames). One total encode instead of render+tighten,
+    # which was re-compressing AAC and bringing the robotic artifact back. adeclick
+    # repairs any impulse at the jump-cut junctions.
+    af_parts = [AUDIO_STUDIO] if enhance_audio else []
+    total = preview_secs or probe_duration(video)
+    if keeps:
+        sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keeps)
+        vf += f",select='{sel}',setpts=N/FRAME_RATE/TB"
+        af_parts.append(f"aselect='{sel}',asetpts=N/SR/TB,adeclick")
+        if not preview_secs:
+            total = sum(b - a for a, b in keeps)
     bitrate = "12M"
     if preview_secs:                      # fast low-res sample of the first seconds
         pv_h = (round(540 * oh / ow) // 2) * 2
@@ -322,15 +334,15 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
         bitrate = "6M"
     cmd = [FFMPEG, "-y", "-hwaccel", "videotoolbox", "-i", str(video), "-vf", vf,
            "-c:v", "h264_videotoolbox", "-b:v", bitrate]
-    if enhance_audio:
-        cmd += ["-af", AUDIO_STUDIO]
+    if af_parts:
+        cmd += ["-af", ",".join(af_parts)]
     # 192k base: shorts derive from this render, so give downstream steps headroom
     cmd += ["-c:a", "aac", "-b:a", "192k"]
     if preview_secs:
         cmd += ["-t", str(preview_secs)]
     cmd += [str(out)]
     if on_pct:
-        run_ffmpeg_progress(cmd, preview_secs or probe_duration(video), on_pct)
+        run_ffmpeg_progress(cmd, total, on_pct)
     else:
         run(cmd)
 
@@ -499,10 +511,35 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     build_ass(phrases, ass, ow, oh, style, anim)           # rebuild from edited captions
     beats = plan.get("beats") if dynamic else None
 
+    # ZERO-CASCADE: silence-trim happens INSIDE the main render (one encode total).
+    # keeps come from the source wav; highlight timestamps get remapped onto the
+    # trimmed timeline so shorts still cut the right content.
+    keeps = None
+    if dynamic:
+        keeps, src_dur = edit_mod.keep_segments(plan["wav"])
+        removed = src_dur - sum(b - a for a, b in keeps)
+        if removed < 0.2:
+            keeps = None                                    # nothing worth trimming
+        else:
+            print(f"   trim fusionado al render: -{removed:.1f}s de silencios/muletillas")
+
+    def remap(t):
+        if not keeps:
+            return t
+        acc = 0.0
+        for a, b in keeps:
+            if t <= a:
+                return acc
+            if t <= b:
+                return acc + (t - a)
+            acc += b - a
+        return acc
+
     step("Montando el video…")
     full = out_dir / f"{stem}_reelfy.mp4"
     reframe_and_burn(video, ass, full, cmds_path=plan["cmds_path"], beats=beats,
                      enhance_audio=enhance_audio, out_w=ow, out_h=oh, camera=camera,
+                     keeps=keeps,
                      on_pct=(lambda p: on_pct("full", p)) if on_pct else None)
     if music:
         step("Añadiendo música de fondo…")
@@ -514,12 +551,14 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     for k, h in enumerate(enabled, 1):
         step(f"Cortando short {k}…")
         clip = out_dir / f"{stem}_short{k}.mp4"
-        cut_clip(full, h["start"], h["end"], clip,
+        cut_clip(full, remap(h["start"]), remap(h["end"]), clip,
                  on_pct=(lambda p, k=k: on_pct(f"short{k}", p)) if on_pct else None)
         title = titles.get(h.get("title", ""), h.get("title", ""))
-        if dynamic or (hook and title):
+        if hook and title:
+            # hook only: video re-encodes, audio STREAM-COPIES (silences already
+            # trimmed in the main render -> shorts never re-encode audio again)
             tmp = out_dir / f"{stem}_short{k}_fin.mp4"
-            finish_short(clip, tmp, dynamic, title if hook else None, ow, oh)
+            finish_short(clip, tmp, False, title, ow, oh)
             tmp.replace(clip)
         thumb = out_dir / f"{stem}_short{k}_thumb.jpg"
         try:
@@ -529,15 +568,6 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
         clips.append({"name": f"Short {k}: {h.get('title', '')}".strip(" :"),
                       "file": clip.name,
                       "thumb": thumb.name if thumb and thumb.exists() else None})
-
-    if dynamic:
-        # Trim silences/fillers from the FULL video too — but only AFTER cutting the
-        # shorts (their [start,end] timestamps live on the untrimmed timeline).
-        step("Puliendo el ritmo del video completo…")
-        tmp = out_dir / f"{stem}_full_fin.mp4"
-        kept, removed = edit_mod.tighten(full, tmp)
-        tmp.replace(full)
-        print(f"   full: -{removed:.1f}s de silencios/muletillas")
     return clips
 
 
