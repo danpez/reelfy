@@ -47,7 +47,7 @@ def _analyze(job_id, video, glossary, n):
         job.update(phase="error", error=f"Análisis falló: {e}")
 
 
-def _render(job_id, plan, dynamic, enhance, style, anim, fmt, music, track, mvol, hook):
+def _render(job_id, plan, dynamic, enhance, style, anim, fmt, music, track, mvol, hook, lang):
     job = JOBS[job_id]
     n_shorts = max(1, sum(1 for h in plan.get("highlights", []) if h.get("enabled", True)))
     t0 = time.time()
@@ -68,7 +68,7 @@ def _render(job_id, plan, dynamic, enhance, style, anim, fmt, music, track, mvol
         clips = pipeline.render_from_plan(plan, OUTPUT, dynamic=dynamic, enhance_audio=enhance,
                                           style=style, anim=anim, fmt=fmt, music=music,
                                           music_track=track, music_volume=mvol, hook=hook,
-                                          on_step=step, on_pct=overall)
+                                          lang=lang, on_step=step, on_pct=overall)
         job.update(phase="done", pct=100, message="¡Listo!", clips=clips, eta=0)
     except Exception as e:  # noqa
         job.update(phase="error", error=f"Render falló: {e}")
@@ -110,9 +110,10 @@ async def render(job_id: str, req: Request):
     track = body.get("music_track", "ambient")
     mvol = float(body.get("music_volume", 0.26))
     hook = bool(body.get("hook", False))
+    lang = body.get("lang", "es")
     job.update(phase="rendering", pct=0, message="Preparando el render…", plan=plan)
     threading.Thread(target=_render,
-                     args=(job_id, plan, dynamic, enhance, style, anim, fmt, music, track, mvol, hook),
+                     args=(job_id, plan, dynamic, enhance, style, anim, fmt, music, track, mvol, hook, lang),
                      daemon=True).start()
     return {"ok": True}
 
@@ -132,9 +133,10 @@ async def preview(job_id: str, req: Request):
     fmt = body.get("format", "9:16")
     music = bool(body.get("music", False))
     track = body.get("music_track", "ambient"); mvol = float(body.get("music_volume", 0.26))
+    lang = body.get("lang", "es")
     try:
         await run_in_threadpool(pipeline.render_preview, plan, out, 7, enhance, style, anim,
-                                fmt, music, track, mvol)
+                                fmt, music, track, mvol, lang)
     except Exception as e:  # noqa
         raise HTTPException(500, f"Preview falló: {e}")
     return {"file": out.name}

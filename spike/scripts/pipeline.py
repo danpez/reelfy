@@ -24,6 +24,7 @@ import highlights as hl
 import align as align_mod
 import edit as edit_mod
 import thumbnail as thumb_mod
+import translate as translate_mod
 
 SPIKE = Path(__file__).resolve().parent.parent
 WCLI = SPIKE / "whisper.cpp/build/bin/whisper-cli"
@@ -477,7 +478,7 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
 
 def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="clasico",
                      anim="none", fmt="9:16", music=False, music_track="ambient",
-                     music_volume=0.26, hook=False, on_step=None, on_pct=None):
+                     music_volume=0.26, hook=False, lang="es", on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -488,8 +489,14 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
     stem = plan["stem"]; video = Path(plan["video"]); camera = plan.get("camera")
     out_dir = Path(out_dir); out_dir.mkdir(exist_ok=True)
+    phrases, titles = plan["phrases"], {}
+    if lang == "en":
+        step("Traduciendo subtítulos al inglés…")
+        phrases = translate_mod.translate_phrases(phrases)
+        hl_titles = [h.get("title", "") for h in plan["highlights"]]
+        titles = dict(zip(hl_titles, translate_mod.translate_texts(hl_titles)))
     ass = SPIKE / "work" / f"{stem}.ass"
-    build_ass(plan["phrases"], ass, ow, oh, style, anim)   # rebuild from edited captions
+    build_ass(phrases, ass, ow, oh, style, anim)           # rebuild from edited captions
     beats = plan.get("beats") if dynamic else None
 
     step("Montando el video…")
@@ -509,13 +516,14 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
         clip = out_dir / f"{stem}_short{k}.mp4"
         cut_clip(full, h["start"], h["end"], clip,
                  on_pct=(lambda p, k=k: on_pct(f"short{k}", p)) if on_pct else None)
-        if dynamic or (hook and h.get("title")):
+        title = titles.get(h.get("title", ""), h.get("title", ""))
+        if dynamic or (hook and title):
             tmp = out_dir / f"{stem}_short{k}_fin.mp4"
-            finish_short(clip, tmp, dynamic, h.get("title") if hook else None, ow, oh)
+            finish_short(clip, tmp, dynamic, title if hook else None, ow, oh)
             tmp.replace(clip)
         thumb = out_dir / f"{stem}_short{k}_thumb.jpg"
         try:
-            thumb_mod.make_thumbnail(clip, thumb, h.get("title", ""))
+            thumb_mod.make_thumbnail(clip, thumb, title)
         except Exception as e:  # noqa
             print(f"   thumbnail failed: {e}"); thumb = None
         clips.append({"name": f"Short {k}: {h.get('title', '')}".strip(" :"),
@@ -534,13 +542,16 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
 
 
 def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim="none",
-                   fmt="9:16", music=False, music_track="ambient", music_volume=0.26):
+                   fmt="9:16", music=False, music_track="ambient", music_volume=0.26,
+                   lang="es"):
     """Fast, low-res sample of the first `secs` (the real look: captions, tracking,
-    blurred bg, zoom, studio audio, music, chosen style/format) — preview before export."""
+    blurred bg, zoom, studio audio, music, chosen style/format/lang) — preview before export."""
     ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
     stem = plan["stem"]
+    phrases = (translate_mod.translate_phrases(plan["phrases"]) if lang == "en"
+               else plan["phrases"])
     ass = SPIKE / "work" / f"{stem}.ass"
-    build_ass(plan["phrases"], ass, ow, oh, style, anim)
+    build_ass(phrases, ass, ow, oh, style, anim)
     out = Path(out)
     tmp = out.with_name(out.stem + "_raw.mp4") if music else out
     reframe_and_burn(Path(plan["video"]), ass, tmp, cmds_path=plan["cmds_path"],
