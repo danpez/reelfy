@@ -52,6 +52,15 @@ BG_DARKEN = -0.08            # slightly darken bg so fg pops
 ZOOM_IN = 0.10               # emphasis punch-in on the FG content (display size stays fixed)
 ZOOM_HOLD = 1.10             # punch-in hold (s)
 
+# ---- studio audio chain (all local): rumble cut -> RNNoise denoise -> de-ess ->
+# gentle compression -> EBU R128 loudness to the social standard (-14 LUFS) ----
+_RNNOISE = SPIKE / "models/rnnoise.rnnn"
+AUDIO_STUDIO = (
+    f"highpass=f=80,arnndn=m={_RNNOISE},deesser,"
+    "acompressor=threshold=-18dB:ratio=3:attack=5:release=60:makeup=2,"
+    "loudnorm=I=-14:TP=-1.5:LRA=11"
+)
+
 
 def run(cmd, **kw):
     print(f"$ {' '.join(str(c) for c in cmd)}")
@@ -226,7 +235,7 @@ def _tonemap(video):
 
 
 def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None,
-                     on_pct=None, preview_secs=None):
+                     on_pct=None, preview_secs=None, enhance_audio=False):
     """Composite a FIXED blurred background + a dynamic foreground video, burn captions.
 
     Layers (Kevin's design — the frame/margins never move; only the video moves):
@@ -283,7 +292,10 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
         vf += ",scale=540:960"
         bitrate = "6M"
     cmd = [FFMPEG, "-y", "-hwaccel", "videotoolbox", "-i", str(video), "-vf", vf,
-           "-c:v", "h264_videotoolbox", "-b:v", bitrate, "-c:a", "aac", "-b:a", "128k"]
+           "-c:v", "h264_videotoolbox", "-b:v", bitrate]
+    if enhance_audio:
+        cmd += ["-af", AUDIO_STUDIO]
+    cmd += ["-c:a", "aac", "-b:a", "128k"]
     if preview_secs:
         cmd += ["-t", str(preview_secs)]
     cmd += [str(out)]
@@ -350,7 +362,7 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
     }
 
 
-def render_from_plan(plan, out_dir, dynamic=True, on_step=None, on_pct=None):
+def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full vertical + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -367,6 +379,7 @@ def render_from_plan(plan, out_dir, dynamic=True, on_step=None, on_pct=None):
     step("Montando el video vertical…")
     full = out_dir / f"{stem}_reelfy.mp4"
     reframe_and_burn(video, ass, full, cmds_path=plan["cmds_path"], beats=beats,
+                     enhance_audio=enhance_audio,
                      on_pct=(lambda p: on_pct("full", p)) if on_pct else None)
     clips = [{"name": "Video completo", "file": full.name}]
 
@@ -383,14 +396,14 @@ def render_from_plan(plan, out_dir, dynamic=True, on_step=None, on_pct=None):
     return clips
 
 
-def render_preview(plan, out, secs=7):
+def render_preview(plan, out, secs=7, enhance_audio=False):
     """Fast, low-res sample of the first `secs` (the real look: captions, tracking,
-    blurred bg, zoom) so the user can preview before the full export."""
+    blurred bg, zoom, studio audio) so the user can preview before the full export."""
     stem = plan["stem"]
     ass = SPIKE / "work" / f"{stem}.ass"
     build_ass(plan["phrases"], ass)
     reframe_and_burn(Path(plan["video"]), ass, out, cmds_path=plan["cmds_path"],
-                     beats=plan.get("beats"), preview_secs=secs)
+                     beats=plan.get("beats"), preview_secs=secs, enhance_audio=enhance_audio)
     return out
 
 

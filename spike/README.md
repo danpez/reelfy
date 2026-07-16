@@ -50,9 +50,11 @@ cmake -S whisper.cpp -B whisper.cpp/build -DCMAKE_BUILD_TYPE=Release
 cmake --build whisper.cpp/build -j --config Release
 bash whisper.cpp/models/download-ggml-model.sh large-v3-turbo   # ~1.5 GB
 
-# 2) YuNet (subject-tracking, Apache-2.0, ~230 KB)
+# 2) YuNet (subject-tracking, Apache-2.0, ~230 KB) + RNNoise (audio, BSD, ~290 KB)
 mkdir -p models && curl -sL -o models/face_detection_yunet_2023mar.onnx \
   https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+curl -sL -o models/rnnoise.rnnn \
+  https://raw.githubusercontent.com/GregorR/rnnoise-models/master/somnolent-hogwash-2018-09-01/sh.rnnn
 
 # 3) ffmpeg-full (libass) + venv Python 3.12
 brew install ffmpeg-full cmake
