@@ -471,8 +471,17 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
     highlights = hl.select_highlights(hl.build_sentences(words), n=n)
     for h in highlights:
         h["enabled"] = True
-    step(80, "Detectando momentos de énfasis…")
+    step(78, "Detectando momentos de énfasis…")
     beats, _ = edit_mod.emphasis_beats(wav)
+    step(84, "Detectando silencios y muletillas…")
+    keeps, src_len = edit_mod.keep_segments(str(wav))
+    cuts, t_prev = [], 0.0                 # complement of keeps = editable cut track
+    for a, b in keeps:
+        if a - t_prev > 0.05:
+            cuts.append({"start": round(t_prev, 2), "end": round(a, 2), "enabled": True})
+        t_prev = b
+    if src_len - t_prev > 0.05:
+        cuts.append({"start": round(t_prev, 2), "end": round(src_len, 2), "enabled": True})
     step(90, "Calculando el seguimiento de cámara…")
     src_w, src_h = probe_dims(video)
     _, _, _, camera = reframe_track.build(video, src_w, src_h, str(cmds))
@@ -485,6 +494,7 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
                     for ph in phrases],
         "highlights": highlights,
         "beats": beats,
+        "cuts": cuts,
     }
 
 
@@ -512,12 +522,24 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     beats = plan.get("beats") if dynamic else None
 
     # ZERO-CASCADE: silence-trim happens INSIDE the main render (one encode total).
-    # keeps come from the source wav; highlight timestamps get remapped onto the
-    # trimmed timeline so shorts still cut the right content.
+    # keeps = complement of the ENABLED cuts from the plan (the user can restore any
+    # cut in the editor). Highlight timestamps get remapped onto the trimmed timeline.
     keeps = None
     if dynamic:
-        keeps, src_dur = edit_mod.keep_segments(plan["wav"])
-        removed = src_dur - sum(b - a for a, b in keeps)
+        src_dur = plan.get("duration") or probe_duration(video)
+        cuts = sorted((c for c in plan.get("cuts", []) if c.get("enabled", True)),
+                      key=lambda c: c["start"])
+        if cuts:
+            keeps, t = [], 0.0
+            for c in cuts:
+                if c["start"] - t > 0.05:
+                    keeps.append((t, c["start"]))
+                t = max(t, c["end"])
+            if src_dur - t > 0.05:
+                keeps.append((t, src_dur))
+        elif "cuts" not in plan:                            # older plans: detect now
+            keeps, src_dur = edit_mod.keep_segments(plan["wav"])
+        removed = src_dur - sum(b - a for a, b in keeps) if keeps else 0.0
         if removed < 0.2:
             keeps = None                                    # nothing worth trimming
         else:
