@@ -42,9 +42,15 @@ MARGIN_V = 430               # captions in lower third (chest), clear of face & 
 MAX_WORDS_PER_LINE = 3       # short phrases, like Submagic/Opus
 GAP_SPLIT_MS = 700           # start a new phrase after a pause this long
 
-# ---- framing: give the subject "air" (margins) so social UI doesn't crowd it ----
-AIR_SCALE = 0.86             # subject fills this fraction of width; rest is blurred fill
-SUBJECT_Y = 0.40             # vertical placement of subject (0=top .. 1=bottom of slack)
+# ---- framing: FIXED blurred background + dynamic foreground video on top ----
+# The bg is a static cover-crop of the scene, blurred, NEVER panned/zoomed (fixed).
+# ALL motion (tracking pan, zoom punches) lives in the foreground layer only, so the
+# frame/margins stay rock-steady and professional.
+FG_SCALE = 0.84              # foreground video fills this fraction; rest = fixed blurred margin
+BG_BLUR = 42                 # background blur strength
+BG_DARKEN = -0.08            # slightly darken bg so fg pops
+ZOOM_IN = 0.10               # emphasis punch-in on the FG content (display size stays fixed)
+ZOOM_HOLD = 1.10             # punch-in hold (s)
 
 
 def run(cmd, **kw):
@@ -187,40 +193,56 @@ def probe_dims(video):
     return nums[0], nums[1]
 
 
-def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None):
-    """Reframe to 9:16 and burn the ASS captions.
+def _tonemap(video):
+    if is_hdr(video):
+        return ["zscale=transfer=linear:npl=100", "tonemap=tonemap=hable:desat=0",
+                "zscale=transfer=bt709:matrix=bt709:primaries=bt709:range=tv"]
+    return []
 
-    Apple Silicon fast path (~5.4x vs CPU/libx264, render 3.3x realtime on 4K HDR):
-      - VideoToolbox hardware DECODE (`-hwaccel videotoolbox`)
-      - crop/scale to 1080x1920 BEFORE tonemap -> tonemap runs on ~4x fewer pixels
-      - VideoToolbox hardware ENCODE (`h264_videotoolbox`)
-    Vulkan/libplacebo GPU tonemap is NOT usable here (no loadable Vulkan runtime).
 
-    Subject tracking (track=True): a YuNet face trajectory drives a `sendcmd`-panned
-    crop that follows the speaker instead of a fixed center-crop.
+def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None):
+    """Composite a FIXED blurred background + a dynamic foreground video, burn captions.
+
+    Layers (Kevin's design — the frame/margins never move; only the video moves):
+      - BG: static cover-crop of the scene, blurred + darkened. No pan, no zoom -> fixed.
+      - FG: the subject, YuNet-tracked pan + optional emphasis punch-in zoom (zoom is on
+        the CONTENT; the fg display rect stays fixed, so margins are rock-steady).
+      - Captions on top, fixed position.
+    Apple Silicon fast path: VideoToolbox decode/encode; tonemap at low res.
     """
     src_w, src_h = probe_dims(video)
-    chain = []
+    tm = _tonemap(video)
+    if tm:
+        print("   HDR -> tonemap HLG/PQ to SDR (both layers)")
+    fg_w = (round(W * FG_SCALE) // 2) * 2
+    fg_h = (round(H * FG_SCALE) // 2) * 2
+
+    # --- foreground: tracked (or static) 9:16 crop scaled to the inset size ---
+    cmds = None
     if track:
         cw, ch, cmds = reframe_track.build(video, src_w, src_h, cmds_path)
-        if cmds:  # dynamic pan then downscale
-            chain += [f"sendcmd=f={cmds}",
-                      f"crop={cw}:{ch}:x=0:y=(ih-{ch})/2",
-                      f"scale={W}:{H}"]
-    if not chain:  # static center-crop fallback
-        chain += [f"scale={W}:{H}:force_original_aspect_ratio=increase", f"crop={W}:{H}"]
-    chain += [f"fps={fps}"]
-    if is_hdr(video):
-        print("   HDR detected -> tonemapping HLG/PQ to SDR bt709 (post-downscale)")
-        chain += [
-            "zscale=transfer=linear:npl=100",
-            "tonemap=tonemap=hable:desat=0",
-            "zscale=transfer=bt709:matrix=bt709:primaries=bt709:range=tv",
-        ]
-    # Plain full-height crop (widest 9:16 FOV possible from a 16:9 source = most
-    # "air" without letterbox bars). No blurred inset. Captions burned on top.
-    chain += ["format=yuv420p", f"subtitles={ass_path}"]
-    vf = ",".join(chain)
+    if cmds:
+        fg = [f"sendcmd=f={cmds}", f"crop@fgc={cw}:{ch}:x=0:y=(ih-{ch})/2", f"scale={fg_w}:{fg_h}"]
+    else:
+        fg = [f"scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase", f"crop={fg_w}:{fg_h}"]
+    fg = fg + [f"fps={fps}"] + tm   # sendcmd MUST precede fps or its crop-x cmds don't land
+    if beats:   # hard-cut punch-in on the fg CONTENT (display size fixed)
+        win = "+".join(f"between(t,{b:.3f},{b + ZOOM_HOLD:.3f})" for b in beats)
+        z = f"(1+{ZOOM_IN}*({win}))"
+        fg += [f"scale=w='ceil({fg_w}*{z}/2)*2':h='ceil({fg_h}*{z}/2)*2':eval=frame",
+               f"crop={fg_w}:{fg_h}"]
+    fg += ["format=yuv420p"]
+
+    # --- background: static blurred cover-fill of the scene (fixed framing) ---
+    bg = ([f"scale={W}:{H}:force_original_aspect_ratio=increase", f"crop={W}:{H}", f"fps={fps}"]
+          + tm + [f"gblur=sigma={BG_BLUR}", f"eq=brightness={BG_DARKEN}:saturation=0.9",
+                  "format=yuv420p"])
+
+    vf = (f"split=2[bgsrc][fgsrc];"
+          f"[bgsrc]{','.join(bg)}[bg];"
+          f"[fgsrc]{','.join(fg)}[fg];"
+          f"[bg][fg]overlay=x=(W-w)/2:y=(H-h)/2[c];"
+          f"[c]subtitles={ass_path}")
     run([FFMPEG, "-y", "-hwaccel", "videotoolbox", "-i", str(video), "-vf", vf,
          "-c:v", "h264_videotoolbox", "-b:v", "12M",
          "-c:a", "aac", "-b:a", "128k", str(out)])
@@ -246,11 +268,11 @@ def make_highlights(json_path, full_out, n, out_dir, stem, dynamic=False):
         print(f"   short {k}: {c['start']:.1f}-{c['end']:.1f}s ({c['end']-c['start']:.0f}s) "
               f"\"{c['title']}\" — {c['reason']}")
         cut_clip(full_out, c["start"], c["end"], clip_out)
-        if dynamic:
+        if dynamic:   # zoom punches are baked in the full render; here just trim silences
             tmp = out_dir / f"{stem}_short{k}_dyn.mp4"
-            removed, nz = edit_mod.dynamic(clip_out, tmp, out_dir)
+            kept, removed = edit_mod.tighten(clip_out, tmp)
             tmp.replace(clip_out)
-            print(f"      dynamic: -{removed:.1f}s silencios, {nz} punch-in zooms (corte duro)")
+            print(f"      dynamic: -{removed:.1f}s silencios (zoom ya horneado)")
         results.append((clip_out, c))
     return results
 
@@ -299,8 +321,12 @@ def main():
     phrases = group_phrases(words)
     print(f"   {len(words)} words -> {len(phrases)} caption phrases")
     print("== [4/5] build word-highlight ASS =="); build_ass(phrases, ass)
-    print("== [5/5] reframe 9:16 (subject-tracking) + air + burn captions ==")
-    reframe_and_burn(video, ass, out, track=not args.no_track, cmds_path=str(cmds))
+    beats = None
+    if args.dynamic:
+        print("   emphasis beats (audio energy) for punch-in zoom...")
+        beats, _ = edit_mod.emphasis_beats(wav)
+    print("== [5/5] fixed blurred bg + tracked/zoomed fg + burn captions ==")
+    reframe_and_burn(video, ass, out, track=not args.no_track, cmds_path=str(cmds), beats=beats)
     print(f"\n✅ full: {out}")
 
     if args.highlights:

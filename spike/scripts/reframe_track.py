@@ -113,8 +113,9 @@ def build_crop_x(xs, src_w, cw):
 
 
 def write_sendcmd(crop_x, cmds_path):
-    """One sendcmd entry per output frame -> sub-pixel-smooth pan (no visible steps)."""
-    lines = [f"{i / OUT_FPS:.3f} crop x {int(round(x))};" for i, x in enumerate(crop_x)]
+    """One sendcmd entry per output frame -> sub-pixel-smooth pan (no visible steps).
+    Targets the named instance `crop@fgc` so it hits the FG crop, not the BG crop."""
+    lines = [f"{i / OUT_FPS:.3f} crop@fgc x {int(round(x))};" for i, x in enumerate(crop_x)]
     Path(cmds_path).write_text("\n".join(lines) + "\n")
     return cmds_path
 
