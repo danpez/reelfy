@@ -351,9 +351,27 @@ def add_music(video_in, video_out, track="ambient", volume=0.26):
          "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(video_out)])
 
 
-def make_hook_ass(title, w, h, out, dur=3.0):
-    """A big animated hook title (top area, boxed, fade in/out) for the first `dur`s."""
-    size = max(30, int(w * 0.060))
+def make_hook_ass(title, w, h, out, dur=3.4):
+    """Viral-style animated hook for the first `dur`s.
+
+    - UPPERCASE, heavy outline + shadow (no flat black box)
+    - key words (the longer ones) highlighted in brand amber
+    - amber GLOW layer behind the text (blurred copy)
+    - pop-in with overshoot (30% -> 116% -> 100%) + fade out
+    """
+    size = max(34, int(w * 0.072))
+    AMBER = r"\c&H20B0FF&"      # #FFB020 in ASS BGR
+    WHITE = r"\c&HFFFFFF&"
+    words = (title or "").upper().split()
+    # highlight the informative words: alternate among words of >=5 chars
+    longs = [i for i, t in enumerate(words) if len(t) >= 5]
+    hot = set(longs[::2] if longs else [])
+    styled = " ".join(f"{{{AMBER}}}{t}{{{WHITE}}}" if i in hot else t
+                      for i, t in enumerate(words))
+    pop = (r"{\fad(120,420)\fscx30\fscy30"
+           r"\t(0,190,\fscx116\fscy116)\t(190,330,\fscx100\fscy100)}")
+    glow = (r"{\fad(120,420)\blur14\bord6\fscx30\fscy30"
+            r"\t(0,190,\fscx116\fscy116)\t(190,330,\fscx100\fscy100)}")
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {w}
@@ -362,23 +380,16 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV
-Style: Hook,{FONT},{size},&H00FFFFFF,&H00000000,&HA8140F0A,1,3,10,0,8,{int(w*0.08)},{int(w*0.08)},{int(h*0.11)}
+Style: Hook,{FONT},{size},&H00FFFFFF,&H00000000,&H96000000,1,1,{max(4, size // 11)},{max(2, size // 20)},8,{int(w*0.07)},{int(w*0.07)},{int(h*0.10)}
+Style: HookGlow,{FONT},{size},&H0020B0FF,&H0020B0FF,&H00000000,1,1,{max(4, size // 11)},0,8,{int(w*0.07)},{int(w*0.07)},{int(h*0.10)}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-Dialogue: 0,0:00:00.00,{ass_time(dur)},Hook,,0,0,0,,{{\\fad(300,400)}}{(title or '').upper()}
+Dialogue: 0,0:00:00.00,{ass_time(dur)},HookGlow,,0,0,0,,{glow}{(title or '').upper()}
+Dialogue: 1,0:00:00.00,{ass_time(dur)},Hook,,0,0,0,,{pop}{styled}
 """
     Path(out).write_text(header)
     return out
-
-
-def add_hook(video_in, video_out, title, w, h):
-    """Burn an animated hook title over the first seconds (re-encode; fast for a short)."""
-    ass = Path(video_out).with_suffix(".hook.ass")
-    make_hook_ass(title, w, h, ass)
-    run([FFMPEG, "-y", "-i", str(video_in), "-vf", f"subtitles={ass}",
-         "-c:v", "h264_videotoolbox", "-b:v", "12M", "-c:a", "aac", "-b:a", "128k", str(video_out)])
-    ass.unlink(missing_ok=True)
 
 
 def cut_clip(full_out, start, end, clip_out, on_pct=None):
@@ -510,6 +521,15 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
         clips.append({"name": f"Short {k}: {h.get('title', '')}".strip(" :"),
                       "file": clip.name,
                       "thumb": thumb.name if thumb and thumb.exists() else None})
+
+    if dynamic:
+        # Trim silences/fillers from the FULL video too — but only AFTER cutting the
+        # shorts (their [start,end] timestamps live on the untrimmed timeline).
+        step("Puliendo el ritmo del video completo…")
+        tmp = out_dir / f"{stem}_full_fin.mp4"
+        kept, removed = edit_mod.tighten(full, tmp)
+        tmp.replace(full)
+        print(f"   full: -{removed:.1f}s de silencios/muletillas")
     return clips
 
 
