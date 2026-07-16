@@ -70,7 +70,8 @@ _RNNOISE = SPIKE / "models/rnnoise.rnnn"
 AUDIO_STUDIO = (
     f"highpass=f=80,arnndn=m={_RNNOISE},deesser,"
     "acompressor=threshold=-18dB:ratio=3:attack=5:release=60:makeup=2,"
-    "loudnorm=I=-14:TP=-1.5:LRA=11"
+    "loudnorm=I=-14:TP=-1.5:LRA=11,"
+    "aresample=48000"   # loudnorm upsamples internally; pin back to 48 kHz
 )
 
 
@@ -322,7 +323,8 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
            "-c:v", "h264_videotoolbox", "-b:v", bitrate]
     if enhance_audio:
         cmd += ["-af", AUDIO_STUDIO]
-    cmd += ["-c:a", "aac", "-b:a", "128k"]
+    # 192k base: shorts derive from this render, so give downstream steps headroom
+    cmd += ["-c:a", "aac", "-b:a", "192k"]
     if preview_secs:
         cmd += ["-t", str(preview_secs)]
     cmd += [str(out)]
@@ -346,7 +348,7 @@ def add_music(video_in, video_out, track="ambient", volume=0.26):
             f"[0:a][duck]amix=inputs=2:duration=first:dropout_transition=0[a]")
     run([FFMPEG, "-y", "-i", str(video_in), "-stream_loop", "-1", "-i", str(m),
          "-filter_complex", filt, "-map", "0:v", "-map", "[a]",
-         "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest", str(video_out)])
+         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(video_out)])
 
 
 def make_hook_ass(title, w, h, out, dur=3.0):
@@ -381,13 +383,39 @@ def add_hook(video_in, video_out, title, w, h):
 
 def cut_clip(full_out, start, end, clip_out, on_pct=None):
     """Cut a highlight [start,end] from the fully-rendered vertical (captions and
-    tracking already baked, so timing stays correct). Re-encode for frame accuracy."""
+    tracking already baked). Video re-encodes for frame accuracy; audio STREAM-COPIES
+    (zero generation loss — cascaded AAC re-encodes were making shorts sound robotic)."""
     cmd = [FFMPEG, "-y", "-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", str(full_out),
-           "-c:v", "h264_videotoolbox", "-b:v", "12M", "-c:a", "aac", "-b:a", "128k", str(clip_out)]
+           "-c:v", "h264_videotoolbox", "-b:v", "12M", "-c:a", "copy", str(clip_out)]
     if on_pct:
         run_ffmpeg_progress(cmd, max(0.1, end - start), on_pct)
     else:
         run(cmd)
+
+
+def finish_short(clip_in, clip_out, dynamic, hook_title, w, h):
+    """ONE finishing pass per short: silence-trim (jump cuts) and/or hook overlay.
+    Merging them (instead of tighten->hook as separate re-encodes) keeps the audio
+    at a single extra AAC generation max — and none at all if only the hook runs."""
+    vf, af = [], None
+    if dynamic:
+        keeps, dur = edit_mod.keep_segments(clip_in)
+        if keeps and sum(b - a for a, b in keeps) < dur - 0.2:
+            sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keeps)
+            vf += [f"select='{sel}'", "setpts=N/FRAME_RATE/TB"]
+            af = f"aselect='{sel}',asetpts=N/SR/TB"
+    if hook_title:
+        ass = Path(clip_out).with_suffix(".hook.ass")
+        make_hook_ass(hook_title, w, h, ass)
+        vf += [f"subtitles={ass}"]   # after select -> hook rides the FINAL timeline
+    if not vf:
+        Path(clip_in).replace(clip_out); return
+    cmd = [FFMPEG, "-y", "-i", str(clip_in), "-vf", ",".join(vf),
+           "-c:v", "h264_videotoolbox", "-b:v", "12M"]
+    cmd += (["-af", af, "-c:a", "aac", "-b:a", "192k"] if af else ["-c:a", "copy"])
+    cmd += [str(clip_out)]
+    run(cmd)
+    Path(clip_out).with_suffix(".hook.ass").unlink(missing_ok=True)
 
 
 def analyze(video, glossary="", n=2, align=True, on_step=None):
@@ -470,12 +498,10 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
         clip = out_dir / f"{stem}_short{k}.mp4"
         cut_clip(full, h["start"], h["end"], clip,
                  on_pct=(lambda p, k=k: on_pct(f"short{k}", p)) if on_pct else None)
-        if dynamic:
-            tmp = out_dir / f"{stem}_short{k}_dyn.mp4"
-            edit_mod.tighten(clip, tmp); tmp.replace(clip)
-        if hook and h.get("title"):
-            tmp = out_dir / f"{stem}_short{k}_hook.mp4"
-            add_hook(clip, tmp, h["title"], ow, oh); tmp.replace(clip)
+        if dynamic or (hook and h.get("title")):
+            tmp = out_dir / f"{stem}_short{k}_fin.mp4"
+            finish_short(clip, tmp, dynamic, h.get("title") if hook else None, ow, oh)
+            tmp.replace(clip)
         thumb = out_dir / f"{stem}_short{k}_thumb.jpg"
         try:
             thumb_mod.make_thumbnail(clip, thumb, h.get("title", ""))

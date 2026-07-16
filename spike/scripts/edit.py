@@ -42,10 +42,10 @@ def _silences(video):
     return list(zip(s, e))
 
 
-def tighten(video_in, video_out):
-    """Concatenate speech segments (drop silences) in one re-encode pass. Jump-cuts."""
-    dur = _duration(video_in)
-    sil = _silences(video_in)
+def keep_segments(video):
+    """Speech segments to keep (complement of padded silences). Returns (keeps, dur)."""
+    dur = _duration(video)
+    sil = _silences(video)
     keeps, t = [], 0.0
     for s, e in sil:
         a, b = min(s + PAD, dur), max(e - PAD, 0)
@@ -56,13 +56,20 @@ def tighten(video_in, video_out):
         keeps.append((t, dur))
     if not keeps:
         keeps = [(0.0, dur)]
+    return keeps, dur
+
+
+def tighten(video_in, video_out):
+    """Concatenate speech segments (drop silences) in one re-encode pass. Jump-cuts.
+    Audio at 192k to limit cascaded-AAC generation loss."""
+    keeps, dur = keep_segments(video_in)
     sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keeps)
     kept = sum(b - a for a, b in keeps)
     subprocess.run([FFMPEG, "-y", "-i", str(video_in),
                     "-vf", f"select='{sel}',setpts=N/FRAME_RATE/TB",
                     "-af", f"aselect='{sel}',asetpts=N/SR/TB",
                     "-c:v", "h264_videotoolbox", "-b:v", "12M",
-                    "-c:a", "aac", "-b:a", "128k", str(video_out)],
+                    "-c:a", "aac", "-b:a", "192k", str(video_out)],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return kept, dur - kept
 

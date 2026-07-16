@@ -27,3 +27,4 @@ spike/whisper.cpp/
 *.wav
 *.bin
 *.gguf
+.claude/settings.local.json
