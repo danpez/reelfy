@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import reframe_track
 import highlights as hl
 import align as align_mod
+import edit as edit_mod
 
 SPIKE = Path(__file__).resolve().parent.parent
 WCLI = SPIKE / "whisper.cpp/build/bin/whisper-cli"
@@ -225,8 +226,9 @@ def cut_clip(full_out, start, end, clip_out):
          str(clip_out)])
 
 
-def make_highlights(json_path, full_out, n, out_dir, stem):
-    """Select n highlights via local LLM and cut each into its own short."""
+def make_highlights(json_path, full_out, n, out_dir, stem, dynamic=False):
+    """Select n highlights via local LLM and cut each into its own short.
+    If dynamic, also trim silences + add a breathing punch-in zoom (Phase 2b)."""
     sents = hl.build_sentences(hl.load_words(json_path))
     print(f"   {len(sents)} sentences -> asking local LLM ({hl.MODEL}) for {n} highlight(s)...")
     clips = hl.select_highlights(sents, n=n)
@@ -236,6 +238,11 @@ def make_highlights(json_path, full_out, n, out_dir, stem):
         print(f"   short {k}: {c['start']:.1f}-{c['end']:.1f}s ({c['end']-c['start']:.0f}s) "
               f"\"{c['title']}\" — {c['reason']}")
         cut_clip(full_out, c["start"], c["end"], clip_out)
+        if dynamic:
+            tmp = out_dir / f"{stem}_short{k}_dyn.mp4"
+            kept, removed = edit_mod.tighten(clip_out, tmp)
+            tmp.replace(clip_out)
+            print(f"      dynamic: -{removed:.1f}s silencios, punch-in zoom")
         results.append((clip_out, c))
     return results
 
@@ -253,6 +260,8 @@ def main():
                     help="also select N best highlight clips via local LLM and cut shorts")
     ap.add_argument("--no-align", action="store_true",
                     help="skip wav2vec2 forced alignment (use whisper's own timings)")
+    ap.add_argument("--dynamic", action="store_true",
+                    help="add dynamism to shorts: trim silences + breathing punch-in zoom")
     args = ap.parse_args()
 
     video = Path(args.video).resolve()
@@ -288,7 +297,8 @@ def main():
 
     if args.highlights:
         print(f"== [5] highlights (local LLM) ==")
-        for clip_out, _ in make_highlights(jp, out, args.highlights, out.parent, stem):
+        for clip_out, _ in make_highlights(jp, out, args.highlights, out.parent, stem,
+                                           dynamic=args.dynamic):
             print(f"✅ short: {clip_out}")
 
 

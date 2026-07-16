@@ -70,8 +70,13 @@ ollama pull qwen2.5:7b                   # ~4.7 GB
 cd spike
 ./scripts/run.sh input/mi-video.mp4 \
   --glossary "Keruvin Store, Al Haramain, Oud" \  # opcional: nombres propios
-  --highlights 2                                   # opcional: corta los 2 mejores shorts (LLM local)
-# --no-track  para desactivar el subject-tracking (crop fijo centrado)
+  --highlights 2 \                                 # opcional: corta los 2 mejores shorts (LLM local)
+  --dynamic                                        # opcional: corta silencios + punch-in zoom en los shorts
+# --no-track  crop fijo centrado · --no-align  usa timing de whisper sin alineación forzada
+```
+
+Módulos: `pipeline.py` (orquesta) · `align.py` (sync) · `reframe_track.py` (cámara) · `highlights.py` (LLM) · `edit.py` (dinamismo)
+```
 ```
 
 ## Material de prueba
@@ -128,6 +133,7 @@ Input: `IMG_5637.MOV` — iPhone 16 Pro Max, **4K HDR (HLG 10-bit), 60 fps, 3 mi
 - ~~Subject-tracking en el reframe (detector permisivo).~~ ✅ HECHO (YuNet).
 - ~~Optimizar render con VideoToolbox / downscale antes del tonemap.~~ ✅ HECHO (5.4× → 71s para 3min).
 - ~~Fase 2: selección de highlights por LLM.~~ ✅ HECHO (ollama qwen2.5:7b local; de 3min → 2 shorts elegidos por IA en ~6s).
+- ~~Fase 2b: dinamismo (cortar silencios + punch-ins).~~ ✅ HECHO (`edit.py`, flag `--dynamic`): `silencedetect` → concatena segmentos con voz (jump-cuts) + breathing punch-in zoom, sobre el vertical ya renderizado (captions/audio siguen en sync). Nota: en habla densa el recorte de silencios quita poco; el zoom da la energía. Tunables: `NOISE_DB`, `MIN_SIL`, `ZOOM_AMPL`, `ZOOM_PERIOD`. Alternativa futura: punch-ins discretos sincronizados a los cortes (en vez de zoom continuo).
 - Head-to-head vs OpusClip/Submagic (pendiente — requiere subir el mismo video).
 - Explorar alineación forzada (WhisperX) solo si aparece drift en clips más largos.
 - Pendiente Fase 2b: auto-editor (cortar silencios/muletillas dentro del clip) + PySceneDetect (tracking por escena para varios interlocutores).
