@@ -396,7 +396,8 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
 
 
 def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="clasico",
-                     fmt="9:16", music=False, music_track="ambient", on_step=None, on_pct=None):
+                     fmt="9:16", music=False, music_track="ambient", music_volume=0.26,
+                     on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -419,7 +420,7 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     if music:
         step("Añadiendo música de fondo…")
         tmp = out_dir / f"{plan['stem']}_mus.mp4"
-        add_music(full, tmp, music_track); tmp.replace(full)
+        add_music(full, tmp, music_track, music_volume); tmp.replace(full)
     clips = [{"name": "Video completo", "file": full.name}]
 
     enabled = [h for h in plan["highlights"] if h.get("enabled", True)]
@@ -443,7 +444,7 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
 
 
 def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", fmt="9:16",
-                   music=False, music_track="ambient"):
+                   music=False, music_track="ambient", music_volume=0.26):
     """Fast, low-res sample of the first `secs` (the real look: captions, tracking,
     blurred bg, zoom, studio audio, music, chosen style/format) — preview before export."""
     ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
@@ -456,7 +457,7 @@ def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", fmt=
                      beats=plan.get("beats"), preview_secs=secs, enhance_audio=enhance_audio,
                      out_w=ow, out_h=oh, camera=plan.get("camera"))
     if music:
-        add_music(tmp, out, music_track); tmp.unlink(missing_ok=True)
+        add_music(tmp, out, music_track, music_volume); tmp.unlink(missing_ok=True)
     return out
 
 

@@ -47,7 +47,7 @@ def _analyze(job_id, video, glossary, n):
         job.update(phase="error", error=f"Análisis falló: {e}")
 
 
-def _render(job_id, plan, dynamic, enhance, style, fmt, music):
+def _render(job_id, plan, dynamic, enhance, style, fmt, music, track, mvol):
     job = JOBS[job_id]
     n_shorts = max(1, sum(1 for h in plan.get("highlights", []) if h.get("enabled", True)))
     t0 = time.time()
@@ -66,8 +66,8 @@ def _render(job_id, plan, dynamic, enhance, style, fmt, music):
     try:
         def step(m): job.update(message=m)
         clips = pipeline.render_from_plan(plan, OUTPUT, dynamic=dynamic, enhance_audio=enhance,
-                                          style=style, fmt=fmt, music=music,
-                                          on_step=step, on_pct=overall)
+                                          style=style, fmt=fmt, music=music, music_track=track,
+                                          music_volume=mvol, on_step=step, on_pct=overall)
         job.update(phase="done", pct=100, message="¡Listo!", clips=clips, eta=0)
     except Exception as e:  # noqa
         job.update(phase="error", error=f"Render falló: {e}")
@@ -106,8 +106,11 @@ async def render(job_id: str, req: Request):
     style = body.get("style", "clasico")
     fmt = body.get("format", "9:16")
     music = bool(body.get("music", False))
+    track = body.get("music_track", "ambient")
+    mvol = float(body.get("music_volume", 0.26))
     job.update(phase="rendering", pct=0, message="Preparando el render…", plan=plan)
-    threading.Thread(target=_render, args=(job_id, plan, dynamic, enhance, style, fmt, music),
+    threading.Thread(target=_render,
+                     args=(job_id, plan, dynamic, enhance, style, fmt, music, track, mvol),
                      daemon=True).start()
     return {"ok": True}
 
@@ -125,11 +128,19 @@ async def preview(job_id: str, req: Request):
     enhance = bool(body.get("enhance_audio", True))
     style = body.get("style", "clasico"); fmt = body.get("format", "9:16")
     music = bool(body.get("music", False))
+    track = body.get("music_track", "ambient"); mvol = float(body.get("music_volume", 0.26))
     try:
-        await run_in_threadpool(pipeline.render_preview, plan, out, 7, enhance, style, fmt, music)
+        await run_in_threadpool(pipeline.render_preview, plan, out, 7, enhance, style, fmt,
+                                music, track, mvol)
     except Exception as e:  # noqa
         raise HTTPException(500, f"Preview falló: {e}")
     return {"file": out.name}
+
+
+@app.get("/tracks")
+def tracks():
+    d = SPIKE / "assets/music"
+    return [p.stem for p in sorted(d.glob("*.m4a"))] if d.exists() else []
 
 
 @app.get("/status/{job_id}")

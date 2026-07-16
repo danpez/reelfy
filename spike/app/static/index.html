@@ -95,7 +95,9 @@
   .seg button{border:0;background:none;color:var(--muted);padding:7px 13px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;transition:.15s}
   .seg button:hover{color:var(--text)}
   .seg button.sel{background:linear-gradient(90deg,var(--brand),var(--brand2));color:#fff}
-  .optrow{display:flex;gap:26px;flex-wrap:wrap;margin-top:18px}
+  .optrow{display:flex;gap:26px;flex-wrap:wrap;margin-top:18px;align-items:flex-end}
+  .selinp{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 12px;color:var(--text);font-size:14px;min-width:150px}
+  .rng{width:180px;accent-color:var(--brand);cursor:pointer}
   .actionbar{position:sticky;bottom:0;margin-top:20px;padding-top:16px;border-top:1px solid var(--line);
              display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:linear-gradient(180deg,transparent,var(--panel) 40%)}
   .swlabel{display:flex;align-items:center;gap:9px;color:var(--text);font-size:14px;cursor:pointer;user-select:none}
@@ -176,6 +178,11 @@
       <div><label>Formato</label><div class="seg" id="segFmt">
         <button data-v="9:16" class="sel">9:16</button><button data-v="1:1">1:1</button><button data-v="4:5">4:5</button></div></div>
     </div>
+    <div class="optrow" id="musrow" style="display:none">
+      <div><label>Pista de música</label><select id="mtrack" class="selinp"></select></div>
+      <div><label>Volumen música: <span id="mvollbl">26%</span></label>
+        <input type="range" id="mvol" min="4" max="60" value="26" class="rng"></div>
+    </div>
     <label style="margin-top:20px">Subtítulos — clic en cualquier palabra para corregirla ✏️</label>
     <div class="subs" id="subs"></div>
     <div class="actionbar">
@@ -222,6 +229,7 @@ const $=s=>document.querySelector(s);
 function show(id){document.querySelectorAll('.screen').forEach(e=>e.classList.remove('on'));$(id).classList.add('on');}
 const fmtT=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
 let picked=null, JOB=null, PLAN=null, STYLE="clasico", FMT="9:16";
+const musOpts=()=>({music:$("#music").checked,music_track:$("#mtrack").value,music_volume:(+$("#mvol").value)/100});
 function seg(id,set){const el=$(id);el.querySelectorAll("button").forEach(b=>b.onclick=()=>{
   el.querySelectorAll("button").forEach(x=>x.classList.remove("sel"));b.classList.add("sel");set(b.dataset.v);});}
 
@@ -263,9 +271,17 @@ async function poll(){
 }
 function setBar(sel,pct){ $(sel).style.width=Math.max(2,pct)+"%"; }
 
+async function loadTracks(){
+  try{ const t=await(await fetch("/tracks")).json();
+    $("#mtrack").innerHTML=t.map(x=>`<option value="${x}">${x[0].toUpperCase()+x.slice(1)}</option>`).join("");
+  }catch(e){}
+}
 function buildReview(){
   show("#s-review");
   seg("#segStyle",v=>STYLE=v); seg("#segFmt",v=>FMT=v);
+  loadTracks();
+  $("#music").onchange=e=>$("#musrow").style.display=e.target.checked?"flex":"none";
+  $("#mvol").oninput=e=>$("#mvollbl").textContent=e.target.value+"%";
   $("#srcVid").src="/source/"+JOB;
   const dur=PLAN.duration; $("#tl-end").textContent=fmtT(dur);
   const tl=$("#tl"); tl.innerHTML="";
@@ -295,7 +311,7 @@ $("#preview").onclick=async()=>{
   const b=$("#preview"); const old=b.innerHTML; b.disabled=true; b.innerHTML='<span class="spinner"></span> Generando muestra…';
   try{
     const r=await(await fetch("/preview/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,format:FMT,music:$("#music").checked})})).json();
+      body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,format:FMT,...musOpts()})})).json();
     if(r.file){ $("#pvOut").src="/video/"+r.file+"?t="+Date.now(); $("#modal").classList.add("on"); }
     else fail(r.detail||"No se pudo generar la muestra.");
   }catch(e){ alert("No se pudo generar la muestra."); }
@@ -307,7 +323,7 @@ $("#modal").onclick=e=>{if(e.target===$("#modal")){$("#modal").classList.remove(
 $("#render").onclick=async()=>{
   show("#s-rendering");
   try{ await fetch("/render/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,format:FMT,music:$("#music").checked})}); }
+    body:JSON.stringify({plan:PLAN,dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,style:STYLE,format:FMT,...musOpts()})}); }
   catch(e){ return fail("No se pudo iniciar el render."); }
   poll();
 };
