@@ -63,16 +63,24 @@ def select_highlights(sentences, n=1):
     system = (
         "Eres un editor de video experto en shorts virales para redes (TikTok, "
         "Reels, Shorts) en español/LATAM. Se te da la transcripción de un video "
-        "largo, numerada por oración con sus tiempos. Debes elegir los mejores "
-        "fragmentos CONTIGUOS que funcionen como short independiente: un gancho "
-        "claro, una idea completa y valor o entretenimiento. Responde SOLO JSON."
+        "largo, numerada por oración con sus tiempos. Elige los mejores fragmentos "
+        "CONTIGUOS que funcionen como short independiente.\n"
+        "REGLAS CLAVE:\n"
+        "- El fragmento DEBE ENTREGAR el valor, no solo prometerlo: que contenga la "
+        "respuesta, el dato, la revelación o el remate concretos.\n"
+        "- RECHAZA tramos que sean solo preparación, búsqueda, titubeos, relleno o "
+        "'ahorita lo busco' sin que se diga el contenido prometido.\n"
+        "- Debe tener un gancho al inicio y una idea que se completa dentro del clip.\n"
+        "Responde SOLO JSON."
     )
     user = (
         f"Transcripción:\n" + "\n".join(lines) +
         f"\n\nElige los {n} mejores fragmentos para shorts de entre {MIN_SEC} y {MAX_SEC} "
         f"segundos. Cada fragmento es un rango de oraciones contiguas [from_i, to_i]. "
+        "El 'title' debe reflejar lo que REALMENTE se dice en ese rango (no lo que se "
+        "promete en otro lado). "
         'Devuelve JSON: {"clips":[{"from_i":int,"to_i":int,"title":"gancho corto",'
-        '"reason":"por qué engancha"}]}'
+        '"reason":"qué valor concreto entrega y por qué engancha"}]}'
     )
     raw = _ollama_chat(system, user)
     data = json.loads(raw)

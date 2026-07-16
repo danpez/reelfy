@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import reframe_track
 import highlights as hl
+import align as align_mod
 
 SPIKE = Path(__file__).resolve().parent.parent
 WCLI = SPIKE / "whisper.cpp/build/bin/whisper-cli"
@@ -35,10 +36,14 @@ FONT_SIZE = 78
 BASE_COLOR = "&H00FFFFFF"    # white (ASS is &HAABBGGRR)
 ACTIVE_COLOR = "&H0000E5FF"  # amber highlight for the spoken word
 OUTLINE = 5
-MARGIN_H = 120              # side margins so text never overflows
-MARGIN_V = 540               # captions in lower third
+MARGIN_H = 140              # side margins so text never overflows
+MARGIN_V = 620               # captions higher, clear of TikTok bottom UI (safe zone)
 MAX_WORDS_PER_LINE = 3       # short phrases, like Submagic/Opus
 GAP_SPLIT_MS = 700           # start a new phrase after a pause this long
+
+# ---- framing: give the subject "air" (margins) so social UI doesn't crowd it ----
+AIR_SCALE = 0.86             # subject fills this fraction of width; rest is blurred fill
+SUBJECT_Y = 0.40             # vertical placement of subject (0=top .. 1=bottom of slack)
 
 
 def run(cmd, **kw):
@@ -195,8 +200,18 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None):
             "tonemap=tonemap=hable:desat=0",
             "zscale=transfer=bt709:matrix=bt709:primaries=bt709:range=tv",
         ]
-    chain += ["format=yuv420p", f"subtitles={ass_path}"]
-    vf = ",".join(chain)
+    base = ",".join(chain + ["format=yuv420p"])   # tracked, tonemapped 1080x1920
+    # "Air": inset the subject over a blurred, zoomed fill of itself (full-bleed
+    # margins on all sides, no black bars), then burn captions in the safe zone.
+    bg_w, bg_h = (round(W * 1.12) // 2) * 2, (round(H * 1.12) // 2) * 2
+    fg_w = (round(W * AIR_SCALE) // 2) * 2
+    vf = (
+        f"{base},split=2[bg][fg];"
+        f"[bg]scale={bg_w}:{bg_h},crop={W}:{H},gblur=sigma=32,eq=brightness=-0.06:saturation=0.92[bgb];"
+        f"[fg]scale={fg_w}:-2[fgs];"
+        f"[bgb][fgs]overlay=x=(W-w)/2:y=(H-h)*{SUBJECT_Y}[cmp];"
+        f"[cmp]subtitles={ass_path}"
+    )
     run([FFMPEG, "-y", "-hwaccel", "videotoolbox", "-i", str(video), "-vf", vf,
          "-c:v", "h264_videotoolbox", "-b:v", "12M",
          "-c:a", "aac", "-b:a", "128k", str(out)])
@@ -236,6 +251,8 @@ def main():
                     help="disable subject tracking (use fixed center-crop)")
     ap.add_argument("--highlights", type=int, default=0, metavar="N",
                     help="also select N best highlight clips via local LLM and cut shorts")
+    ap.add_argument("--no-align", action="store_true",
+                    help="skip wav2vec2 forced alignment (use whisper's own timings)")
     args = ap.parse_args()
 
     video = Path(args.video).resolve()
@@ -254,12 +271,18 @@ def main():
     print("== [1/4] extract audio =="); extract_audio(video, wav)
     glossary = (f"Nombres propios y términos: {args.glossary}."
                 if args.glossary else "")
-    print("== [2/4] transcribe (whisper.cpp, es, word-level) =="); jp = transcribe(wav, prefix, glossary)
+    print("== [2/5] transcribe (whisper.cpp, es, word-level) =="); jp = transcribe(wav, prefix, glossary)
     words = load_words(jp)
+    if not args.no_align:
+        print("== [3/5] forced alignment (wav2vec2, tight caption sync) ==")
+        try:
+            words = align_mod.align_words(wav, words)
+        except Exception as e:
+            print(f"   alignment failed ({e}); falling back to whisper timings")
     phrases = group_phrases(words)
     print(f"   {len(words)} words -> {len(phrases)} caption phrases")
-    print("== [3/4] build word-highlight ASS =="); build_ass(phrases, ass)
-    print("== [4/4] reframe 9:16 (subject-tracking) + burn captions ==")
+    print("== [4/5] build word-highlight ASS =="); build_ass(phrases, ass)
+    print("== [5/5] reframe 9:16 (subject-tracking) + air + burn captions ==")
     reframe_and_burn(video, ass, out, track=not args.no_track, cmds_path=str(cmds))
     print(f"\n✅ full: {out}")
 

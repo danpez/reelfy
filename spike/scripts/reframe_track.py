@@ -25,10 +25,9 @@ YUNET = SPIKE / "models/face_detection_yunet_2023mar.onnx"
 SAMPLE_FPS = 6           # face detections per second
 DET_W, DET_H = 960, 540  # low-res detection frame size
 OUT_FPS = 30             # output frame rate (sendcmd emitted per output frame -> fluid)
-SMOOTH_SEC = 1.2         # zero-phase moving-average window in seconds (calm pan)
-MAX_VEL_PXF = 6.0        # max crop-x move per OUTPUT frame, in source px (anti-whip;
-                         # smoothing does the anti-jitter, this only caps fast catch-up)
-DEADZONE_PX = 6          # ignore sub-threshold jitter of the smoothed center (source px)
+PRESMOOTH_SEC = 0.7      # zero-phase moving-average on raw detections (denoise)
+CAM_FREQ_HZ = 0.9        # virtual-camera natural frequency (lower = calmer/lazier follow)
+DEADZONE_FRAC = 0.020    # ignore target moves smaller than this (fraction of width)
 
 
 def crop_dims(src_w, src_h, target_w=1080, target_h=1920):
@@ -78,31 +77,38 @@ def _zero_phase_ma(a, win):
 
 
 def build_crop_x(xs, src_w, cw):
-    """Smoothed face-x fractions -> per-OUTPUT-frame integer crop x (source px).
+    """Face-x detections -> per-OUTPUT-frame integer crop x, moved by a virtual camera.
 
-    Pipeline: zero-phase smooth (calm, no lag) -> resample sample_fps to out_fps
-    (linear, so motion is continuous not stepped) -> dead-zone + per-frame velocity
-    clamp (kills micro-jitter and whip-pans). Returns a list, one x per output frame.
+    1) denoise raw detections (zero-phase MA) and resample to output fps,
+    2) a target with hysteresis dead-zone (camera only re-targets once the subject
+       drifts beyond DEADZONE, then holds the new anchor) -> no constant micro-chasing,
+    3) a critically-damped spring integrates camera->target -> smooth ease in/out,
+       no overshoot, no steps (buttery "operator following the subject").
     """
     if not xs:
         return []
-    a = _zero_phase_ma(np.array(xs, float), SMOOTH_SEC * SAMPLE_FPS)
-    # sample-rate timeline -> output-frame timeline (dense -> fluid)
+    a = _zero_phase_ma(np.array(xs, float), PRESMOOTH_SEC * SAMPLE_FPS)
     dur = (len(a) - 1) / SAMPLE_FPS
-    n_out = max(1, int(round(dur * OUT_FPS)) + 1)
-    t_out = np.arange(n_out) / OUT_FPS
-    t_in = np.arange(len(a)) / SAMPLE_FPS
-    cx = np.interp(t_out, t_in, a) * src_w - cw / 2      # crop-left, face centered
+    n = max(1, int(round(dur * OUT_FPS)) + 1)
+    face = np.interp(np.arange(n) / OUT_FPS, np.arange(len(a)) / SAMPLE_FPS, a)  # face-x frac/frame
+
+    dead = DEADZONE_FRAC
+    dt = 1.0 / OUT_FPS
+    omega = 2 * np.pi * CAM_FREQ_HZ
     xmax = src_w - cw
-    cx = np.clip(cx, 0, xmax)
-    # dead-zone + velocity clamp on the final per-frame path
-    out = [float(cx[0])]
-    for v in cx[1:]:
-        prev = out[-1]
-        if abs(v - prev) < DEADZONE_PX:              # ignore tiny jitter
-            out.append(prev); continue
-        d = float(np.clip(v - prev, -MAX_VEL_PXF, MAX_VEL_PXF))
-        out.append(prev + d)
+
+    target = face[0]
+    x = face[0] * src_w - cw / 2          # camera crop-left (px)
+    v = 0.0
+    out = []
+    for f in face:
+        if abs(f - target) > dead:        # hysteresis: only re-anchor on real movement
+            target = f - np.sign(f - target) * dead
+        tgt_px = min(max(target * src_w - cw / 2, 0), xmax)
+        acc = omega * omega * (tgt_px - x) - 2 * omega * v   # critically damped
+        v += acc * dt
+        x += v * dt
+        out.append(min(max(x, 0), xmax))
     return out
 
 

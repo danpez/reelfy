@@ -106,6 +106,12 @@ Input: `IMG_5637.MOV` — iPhone 16 Pro Max, **4K HDR (HLG 10-bit), 60 fps, 3 mi
 - ✅ **Glosario de nombres propios** (`--glossary`): whisper `--prompt` + `--carry-initial-prompt` sesga el vocabulario. Corrigió "Kerobin"→**"Keruvin Store"** y "Outh"→"Oud" en el video real. Feature real del producto (vocabulario por marca/usuario).
 - ✅ **Subject-tracking en el reframe** (`reframe_track.py`): detección de cara con **YuNet (OpenCV, Apache-2.0 — NO YOLO/AGPL)** a 4 fps → trayectoria suavizada (media móvil + clamp de velocidad) → crop 9:16 paneado por `sendcmd` que sigue al hablante. En el frame de los 45s (antes pegado al borde) ahora queda **centrado**. Pipeline con tracking: **82 s** para 3 min (incluye el paso de detección).
 
+**Pulido de calidad (2026-07-15, ronda 3 — feedback Kevin):**
+- ✅ **Sync con ALINEACIÓN FORZADA** (`align.py`, wav2vec2 MMS_FA vía ctc-forced-aligner): re-timea las palabras de whisper alineando todo el transcript al audio globalmente → corrige el drift bidireccional (<1s adelanto/atraso) que el DTW no resolvía. 392-394/~423 palabras re-timeadas; se conserva el texto original (acentos/puntuación) mapeando por secuencia normalizada. Flag `--no-align` para desactivar.
+- ✅ **Tracking tipo cámara real** (`reframe_track.build_crop_x`): resorte **críticamente amortiguado** + dead-zone con histéresis (la cámara sólo re-ancla cuando te mueves de verdad, luego sostiene) → ease in/out suave, sin overshoot ni pasos. Reemplaza la interpolación lineal.
+- ✅ **Aire en el encuadre**: sujeto inset (~86% del ancho) sobre un fondo del mismo frame difuminado (full-bleed, sin barras) → margen en todos los lados para que la UI de TikTok no tape contenido/subtítulos. Captions en safe zone. Constantes `AIR_SCALE`, `SUBJECT_Y`, `MARGIN_V`.
+- ✅ **Highlights con payload real**: el prompt ahora exige que el fragmento ENTREGUE el valor (no sólo lo prometa) y rechaza tramos de búsqueda/relleno → el short 1 pasó de "buscando el perfume" a "las notas del perfume" (el contenido real).
+
 **Pulido de calidad (2026-07-15, ronda 2):**
 - ✅ **Sync de captions con DTW** (`--dtw large.v3.turbo`): timestamps por token vía alineación de atención cruzada, mucho más precisos que la heurística por defecto (corrige los desfases <1s).
 - ✅ **Captions gapless**: cada palabra se sostiene hasta el inicio de la siguiente dentro de la frase → sin parpadeo, el resalte avanza justo en el beat.
