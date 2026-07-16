@@ -23,7 +23,7 @@ PAD = 0.06
 # punch-in zoom
 ZOOM_IN = 0.10       # zoom factor on emphasis (1.10x); subtle to keep air
 HOLD = 1.10          # how long a punch-in holds (s)
-BEAT_SPACING = 4.0   # ~one emphasis punch per this many seconds
+BEAT_SPACING = 7.0   # ~one emphasis punch per this many seconds (calmer, less frequent)
 
 
 def _duration(video):
