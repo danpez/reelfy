@@ -109,11 +109,11 @@ def write_cmds(centers, src_w, cw, cmds_path):
     return cmds_path
 
 
-def build(video, src_w, src_h, cmds_path):
-    """Detect + smooth the camera trajectory, write cmds for the default 9:16 crop.
+def build(video, src_w, src_h, cmds_path, tw=1080, th=1920):
+    """Detect + smooth the camera trajectory, write cmds for the target crop aspect.
     Returns (crop_w, crop_h, cmds_path, centers). centers is format-independent so the
-    plan can re-emit cmds for 1:1 / 4:5 without re-detecting."""
-    cw, ch = crop_dims(src_w, src_h)
+    plan can re-emit cmds for any aspect without re-detecting."""
+    cw, ch = crop_dims(src_w, src_h, tw, th)
     if cw >= src_w:                        # portrait: no horizontal pan
         return cw, ch, None, []
     xs = detect_face_track(video, src_w, src_h)

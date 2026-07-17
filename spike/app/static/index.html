@@ -500,14 +500,22 @@ function draw(){
   if(!V.paused && $("#dynamic").checked){ const c=activeCut(t); if(c&&c.end<dur-0.05) V.currentTime=c.end+0.01; }
   const vw=V.videoWidth, vh=V.videoHeight;
   if(vw){
-    // bg: low-res draw -> smooth upscale (real blur look, works in Safari) + darken
-    const s=Math.max(OS.width/vw, OS.height/vh), bw=vw*s, bh=vh*s;
-    OCTX.drawImage(V,(OS.width-bw)/2,(OS.height-bh)/2,bw,bh);
-    CTX.imageSmoothingEnabled=true; CTX.imageSmoothingQuality="high";
-    CTX.drawImage(OS,0,0,CW,CH);
-    CTX.fillStyle="rgba(8,10,14,.28)"; CTX.fillRect(0,0,CW,CH);
-    // fg: tracked crop of the CHOSEN aspect, inset 84%, zoom punch
-    const cw=Math.min(vw, vh*(CW/CH)), ch=Math.min(vh, vw*(CH/CW));
+    // DYNAMIC margins: air only where the aspect mismatch crops content.
+    const srcAr=vw/vh, outAr=CW/CH;
+    let fw,fh;
+    if(Math.abs(srcAr/outAr-1)<0.05){ fw=CW; fh=CH; }            // match -> full bleed
+    else if(srcAr>outAr){ fw=CW*0.84; fh=CH; }                    // wide src -> side air
+    else { fw=CW; fh=CH*0.84; }                                   // tall src -> top/bottom air
+    if(fw<CW||fh<CH){
+      // bg: low-res draw -> smooth upscale (real blur, Safari-safe) + darken
+      const s=Math.max(OS.width/vw, OS.height/vh), bw=vw*s, bh=vh*s;
+      OCTX.drawImage(V,(OS.width-bw)/2,(OS.height-bh)/2,bw,bh);
+      CTX.imageSmoothingEnabled=true; CTX.imageSmoothingQuality="high";
+      CTX.drawImage(OS,0,0,CW,CH);
+      CTX.fillStyle="rgba(8,10,14,.28)"; CTX.fillRect(0,0,CW,CH);
+    }
+    // fg: tracked crop AT THE FG ASPECT, zoom punch
+    const cw=Math.min(vw, vh*(fw/fh)), ch=Math.min(vh, vw*(fh/fw));
     let cx=(vw-cw)/2;
     if(cw<vw-2 && PLAN.camera&&PLAN.camera.length){
       const i=Math.min(PLAN.camera.length-1, Math.max(0,Math.floor(t*30)));
@@ -516,7 +524,6 @@ function draw(){
     let z=1;
     if($("#dynamic").checked&&(PLAN.beats||[]).some(b=>t>=b&&t<b+1.1)) z=1.10;
     const sw=cw/z, sh=ch/z, sx=cx+(cw-sw)/2, sy=((vh-ch)/2)+(ch-sh)/2;
-    const fw=CW*0.84, fh=CH*0.84;
     CTX.drawImage(V, sx,sy,sw,sh, (CW-fw)/2,(CH-fh)/2, fw,fh);
     drawCaption(t);
     drawHook(t);

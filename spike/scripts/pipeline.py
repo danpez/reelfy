@@ -308,22 +308,30 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
     tm = _tonemap(video)
     if tm:
         print("   HDR -> tonemap HLG/PQ to SDR (both layers)")
-    fg_w = (round(ow * FG_SCALE) // 2) * 2
-    fg_h = (round(oh * FG_SCALE) // 2) * 2
+    # DYNAMIC margins: air only where the aspect mismatch actually crops content.
+    #  - source aspect ~= output aspect  -> full-bleed, NO margins
+    #  - source WIDER than output        -> air on the SIDES only (full height)
+    #  - source TALLER than output       -> air TOP/BOTTOM only (full width)
+    src_ar, out_ar = src_w / src_h, ow / oh
+    if abs(src_ar / out_ar - 1) < 0.05:
+        fg_w, fg_h = ow, oh
+    elif src_ar > out_ar:
+        fg_w, fg_h = (round(ow * FG_SCALE) // 2) * 2, oh
+    else:
+        fg_w, fg_h = ow, (round(oh * FG_SCALE) // 2) * 2
 
-    # --- foreground: tracked (or static) crop (of the output aspect) scaled to inset ---
+    # --- foreground: tracked (or static) crop AT THE FG ASPECT scaled to its box ---
     cmds = None
     if track:
-        cw, ch = reframe_track.crop_dims(src_w, src_h, ow, oh)
+        cw, ch = reframe_track.crop_dims(src_w, src_h, fg_w, fg_h)
         if cw >= src_w:                                   # no horizontal room to pan
             cmds = None
-        elif camera:                                      # regen pan for THIS aspect
-            cmds = str(Path(ass_path).with_suffix(f".{ow}x{oh}.crop.txt"))
+        elif camera:                                      # regen pan for THIS fg aspect
+            cmds = str(Path(ass_path).with_suffix(f".{fg_w}x{fg_h}.crop.txt"))
             reframe_track.write_cmds(camera, src_w, cw, cmds)
-        elif cmds_path and Path(cmds_path).exists() and (ow, oh) == (W, H):
-            cmds = cmds_path                              # reuse default-9:16 tracking
-        else:
-            cw, ch, cmds, _ = reframe_track.build(video, src_w, src_h, cmds_path)
+        else:                                             # CLI/no-analyze: detect now
+            cw, ch, cmds, _ = reframe_track.build(video, src_w, src_h, cmds_path,
+                                                  fg_w, fg_h)
     if cmds:
         fg = [f"sendcmd=f={cmds}", f"crop@fgc={cw}:{ch}:x=0:y=(ih-{ch})/2", f"scale={fg_w}:{fg_h}"]
     else:
