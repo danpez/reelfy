@@ -30,3 +30,6 @@ spike/whisper.cpp/
 .claude/settings.local.json
 desktop/build/
 desktop/dist/
+spike/bin/
+spike/ollama/
+spike/logs/

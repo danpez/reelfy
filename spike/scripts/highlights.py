@@ -8,12 +8,14 @@ contiguous span(s) that would make an engaging short. Returns time ranges +
 a hook title, which the pipeline then renders (reframe + captions) as clips.
 """
 import json
+import os
 import re
 import urllib.request
 from pathlib import Path
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL = "qwen2.5:7b"
+# apuntan al ollama EMBEBIDO cuando la app define REELFY_OLLAMA_URL; en dev, al del sistema
+OLLAMA_URL = os.environ.get("REELFY_OLLAMA_URL", "http://localhost:11434") + "/api/chat"
+MODEL = os.environ.get("REELFY_LLM_MODEL", "qwen2.5:7b")
 
 # target short length window (seconds)
 MIN_SEC, MAX_SEC = 18, 60

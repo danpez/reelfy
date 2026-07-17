@@ -10,63 +10,198 @@ Reelfy — local app server (FastAPI), interactive 2-phase flow.
 Imports the pipeline in-process so it can pass the plan around and stream real
 ffmpeg progress. Everything local; no cloud.
 """
+import atexit
+import json
+import os
+import subprocess
 import sys
 import threading
 import time
+import traceback
+import urllib.request
 import uuid
 from pathlib import Path
 
 SPIKE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SPIKE / "scripts"))
 import paths  # noqa: E402
-import pipeline  # noqa: E402
+
+# ---- LLM embebido: si el binario de ollama viene en el bundle, corre en un
+# puerto propio con modelos en DATA. El pipeline (highlights/translate) apunta
+# ahí por REELFY_OLLAMA_URL. En dev (sin bundle) usa el ollama del sistema. ----
+OLLAMA_PORT = 11499
+BUNDLED_OLLAMA = Path(paths.OLLAMA_BIN).name == "ollama" and "ollama-runtime" in paths.OLLAMA_BIN
+if BUNDLED_OLLAMA:
+    os.environ["REELFY_OLLAMA_URL"] = f"http://127.0.0.1:{OLLAMA_PORT}"
+    os.environ["REELFY_LLM_MODEL"] = paths.LLM_MODEL
+
+import pipeline  # noqa: E402  (lee REELFY_OLLAMA_URL ya definido)
 
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Request  # noqa: E402
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse  # noqa: E402
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, PlainTextResponse  # noqa: E402
 from starlette.concurrency import run_in_threadpool  # noqa: E402
 
 INPUT, OUTPUT = paths.INPUT, paths.OUTPUT
 STATIC = Path(__file__).resolve().parent / "static"
 
+# ---- logging: tee de stdout/stderr al archivo DATA/logs/reelfy.log ----
+LOG_FILE = paths.LOGS / "reelfy.log"
+
+
+class _Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, s):
+        for st in self.streams:
+            try:
+                st.write(s); st.flush()
+            except Exception:  # noqa
+                pass
+
+    def flush(self):
+        for st in self.streams:
+            try:
+                st.flush()
+            except Exception:  # noqa
+                pass
+
+    def isatty(self):
+        return getattr(self.streams[0], "isatty", lambda: False)()
+
+    def fileno(self):
+        return self.streams[0].fileno()
+
+
+_logf = open(LOG_FILE, "a", buffering=1)
+sys.stdout = _Tee(sys.__stdout__, _logf)
+sys.stderr = _Tee(sys.__stderr__, _logf)
+print(f"\n===== Reelfy arranque {time.strftime('%Y-%m-%d %H:%M:%S')} "
+      f"(LLM embebido={BUNDLED_OLLAMA}) =====")
+
 app = FastAPI(title="Reelfy")
 JOBS: dict[str, dict] = {}
 
-# ---- primer arranque: el modelo grande de whisper se descarga a DATA ----
-SETUP = {"state": "ready" if paths.engine_ready() else "missing", "pct": 0, "msg": ""}
+# ---- ciclo de vida del ollama embebido ----
+_ollama_proc = None
 
 
-def _download_model():
-    import urllib.request
-    dst = paths._MODEL_DATA
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_suffix(".part")
+def _start_ollama():
+    global _ollama_proc
+    if not BUNDLED_OLLAMA:
+        return
+    env = dict(os.environ, OLLAMA_HOST=f"127.0.0.1:{OLLAMA_PORT}",
+               OLLAMA_MODELS=str(paths.OLLAMA_MODELS))
     try:
-        req = urllib.request.Request(paths.MODEL_URL, headers={"User-Agent": "Reelfy/0.1"})
-        with urllib.request.urlopen(req) as r, open(tmp, "wb") as f:
-            total = int(r.headers.get("Content-Length") or paths.MODEL_SIZE)
-            done = 0
-            while chunk := r.read(1 << 20):
-                f.write(chunk); done += len(chunk)
-                SETUP.update(pct=round(done / total * 100, 1),
-                             msg=f"Descargando modelo de voz… {done//(1<<20)} / {total//(1<<20)} MB")
-        tmp.rename(dst)
+        _ollama_proc = subprocess.Popen([paths.OLLAMA_BIN, "serve"], env=env,
+                                        stdout=_logf, stderr=_logf)
+        atexit.register(lambda: _ollama_proc and _ollama_proc.terminate())
+    except Exception as e:  # noqa
+        print(f"ollama no arrancó: {e}")
+
+
+def _ollama_up():
+    url = os.environ.get("REELFY_OLLAMA_URL", "http://localhost:11434")
+    try:
+        urllib.request.urlopen(url + "/api/version", timeout=0.6)
+        return True
+    except Exception:  # noqa
+        return False
+
+
+def _llm_ready():
+    """El modelo LLM está descargado en el ollama embebido/sistema."""
+    url = os.environ.get("REELFY_OLLAMA_URL", "http://localhost:11434")
+    try:
+        r = json.loads(urllib.request.urlopen(url + "/api/tags", timeout=1).read())
+        names = [m.get("name", "") for m in r.get("models", [])]
+        return any(paths.LLM_MODEL.split(":")[0] in n for n in names)
+    except Exception:  # noqa
+        return False
+
+
+if BUNDLED_OLLAMA:
+    _start_ollama()
+
+# ---- primer arranque: prepara TODO (voz + IA de lenguaje + alineador) ----
+SETUP = {"state": "ready", "pct": 0, "msg": ""}
+
+
+def _needs_setup():
+    if not paths.engine_ready():
+        return True
+    if BUNDLED_OLLAMA and not _llm_ready():
+        return True
+    return False
+
+
+SETUP["state"] = "missing" if _needs_setup() else "ready"
+
+
+def _dl_file(url, dst, label, lo, hi, size_hint=0):
+    """Descarga con progreso mapeado al rango [lo,hi] del progreso global."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(dst.suffix + ".part")
+    req = urllib.request.Request(url, headers={"User-Agent": "Reelfy/0.1"})
+    with urllib.request.urlopen(req) as r, open(tmp, "wb") as f:
+        total = int(r.headers.get("Content-Length") or size_hint) or 1
+        done = 0
+        while chunk := r.read(1 << 20):
+            f.write(chunk); done += len(chunk)
+            SETUP.update(pct=round(lo + (hi - lo) * done / total, 1),
+                         msg=f"{label}… {done // (1 << 20)} / {total // (1 << 20)} MB")
+    tmp.rename(dst)
+
+
+def _pull_llm(lo, hi):
+    """ollama pull con progreso (stream JSON) mapeado a [lo,hi]."""
+    url = os.environ["REELFY_OLLAMA_URL"] + "/api/pull"
+    body = json.dumps({"model": paths.LLM_MODEL}).encode()
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as r:
+        for line in r:
+            try:
+                d = json.loads(line)
+            except Exception:  # noqa
+                continue
+            tot, comp = d.get("total"), d.get("completed")
+            if tot and comp:
+                SETUP.update(pct=round(lo + (hi - lo) * comp / tot, 1),
+                             msg=f"Descargando IA de lenguaje… {comp // (1 << 20)} / {tot // (1 << 20)} MB")
+
+
+def _run_setup():
+    try:
+        # 1) modelo de voz (whisper) 0..55%
+        if not paths.engine_ready():
+            _dl_file(paths.MODEL_URL, paths._MODEL_DATA, "Descargando modelo de voz",
+                     0, 55, paths.MODEL_SIZE)
+        # 2) IA de lenguaje (LLM en el ollama embebido) 55..90%
+        if BUNDLED_OLLAMA:
+            for _ in range(30):
+                if _ollama_up():
+                    break
+                time.sleep(0.5)
+            if not _llm_ready():
+                _pull_llm(55, 90)
+        # 3) alineador de subtítulos (mejora la sincronía) 90..100%
+        SETUP.update(pct=92, msg="Preparando la sincronía de subtítulos…")
+        try:
+            import align as align_mod
+            align_mod.preload()
+        except Exception:  # noqa
+            pass  # opcional: analyze funciona sin él
         SETUP.update(state="ready", pct=100, msg="Listo")
     except Exception as e:  # noqa
-        tmp.unlink(missing_ok=True)
-        SETUP.update(state="error", msg=f"Descarga falló: {e}")
+        traceback.print_exc()
+        SETUP.update(state="error", msg=f"Preparación falló: {e}")
 
 
 @app.get("/setup")
 def setup_status():
-    if SETUP["state"] != "downloading" and paths.engine_ready():
+    if SETUP["state"] not in ("downloading",) and not _needs_setup():
         SETUP.update(state="ready", pct=100)
-    try:
-        import urllib.request
-        urllib.request.urlopen("http://localhost:11434/api/version", timeout=0.6)
-        ollama = True
-    except Exception:  # noqa
-        ollama = False
-    return {**SETUP, "ollama": ollama, **_lic_state()}
+    return {**SETUP, "llm": _llm_ready(), **_lic_state()}
 
 
 # ---- licencias (solo la app empaquetada; el modo dev del repo no se gatea) ----
@@ -140,11 +275,20 @@ async def license_activate(req: Request):
 
 @app.post("/setup/start")
 def setup_start():
-    if paths.engine_ready() or SETUP["state"] == "downloading":
+    if not _needs_setup() or SETUP["state"] == "downloading":
         return {"ok": True}
-    SETUP.update(state="downloading", pct=0, msg="Iniciando descarga…")
-    threading.Thread(target=_download_model, daemon=True).start()
+    SETUP.update(state="downloading", pct=0, msg="Preparando…")
+    threading.Thread(target=_run_setup, daemon=True).start()
     return {"ok": True}
+
+
+@app.get("/logs")
+def get_logs():
+    """El registro de la sesión, para diagnosticar y compartir reportes."""
+    if not LOG_FILE.exists():
+        return PlainTextResponse("(sin registro)")
+    data = LOG_FILE.read_text(errors="replace")
+    return PlainTextResponse(data[-200_000:])  # últimos ~200 KB
 
 
 def _new(job_id, **kw):
@@ -159,6 +303,7 @@ def _analyze(job_id, video, glossary, n):
         plan = pipeline.analyze(video, glossary, n, on_step=step)
         job.update(phase="review", pct=100, message="Análisis listo", plan=plan)
     except Exception as e:  # noqa
+        traceback.print_exc()
         job.update(phase="error", error=f"Análisis falló: {e}")
 
 
@@ -195,6 +340,7 @@ def _render(job_id, plan, dynamic, enhance, style, anim, fmt, music, track, mvol
                                           on_step=step, on_pct=overall)
         job.update(phase="done", pct=100, message="¡Listo!", clips=clips, eta=0)
     except Exception as e:  # noqa
+        traceback.print_exc()
         job.update(phase="error", error=f"Render falló: {e}")
 
 

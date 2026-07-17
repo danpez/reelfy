@@ -23,6 +23,19 @@ def _norm(s):
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
+def preload():
+    """Fuerza la descarga/carga del modelo del alineador (MMS_FA de torchaudio) en el
+    primer arranque, para que no baje ~1 GB oculto durante el primer análisis.
+    Devuelve True si quedó listo; False si no (analyze igual funciona sin alineación)."""
+    global _model
+    try:
+        import torchaudio
+        _model = torchaudio.pipelines.MMS_FA.get_model(with_star=False)
+        return True
+    except Exception:  # noqa
+        return False
+
+
 def align_words(wav_path, words):
     """Return `words` with start/end replaced by forced-alignment timings.
     Falls back to the original timing for any word that can't be matched."""

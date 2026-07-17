@@ -38,6 +38,20 @@ for b in ffmpeg ffprobe; do
   cp "$CACHE/$b" "$ENGINE/bin/$b"
 done
 
+echo "==> [3.5] ollama embebido (binario + runners) para la IA de lenguaje"
+OLLAMA_LIBEXEC=$(dirname "$(readlink -f "$(command -v ollama)")" 2>/dev/null || echo "")
+if [ -z "$OLLAMA_LIBEXEC" ] || [ ! -f "$OLLAMA_LIBEXEC/ollama" ]; then
+  # ubicación típica de Homebrew
+  OLLAMA_LIBEXEC=$(ls -d /opt/homebrew/Cellar/ollama/*/libexec 2>/dev/null | tail -1)
+fi
+if [ -n "$OLLAMA_LIBEXEC" ] && [ -f "$OLLAMA_LIBEXEC/ollama" ]; then
+  mkdir -p "$ENGINE/bin/ollama-runtime"
+  cp -R "$OLLAMA_LIBEXEC"/ "$ENGINE/bin/ollama-runtime/"
+  echo "    ollama desde $OLLAMA_LIBEXEC ($(du -sh "$ENGINE/bin/ollama-runtime" | cut -f1))"
+else
+  echo "    ⚠ ollama no encontrado — la IA de lenguaje no vendrá embebida"
+fi
+
 echo "==> [4/8] python standalone"
 if [ ! -f "$CACHE/python.tar.gz" ]; then
   curl -sL -o "$CACHE/python.tar.gz" "$PYURL"
@@ -85,9 +99,14 @@ if [ -n "${REELFY_SIGN_ID:-}" ]; then
   # firmar leaves primero (más profundos antes que sus contenedores)
   awk '{print gsub(/\//,"/")"\t"$0}' "$MACHO" | sort -rn | cut -f2- |
     while IFS= read -r f; do "${SIGN[@]}" "$f" 2>/dev/null; done
-  # 2) el intérprete Python necesita los entitlements (JIT de torch)
-  codesign --force --timestamp --options runtime --entitlements "$ENT" \
-    -s "$REELFY_SIGN_ID" "$APP"/Contents/Resources/engine/python/bin/python3.12
+  # 2) binarios que hacen JIT/Metal necesitan los entitlements (Python torch,
+  #    ollama y su runner llama-server para cómputo en GPU)
+  for j in "$APP"/Contents/Resources/engine/python/bin/python3.12 \
+           "$APP"/Contents/Resources/engine/bin/ollama-runtime/ollama \
+           "$APP"/Contents/Resources/engine/bin/ollama-runtime/lib/ollama/llama-server; do
+    [ -f "$j" ] && codesign --force --timestamp --options runtime --entitlements "$ENT" \
+      -s "$REELFY_SIGN_ID" "$j"
+  done
   # 3) binario principal y la .app (contenedor al final)
   codesign --force --timestamp --options runtime --entitlements "$ENT" \
     -s "$REELFY_SIGN_ID" "$APP/Contents/MacOS/Reelfy"

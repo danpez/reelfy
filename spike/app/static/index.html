@@ -304,11 +304,10 @@
     <div id="setupGate" style="display:none;margin-top:20px;border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--panel2)">
       <div style="font-size:13px;font-weight:600;margin-bottom:10px"><span class="spinner"></span> Primer arranque: preparando el motor de IA</div>
       <div class="bar"><i id="g-fill"></i></div>
-      <div class="hint" id="g-msg" style="margin-top:8px">Se descarga una sola vez (~1.6 GB).</div>
+      <div class="hint" id="g-msg" style="margin-top:8px">Se prepara una sola vez: modelo de voz, IA de lenguaje y sincronía (~4 GB). No cierres la app.</div>
     </div>
     <div style="margin-top:20px"><button class="btn" id="go" disabled><svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Procesar con IA</button></div>
     <div class="hint" id="setupHint">La IA transcribe, sincroniza subtítulos, elige momentos, detecta silencios y calcula la cámara. Después tú ajustas todo en el editor.</div>
-    <div class="hint" id="ollamaHint" style="display:none;color:var(--brand2)">Ollama no detectado: los momentos se eligen por heurística y la traducción EN está desactivada. Para IA completa instala <b>ollama.com</b> y ejecuta <b>ollama pull qwen2.5:7b</b>.</div>
   </div></section>
 
   <section class="screen" id="s-analyzing"><div class="card">
@@ -472,7 +471,12 @@
 
   <section class="screen" id="s-error"><div class="card err">
     <svg class="ic" viewBox="0 0 24 24"><use href="#i-alert"/></svg> <span id="err-msg"></span>
-    <div style="margin-top:14px"><button class="btn ghost" id="retry">Volver</button></div>
+    <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn ghost" id="retry">Volver</button>
+      <button class="btn ghost" id="showLog"><svg class="ic" viewBox="0 0 24 24"><use href="#i-type"/></svg>Ver detalles del error</button>
+      <button class="btn ghost" id="copyLog"><svg class="ic" viewBox="0 0 24 24"><use href="#i-save"/></svg>Copiar registro</button>
+    </div>
+    <pre id="logBox" style="display:none;margin-top:14px;max-height:280px;overflow:auto;background:var(--sunken);border:1px solid var(--line);border-radius:8px;padding:12px;font-size:11px;color:var(--muted);white-space:pre-wrap"></pre>
   </div></section>
 </div>
 
@@ -547,7 +551,6 @@ $("#licBtn").onclick=async()=>{
 };
 async function initSetup(){
   let s; try{ s=await(await fetch("/setup")).json(); }catch(e){ return; }
-  $("#ollamaHint").style.display=s.ollama?"none":"block";
   LICENSED=s.licensed!==false;
   $("#licGate").style.display=LICENSED?"none":"block";
   if(s.state==="ready"){ ENGINE_READY=LICENSED; $("#setupGate").style.display="none";
@@ -1314,6 +1317,13 @@ $("#backEditor").onclick=()=>{ RESULTS=[]; show("#s-editor"); };
 $("#again").onclick=()=>location.reload();
 $("#retry").onclick=()=>location.reload();
 function fail(m){ show("#s-error"); $("#err-msg").textContent=m||"Ocurrió un error."; }
+async function loadLog(){ try{ return await(await fetch("/logs")).text(); }catch(e){ return "(no se pudo leer el registro)"; } }
+$("#showLog").onclick=async()=>{ const b=$("#logBox");
+  if(b.style.display==="none"){ b.textContent=await loadLog(); b.style.display="block"; }
+  else b.style.display="none"; };
+$("#copyLog").onclick=async()=>{ const t=await loadLog();
+  try{ await navigator.clipboard.writeText(t); $("#copyLog").innerHTML=ICO("check")+"Copiado"; }
+  catch(e){ const b=$("#logBox"); b.textContent=t; b.style.display="block"; } };
 
 /* dev: abrir el editor con un plan simulado (validación de UI sin análisis) */
 if(location.hash==="#demo"){
