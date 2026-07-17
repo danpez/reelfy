@@ -28,3 +28,4 @@ spike/whisper.cpp/
 *.bin
 *.gguf
 .claude/settings.local.json
+desktop/build/
