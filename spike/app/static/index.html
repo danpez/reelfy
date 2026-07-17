@@ -293,6 +293,14 @@
       <div class="row"><div><label>Shorts por video</label>
         <input type="number" id="highlights" value="2" min="1" max="5"></div><div></div></div>
     </div>
+    <div id="licGate" style="display:none;margin-top:20px;border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--panel2)">
+      <div style="font-size:13px;font-weight:600;margin-bottom:10px"><svg class="ic" viewBox="0 0 24 24"><use href="#i-tag"/></svg> Activa tu licencia</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <input type="text" id="licKey" placeholder="REELFY-XXXX-XXXX-XXXX" style="flex:1;min-width:220px;text-transform:uppercase">
+        <button class="btn" id="licBtn">Activar</button>
+      </div>
+      <div class="hint" id="licMsg">Tu llave llegó con la invitación. Se valida una vez y funciona offline.</div>
+    </div>
     <div id="setupGate" style="display:none;margin-top:20px;border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--panel2)">
       <div style="font-size:13px;font-weight:600;margin-bottom:10px"><span class="spinner"></span> Primer arranque: preparando el motor de IA</div>
       <div class="bar"><i id="g-fill"></i></div>
@@ -524,12 +532,28 @@ function pick(files){
 $("#go").onclick=()=>FILES.length>1?runBatch():runSingle();
 
 /* ---- primer arranque: modelo de voz + detección de ollama ---- */
-let ENGINE_READY=true;
+let ENGINE_READY=true, LICENSED=true;
+$("#licBtn").onclick=async()=>{
+  const b=$("#licBtn"); b.disabled=true; $("#licMsg").textContent="Validando…";
+  try{
+    const r=await fetch("/license",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({key:$("#licKey").value})});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||"Llave no válida.");
+    $("#licMsg").textContent="Activada — bienvenido, "+(d.name||"")+".";
+    setTimeout(initSetup,600);
+  }catch(e){ $("#licMsg").textContent=e.message; }
+  b.disabled=false;
+};
 async function initSetup(){
   let s; try{ s=await(await fetch("/setup")).json(); }catch(e){ return; }
   $("#ollamaHint").style.display=s.ollama?"none":"block";
-  if(s.state==="ready"){ ENGINE_READY=true; $("#setupGate").style.display="none";
-    if(FILES.length)$("#go").disabled=false; return; }
+  LICENSED=s.licensed!==false;
+  $("#licGate").style.display=LICENSED?"none":"block";
+  if(s.state==="ready"){ ENGINE_READY=LICENSED; $("#setupGate").style.display="none";
+    $("#go").disabled=!(ENGINE_READY&&FILES.length);
+    if(!LICENSED) setTimeout(initSetup,4000);
+    return; }
   ENGINE_READY=false; $("#go").disabled=true;
   $("#setupGate").style.display="block";
   if(s.state==="missing"){ fetch("/setup/start",{method:"POST"}); }

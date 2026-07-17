@@ -66,7 +66,76 @@ def setup_status():
         ollama = True
     except Exception:  # noqa
         ollama = False
-    return {**SETUP, "ollama": ollama}
+    return {**SETUP, "ollama": ollama, **_lic_state()}
+
+
+# ---- licencias (solo la app empaquetada; el modo dev del repo no se gatea) ----
+import json as _json  # noqa: E402
+import os as _os  # noqa: E402
+import urllib.request as _url  # noqa: E402
+
+GATED = bool(_os.environ.get("REELFY_DATA"))
+LIC_URL = _os.environ.get("REELFY_LICENSE_URL",
+                          "https://reelfy.mixiuh.online/api/license/activate")
+LIC_FILE = paths.DATA / "license.json"
+LIC_GRACE = 7 * 86400  # revalida cada 7 días; offline sigue funcionando ese lapso
+
+
+def _lic_state():
+    if not GATED:
+        return {"licensed": True, "name": "dev"}
+    try:
+        d = _json.loads(LIC_FILE.read_text())
+    except Exception:  # noqa
+        return {"licensed": False}
+    if time.time() < d.get("valid_until", 0):
+        return {"licensed": True, "name": d.get("name", "")}
+    return {"licensed": False, "expired": True}
+
+
+def _lic_activate(key):
+    """Valida contra la API; True -> renueva la gracia local."""
+    body = _json.dumps({"key": key}).encode()
+    req = _url.Request(LIC_URL, data=body, headers={"Content-Type": "application/json"})
+    r = _json.loads(_url.urlopen(req, timeout=10).read())
+    if r.get("ok"):
+        LIC_FILE.write_text(_json.dumps({"key": key, "name": r.get("name", ""),
+                                         "valid_until": time.time() + LIC_GRACE}))
+        return True, r.get("name", "")
+    if r.get("reason") == "revoked":
+        LIC_FILE.unlink(missing_ok=True)
+    return False, r.get("reason", "invalid")
+
+
+def _lic_revalidate():
+    """Al arrancar: si hay licencia, renueva en silencio; sin red, la gracia manda."""
+    try:
+        key = _json.loads(LIC_FILE.read_text()).get("key")
+        if key:
+            _lic_activate(key)
+    except Exception:  # noqa: sin red o sin licencia — la caché local decide
+        pass
+
+
+if GATED:
+    threading.Thread(target=_lic_revalidate, daemon=True).start()
+
+
+@app.post("/license")
+async def license_activate(req: Request):
+    body = await req.json()
+    key = str(body.get("key", "")).strip().upper()
+    if not key:
+        raise HTTPException(400, "Falta la llave")
+    try:
+        ok, info = _lic_activate(key)
+    except Exception:  # noqa
+        raise HTTPException(502, "No se pudo contactar el servidor de licencias. "
+                                 "Revisa tu conexión e intenta de nuevo.")
+    if not ok:
+        raise HTTPException(403, "Llave revocada." if info == "revoked"
+                            else "Llave no válida.")
+    return {"ok": True, "name": info}
 
 
 @app.post("/setup/start")
@@ -149,6 +218,8 @@ async def analyze(video: UploadFile, glossary: str = Form(""), highlights: int =
         raise HTTPException(400, "Formato no soportado. Usa MP4 o MOV.")
     if not paths.engine_ready():
         raise HTTPException(409, "El motor de IA aún se está preparando (primer arranque).")
+    if not _lic_state()["licensed"]:
+        raise HTTPException(403, "Activa tu licencia de Reelfy para procesar videos.")
     job_id = uuid.uuid4().hex[:12]
     dst = INPUT / f"{job_id}{ext}"
     with open(dst, "wb") as f:
