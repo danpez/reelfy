@@ -66,7 +66,29 @@ cp "$DIST/build/Reelfy" "$APP/Contents/MacOS/Reelfy"
 cp Info.plist "$APP/Contents/Info.plist"
 cp build/Reelfy.icns "$APP/Contents/Resources/Reelfy.icns"
 mv "$ENGINE" "$APP/Contents/Resources/engine"
-codesign --force --deep -s - "$APP" 2>/dev/null
+
+# Firma: Developer ID si REELFY_SIGN_ID está definido (p.ej. "Developer ID
+# Application: Kevin Gonzalez (TEAMID)"); si no, ad-hoc (solo pruebas locales).
+if [ -n "${REELFY_SIGN_ID:-}" ]; then
+  echo "==> firma Developer ID + hardened runtime (tarda: miles de binarios)"
+  ENT="$(pwd)/entitlements.plist"
+  # 1) todo Mach-O anidado (dylibs, .so, ejecutables del motor)
+  find "$APP/Contents/Resources/engine" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 |
+    xargs -0 -P 8 -n 20 codesign --force --timestamp --options runtime -s "$REELFY_SIGN_ID" 2>/dev/null
+  for exe in "$APP/Contents/Resources/engine/bin/ffmpeg" \
+             "$APP/Contents/Resources/engine/bin/ffprobe" \
+             "$APP/Contents/Resources/engine/whisper.cpp/build/bin/whisper-cli" \
+             "$APP"/Contents/Resources/engine/python/bin/python3.12; do
+    codesign --force --timestamp --options runtime --entitlements "$ENT" -s "$REELFY_SIGN_ID" "$exe"
+  done
+  # 2) binario principal y la .app
+  codesign --force --timestamp --options runtime --entitlements "$ENT" -s "$REELFY_SIGN_ID" \
+    "$APP/Contents/MacOS/Reelfy"
+  codesign --force --timestamp --options runtime --entitlements "$ENT" -s "$REELFY_SIGN_ID" "$APP"
+  codesign --verify --deep --strict "$APP" && echo "firma verificada"
+else
+  codesign --force --deep -s - "$APP" 2>/dev/null
+fi
 
 echo "==> [8/8] DMG"
 rm -f "$DIST/Reelfy.dmg"
