@@ -1,7 +1,7 @@
 # Reelfy — Roadmap & contexto
 
 **Creado:** 2026-07-15 (como "Clipfy"). **Renombrado a Reelfy:** 2026-07-15.
-**Estado:** investigación cerrada · decisión de proceder con el wedge de ejecución · pendiente MVP + spike.
+**Estado (2026-07-16):** motor completo validado en local (pipeline IA + Reelfy Studio, editor con preview en tiempo real) · empaquetado como app nativa de macOS (`/Applications/Reelfy.app`, `desktop/`) · siguiente: identidad de marca + landing (`reelfy.mixiuh.online`) · multiplataforma en el horizonte.
 **Origen:** proyecto para avanzar el portafolio de Mixiuh mientras se destraban Holdyfy/Queryfy en tiendas.
 
 ## La idea
@@ -52,8 +52,19 @@ Enfoque: **el video vertical final, subtitulado en español con timing impecable
 
 ## Pendientes inmediatos
 
-- [ ] Definir alcance exacto del MVP (input → pipeline → output) y criterios de "listo para publicar".
-- [ ] **Spike de validación en M2 Max**: whisper.cpp + FFmpeg + auto-editor + PySceneDetect sobre un video real → medir calidad de timing/sincronía de captions ES vs OpusClip/Submagic. **Go/No-go de ejecución con datos.**
-- [ ] Elegir detector de reencuadre con licencia permisiva (no AGPL).
-- [ ] Confirmar términos/costos concretos de Epidemic Sound Partner API para SaaS (o consolidar Pixabay-in-work).
-- [ ] (Opcional) renombrar repo/carpeta local `clipfy` → `reelfy` y crear `reelfy.mixiuh.online` cuando haya prototipo.
+- [x] Definir alcance del MVP y validarlo — **hecho y superado**: pipeline completo + Reelfy Studio (editor interactivo, preview en tiempo real) + `.app` de macOS.
+- [x] **Spike de validación en M2 Max** — hecho con video real (captions ES con alineación forzada, tracking con resorte crítico, zero-cascade audio).
+- [x] Detector de reencuadre permisivo — YuNet (Apache-2.0).
+- [ ] Logo Reelfy (familia de monogramas Mixiuh) → Kevin lo genera con IA externa.
+- [ ] **Landing page** en `reelfy.mixiuh.online` (siguiente bloque tras el logo).
+- [ ] Confirmar términos/costos de música para distribución (hoy: pistas propias generadas royalty-free baked-in).
+- [ ] Head-to-head medible vs OpusClip/Submagic con el mismo video (evidencia para la landing).
+- [ ] (Opcional) renombrar repo/carpeta local `clipfy` → `reelfy`.
+
+## Multiplataforma (roadmap técnico)
+
+Reelfy debe correr **más allá de macOS** (decisión 2026-07-16). Estado real del stack por pieza:
+
+- **Ya portable** (Python/JS puro): FastAPI + Studio (WebView), YuNet/OpenCV, ctc-forced-aligner (torch CPU), librosa, Pillow, ollama (existe en Win/Linux), whisper.cpp (compila en Win/Linux con CUDA/Vulkan en vez de Metal).
+- **Atado a macOS hoy**: encode/decode **VideoToolbox** (→ NVENC/QSV/VAAPI o x264 según plataforma), rutas absolutas a `ffmpeg-full`/`ffprobe` de Homebrew (→ resolver binario por plataforma o embeber build estático de ffmpeg CON libass), carcasa **Swift/WKWebView** (→ Tauri v2 como shell multiplataforma manteniendo el mismo Studio HTML, o Electron como fallback).
+- **Plan por fases**: (1) abstraer capa de binarios/encoders en `pipeline.py` (tabla por plataforma, detección en runtime); (2) empaquetado del motor con venv embebido o PyInstaller por OS; (3) shell Tauri v2 (Win/Linux/macOS) reutilizando `static/index.html` tal cual; (4) CI de builds por OS. La `.app` Swift actual queda como shell nativo premium de macOS mientras tanto.
