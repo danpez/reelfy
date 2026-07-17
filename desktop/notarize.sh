@@ -16,12 +16,7 @@ PROFILE=mixiuh
 [ -d "$APP" ] || { echo "No existe $APP — corre dist.sh (firmado) primero"; exit 1; }
 
 pack_dmg() {
-  local root=dist/dmgroot
-  rm -rf "$root"; mkdir -p "$root"
-  cp -R "$APP" "$root/"; ln -s /Applications "$root/Applications"
-  rm -f "$DMG"
-  hdiutil create -quiet -volname "Reelfy" -srcfolder "$root" -ov -format UDZO "$DMG"
-  rm -rf "$root"
+  ./make_dmg.sh "$APP" "$DMG"   # DMG de marca (fondo + "arrastra a Aplicaciones")
 }
 
 echo "==> [1/5] notarizando la app (zip)…"

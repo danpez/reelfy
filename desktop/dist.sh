@@ -98,14 +98,8 @@ else
   codesign --force --deep -s - "$APP" 2>/dev/null
 fi
 
-echo "==> [8/8] DMG"
-rm -f "$DIST/Reelfy.dmg"
-DMGROOT="$DIST/dmgroot"
-rm -rf "$DMGROOT"; mkdir -p "$DMGROOT"
-cp -R "$APP" "$DMGROOT/"
-ln -s /Applications "$DMGROOT/Applications"
-hdiutil create -quiet -volname "Reelfy" -srcfolder "$DMGROOT" -ov -format UDZO "$DIST/Reelfy.dmg"
-rm -rf "$DMGROOT"
+echo "==> [8/8] DMG de marca"
+./make_dmg.sh "$APP" "$DIST/Reelfy.dmg"
 
 du -sh "$APP" "$DIST/Reelfy.dmg"
 echo "OK -> $DIST/Reelfy.dmg"
