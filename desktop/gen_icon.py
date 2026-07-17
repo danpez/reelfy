@@ -29,7 +29,13 @@ def main():
     mh = round(box * 0.58)
     mw = round(mh * mark.width / mark.height)
     mark = mark.resize((mw, mh), Image.LANCZOS)
-    img.alpha_composite(mark, ((S - mw) // 2, (S - mh) // 2))
+    # optical centering: alpha centroid at canvas center (the R is top/left-heavy)
+    import numpy as np
+    al = np.asarray(mark.split()[-1]).astype(float)
+    ys, xs = np.indices(al.shape)
+    cx = (al * xs).sum() / al.sum() / al.shape[1]
+    cy = (al * ys).sum() / al.sum() / al.shape[0]
+    img.alpha_composite(mark, (round(S / 2 - cx * mw), round(S / 2 - cy * mh)))
 
     with tempfile.TemporaryDirectory() as tmp:
         iconset = Path(tmp) / "Reelfy.iconset"

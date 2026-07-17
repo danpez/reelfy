@@ -45,6 +45,14 @@ def solid(matte, rgb):
     return out
 
 
+def centroid(matte):
+    """Center of visual mass (alpha centroid), as fractions of width/height."""
+    a = np.asarray(matte).astype(float)
+    total = a.sum()
+    ys, xs = np.indices(a.shape)
+    return (a * xs).sum() / total / a.shape[1], (a * ys).sum() / total / a.shape[0]
+
+
 def on_bg(matte, fg_rgb, bg_rgb, size=1024, mark_frac=0.62, radius_frac=0.0):
     img = Image.new("RGBA", (size, size), bg_rgb + (255,))
     mw = round(size * mark_frac)
@@ -53,7 +61,10 @@ def on_bg(matte, fg_rgb, bg_rgb, size=1024, mark_frac=0.62, radius_frac=0.0):
         mh = round(size * mark_frac)
         mw = round(mh * matte.width / matte.height)
     mark = solid(matte.resize((mw, mh), Image.LANCZOS), fg_rgb)
-    img.alpha_composite(mark, ((size - mw) // 2, (size - mh) // 2))
+    # optical centering: place the mark's center of MASS at the canvas center
+    # (the R is top/left-heavy; bbox centering reads visibly off-center)
+    cx, cy = centroid(matte)
+    img.alpha_composite(mark, (round(size / 2 - cx * mw), round(size / 2 - cy * mh)))
     if radius_frac > 0:
         r = round(size * radius_frac)
         m = Image.new("L", (size, size), 0)
