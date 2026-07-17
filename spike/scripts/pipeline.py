@@ -67,6 +67,15 @@ def _fit_size(text, base, max_w, floor=28):
     return max(floor, int(base * max_w / tw * 0.98))
 
 
+def _hex_ass(hex_color):
+    """'#rrggbb' -> ASS '&H00BBGGRR' (BGR order)."""
+    c = hex_color.lstrip("#")
+    if len(c) != 6:
+        return None
+    r, g, b = c[0:2], c[2:4], c[4:6]
+    return f"&H00{b}{g}{r}".upper()
+
+
 # caption style presets (ASS colours are &HAABBGGRR). base text is always white/bold.
 STYLES = {
     "clasico":  dict(size=78, active="&H0000E5FF", outline=5, upper=False),  # white + amber
@@ -192,16 +201,22 @@ def ass_time(t):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def build_ass(phrases, ass_path, w=W, h=H, style="clasico", anim="none"):
+def build_ass(phrases, ass_path, w=W, h=H, style="clasico", anim="none",
+              cap_color=None, cap_font=None, cap_scale=1.0, cap_pos=0.776):
     """Word-by-word highlight captions, ROCK-STABLE position.
 
     Highlight is COLOR-ONLY (glyph metrics never change) so the phrase stays pinned;
     events globally de-overlapped + min-duration'd + capped on long pauses so captions
-    never duplicate or vanish. `style` picks a preset; `w,h` match the output format.
+    never duplicate or vanish. Personalization: `cap_color` (hex) overrides the
+    highlight color, `cap_font` the family, `cap_scale` the size, `cap_pos` the
+    vertical baseline position (fraction of height from the top).
     """
-    st = STYLES.get(style, STYLES["clasico"])
-    active_color = st["active"]
-    margin_v = round(h * 0.224)   # lower third, scales with the chosen aspect
+    st = dict(STYLES.get(style, STYLES["clasico"]))
+    st["size"] = max(24, int(st["size"] * float(cap_scale or 1.0)))
+    active_color = (_hex_ass(cap_color) if cap_color else None) or st["active"]
+    font = cap_font or FONT
+    cap_pos = min(0.93, max(0.15, float(cap_pos or 0.776)))
+    margin_v = round(h * (1 - cap_pos))   # ASS MarginV = distance from the bottom
     MIN_DUR = 0.06
     MAX_HOLD = 1.2   # after this much silence the caption clears (natural)
     header = f"""[Script Info]
@@ -212,7 +227,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Outline, Shadow, Alignment, MarginL, MarginR, MarginV
-Style: Base,{FONT},{st["size"]},{BASE_COLOR},&H00000000,&H80000000,1,{st["outline"]},2,2,{MARGIN_H},{MARGIN_H},{margin_v}
+Style: Base,{font},{st["size"]},{BASE_COLOR},&H00000000,&H80000000,1,{st["outline"]},2,2,{MARGIN_H},{MARGIN_H},{margin_v}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -293,9 +308,13 @@ def _tonemap(video):
     return []
 
 
+BRAND_DIR = SPIKE / "assets/brand"
+
+
 def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None,
                      on_pct=None, preview_secs=None, enhance_audio=False,
-                     out_w=W, out_h=H, camera=None, keeps=None):
+                     out_w=W, out_h=H, camera=None, keeps=None,
+                     zoom_amt=ZOOM_IN, air=None, logo=None):
     """Composite a FIXED blurred background + a dynamic foreground video, burn captions.
 
     Layers (frame/margins never move; only the video moves): static blurred BG cover +
@@ -312,13 +331,14 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
     #  - source aspect ~= output aspect  -> full-bleed, NO margins
     #  - source WIDER than output        -> air on the SIDES only (full height)
     #  - source TALLER than output       -> air TOP/BOTTOM only (full width)
+    inset = 1 - min(0.35, max(0.0, air if air is not None else (1 - FG_SCALE)))
     src_ar, out_ar = src_w / src_h, ow / oh
-    if abs(src_ar / out_ar - 1) < 0.05:
+    if abs(src_ar / out_ar - 1) < 0.05 or inset >= 0.995:
         fg_w, fg_h = ow, oh
     elif src_ar > out_ar:
-        fg_w, fg_h = (round(ow * FG_SCALE) // 2) * 2, oh
+        fg_w, fg_h = (round(ow * inset) // 2) * 2, oh
     else:
-        fg_w, fg_h = ow, (round(oh * FG_SCALE) // 2) * 2
+        fg_w, fg_h = ow, (round(oh * inset) // 2) * 2
 
     # --- foreground: tracked (or static) crop AT THE FG ASPECT scaled to its box ---
     cmds = None
@@ -337,9 +357,9 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
     else:
         fg = [f"scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase", f"crop={fg_w}:{fg_h}"]
     fg = fg + [f"fps={fps}"] + tm   # sendcmd MUST precede fps or its crop-x cmds don't land
-    if beats:   # hard-cut punch-in on the fg CONTENT (display size fixed)
+    if beats and zoom_amt > 0.004:   # hard-cut punch-in on the fg CONTENT (display size fixed)
         win = "+".join(f"between(t,{b:.3f},{b + ZOOM_HOLD:.3f})" for b in beats)
-        z = f"(1+{ZOOM_IN}*({win}))"
+        z = f"(1+{zoom_amt}*({win}))"
         fg += [f"scale=w='ceil({fg_w}*{z}/2)*2':h='ceil({fg_h}*{z}/2)*2':eval=frame",
                f"crop={fg_w}:{fg_h}"]
     fg += ["format=yuv420p"]
@@ -355,6 +375,17 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
           f"[fgsrc]{','.join(fg)}[fg];"
           f"[bg][fg]overlay=x=(W-w)/2:y=(H-h)/2[c];"
           f"[c]subtitles={ass_path}")
+    if logo:
+        lf = BRAND_DIR / "logo.png"
+        if lf.exists():
+            lw = (round(ow * float(logo.get("size", 0.14))) // 2) * 2
+            op = float(logo.get("opacity", 0.9))
+            mx, my = round(ow * 0.03), round(oh * 0.03)
+            pos = logo.get("pos", "br")
+            ox = f"{mx}" if pos in ("tl", "bl") else f"W-w-{mx}"
+            oy = f"{my}" if pos in ("tl", "tr") else f"H-h-{my}"
+            vf += (f"[cs];movie='{lf}',scale={lw}:-1,format=rgba,"
+                   f"colorchannelmixer=aa={op}[lg];[cs][lg]overlay={ox}:{oy}")
     # ZERO-CASCADE silence trim: select/aselect fused into THIS render (after captions,
     # so burned subs follow their frames). One total encode instead of render+tighten,
     # which was re-compressing AAC and bringing the robotic artifact back. adeclick
@@ -542,7 +573,8 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
 
 def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="clasico",
                      anim="none", fmt="9:16", music=False, music_track="ambient",
-                     music_volume=0.26, hook=False, lang="es", on_step=None, on_pct=None):
+                     music_volume=0.26, hook=False, lang="es", custom=None,
+                     on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -566,8 +598,11 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
             step("Traduciendo subtítulos al inglés…")
             phrases = translate_mod.translate_phrases(phrases)
             titles = dict(zip(hl_titles, translate_mod.translate_texts(hl_titles)))
+    c = custom or {}
     ass = SPIKE / "work" / f"{stem}.ass"
-    build_ass(phrases, ass, ow, oh, style, anim)           # rebuild from edited captions
+    build_ass(phrases, ass, ow, oh, style, anim,           # rebuild from edited captions
+              c.get("cap_color"), c.get("cap_font"),
+              c.get("cap_scale", 1.0), c.get("cap_pos", 0.776))
     beats = plan.get("beats") if dynamic else None
 
     # ZERO-CASCADE: silence-trim happens INSIDE the main render (one encode total).
@@ -610,7 +645,8 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     full = out_dir / f"{stem}_reelfy.mp4"
     reframe_and_burn(video, ass, full, cmds_path=plan["cmds_path"], beats=beats,
                      enhance_audio=enhance_audio, out_w=ow, out_h=oh, camera=camera,
-                     keeps=keeps,
+                     keeps=keeps, zoom_amt=float(c.get("zoom_amt", ZOOM_IN)),
+                     air=c.get("air"), logo=c.get("logo"),
                      on_pct=(lambda p: on_pct("full", p)) if on_pct else None)
     if music:
         step("Añadiendo música de fondo…")
@@ -644,7 +680,7 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
 
 def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim="none",
                    fmt="9:16", music=False, music_track="ambient", music_volume=0.26,
-                   lang="es"):
+                   lang="es", custom=None):
     """Fast, low-res sample of the first `secs` (the real look: captions, tracking,
     blurred bg, zoom, studio audio, music, chosen style/format/lang) — preview before export."""
     ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
@@ -653,13 +689,18 @@ def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim
         phrases = plan.get("phrases_en") or translate_mod.translate_phrases(plan["phrases"])
     else:
         phrases = plan["phrases"]
+    c = custom or {}
     ass = SPIKE / "work" / f"{stem}.ass"
-    build_ass(phrases, ass, ow, oh, style, anim)
+    build_ass(phrases, ass, ow, oh, style, anim,
+              c.get("cap_color"), c.get("cap_font"),
+              c.get("cap_scale", 1.0), c.get("cap_pos", 0.776))
     out = Path(out)
     tmp = out.with_name(out.stem + "_raw.mp4") if music else out
     reframe_and_burn(Path(plan["video"]), ass, tmp, cmds_path=plan["cmds_path"],
                      beats=plan.get("beats"), preview_secs=secs, enhance_audio=enhance_audio,
-                     out_w=ow, out_h=oh, camera=plan.get("camera"))
+                     out_w=ow, out_h=oh, camera=plan.get("camera"),
+                     zoom_amt=float(c.get("zoom_amt", ZOOM_IN)),
+                     air=c.get("air"), logo=c.get("logo"))
     if music:
         add_music(tmp, out, music_track, music_volume); tmp.unlink(missing_ok=True)
     return out

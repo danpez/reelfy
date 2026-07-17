@@ -47,7 +47,15 @@ def _analyze(job_id, video, glossary, n):
         job.update(phase="error", error=f"Análisis falló: {e}")
 
 
-def _render(job_id, plan, dynamic, enhance, style, anim, fmt, music, track, mvol, hook, lang):
+CUSTOM_KEYS = ("cap_color", "cap_font", "cap_scale", "cap_pos", "zoom_amt", "air", "logo")
+
+
+def _custom(body):
+    return {k: body[k] for k in CUSTOM_KEYS if body.get(k) is not None}
+
+
+def _render(job_id, plan, dynamic, enhance, style, anim, fmt, music, track, mvol, hook, lang,
+            custom):
     job = JOBS[job_id]
     n_shorts = max(1, sum(1 for h in plan.get("highlights", []) if h.get("enabled", True)))
     t0 = time.time()
@@ -68,7 +76,8 @@ def _render(job_id, plan, dynamic, enhance, style, anim, fmt, music, track, mvol
         clips = pipeline.render_from_plan(plan, OUTPUT, dynamic=dynamic, enhance_audio=enhance,
                                           style=style, anim=anim, fmt=fmt, music=music,
                                           music_track=track, music_volume=mvol, hook=hook,
-                                          lang=lang, on_step=step, on_pct=overall)
+                                          lang=lang, custom=custom,
+                                          on_step=step, on_pct=overall)
         job.update(phase="done", pct=100, message="¡Listo!", clips=clips, eta=0)
     except Exception as e:  # noqa
         job.update(phase="error", error=f"Render falló: {e}")
@@ -113,7 +122,8 @@ async def render(job_id: str, req: Request):
     lang = body.get("lang", "es")
     job.update(phase="rendering", pct=0, message="Preparando el render…", plan=plan)
     threading.Thread(target=_render,
-                     args=(job_id, plan, dynamic, enhance, style, anim, fmt, music, track, mvol, hook, lang),
+                     args=(job_id, plan, dynamic, enhance, style, anim, fmt, music, track,
+                           mvol, hook, lang, _custom(body)),
                      daemon=True).start()
     return {"ok": True}
 
@@ -136,10 +146,60 @@ async def preview(job_id: str, req: Request):
     lang = body.get("lang", "es")
     try:
         await run_in_threadpool(pipeline.render_preview, plan, out, 7, enhance, style, anim,
-                                fmt, music, track, mvol, lang)
+                                fmt, music, track, mvol, lang, _custom(body))
     except Exception as e:  # noqa
         raise HTTPException(500, f"Preview falló: {e}")
     return {"file": out.name}
+
+
+BRAND = SPIKE / "assets/brand"
+BRAND.mkdir(parents=True, exist_ok=True)
+PRESETS_F = BRAND / "presets.json"
+
+
+@app.post("/brand/logo")
+async def upload_logo(logo: UploadFile):
+    if not (logo.content_type or "").startswith("image/"):
+        raise HTTPException(400, "Sube una imagen PNG/JPG (idealmente PNG con transparencia).")
+    data = await logo.read()
+    (BRAND / "logo.png").write_bytes(data)
+    return {"ok": True}
+
+
+@app.get("/brand/logo")
+def get_logo():
+    f = BRAND / "logo.png"
+    if not f.exists():
+        raise HTTPException(404, "Sin logo")
+    return FileResponse(f, media_type="image/png")
+
+
+@app.get("/presets")
+def get_presets():
+    import json
+    return json.loads(PRESETS_F.read_text()) if PRESETS_F.exists() else {}
+
+
+@app.post("/presets")
+async def save_preset(req: Request):
+    import json
+    body = await req.json()
+    name, config = body.get("name", "").strip(), body.get("config", {})
+    if not name:
+        raise HTTPException(400, "Falta el nombre del preset")
+    data = json.loads(PRESETS_F.read_text()) if PRESETS_F.exists() else {}
+    data[name] = config
+    PRESETS_F.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    return {"ok": True, "presets": list(data.keys())}
+
+
+@app.delete("/presets/{name}")
+def delete_preset(name: str):
+    import json
+    data = json.loads(PRESETS_F.read_text()) if PRESETS_F.exists() else {}
+    data.pop(name, None)
+    PRESETS_F.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    return {"ok": True, "presets": list(data.keys())}
 
 
 @app.get("/tracks")
