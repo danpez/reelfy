@@ -88,6 +88,14 @@ def index():
     return (STATIC / "index.html").read_text()
 
 
+@app.get("/static/{filename}")
+def static_file(filename: str):
+    f = STATIC / Path(filename).name
+    if not f.exists():
+        raise HTTPException(404, "No existe")
+    return FileResponse(f)
+
+
 @app.post("/analyze")
 async def analyze(video: UploadFile, glossary: str = Form(""), highlights: int = Form(2)):
     ext = Path(video.filename or "v.mp4").suffix.lower() or ".mp4"
