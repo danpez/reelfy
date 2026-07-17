@@ -70,21 +70,29 @@ mv "$ENGINE" "$APP/Contents/Resources/engine"
 # Firma: Developer ID si REELFY_SIGN_ID está definido (p.ej. "Developer ID
 # Application: Kevin Gonzalez (TEAMID)"); si no, ad-hoc (solo pruebas locales).
 if [ -n "${REELFY_SIGN_ID:-}" ]; then
-  echo "==> firma Developer ID + hardened runtime (tarda: miles de binarios)"
+  echo "==> firma Developer ID + hardened runtime (detectando Mach-O por contenido)"
   ENT="$(pwd)/entitlements.plist"
-  # 1) todo Mach-O anidado (dylibs, .so, ejecutables del motor)
-  find "$APP/Contents/Resources/engine" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 |
-    xargs -0 -P 8 -n 20 codesign --force --timestamp --options runtime -s "$REELFY_SIGN_ID" 2>/dev/null
-  for exe in "$APP/Contents/Resources/engine/bin/ffmpeg" \
-             "$APP/Contents/Resources/engine/bin/ffprobe" \
-             "$APP/Contents/Resources/engine/whisper.cpp/build/bin/whisper-cli" \
-             "$APP"/Contents/Resources/engine/python/bin/python3.12; do
-    codesign --force --timestamp --options runtime --entitlements "$ENT" -s "$REELFY_SIGN_ID" "$exe"
-  done
-  # 2) binario principal y la .app
-  codesign --force --timestamp --options runtime --entitlements "$ENT" -s "$REELFY_SIGN_ID" \
-    "$APP/Contents/MacOS/Reelfy"
-  codesign --force --timestamp --options runtime --entitlements "$ENT" -s "$REELFY_SIGN_ID" "$APP"
+  SIGN=(codesign --force --timestamp --options runtime -s "$REELFY_SIGN_ID")
+  # 1) TODO binario Mach-O anidado, sin importar la extensión (dylibs, .so y
+  #    ejecutables sueltos como torch/protoc que no terminan en .dylib/.so).
+  MACHO="$DIST/macho.list"; : > "$MACHO"
+  while IFS= read -r f; do
+    case "$(file -b "$f" 2>/dev/null)" in
+      Mach-O*) printf '%s\n' "$f" >> "$MACHO";;
+    esac
+  done < <(find "$APP/Contents/Resources/engine" -type f)
+  echo "    $(wc -l < "$MACHO" | tr -d ' ') binarios Mach-O a firmar"
+  # firmar leaves primero (más profundos antes que sus contenedores)
+  awk '{print gsub(/\//,"/")"\t"$0}' "$MACHO" | sort -rn | cut -f2- |
+    while IFS= read -r f; do "${SIGN[@]}" "$f" 2>/dev/null; done
+  # 2) el intérprete Python necesita los entitlements (JIT de torch)
+  codesign --force --timestamp --options runtime --entitlements "$ENT" \
+    -s "$REELFY_SIGN_ID" "$APP"/Contents/Resources/engine/python/bin/python3.12
+  # 3) binario principal y la .app (contenedor al final)
+  codesign --force --timestamp --options runtime --entitlements "$ENT" \
+    -s "$REELFY_SIGN_ID" "$APP/Contents/MacOS/Reelfy"
+  codesign --force --timestamp --options runtime --entitlements "$ENT" \
+    -s "$REELFY_SIGN_ID" "$APP"
   codesign --verify --deep --strict "$APP" && echo "firma verificada"
 else
   codesign --force --deep -s - "$APP" 2>/dev/null

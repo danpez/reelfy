@@ -1,21 +1,49 @@
 #!/bin/bash
-# Notariza y estampa el DMG. Requiere credenciales guardadas una vez con:
-#   xcrun notarytool store-credentials reelfy \
-#     --apple-id tacataca-tacu@hotmail.com --team-id TEAMID
-#   (contraseña específica de app de account.apple.com)
-# o con API key de App Store Connect:
-#   xcrun notarytool store-credentials reelfy --key KEY.p8 --key-id XXX --issuer YYY
+# Notariza Reelfy y deja el DMG listo para distribuir. Flujo bulletproof:
+# notariza la app (registra su cdhash) -> estampa la app -> reempaca el DMG con
+# la app ya estampada -> notariza el DMG -> estampa el DMG. Así tanto el DMG
+# como la .app validan OFFLINE.
+#
+# Credenciales guardadas una vez (perfil de llavero 'mixiuh') con la API key de
+# App Store Connect:
+#   xcrun notarytool store-credentials mixiuh \
+#     --key ~/Work/Mixiuh/keys/AuthKey_XXXX.p8 --key-id XXXX --issuer UUID
 set -euo pipefail
 cd "$(dirname "$0")"
+APP=dist/Reelfy.app
 DMG=dist/Reelfy.dmg
-[ -f "$DMG" ] || { echo "No existe $DMG — corre dist.sh primero"; exit 1; }
+PROFILE=mixiuh
+[ -d "$APP" ] || { echo "No existe $APP — corre dist.sh (firmado) primero"; exit 1; }
 
-echo "==> notarizando (espera a Apple)…"
-xcrun notarytool submit "$DMG" --keychain-profile reelfy --wait
+pack_dmg() {
+  local root=dist/dmgroot
+  rm -rf "$root"; mkdir -p "$root"
+  cp -R "$APP" "$root/"; ln -s /Applications "$root/Applications"
+  rm -f "$DMG"
+  hdiutil create -quiet -volname "Reelfy" -srcfolder "$root" -ov -format UDZO "$DMG"
+  rm -rf "$root"
+}
 
-echo "==> estampando ticket"
+echo "==> [1/5] notarizando la app (zip)…"
+ZIP=dist/Reelfy.zip
+ditto -c -k --keepParent "$APP" "$ZIP"
+xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait
+rm -f "$ZIP"
+
+echo "==> [2/5] estampando la app"
+xcrun stapler staple "$APP"
+
+echo "==> [3/5] reempacando el DMG con la app estampada"
+pack_dmg
+
+echo "==> [4/5] notarizando el DMG…"
+xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait
+
+echo "==> [5/5] estampando el DMG"
 xcrun stapler staple "$DMG"
 
-echo "==> verificación Gatekeeper"
-spctl -a -t open --context context:primary-signature -v "$DMG" || true
+echo "==> verificación"
+MP=$(hdiutil attach "$DMG" -nobrowse -readonly | grep Volumes | awk '{print $3}')
+spctl -a -vvv "$MP/Reelfy.app" 2>&1 | sed 's/^/    /'
+hdiutil detach "$MP" -quiet
 echo "OK — $DMG listo para distribuir"
