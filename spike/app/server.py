@@ -18,18 +18,64 @@ from pathlib import Path
 
 SPIKE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SPIKE / "scripts"))
+import paths  # noqa: E402
 import pipeline  # noqa: E402
 
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Request  # noqa: E402
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse  # noqa: E402
 from starlette.concurrency import run_in_threadpool  # noqa: E402
 
-INPUT = SPIKE / "input"; OUTPUT = SPIKE / "output"
+INPUT, OUTPUT = paths.INPUT, paths.OUTPUT
 STATIC = Path(__file__).resolve().parent / "static"
-INPUT.mkdir(exist_ok=True); OUTPUT.mkdir(exist_ok=True)
 
 app = FastAPI(title="Reelfy")
 JOBS: dict[str, dict] = {}
+
+# ---- primer arranque: el modelo grande de whisper se descarga a DATA ----
+SETUP = {"state": "ready" if paths.engine_ready() else "missing", "pct": 0, "msg": ""}
+
+
+def _download_model():
+    import urllib.request
+    dst = paths._MODEL_DATA
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(".part")
+    try:
+        req = urllib.request.Request(paths.MODEL_URL, headers={"User-Agent": "Reelfy/0.1"})
+        with urllib.request.urlopen(req) as r, open(tmp, "wb") as f:
+            total = int(r.headers.get("Content-Length") or paths.MODEL_SIZE)
+            done = 0
+            while chunk := r.read(1 << 20):
+                f.write(chunk); done += len(chunk)
+                SETUP.update(pct=round(done / total * 100, 1),
+                             msg=f"Descargando modelo de voz… {done//(1<<20)} / {total//(1<<20)} MB")
+        tmp.rename(dst)
+        SETUP.update(state="ready", pct=100, msg="Listo")
+    except Exception as e:  # noqa
+        tmp.unlink(missing_ok=True)
+        SETUP.update(state="error", msg=f"Descarga falló: {e}")
+
+
+@app.get("/setup")
+def setup_status():
+    if SETUP["state"] != "downloading" and paths.engine_ready():
+        SETUP.update(state="ready", pct=100)
+    try:
+        import urllib.request
+        urllib.request.urlopen("http://localhost:11434/api/version", timeout=0.6)
+        ollama = True
+    except Exception:  # noqa
+        ollama = False
+    return {**SETUP, "ollama": ollama}
+
+
+@app.post("/setup/start")
+def setup_start():
+    if paths.engine_ready() or SETUP["state"] == "downloading":
+        return {"ok": True}
+    SETUP.update(state="downloading", pct=0, msg="Iniciando descarga…")
+    threading.Thread(target=_download_model, daemon=True).start()
+    return {"ok": True}
 
 
 def _new(job_id, **kw):
@@ -101,6 +147,8 @@ async def analyze(video: UploadFile, glossary: str = Form(""), highlights: int =
     ext = Path(video.filename or "v.mp4").suffix.lower() or ".mp4"
     if ext not in (".mp4", ".mov", ".m4v", ".mkv", ".webm"):
         raise HTTPException(400, "Formato no soportado. Usa MP4 o MOV.")
+    if not paths.engine_ready():
+        raise HTTPException(409, "El motor de IA aún se está preparando (primer arranque).")
     job_id = uuid.uuid4().hex[:12]
     dst = INPUT / f"{job_id}{ext}"
     with open(dst, "wb") as f:
@@ -160,8 +208,7 @@ async def preview(job_id: str, req: Request):
     return {"file": out.name}
 
 
-BRAND = SPIKE / "assets/brand"
-BRAND.mkdir(parents=True, exist_ok=True)
+BRAND = paths.BRAND
 PRESETS_F = BRAND / "presets.json"
 
 
@@ -239,7 +286,11 @@ async def translate(job_id: str, req: Request):
         titles = [h.get("title", "") for h in plan.get("highlights", [])]
         titles_en = await run_in_threadpool(pipeline.translate_mod.translate_texts, titles)
     except Exception as e:  # noqa
-        raise HTTPException(500, f"Traducción falló: {e}")
+        msg = str(e)
+        if "11434" in msg or "Connection refused" in msg or "urlopen" in msg:
+            msg = ("La traducción usa la IA local (Ollama), que no está instalada. "
+                   "Descárgala gratis de ollama.com y ejecuta: ollama pull qwen2.5:7b")
+        raise HTTPException(500, f"Traducción falló: {msg}")
     return {"phrases_en": phrases_en, "titles_en": titles_en}
 
 

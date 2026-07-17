@@ -293,8 +293,14 @@
       <div class="row"><div><label>Shorts por video</label>
         <input type="number" id="highlights" value="2" min="1" max="5"></div><div></div></div>
     </div>
+    <div id="setupGate" style="display:none;margin-top:20px;border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--panel2)">
+      <div style="font-size:13px;font-weight:600;margin-bottom:10px"><span class="spinner"></span> Primer arranque: preparando el motor de IA</div>
+      <div class="bar"><i id="g-fill"></i></div>
+      <div class="hint" id="g-msg" style="margin-top:8px">Se descarga una sola vez (~1.6 GB).</div>
+    </div>
     <div style="margin-top:20px"><button class="btn" id="go" disabled><svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Procesar con IA</button></div>
     <div class="hint" id="setupHint">La IA transcribe, sincroniza subtítulos, elige momentos, detecta silencios y calcula la cámara. Después tú ajustas todo en el editor.</div>
+    <div class="hint" id="ollamaHint" style="display:none;color:var(--brand2)">Ollama no detectado: los momentos se eligen por heurística y la traducción EN está desactivada. Para IA completa instala <b>ollama.com</b> y ejecuta <b>ollama pull qwen2.5:7b</b>.</div>
   </div></section>
 
   <section class="screen" id="s-analyzing"><div class="card">
@@ -513,9 +519,26 @@ function pick(files){
     fl.innerHTML=files.map(f=>`<div class="f">${ICO("film")} ${f.name}<span class="sz">${(f.size/1048576).toFixed(1)} MB</span></div>`).join("");
     $("#go").innerHTML=ICO("spark")+`Procesar ${files.length} videos (lote)`;
   }
-  $("#go").disabled=false;
+  $("#go").disabled=!ENGINE_READY;
 }
 $("#go").onclick=()=>FILES.length>1?runBatch():runSingle();
+
+/* ---- primer arranque: modelo de voz + detección de ollama ---- */
+let ENGINE_READY=true;
+async function initSetup(){
+  let s; try{ s=await(await fetch("/setup")).json(); }catch(e){ return; }
+  $("#ollamaHint").style.display=s.ollama?"none":"block";
+  if(s.state==="ready"){ ENGINE_READY=true; $("#setupGate").style.display="none";
+    if(FILES.length)$("#go").disabled=false; return; }
+  ENGINE_READY=false; $("#go").disabled=true;
+  $("#setupGate").style.display="block";
+  if(s.state==="missing"){ fetch("/setup/start",{method:"POST"}); }
+  if(s.state==="error"){ $("#g-msg").textContent=s.msg+" — reintentando…";
+    setTimeout(()=>fetch("/setup/start",{method:"POST"}),3000); }
+  else if(s.msg){ $("#g-msg").textContent=s.msg; $("#g-fill").style.width=Math.max(2,s.pct)+"%"; }
+  setTimeout(initSetup,1200);
+}
+initSetup();
 
 /* ============ analyze -> editor ============ */
 async function runSingle(){

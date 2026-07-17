@@ -26,11 +26,8 @@ import edit as edit_mod
 import thumbnail as thumb_mod
 import translate as translate_mod
 
-SPIKE = Path(__file__).resolve().parent.parent
-WCLI = SPIKE / "whisper.cpp/build/bin/whisper-cli"
-MODEL = SPIKE / "whisper.cpp/models/ggml-large-v3-turbo.bin"
-# ffmpeg-full (keg-only) — needed for the libass `subtitles` filter to burn captions
-FFMPEG = "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
+from paths import SPIKE, DATA, WORK, WCLI, FFMPEG, FFPROBE  # noqa: E402
+import paths as paths_mod  # noqa: E402
 
 # ---- caption styling (the wedge: word-by-word "viral" look) ----
 W, H = 1080, 1920            # 9:16
@@ -100,7 +97,7 @@ ZOOM_HOLD = 1.10             # punch-in hold (s)
 
 # ---- studio audio chain (all local): rumble cut -> RNNoise denoise -> de-ess ->
 # gentle compression -> EBU R128 loudness to the social standard (-14 LUFS) ----
-_RNNOISE = SPIKE / "models/rnnoise.rnnn"
+_RNNOISE = paths_mod.RNNOISE
 AUDIO_STUDIO = (
     f"highpass=f=80,arnndn=m={_RNNOISE}:mix=0.85,deesser,"   # mix<1: keep some natural
     "acompressor=threshold=-18dB:ratio=3:attack=5:release=60:makeup=2,"  # signal -> less
@@ -130,7 +127,7 @@ def run_ffmpeg_progress(cmd, total_dur, on_pct):
 
 
 def probe_duration(video):
-    r = subprocess.run(["/opt/homebrew/bin/ffprobe", "-v", "error", "-show_entries",
+    r = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
                         "format=duration", "-of", "default=nk=1:nw=1", str(video)],
                        capture_output=True, text=True)
     try:
@@ -154,7 +151,7 @@ def transcribe(wav, out_prefix, glossary=""):
     """
     # --dtw: token-level timestamps via cross-attention alignment (DTW).
     # Much tighter caption sync than the default heuristic timing.
-    cmd = [str(WCLI), "-m", str(MODEL), "-f", str(wav),
+    cmd = [str(WCLI), "-m", str(paths_mod.model_path()), "-f", str(wav),
            "-l", "es", "-ml", "1", "-sow", "--dtw", "large.v3.turbo",
            "-oj", "-of", str(out_prefix)]
     if glossary:
@@ -286,7 +283,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 def is_hdr(video):
     """Detect HLG/PQ HDR by color_transfer so we can tonemap to SDR."""
     r = subprocess.run(
-        ["/opt/homebrew/bin/ffprobe", "-v", "error", "-select_streams", "v:0",
+        [FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=color_transfer", "-of", "default=nk=1:nw=1", str(video)],
         capture_output=True, text=True)
     return r.stdout.strip() in ("arib-std-b67", "smpte2084")
@@ -294,7 +291,7 @@ def is_hdr(video):
 
 def probe_dims(video):
     r = subprocess.run(
-        ["/opt/homebrew/bin/ffprobe", "-v", "error", "-select_streams", "v:0",
+        [FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(video)],
         capture_output=True, text=True)
     nums = [int(n) for n in r.stdout.strip().split("x") if n.strip()]
@@ -308,7 +305,7 @@ def _tonemap(video):
     return []
 
 
-BRAND_DIR = SPIKE / "assets/brand"
+BRAND_DIR = paths_mod.BRAND
 
 
 def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None,
@@ -418,7 +415,7 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
         run(cmd)
 
 
-MUSIC_DIR = SPIKE / "assets/music"
+MUSIC_DIR = paths_mod.MUSIC_DIR
 
 
 def add_music(video_in, video_out, track="ambient", volume=0.26):
@@ -525,7 +522,7 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
             on_step(p, m)
 
     video = Path(video).resolve()
-    work = SPIKE / "work"; work.mkdir(exist_ok=True)
+    work = WORK
     stem = video.stem
     wav = work / f"{stem}.wav"; prefix = work / stem; cmds = work / f"{stem}.crop.txt"
 
@@ -599,7 +596,7 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
             phrases = translate_mod.translate_phrases(phrases)
             titles = dict(zip(hl_titles, translate_mod.translate_texts(hl_titles)))
     c = custom or {}
-    ass = SPIKE / "work" / f"{stem}.ass"
+    ass = WORK / f"{stem}.ass"
     build_ass(phrases, ass, ow, oh, style, anim,           # rebuild from edited captions
               c.get("cap_color"), c.get("cap_font"),
               c.get("cap_scale", 1.0), c.get("cap_pos", 0.776))
@@ -690,7 +687,7 @@ def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim
     else:
         phrases = plan["phrases"]
     c = custom or {}
-    ass = SPIKE / "work" / f"{stem}.ass"
+    ass = WORK / f"{stem}.ass"
     build_ass(phrases, ass, ow, oh, style, anim,
               c.get("cap_color"), c.get("cap_font"),
               c.get("cap_scale", 1.0), c.get("cap_pos", 0.776))
@@ -716,7 +713,7 @@ def main():
     ap.add_argument("--dynamic", action="store_true")
     args = ap.parse_args()
     plan = analyze(args.video, args.glossary, args.highlights, align=not args.no_align)
-    out_dir = Path(args.out).parent if args.out else SPIKE / "output"
+    out_dir = Path(args.out).parent if args.out else paths_mod.OUTPUT
     for c in render_from_plan(plan, out_dir, dynamic=args.dynamic):
         print(f"✅ {c['name']} -> {c['file']}")
 

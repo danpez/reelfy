@@ -13,7 +13,7 @@ import re
 import subprocess
 from pathlib import Path
 
-FFMPEG = "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
+from paths import FFMPEG, FFPROBE  # noqa: E402,F401
 W, H = 1080, 1920
 
 # silence trim
@@ -27,7 +27,7 @@ BEAT_SPACING = 7.0   # ~one emphasis punch per this many seconds (calmer, less f
 
 
 def _duration(video):
-    r = subprocess.run(["/opt/homebrew/bin/ffprobe", "-v", "error", "-show_entries",
+    r = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
                         "format=duration", "-of", "default=nk=1:nw=1", str(video)],
                        capture_output=True, text=True)
     return float(r.stdout.strip())

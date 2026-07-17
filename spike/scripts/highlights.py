@@ -82,7 +82,10 @@ def select_highlights(sentences, n=1):
         'Devuelve JSON: {"clips":[{"from_i":int,"to_i":int,"title":"gancho corto",'
         '"reason":"qué valor concreto entrega y por qué engancha"}]}'
     )
-    raw = _ollama_chat(system, user)
+    try:
+        raw = _ollama_chat(system, user)
+    except Exception:  # sin ollama: heurística local (la app degrada con gracia)
+        return _fallback(sentences, n)
     data = json.loads(raw)
     by_i = {s["i"]: s for s in sentences}
     clips = []
@@ -100,6 +103,31 @@ def select_highlights(sentences, n=1):
             continue
         clips.append({"start": round(start, 2), "end": round(end, 2),
                       "title": c.get("title", ""), "reason": c.get("reason", "")})
+    return clips
+
+
+def _fallback(sentences, n):
+    """Sin LLM: n ventanas de ~30s repartidas por el video, alineadas a oraciones,
+    priorizando las zonas con más densidad de palabras (más habla = más contenido)."""
+    if not sentences:
+        return []
+    dur = sentences[-1]["end"]
+    target = (MIN_SEC + MAX_SEC) / 2
+    clips = []
+    for k in range(n):
+        anchor = dur * (k + 0.5) / n
+        i = min(range(len(sentences)), key=lambda j: abs(sentences[j]["start"] - anchor))
+        start = sentences[i]["start"]; b = i
+        while b + 1 < len(sentences) and sentences[b + 1]["end"] - start < target:
+            b += 1
+        end = min(sentences[b]["end"], start + MAX_SEC)
+        if end - start < MIN_SEC and start + MIN_SEC <= dur:
+            end = start + MIN_SEC
+        if any(start < pc["end"] and end > pc["start"] for pc in clips):
+            continue
+        clips.append({"start": round(start, 2), "end": round(end, 2),
+                      "title": f"Momento {k + 1}",
+                      "reason": "selección automática (sin IA local instalada)"})
     return clips
 
 

@@ -18,7 +18,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-FFMPEG = "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
+from paths import FFMPEG  # noqa: E402
 SPIKE = Path(__file__).resolve().parent.parent
 YUNET = SPIKE / "models/face_detection_yunet_2023mar.onnx"
 

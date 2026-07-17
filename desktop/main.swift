@@ -82,16 +82,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         DispatchQueue.main.async { self.web.load(URLRequest(url: URL(string: BASE)!)) }
     }
     func spawnServer() {
-        let home = ProcessInfo.processInfo.environment["REELFY_HOME"]
-            ?? "\(NSHomeDirectory())/Work/Mixiuh/clipfy/spike"
-        let py = "\(home)/.venv/bin/python"
-        guard FileManager.default.isExecutableFile(atPath: py) else {
+        let fm = FileManager.default
+        var home: String
+        var py: String
+        var extraEnv: [String: String] = [:]
+        let bundled = (Bundle.main.resourcePath ?? "") + "/engine"
+        let bundledPy = bundled + "/python/bin/python3"
+        if fm.fileExists(atPath: bundled + "/app/server.py"), fm.isExecutableFile(atPath: bundledPy) {
+            // app distribuible: motor embebido, datos del usuario en App Support
+            home = bundled
+            py = bundledPy
+            let data = NSHomeDirectory() + "/Library/Application Support/Reelfy"
+            try? fm.createDirectory(atPath: data, withIntermediateDirectories: true)
+            extraEnv["REELFY_HOME"] = home
+            extraEnv["REELFY_DATA"] = data
+        } else {
+            // modo desarrollo: el repo en esta máquina
+            home = ProcessInfo.processInfo.environment["REELFY_HOME"]
+                ?? "\(NSHomeDirectory())/Work/Mixiuh/clipfy/spike"
+            py = "\(home)/.venv/bin/python"
+        }
+        guard fm.isExecutableFile(atPath: py) else {
             showError("No encuentro el motor en <b>\(home)</b>.<br>Define la variable REELFY_HOME o restaura la carpeta del proyecto.")
             return
         }
-        let logURL = FileManager.default.homeDirectoryForCurrentUser
+        let logURL = fm.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/Reelfy.log")
-        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        fm.createFile(atPath: logURL.path, contents: nil)
         let log = try? FileHandle(forWritingTo: logURL)
 
         let p = Process()
@@ -99,6 +116,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         p.arguments = ["-u", "\(home)/app/server.py"]
         var env = ProcessInfo.processInfo.environment
         env["REELFY_PORT"] = String(PORT)
+        for (k, v) in extraEnv { env[k] = v }
         p.environment = env
         p.currentDirectoryURL = URL(fileURLWithPath: home)
         p.standardOutput = log ?? FileHandle.nullDevice
