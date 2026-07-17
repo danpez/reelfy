@@ -136,10 +136,24 @@ def probe_duration(video):
         return 0.0
 
 
+def has_audio(video):
+    """True si el video trae al menos una pista de audio."""
+    r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "a",
+                        "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(video)],
+                       capture_output=True, text=True)
+    return "audio" in (r.stdout or "")
+
+
 def extract_audio(video, wav):
-    run([FFMPEG, "-y", "-i", str(video), "-ar", "16000", "-ac", "1",
-         "-c:a", "pcm_s16le", str(wav)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not has_audio(video):
+        raise RuntimeError("El video no tiene pista de audio. Reelfy necesita audio con "
+                           "voz para transcribir y generar los subtítulos sincronizados.")
+    r = subprocess.run([FFMPEG, "-y", "-i", str(video), "-ar", "16000", "-ac", "1",
+                        "-c:a", "pcm_s16le", str(wav)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if r.returncode != 0:
+        tail = " ".join((r.stderr or "").strip().splitlines()[-2:]) or f"código {r.returncode}"
+        raise RuntimeError(f"No se pudo extraer el audio del video: {tail}")
 
 
 def transcribe(wav, out_prefix, glossary=""):
