@@ -532,7 +532,7 @@ function drawCaption(t){
   const ph=P().find(p=>p.length&&t>=p[0].start&&t<p[p.length-1].end+0.05);
   if(!ph) return;
   const st=CAPSTYLE[STYLE]||CAPSTYLE.clasico;
-  const fsz=st.size*CW/OW;                      // mirror ASS: size relative to export width
+  let fsz=st.size*CW/OW;                        // mirror ASS: size relative to export width
   const age=t-ph[0].start;
   let scale=1, alpha=1;
   if(ANIM==="pop"){ scale=popScale(age); alpha=Math.min(1,age/0.12); }
@@ -542,17 +542,39 @@ function drawCaption(t){
   const y=CH*0.776;
   CTX.translate(CW/2,y); CTX.scale(scale,scale); CTX.translate(-CW/2,-y);
   CTX.font=`700 ${fsz}px Arial`;
-  CTX.textBaseline="alphabetic"; CTX.lineJoin="round"; CTX.lineWidth=fsz/6; CTX.strokeStyle="#000";
+  CTX.textBaseline="alphabetic"; CTX.lineJoin="round"; CTX.strokeStyle="#000";
   const words=ph.map(w=>st.upper?w.text.toUpperCase():w.text);
-  const widths=words.map(x=>CTX.measureText(x).width), sp=CTX.measureText(" ").width;
-  const totalW=widths.reduce((a,b)=>a+b,0)+sp*(words.length-1);
-  let x=(CW-totalW)/2;
-  ph.forEach((w,i)=>{
-    const active=t>=w.start&&t<w.end;
-    CTX.strokeText(words[i],x,y);
-    CTX.fillStyle=active?st.active:"#fff";
-    CTX.fillText(words[i],x,y);
-    x+=widths[i]+sp;
+  const fszBase=fsz, maxW=CW*0.92;
+  const measure=()=>{CTX.font=`700 ${fsz}px Arial`;
+    return {ws:words.map(x=>CTX.measureText(x).width), sp:CTX.measureText(" ").width};};
+  let m=measure(), totalW=m.ws.reduce((a,b)=>a+b,0)+m.sp*(words.length-1);
+  if(totalW>maxW){                               // AUTO-FIT: shrink (min 60%)…
+    fsz=Math.max(fszBase*0.6, fsz*maxW/totalW);
+    m=measure(); totalW=m.ws.reduce((a,b)=>a+b,0)+m.sp*(words.length-1);
+  }
+  CTX.lineWidth=fsz/6;
+  // …and if it STILL overflows, wrap to 2 balanced lines (mirrors ASS wrapping)
+  let rows=[ph.map((w,i)=>({w,txt:words[i],wd:m.ws[i]}))];
+  if(totalW>maxW&&words.length>1){
+    let best=1, diff=1e9;
+    for(let k=1;k<words.length;k++){
+      const a=m.ws.slice(0,k).reduce((x,y)=>x+y,0)+m.sp*(k-1);
+      const b=m.ws.slice(k).reduce((x,y)=>x+y,0)+m.sp*(words.length-k-1);
+      if(Math.abs(a-b)<diff){diff=Math.abs(a-b);best=k;}
+    }
+    rows=[rows[0].slice(0,best),rows[0].slice(best)];
+  }
+  const lh=fsz*1.18, y0=y-(rows.length-1)*lh;
+  rows.forEach((row,r)=>{
+    const rw=row.reduce((a,c)=>a+c.wd,0)+m.sp*(row.length-1);
+    let x=(CW-rw)/2; const ry=y0+r*lh;
+    row.forEach(c=>{
+      const active=t>=c.w.start&&t<c.w.end;
+      CTX.strokeText(c.txt,x,ry);
+      CTX.fillStyle=active?st.active:"#fff";
+      CTX.fillText(c.txt,x,ry);
+      x+=c.wd+m.sp;
+    });
   });
   CTX.restore();
 }
@@ -567,8 +589,12 @@ function drawHook(t){
   const scale=popScale(age);
   const alpha=age<0.12?age/0.12:age>3.0?Math.max(0,(3.4-age)/0.4):1;
   CTX.save(); CTX.globalAlpha=alpha;
-  const size=0.072*CW*1080/OW; CTX.font=`800 ${size}px Arial`;
-  const maxW=CW*0.86, lines=[]; let cur="";
+  let size=0.072*CW*1080/OW; CTX.font=`800 ${size}px Arial`;
+  const maxW=CW*0.86;
+  // AUTO-FIT: the longest word must fit (wrap can't split words)
+  const lw=Math.max(...title.split(" ").map(w=>CTX.measureText(w).width));
+  if(lw>maxW){ size*=maxW/lw; CTX.font=`800 ${size}px Arial`; }
+  const lines=[]; let cur="";
   title.split(" ").forEach(w=>{ const t2=(cur+" "+w).trim();
     if(cur&&CTX.measureText(t2).width>maxW){lines.push(cur);cur=w;}else cur=t2; });
   if(cur)lines.push(cur); const shown=lines.slice(0,2);

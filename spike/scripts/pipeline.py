@@ -44,6 +44,29 @@ MARGIN_V = 430               # captions in lower third (chest), clear of face & 
 MAX_WORDS_PER_LINE = 3       # short phrases, like Submagic/Opus
 GAP_SPLIT_MS = 700           # start a new phrase after a pause this long
 
+FONT_TTF = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+_FONT_CACHE = {}
+
+
+def _text_w(text, size):
+    """Measure text width in px with the SAME TTF libass renders (Arial Bold),
+    so the auto-fit below matches what actually gets burned."""
+    from PIL import ImageFont
+    f = _FONT_CACHE.get(size)
+    if f is None:
+        f = ImageFont.truetype(FONT_TTF, size)
+        _FONT_CACHE[size] = f
+    return f.getlength(text)
+
+
+def _fit_size(text, base, max_w, floor=28):
+    """Largest font size <= base that fits text within max_w."""
+    tw = _text_w(text, base)
+    if tw <= max_w:
+        return base
+    return max(floor, int(base * max_w / tw * 0.98))
+
+
 # caption style presets (ASS colours are &HAABBGGRR). base text is always white/bold.
 STYLES = {
     "clasico":  dict(size=78, active="&H0000E5FF", outline=5, upper=False),  # white + amber
@@ -203,8 +226,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         "pop":  r"{\fad(70,0)\t(0,150,\fscx112\fscy112)\t(150,270,\fscx100\fscy100)}",
         "slide": r"{\fad(120,0)\t(0,220,\frz0)}",  # subtle settle
     }
+    max_line_w = (w - 2 * MARGIN_H) * 0.97
     events = []   # [start, end, text, is_first_of_phrase]
     for ph in phrases:
+        # AUTO-FIT: if this phrase is wider than the safe area at the base size,
+        # shrink its font (per-phrase \fs tag) so it NEVER clips off-screen.
+        plain = " ".join((t["text"].upper() if st["upper"] else t["text"]) for t in ph)
+        # shrink at most to 60% of the base size; beyond that ASS wraps to 2 lines
+        # (stable within a phrase because the text never changes between events)
+        fs = _fit_size(plain, st["size"], max_line_w, floor=int(st["size"] * 0.6))
+        fs_tag = f"{{\\fs{fs}}}" if fs != st["size"] else ""
         for i, active in enumerate(ph):
             parts = []
             for w_ in ph:
@@ -217,7 +248,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     parts.append(token)
             start = active["start"]
             end = ph[i + 1]["start"] if i + 1 < len(ph) else active["end"]
-            events.append([start, end, " ".join(parts), i == 0])
+            events.append([start, end, fs_tag + " ".join(parts), i == 0])
 
     events.sort(key=lambda e: e[0])
     anim_tag = ANIM.get(anim, "")
@@ -377,6 +408,8 @@ def make_hook_ass(title, w, h, out, dur=3.4):
     AMBER = r"\c&H20B0FF&"      # #FFB020 in ASS BGR
     WHITE = r"\c&HFFFFFF&"
     words = (title or "").upper().split()
+    if words:  # AUTO-FIT: libass wraps lines but cannot break a WORD -> make sure
+        size = _fit_size(max(words, key=len), size, w * 0.84, floor=26)  # the longest fits
     # highlight the informative words: alternate among words of >=5 chars
     longs = [i for i, t in enumerate(words) if len(t) >= 5]
     hot = set(longs[::2] if longs else [])
