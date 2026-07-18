@@ -573,8 +573,11 @@ async function runSingle(){
   const fd=new FormData();
   fd.append("video",FILES[0]); fd.append("glossary",$("#glossary").value); fd.append("highlights",$("#highlights").value);
   show("#s-analyzing");
-  let r; try{ r=await(await fetch("/analyze",{method:"POST",body:fd})).json(); }
+  let resp; try{ resp=await fetch("/analyze",{method:"POST",body:fd}); }
   catch(e){ return fail("No se pudo iniciar el procesamiento."); }
+  const r=await resp.json().catch(()=>({}));
+  if(resp.status===409){ // motor no listo (p.ej. modelo corrupto) -> re-preparar
+    show("#s-setup"); ENGINE_READY=false; $("#go").disabled=true; initSetup(); return; }
   if(r.detail) return fail(r.detail);
   JOB=r.job_id; poll();
 }

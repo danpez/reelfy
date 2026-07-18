@@ -141,76 +141,122 @@ SETUP["state"] = "missing" if _needs_setup() else "ready"
 def _dl_file(url, dst, label, lo, hi, size_hint=0):
     """Descarga con progreso [lo,hi]. VERIFICA que se completó (Content-Length) y
     reintenta si se truncó — así una descarga interrumpida nunca queda como buena."""
+    RETRIES = 5
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_suffix(dst.suffix + ".part")
     done = total = 0
-    for attempt in range(3):
-        req = urllib.request.Request(url, headers={"User-Agent": "Reelfy/0.1"})
-        done = 0
-        with urllib.request.urlopen(req) as r, open(tmp, "wb") as f:
-            total = int(r.headers.get("Content-Length") or size_hint) or 1
-            while chunk := r.read(1 << 20):
-                f.write(chunk); done += len(chunk)
-                SETUP.update(pct=round(lo + (hi - lo) * done / total, 1),
-                             msg=f"{label}… {done // (1 << 20)} / {total // (1 << 20)} MB")
-        if total <= 1 or done >= total:      # completa
-            tmp.rename(dst)
-            return
-        SETUP.update(msg=f"{label}… descarga incompleta, reintentando ({attempt + 2}/3)")
-        time.sleep(1)
+    last_err = ""
+    for attempt in range(RETRIES):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Reelfy/0.1"})
+            done = 0
+            with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+                total = int(r.headers.get("Content-Length") or size_hint) or 1
+                while chunk := r.read(1 << 20):
+                    f.write(chunk); done += len(chunk)
+                    SETUP.update(pct=round(lo + (hi - lo) * done / total, 1),
+                                 msg=f"{label}… {done // (1 << 20)} / {total // (1 << 20)} MB")
+            if total <= 1 or done >= total:                 # completa y verificada
+                tmp.rename(dst)
+                return
+            last_err = f"incompleta {done // (1 << 20)}/{total // (1 << 20)} MB"
+        except Exception as e:                              # noqa: red caída, timeout, etc.
+            last_err = str(e)
+        SETUP.update(msg=f"{label}… reintentando ({attempt + 2}/{RETRIES}) — {last_err}")
+        time.sleep(min(2 ** attempt, 8))                    # backoff
     tmp.unlink(missing_ok=True)
-    raise RuntimeError(f"Descarga incompleta tras 3 intentos "
-                       f"({done // (1 << 20)}/{total // (1 << 20)} MB). Revisa tu conexión.")
+    raise RuntimeError(f"No se pudo descargar «{label}» tras {RETRIES} intentos ({last_err}). "
+                       f"Revisa tu conexión a internet y reintenta.")
 
 
 def _pull_llm(lo, hi):
-    """ollama pull con progreso (stream JSON) mapeado a [lo,hi]."""
-    url = os.environ["REELFY_OLLAMA_URL"] + "/api/pull"
-    body = json.dumps({"model": paths.LLM_MODEL}).encode()
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req) as r:
-        for line in r:
-            try:
-                d = json.loads(line)
-            except Exception:  # noqa
-                continue
-            tot, comp = d.get("total"), d.get("completed")
-            if tot and comp:
-                SETUP.update(pct=round(lo + (hi - lo) * comp / tot, 1),
-                             msg=f"Descargando IA de lenguaje… {comp // (1 << 20)} / {tot // (1 << 20)} MB")
+    """ollama pull con progreso (stream JSON), reintenta y VERIFICA que quedó listo."""
+    for attempt in range(4):
+        try:
+            url = os.environ["REELFY_OLLAMA_URL"] + "/api/pull"
+            body = json.dumps({"model": paths.LLM_MODEL}).encode()
+            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+            err = None
+            with urllib.request.urlopen(req, timeout=120) as r:
+                for line in r:
+                    try:
+                        d = json.loads(line)
+                    except Exception:  # noqa
+                        continue
+                    if d.get("error"):
+                        err = d["error"]
+                    tot, comp = d.get("total"), d.get("completed")
+                    if tot and comp:
+                        SETUP.update(pct=round(lo + (hi - lo) * comp / tot, 1),
+                                     msg=f"Descargando IA de lenguaje… {comp // (1 << 20)} / {tot // (1 << 20)} MB")
+            if not err and _llm_ready():                    # descargado y verificado
+                return
+        except Exception as e:  # noqa
+            err = str(e)
+        SETUP.update(msg=f"IA de lenguaje… reintentando ({attempt + 2}/4)")
+        time.sleep(min(2 ** attempt, 8))
+    raise RuntimeError("No se pudo preparar la IA de lenguaje. Revisa tu conexión y reintenta.")
+
+
+def _ensure_ollama(timeout=30):
+    """Garantiza que el ollama embebido responde; lo reinicia si murió."""
+    for _ in range(int(timeout * 2)):
+        if _ollama_up():
+            return True
+        if _ollama_proc is not None and _ollama_proc.poll() is not None:
+            print("ollama murió, reiniciando…"); _start_ollama()
+        time.sleep(0.5)
+    return _ollama_up()
+
+
+def _disk_free_gb():
+    import shutil
+    return shutil.disk_usage(paths.DATA).free / (1 << 30)
 
 
 def _run_setup():
     try:
-        # 1) modelo de voz (whisper) 0..55%
+        need_dl = not paths.engine_ready() or (BUNDLED_OLLAMA and not _llm_ready())
+        if need_dl and _disk_free_gb() < 6:
+            raise RuntimeError(f"Espacio en disco insuficiente ({_disk_free_gb():.1f} GB libres). "
+                               f"Reelfy necesita ~6 GB para los modelos de IA. Libera espacio y reintenta.")
+        # 1) modelo de voz (whisper) 0..55% — verifica tamaño; si estaba corrupto, lo re-baja
         if not paths.engine_ready():
+            paths._MODEL_DATA.unlink(missing_ok=True)       # limpia un posible modelo truncado
             _dl_file(paths.MODEL_URL, paths._MODEL_DATA, "Descargando modelo de voz",
                      0, 55, paths.MODEL_SIZE)
+            if not paths.engine_ready():
+                raise RuntimeError("El modelo de voz quedó incompleto. Reintenta.")
         # 2) IA de lenguaje (LLM en el ollama embebido) 55..90%
         if BUNDLED_OLLAMA:
-            for _ in range(30):
-                if _ollama_up():
-                    break
-                time.sleep(0.5)
+            SETUP.update(msg="Iniciando la IA de lenguaje…")
+            _ensure_ollama()
             if not _llm_ready():
                 _pull_llm(55, 90)
-        # 3) alineador de subtítulos (mejora la sincronía) 90..100%
+        # 3) alineador de subtítulos 90..100% (opcional: reintenta pero no bloquea)
         SETUP.update(pct=92, msg="Preparando la sincronía de subtítulos…")
         try:
             import align as align_mod
-            align_mod.preload()
+            for _ in range(3):
+                if align_mod.preload():
+                    break
+                time.sleep(2)
         except Exception:  # noqa
-            pass  # opcional: analyze funciona sin él
+            pass  # analyze funciona sin él (usa el timing de whisper)
         SETUP.update(state="ready", pct=100, msg="Listo")
     except Exception as e:  # noqa
         traceback.print_exc()
-        SETUP.update(state="error", msg=f"Preparación falló: {e}")
+        SETUP.update(state="error", pct=SETUP.get("pct", 0),
+                     msg=str(e) or "La preparación falló. Reintenta.")
 
 
 @app.get("/setup")
 def setup_status():
-    if SETUP["state"] not in ("downloading",) and not _needs_setup():
-        SETUP.update(state="ready", pct=100)
+    # re-detecta: si algo se corrompió/borró tras estar listo, vuelve a "missing"
+    if SETUP["state"] not in ("downloading", "error"):
+        SETUP["state"] = "ready" if not _needs_setup() else "missing"
+        if SETUP["state"] == "ready":
+            SETUP["pct"] = 100
     return {**SETUP, "llm": _llm_ready(), **_lic_state()}
 
 
