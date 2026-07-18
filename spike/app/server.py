@@ -139,18 +139,28 @@ SETUP["state"] = "missing" if _needs_setup() else "ready"
 
 
 def _dl_file(url, dst, label, lo, hi, size_hint=0):
-    """Descarga con progreso mapeado al rango [lo,hi] del progreso global."""
+    """Descarga con progreso [lo,hi]. VERIFICA que se completó (Content-Length) y
+    reintenta si se truncó — así una descarga interrumpida nunca queda como buena."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_suffix(dst.suffix + ".part")
-    req = urllib.request.Request(url, headers={"User-Agent": "Reelfy/0.1"})
-    with urllib.request.urlopen(req) as r, open(tmp, "wb") as f:
-        total = int(r.headers.get("Content-Length") or size_hint) or 1
+    done = total = 0
+    for attempt in range(3):
+        req = urllib.request.Request(url, headers={"User-Agent": "Reelfy/0.1"})
         done = 0
-        while chunk := r.read(1 << 20):
-            f.write(chunk); done += len(chunk)
-            SETUP.update(pct=round(lo + (hi - lo) * done / total, 1),
-                         msg=f"{label}… {done // (1 << 20)} / {total // (1 << 20)} MB")
-    tmp.rename(dst)
+        with urllib.request.urlopen(req) as r, open(tmp, "wb") as f:
+            total = int(r.headers.get("Content-Length") or size_hint) or 1
+            while chunk := r.read(1 << 20):
+                f.write(chunk); done += len(chunk)
+                SETUP.update(pct=round(lo + (hi - lo) * done / total, 1),
+                             msg=f"{label}… {done // (1 << 20)} / {total // (1 << 20)} MB")
+        if total <= 1 or done >= total:      # completa
+            tmp.rename(dst)
+            return
+        SETUP.update(msg=f"{label}… descarga incompleta, reintentando ({attempt + 2}/3)")
+        time.sleep(1)
+    tmp.unlink(missing_ok=True)
+    raise RuntimeError(f"Descarga incompleta tras 3 intentos "
+                       f"({done // (1 << 20)}/{total // (1 << 20)} MB). Revisa tu conexión.")
 
 
 def _pull_llm(lo, hi):

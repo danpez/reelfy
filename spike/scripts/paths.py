@@ -42,7 +42,10 @@ def model_path():
 
 
 def engine_ready():
-    return model_path().exists()
+    """El modelo existe Y está COMPLETO (el tamaño coincide). Un modelo truncado
+    por una descarga interrumpida se detecta aquí y se vuelve a descargar."""
+    p = model_path()
+    return p.exists() and p.stat().st_size >= MODEL_SIZE - 1_000_000
 
 
 def _bin(name, brew_default):
