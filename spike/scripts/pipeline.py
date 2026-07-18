@@ -165,13 +165,26 @@ def transcribe(wav, out_prefix, glossary=""):
     """
     # --dtw: token-level timestamps via cross-attention alignment (DTW).
     # Much tighter caption sync than the default heuristic timing.
-    cmd = [str(WCLI), "-m", str(paths_mod.model_path()), "-f", str(wav),
-           "-l", "es", "-ml", "1", "-sow", "--dtw", "large.v3.turbo",
-           "-oj", "-of", str(out_prefix)]
+    base = [str(WCLI), "-m", str(paths_mod.model_path()), "-f", str(wav),
+            "-l", "es", "-ml", "1", "-sow", "--dtw", "large.v3.turbo",
+            "-oj", "-of", str(out_prefix)]
     if glossary:
-        cmd += ["--prompt", glossary, "--carry-initial-prompt"]
-    run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return Path(f"{out_prefix}.json")
+        base += ["--prompt", glossary, "--carry-initial-prompt"]
+    # Primer intento con GPU (Metal). En algunas GPUs recientes (p.ej. Apple M4)
+    # el backend Metal aborta (SIGABRT); se reintenta en CPU (-ng) para que
+    # funcione en CUALQUIER Mac. La CPU de Apple Silicon lo corre bien, más lento.
+    last = ""
+    for extra in ([], ["-ng"]):
+        print(f"$ whisper ({'CPU' if extra else 'GPU'})")
+        r = subprocess.run(base + extra, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE, text=True)
+        if r.returncode == 0 and Path(f"{out_prefix}.json").exists():
+            if extra:
+                print("   whisper: Metal (GPU) falló en este equipo, se usó CPU")
+            return Path(f"{out_prefix}.json")
+        last = " ".join((r.stderr or "").strip().splitlines()[-4:]) or f"señal/código {r.returncode}"
+        print(f"   whisper {'CPU' if extra else 'GPU'} rc={r.returncode}: {last}")
+    raise RuntimeError(f"La transcripción falló: {last}")
 
 
 def load_words(json_path):
