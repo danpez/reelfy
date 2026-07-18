@@ -291,6 +291,15 @@ def get_logs():
     return PlainTextResponse(data[-200_000:])  # últimos ~200 KB
 
 
+@app.get("/logs/download")
+def download_logs():
+    """Descarga el registro como .txt (se guarda directo, sin copiar a mano)."""
+    data = LOG_FILE.read_text(errors="replace") if LOG_FILE.exists() else "(sin registro)"
+    name = f"reelfy-log-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+    return PlainTextResponse(data[-500_000:], media_type="application/octet-stream",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
 def _new(job_id, **kw):
     JOBS[job_id] = dict(phase="analyzing", pct=0, message="Iniciando…", eta=None,
                         elapsed=None, plan=None, clips=[], error=None, **kw)

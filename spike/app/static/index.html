@@ -474,7 +474,8 @@
     <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn ghost" id="retry">Volver</button>
       <button class="btn ghost" id="showLog"><svg class="ic" viewBox="0 0 24 24"><use href="#i-type"/></svg>Ver detalles del error</button>
-      <button class="btn ghost" id="copyLog"><svg class="ic" viewBox="0 0 24 24"><use href="#i-save"/></svg>Copiar registro</button>
+      <button class="btn ghost" id="saveLog"><svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg>Guardar registro (.txt)</button>
+      <button class="btn ghost" id="copyLog"><svg class="ic" viewBox="0 0 24 24"><use href="#i-save"/></svg>Copiar</button>
     </div>
     <pre id="logBox" style="display:none;margin-top:14px;max-height:280px;overflow:auto;background:var(--sunken);border:1px solid var(--line);border-radius:8px;padding:12px;font-size:11px;color:var(--muted);white-space:pre-wrap"></pre>
   </div></section>
@@ -1324,6 +1325,14 @@ $("#showLog").onclick=async()=>{ const b=$("#logBox");
 $("#copyLog").onclick=async()=>{ const t=await loadLog();
   try{ await navigator.clipboard.writeText(t); $("#copyLog").innerHTML=ICO("check")+"Copiado"; }
   catch(e){ const b=$("#logBox"); b.textContent=t; b.style.display="block"; } };
+$("#saveLog").onclick=()=>{
+  // navega al endpoint de descarga: la app nativa lo guarda en Descargas y lo revela en Finder;
+  // en navegador, descarga normal. Fallback: Blob del texto.
+  try{ const a=document.createElement("a"); a.href="/logs/download"; a.download="reelfy-log.txt";
+    document.body.appendChild(a); a.click(); a.remove(); }
+  catch(e){ loadLog().then(t=>{ const u=URL.createObjectURL(new Blob([t],{type:"text/plain"}));
+    const a=document.createElement("a"); a.href=u; a.download="reelfy-log.txt"; a.click(); URL.revokeObjectURL(u); }); }
+};
 
 /* dev: abrir el editor con un plan simulado (validación de UI sin análisis) */
 if(location.hash==="#demo"){
