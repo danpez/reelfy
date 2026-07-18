@@ -47,6 +47,11 @@ fi
 if [ -n "$OLLAMA_LIBEXEC" ] && [ -f "$OLLAMA_LIBEXEC/ollama" ]; then
   mkdir -p "$ENGINE/bin/ollama-runtime"
   cp -R "$OLLAMA_LIBEXEC"/ "$ENGINE/bin/ollama-runtime/"
+  # el runner MLX enlaza a /opt/mlx-c (dependencia externa de Homebrew) con un
+  # symlink que Gatekeeper rechaza; ollama usa Metal/llama-server sin problema.
+  rm -rf "$ENGINE/bin/ollama-runtime/lib/ollama/mlx_metal_v3"
+  # por si acaso: eliminar cualquier symlink roto que quede
+  find "$ENGINE/bin/ollama-runtime" -type l ! -exec test -e {} \; -exec rm -f {} \;
   echo "    ollama desde $OLLAMA_LIBEXEC ($(du -sh "$ENGINE/bin/ollama-runtime" | cut -f1))"
 else
   echo "    ⚠ ollama no encontrado — la IA de lenguaje no vendrá embebida"
