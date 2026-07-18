@@ -38,9 +38,10 @@ echo "==> [5/5] estampando el DMG"
 xcrun stapler staple "$DMG"
 
 echo "==> verificación"
-# desmontar cualquier volumen Reelfy stale (evita verificar un montaje viejo)
-mount | grep -i "/Volumes/Reelfy" | awk '{print $1}' | while read -r d; do
-  hdiutil detach "$d" -force >/dev/null 2>&1
+# desmontar cualquier volumen Reelfy stale (evita verificar un montaje viejo).
+# `|| true`: grep sin match devuelve 1 y con `set -e` abortaría el script.
+(mount | grep -i "/Volumes/Reelfy" | awk '{print $1}' || true) | while read -r d; do
+  hdiutil detach "$d" -force >/dev/null 2>&1 || true
 done
 MP=$(hdiutil attach "$DMG" -nobrowse -readonly | grep Volumes | awk '{print $3}')
 spctl -a -vvv "$MP/Reelfy.app" 2>&1 | sed 's/^/    /'
