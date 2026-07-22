@@ -41,16 +41,20 @@ cp "$CACHE/ff/ffmpeg" "$CACHE/ff/ffprobe" "$ENGINE/bin/"
 chmod +x "$ENGINE/bin/ffmpeg" "$ENGINE/bin/ffprobe"
 
 echo "==> [4/5] ollama embebido (binario + runners)"
-# Resolver la última release de ollama y bajar el tgz de Linux. No-fatal: si
-# falla, la app compila igual (solo sin LLM embebido), como en macOS.
+# OJO: ollama publica el build de Linux como `ollama-linux-amd64.tar.zst`
+# (antes .tgz). Se resuelve el asset del JSON de la release y se extrae con zstd.
+# No-fatal: si falla, la app compila igual (solo sin LLM embebido), como en macOS.
 if [ ! -f "$CACHE/ollama/bin/ollama" ]; then
   set +e
-  # Tomar la URL del asset directamente del JSON de la release (robusto al nombre)
   OLLAMA_URL=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest \
-    | grep -oE '"browser_download_url": *"[^"]*ollama-linux-amd64\.tgz"' | head -1 | cut -d'"' -f4)
-  [ -n "$OLLAMA_URL" ] && curl -fSL -o "$CACHE/ollama.tgz" "$OLLAMA_URL"
-  mkdir -p "$CACHE/ollama"
-  tar -xzf "$CACHE/ollama.tgz" -C "$CACHE/ollama" 2>/dev/null
+    | grep -oE '"browser_download_url": *"[^"]*ollama-linux-amd64\.tar\.zst"' \
+    | head -1 | cut -d'"' -f4)
+  if [ -n "$OLLAMA_URL" ]; then
+    echo "    bajando $(basename "$OLLAMA_URL")…"
+    curl -fSL -o "$CACHE/ollama.tar.zst" "$OLLAMA_URL"
+    mkdir -p "$CACHE/ollama"
+    tar --use-compress-program=unzstd -xf "$CACHE/ollama.tar.zst" -C "$CACHE/ollama"
+  fi
   set -e
 fi
 if [ -f "$CACHE/ollama/bin/ollama" ]; then
@@ -85,3 +89,4 @@ find "$ENGINE/python/lib/python3.12/site-packages" -type d \( -name tests -o -na
      -prune -exec rm -rf {} + 2>/dev/null || true
 
 echo "OK -> $ENGINE ($(du -sh "$ENGINE" | cut -f1))"
+du -sh "$ENGINE"/* 2>/dev/null | sed "s|^|   |"   # desglose por carpeta

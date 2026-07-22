@@ -75,3 +75,4 @@ find "$ENGINE/python/lib/python3.12/site-packages" -type d \( -name tests -o -na
      -prune -exec rm -rf {} + 2>/dev/null || true
 
 echo "OK -> $ENGINE ($(du -sh "$ENGINE" | cut -f1))"
+du -sh "$ENGINE"/* 2>/dev/null | sed "s|^|   |"   # desglose por carpeta
