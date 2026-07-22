@@ -177,7 +177,7 @@ jobs:
           path: |
             reelfy-desktop/src-tauri/target/release/bundle/**/*.dmg
             reelfy-desktop/src-tauri/target/release/bundle/**/*.deb
-            reelfy-desktop/src-tauri/target/release/bundle/**/*.exe
+            reelfy-desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
             reelfy-desktop/src-tauri/target/release/bundle/**/*.msi
 
   release:
@@ -203,5 +203,5 @@ jobs:
           files: |
             dist/**/*.dmg
             dist/**/*.deb
-            dist/**/*.exe
+            dist/**/*-setup.exe
             dist/**/*.msi
