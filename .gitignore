@@ -33,3 +33,7 @@ desktop/dist/
 spike/bin/
 spike/ollama/
 spike/logs/
+
+# Reelfy Tauri: motor ensamblado (pesado, por build/CI)
+reelfy-desktop/src-tauri/engine/
+reelfy-desktop/src-tauri/gen/
