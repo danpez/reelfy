@@ -57,8 +57,12 @@ soxr==1.1.0
 starlette==1.3.1
 sympy==1.14.0
 threadpoolctl==3.6.0
-torch==2.13.0
-torchaudio==2.11.0
+# torch/torchaudio SOLO los usa align.py (el alineador fino, dentro de try/except).
+# En Windows se omiten: (1) NSIS no puede empaquetar >2GB y torch pesa ~1.5GB;
+# (2) sin ellos el pipeline cae al timing nativo de whisper --dtw. El resto
+# (whisper, captions, ollama, reframe onnx, audio) no depende de torch.
+torch==2.13.0; sys_platform != "win32"
+torchaudio==2.11.0; sys_platform != "win32"
 tqdm==4.68.4
 typing-inspection==0.4.2
 typing_extensions==4.16.0
