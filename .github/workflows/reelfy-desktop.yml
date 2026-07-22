@@ -25,7 +25,9 @@ jobs:
           - os: ubuntu-22.04
             script: assemble-engine-linux.sh
             artifact: reelfy-linux
-            bundles: "appimage"
+            # deb: rápido, sin linuxdeploy/FUSE, cubre Ubuntu/Debian/Mint.
+            # (AppImage universal queda pendiente como mejora.)
+            bundles: "deb"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
