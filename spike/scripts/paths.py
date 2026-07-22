@@ -67,9 +67,33 @@ MODEL_URL = ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
 MODEL_SIZE = 1_624_555_275  # bytes, para % de descarga
 
 
+# Alineador de captions (wav2vec2 CTC MMS_FA exportado a ONNX int8). Corre con
+# onnxruntime — sin torch. Mismo patrón que whisper: en el repo durante dev,
+# descargado a DATA en la app.
+_ALIGNER_REPO = SPIKE / "models/mms_fa_int8.onnx"
+_ALIGNER_DATA = DATA / "models/mms_fa_int8.onnx"
+# Se aloja en el repo PÚBLICO de releases (clipfy es privado y sus assets
+# requerirían autenticación para descargarse).
+ALIGNER_URL = os.environ.get(
+    "REELFY_ALIGNER_URL",
+    "https://github.com/danpez/reelfy-releases/releases/download/models-v1/mms_fa_int8.onnx")
+ALIGNER_SIZE = 357_386_092  # bytes, para verificar que la descarga quedó completa
+
+
 def model_path():
     """Ruta efectiva del modelo whisper (repo en dev, descargado en app)."""
     return _MODEL_REPO if _MODEL_REPO.exists() else _MODEL_DATA
+
+
+def aligner_model_path():
+    """Ruta efectiva del modelo del alineador (repo en dev, descargado en app)."""
+    return _ALIGNER_REPO if _ALIGNER_REPO.exists() else _ALIGNER_DATA
+
+
+def aligner_ready():
+    """El modelo del alineador existe Y está completo (tamaño coincide)."""
+    p = aligner_model_path()
+    return p.exists() and p.stat().st_size >= ALIGNER_SIZE - 1_000_000
 
 
 def engine_ready():

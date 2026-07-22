@@ -234,8 +234,18 @@ def _run_setup():
             _ensure_ollama()
             if not _llm_ready():
                 _pull_llm(55, 90)
-        # 3) alineador de subtítulos 90..100% (opcional: reintenta pero no bloquea)
-        SETUP.update(pct=92, msg="Preparando la sincronía de subtítulos…")
+        # 3) afinador de subtítulos 90..100% (el "wedge": sincronía fina).
+        #    Modelo MMS_FA en ONNX int8 (~357 MB) que corre con onnxruntime.
+        #    Opcional: si falla, analyze sigue con el timing de whisper.
+        if not paths.aligner_ready():
+            try:
+                paths._ALIGNER_DATA.unlink(missing_ok=True)   # limpia uno truncado
+                _dl_file(paths.ALIGNER_URL, paths._ALIGNER_DATA,
+                         "Descargando el afinador de subtítulos", 90, 98,
+                         paths.ALIGNER_SIZE)
+            except Exception:  # noqa
+                traceback.print_exc()   # no bloquea el setup
+        SETUP.update(pct=98, msg="Preparando la sincronía de subtítulos…")
         try:
             import align as align_mod
             for _ in range(3):

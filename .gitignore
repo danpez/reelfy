@@ -17,6 +17,10 @@ spike/models/*
 !spike/models/.gitkeep
 !spike/models/*.onnx
 !spike/models/*.rnnn
+# El alineador (357 MB) NO va al repo: se publica como release y la app lo descarga.
+spike/models/mms_fa_int8.onnx
+spike/models/mms_fa_fp32.onnx*
+spike/models/mms_fa_pre.onnx
 spike/assets/*
 !spike/assets/brand/
 !spike/assets/music/
