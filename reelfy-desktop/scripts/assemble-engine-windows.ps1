@@ -48,7 +48,12 @@ try {
   if ($asset) {
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$CACHE/ollama.zip"
     Expand-Archive -Path "$CACHE/ollama.zip" -DestinationPath "$ENGINE/bin/ollama-runtime" -Force
-    Write-Host "    ollama $($rel.tag_name) embebido"
+    # Podar runners/libs de GPU (CUDA/ROCm): pesan >1GB y usamos CPU (llama-server).
+    # Sin esto, el motor supera 2GB y NSIS no puede empaquetarlo.
+    Get-ChildItem -Recurse "$ENGINE/bin/ollama-runtime" -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match 'cuda|rocm|cublas|cudnn|rocblas|hipblas|amdhip|_v11|_v12' } |
+      Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "    ollama $($rel.tag_name) embebido (runners GPU podados)"
   } else { Write-Host "    (asset de ollama no encontrado; sin LLM embebido)" }
 } catch { Write-Host "    ollama no se pudo obtener; el build continua sin LLM embebido" }
 
@@ -61,4 +66,9 @@ tar -xzf "$CACHE/python.tar.gz" -C "$ENGINE"          # -> engine/python (python
   --extra-index-url https://download.pytorch.org/whl/cpu -r "$SPIKE/requirements.txt"
 Get-ChildItem -Recurse "$ENGINE/python" -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Host "OK -> $ENGINE"
+$sz = (Get-ChildItem -Recurse $ENGINE -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1MB
+Write-Host ("OK -> $ENGINE ({0:N0} MB)" -f $sz)
+Get-ChildItem $ENGINE -Directory | ForEach-Object {
+  $s = (Get-ChildItem -Recurse $_.FullName -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1MB
+  Write-Host ("   {0}: {1:N0} MB" -f $_.Name, $s)
+}
