@@ -58,7 +58,12 @@ if [ -f "$CACHE/ollama/bin/ollama" ]; then
   cp "$CACHE/ollama/bin/ollama" "$ENGINE/bin/ollama-runtime/ollama"
   chmod +x "$ENGINE/bin/ollama-runtime/ollama"
   [ -d "$CACHE/ollama/lib/ollama" ] && cp -a "$CACHE/ollama/lib" "$ENGINE/bin/ollama-runtime/"
-  echo "    ollama ${OLLAMA_TAG:-} embebido"
+  # Podar runners/libs de GPU (CUDA/ROCm): cientos de MB y usamos CPU (llama-server).
+  find "$ENGINE/bin/ollama-runtime" \
+       \( -iname "*cuda*" -o -iname "*rocm*" -o -iname "*cublas*" -o -iname "*cudnn*" \
+          -o -iname "*rocblas*" -o -iname "*hipblas*" -o -iname "*amdhip*" \) \
+       -exec rm -rf {} + 2>/dev/null || true
+  echo "    ollama embebido ($(du -sh "$ENGINE/bin/ollama-runtime" | cut -f1), runners GPU podados)"
 else
   echo "    ⚠ ollama no se pudo obtener — la IA de lenguaje no vendrá embebida (build continúa)"
 fi
