@@ -11,8 +11,15 @@ __pycache__/
 *.pyc
 
 # Spike: heavy artifacts (models, source videos, renders, intermediate work, build)
-spike/models/
-spike/assets/
+# Se conservan en el repo los assets/modelos PEQUEÑOS que el CI necesita para
+# ensamblar la app (música, marca, yunet, rnnoise); lo pesado sigue ignorado.
+spike/models/*
+!spike/models/.gitkeep
+!spike/models/*.onnx
+!spike/models/*.rnnn
+spike/assets/*
+!spike/assets/brand/
+!spike/assets/music/
 spike/input/*
 !spike/input/.gitkeep
 spike/output/*

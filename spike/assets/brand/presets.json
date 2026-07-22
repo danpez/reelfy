@@ -1,0 +1,23 @@
+{
+ "NomadaOlfativo": {
+  "style": "clasico",
+  "anim": "fade",
+  "format": "9:16",
+  "lang": "es",
+  "cap_color": "#fffb00",
+  "cap_font": "Arial",
+  "cap_scale": 1.18,
+  "cap_pos": 0.776,
+  "zoom_amt": 0.1,
+  "air": 0.16,
+  "logo_on": true,
+  "logo_pos": "tr",
+  "logo_size": 0.3,
+  "dynamic": true,
+  "enhance": true,
+  "hook": true,
+  "music": true,
+  "music_track": "lofi",
+  "music_volume": 60
+ }
+}
