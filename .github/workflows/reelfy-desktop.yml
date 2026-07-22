@@ -21,12 +21,22 @@ jobs:
           - os: macos-14
             script: assemble-engine-macos.sh
             artifact: reelfy-macos
+            bundles: "app,dmg"
           - os: ubuntu-22.04
             script: assemble-engine-linux.sh
             artifact: reelfy-linux
+            bundles: "appimage"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Liberar espacio en disco (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          df -h /
 
       - name: Node
         uses: actions/setup-node@v4
@@ -73,7 +83,7 @@ jobs:
 
       - name: Tauri build
         working-directory: reelfy-desktop
-        run: npm run tauri build
+        run: npm run tauri build -- --bundles ${{ matrix.bundles }}
 
       - name: Subir artefactos
         uses: actions/upload-artifact@v4
