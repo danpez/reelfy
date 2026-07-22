@@ -41,15 +41,27 @@ cp "$CACHE/ff/ffmpeg" "$CACHE/ff/ffprobe" "$ENGINE/bin/"
 chmod +x "$ENGINE/bin/ffmpeg" "$ENGINE/bin/ffprobe"
 
 echo "==> [4/5] ollama embebido (binario + runners)"
+# Resolver la última release de ollama y bajar el tgz de Linux. No-fatal: si
+# falla, la app compila igual (solo sin LLM embebido), como en macOS.
 if [ ! -f "$CACHE/ollama/bin/ollama" ]; then
-  curl -sL -o "$CACHE/ollama.tgz" "$OLLAMAURL"
+  set +e
+  OLLAMA_TAG=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest \
+    | grep -m1 '"tag_name"' | cut -d'"' -f4)
+  [ -n "$OLLAMA_TAG" ] && curl -fSL -o "$CACHE/ollama.tgz" \
+    "https://github.com/ollama/ollama/releases/download/${OLLAMA_TAG}/ollama-linux-amd64.tgz"
   mkdir -p "$CACHE/ollama"
-  tar -xzf "$CACHE/ollama.tgz" -C "$CACHE/ollama"
+  tar -xzf "$CACHE/ollama.tgz" -C "$CACHE/ollama" 2>/dev/null
+  set -e
 fi
-mkdir -p "$ENGINE/bin/ollama-runtime"
-cp "$CACHE/ollama/bin/ollama" "$ENGINE/bin/ollama-runtime/ollama"
-chmod +x "$ENGINE/bin/ollama-runtime/ollama"
-[ -d "$CACHE/ollama/lib/ollama" ] && cp -a "$CACHE/ollama/lib" "$ENGINE/bin/ollama-runtime/"
+if [ -f "$CACHE/ollama/bin/ollama" ]; then
+  mkdir -p "$ENGINE/bin/ollama-runtime"
+  cp "$CACHE/ollama/bin/ollama" "$ENGINE/bin/ollama-runtime/ollama"
+  chmod +x "$ENGINE/bin/ollama-runtime/ollama"
+  [ -d "$CACHE/ollama/lib/ollama" ] && cp -a "$CACHE/ollama/lib" "$ENGINE/bin/ollama-runtime/"
+  echo "    ollama ${OLLAMA_TAG:-} embebido"
+else
+  echo "    ⚠ ollama no se pudo obtener — la IA de lenguaje no vendrá embebida (build continúa)"
+fi
 
 echo "==> [5/5] python-standalone + dependencias"
 if [ ! -f "$CACHE/python.tar.gz" ]; then
