@@ -8,18 +8,7 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "label": "main",
-        "title": "Reelfy Studio",
-        "width": 1340,
-        "height": 940,
-        "minWidth": 980,
-        "minHeight": 680,
-        "center": true,
-        "backgroundColor": "#0a0c10"
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

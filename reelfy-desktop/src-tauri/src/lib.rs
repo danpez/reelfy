@@ -8,7 +8,8 @@ use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::{Manager, WebviewWindow};
+use tauri::webview::DownloadEvent;
+use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const PORT: u16 = 8317;
 
@@ -116,6 +117,72 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(Engine(Mutex::new(None)))
         .setup(|app| {
+            // Menú nativo (en macOS es necesario para ⌘C/⌘V/⌘Q dentro del webview).
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
+                let app_menu = Submenu::with_items(
+                    app,
+                    "Reelfy",
+                    true,
+                    &[
+                        &PredefinedMenuItem::about(app, Some("Reelfy"), None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::hide(app, None)?,
+                        &PredefinedMenuItem::quit(app, None)?,
+                    ],
+                )?;
+                let edit_menu = Submenu::with_items(
+                    app,
+                    "Edición",
+                    true,
+                    &[
+                        &PredefinedMenuItem::undo(app, None)?,
+                        &PredefinedMenuItem::redo(app, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::cut(app, None)?,
+                        &PredefinedMenuItem::copy(app, None)?,
+                        &PredefinedMenuItem::paste(app, None)?,
+                        &PredefinedMenuItem::select_all(app, None)?,
+                    ],
+                )?;
+                let menu = Menu::with_items(app, &[&app_menu, &edit_menu])?;
+                app.set_menu(menu)?;
+            }
+
+            // Ventana creada desde Rust para poder enganchar el manejo de descargas:
+            // el Studio descarga el video con <a download> -> lo guardamos en Downloads.
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("Reelfy Studio")
+                .inner_size(1340.0, 940.0)
+                .min_inner_size(980.0, 680.0)
+                .center()
+                .on_download(|webview, event| {
+                    if let DownloadEvent::Requested { destination, .. } = event {
+                        if let Ok(dir) = webview.path().download_dir() {
+                            if let Some(name) = destination.file_name().map(|n| n.to_owned()) {
+                                let mut dest = dir.join(&name);
+                                let stem = std::path::Path::new(&name)
+                                    .file_stem()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "reelfy".into());
+                                let ext = std::path::Path::new(&name)
+                                    .extension()
+                                    .map(|e| format!(".{}", e.to_string_lossy()))
+                                    .unwrap_or_default();
+                                let mut i = 1;
+                                while dest.exists() {
+                                    dest = dir.join(format!("{stem}-{i}{ext}"));
+                                    i += 1;
+                                }
+                                *destination = dest;
+                            }
+                        }
+                    }
+                    true
+                })
+                .build()?;
+
             let handle = app.handle().clone();
 
             // 1) ¿ya hay un motor sano (dev con el server ya corriendo)? si no, lo lanzamos.
