@@ -83,6 +83,11 @@ jobs:
 
       - name: Tauri build
         working-directory: reelfy-desktop
+        env:
+          # linuxdeploy/appimagetool son AppImages que usan FUSE; los runners no
+          # lo permiten -> extract-and-run. NO_STRIP evita fallos al hacer strip.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          NO_STRIP: "true"
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
 
       - name: Subir artefactos

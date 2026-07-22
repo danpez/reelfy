@@ -45,10 +45,10 @@ echo "==> [4/5] ollama embebido (binario + runners)"
 # falla, la app compila igual (solo sin LLM embebido), como en macOS.
 if [ ! -f "$CACHE/ollama/bin/ollama" ]; then
   set +e
-  OLLAMA_TAG=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest \
-    | grep -m1 '"tag_name"' | cut -d'"' -f4)
-  [ -n "$OLLAMA_TAG" ] && curl -fSL -o "$CACHE/ollama.tgz" \
-    "https://github.com/ollama/ollama/releases/download/${OLLAMA_TAG}/ollama-linux-amd64.tgz"
+  # Tomar la URL del asset directamente del JSON de la release (robusto al nombre)
+  OLLAMA_URL=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest \
+    | grep -oE '"browser_download_url": *"[^"]*ollama-linux-amd64\.tgz"' | head -1 | cut -d'"' -f4)
+  [ -n "$OLLAMA_URL" ] && curl -fSL -o "$CACHE/ollama.tgz" "$OLLAMA_URL"
   mkdir -p "$CACHE/ollama"
   tar -xzf "$CACHE/ollama.tgz" -C "$CACHE/ollama" 2>/dev/null
   set -e
