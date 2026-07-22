@@ -28,6 +28,10 @@ jobs:
             # deb: rápido, sin linuxdeploy/FUSE, cubre Ubuntu/Debian/Mint.
             # (AppImage universal queda pendiente como mejora.)
             bundles: "deb"
+          - os: windows-latest
+            script: assemble-engine-windows.ps1
+            artifact: reelfy-windows
+            bundles: "nsis"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -70,14 +74,22 @@ jobs:
         run: brew install ollama cmake
 
       - name: Compilar whisper.cpp (CPU)
+        shell: bash
         run: |
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp spike/whisper.cpp
           cmake -S spike/whisper.cpp -B spike/whisper.cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON
           cmake --build spike/whisper.cpp/build --config Release -j 4 --target whisper-cli
-          ls -la spike/whisper.cpp/build/bin || true
+          find spike/whisper.cpp/build -name "whisper-cli*" || true
 
-      - name: Ensamblar el motor
+      - name: Ensamblar el motor (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
         run: bash reelfy-desktop/scripts/${{ matrix.script }}
+
+      - name: Ensamblar el motor (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: reelfy-desktop/scripts/${{ matrix.script }}
 
       - name: npm ci
         working-directory: reelfy-desktop
@@ -102,3 +114,5 @@ jobs:
             reelfy-desktop/src-tauri/target/release/bundle/**/*.app
             reelfy-desktop/src-tauri/target/release/bundle/**/*.AppImage
             reelfy-desktop/src-tauri/target/release/bundle/**/*.deb
+            reelfy-desktop/src-tauri/target/release/bundle/**/*.exe
+            reelfy-desktop/src-tauri/target/release/bundle/**/*.msi
