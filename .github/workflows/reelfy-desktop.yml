@@ -1,0 +1,87 @@
+name: Reelfy Desktop (build)
+
+# Compila la app de escritorio (Tauri + motor embebido) por SO.
+# Manual (workflow_dispatch) o al taguear reelfy-v*.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "reelfy-v*"
+
+concurrency:
+  group: reelfy-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            script: assemble-engine-macos.sh
+            artifact: reelfy-macos
+          - os: ubuntu-22.04
+            script: assemble-engine-linux.sh
+            artifact: reelfy-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            reelfy-desktop/src-tauri/target
+          key: cargo-${{ matrix.os }}-${{ hashFiles('reelfy-desktop/src-tauri/Cargo.lock') }}
+
+      - name: Deps de Linux (webkit + build + patchelf)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf cmake build-essential libfuse2
+
+      - name: Deps de macOS (ollama para el LLM embebido)
+        if: matrix.os == 'macos-14'
+        run: brew install ollama cmake
+
+      - name: Compilar whisper.cpp (CPU)
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp spike/whisper.cpp
+          cmake -S spike/whisper.cpp -B spike/whisper.cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build spike/whisper.cpp/build --config Release -j 4 --target whisper-cli
+          ls -la spike/whisper.cpp/build/bin || true
+
+      - name: Ensamblar el motor
+        run: bash reelfy-desktop/scripts/${{ matrix.script }}
+
+      - name: npm ci
+        working-directory: reelfy-desktop
+        run: npm ci
+
+      - name: Tauri build
+        working-directory: reelfy-desktop
+        run: npm run tauri build
+
+      - name: Subir artefactos
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          retention-days: 7
+          path: |
+            reelfy-desktop/src-tauri/target/release/bundle/**/*.dmg
+            reelfy-desktop/src-tauri/target/release/bundle/**/*.app
+            reelfy-desktop/src-tauri/target/release/bundle/**/*.AppImage
+            reelfy-desktop/src-tauri/target/release/bundle/**/*.deb

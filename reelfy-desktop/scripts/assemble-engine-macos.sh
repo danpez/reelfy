@@ -64,8 +64,7 @@ if [ ! -f "$CACHE/python.tar.gz" ]; then
   curl -sL -o "$CACHE/python.tar.gz" "$PYURL"
 fi
 tar -xzf "$CACHE/python.tar.gz" -C "$ENGINE"    # -> engine/python
-"$SPIKE/.venv/bin/pip" freeze | grep -viE "^(-e|pip=|setuptools=|wheel=)" > "$CACHE/requirements.lock"
-"$ENGINE/python/bin/python3" -m pip install -q --no-warn-script-location -r "$CACHE/requirements.lock"
+"$ENGINE/python/bin/python3" -m pip install -q --no-warn-script-location -r "$SPIKE/requirements.txt"
 find "$ENGINE/python" -name __pycache__ -type d -prune -exec rm -rf {} +
 rm -rf "$ENGINE"/python/lib/python3.12/test \
        "$ENGINE"/python/lib/python3.12/site-packages/torch/test \
