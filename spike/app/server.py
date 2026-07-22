@@ -30,7 +30,8 @@ import paths  # noqa: E402
 # puerto propio con modelos en DATA. El pipeline (highlights/translate) apunta
 # ahí por REELFY_OLLAMA_URL. En dev (sin bundle) usa el ollama del sistema. ----
 OLLAMA_PORT = 11499
-BUNDLED_OLLAMA = Path(paths.OLLAMA_BIN).name == "ollama" and "ollama-runtime" in paths.OLLAMA_BIN
+# "ollama-runtime" en la ruta marca el binario embebido (independiente de .exe en Windows)
+BUNDLED_OLLAMA = "ollama-runtime" in str(paths.OLLAMA_BIN).replace("\\", "/")
 if BUNDLED_OLLAMA:
     os.environ["REELFY_OLLAMA_URL"] = f"http://127.0.0.1:{OLLAMA_PORT}"
     os.environ["REELFY_LLM_MODEL"] = paths.LLM_MODEL
