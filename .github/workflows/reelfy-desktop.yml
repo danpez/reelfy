@@ -168,6 +168,24 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
 
+      # Tauri notariza el .app pero no estampa el DMG: sin ticket embebido,
+      # Gatekeeper valida EN LÍNEA. Estampando, el DMG también valida offline.
+      - name: Notarizar y estampar el DMG (validación offline)
+        if: matrix.os == 'macos-14'
+        shell: bash
+        env:
+          KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          DMG=$(ls reelfy-desktop/src-tauri/target/release/bundle/dmg/*.dmg 2>/dev/null | head -1)
+          if [ -z "$DMG" ] || [ -z "${APPLE_API_KEY_PATH:-}" ] || [ -z "$KEY_ID" ]; then
+            echo "sin DMG o sin credenciales de notarización -> se omite"; exit 0
+          fi
+          xcrun notarytool submit "$DMG" --key "$APPLE_API_KEY_PATH" \
+            --key-id "$KEY_ID" --issuer "$ISSUER" --wait || true
+          xcrun stapler staple "$DMG" && xcrun stapler validate "$DMG" || \
+            echo "no se pudo estampar (la app interna sigue notarizada)"
+
       - name: Subir artefactos
         uses: actions/upload-artifact@v4
         with:
