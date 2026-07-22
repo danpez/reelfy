@@ -4,6 +4,11 @@ name: Reelfy Desktop (build)
 # reelfy-v*, publica un GitHub Release con los 3 instaladores.
 on:
   workflow_dispatch:
+    inputs:
+      incluir_macos:
+        description: "Incluir macOS (cuesta 10x minutos)"
+        type: boolean
+        default: false
   push:
     tags:
       - "reelfy-v*"
@@ -14,24 +19,17 @@ concurrency:
 
 jobs:
   build:
+    # macOS cuesta 10x minutos de Actions, así que SOLO se compila al publicar un
+    # release (tag reelfy-v*) o si se pide explícitamente en el dispatch. Linux (1x)
+    # y Windows (2x) corren siempre: cubren la verificación del día a día.
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-14
-            script: assemble-engine-macos.sh
-            artifact: reelfy-macos
-            bundles: "dmg"
-          - os: ubuntu-22.04
-            script: assemble-engine-linux.sh
-            artifact: reelfy-linux
-            # deb: rápido, sin linuxdeploy/FUSE, cubre Ubuntu/Debian/Mint.
-            # (AppImage universal queda pendiente como mejora.)
-            bundles: "deb"
-          - os: windows-latest
-            script: assemble-engine-windows.ps1
-            artifact: reelfy-windows
-            bundles: "nsis"
+        include: ${{ fromJSON(
+          (startsWith(github.ref, 'refs/tags/') || inputs.incluir_macos)
+          && '[{"os":"ubuntu-22.04","script":"assemble-engine-linux.sh","artifact":"reelfy-linux","bundles":"deb"},{"os":"windows-latest","script":"assemble-engine-windows.ps1","artifact":"reelfy-windows","bundles":"nsis"},{"os":"macos-14","script":"assemble-engine-macos.sh","artifact":"reelfy-macos","bundles":"dmg"}]'
+          || '[{"os":"ubuntu-22.04","script":"assemble-engine-linux.sh","artifact":"reelfy-linux","bundles":"deb"},{"os":"windows-latest","script":"assemble-engine-windows.ps1","artifact":"reelfy-windows","bundles":"nsis"}]'
+          ) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
