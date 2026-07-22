@@ -1,7 +1,7 @@
 name: Reelfy Desktop (build)
 
-# Compila la app de escritorio (Tauri + motor embebido) por SO.
-# Manual (workflow_dispatch) o al taguear reelfy-v*.
+# Compila la app de escritorio (Tauri + motor embebido) por SO y, al taguear
+# reelfy-v*, publica un GitHub Release con los 3 instaladores.
 on:
   workflow_dispatch:
   push:
@@ -21,7 +21,7 @@ jobs:
           - os: macos-14
             script: assemble-engine-macos.sh
             artifact: reelfy-macos
-            bundles: "app,dmg"
+            bundles: "dmg"
           - os: ubuntu-22.04
             script: assemble-engine-linux.sh
             artifact: reelfy-linux
@@ -95,24 +95,68 @@ jobs:
         working-directory: reelfy-desktop
         run: npm ci
 
+      # Notarización macOS: si hay secret con la ASC API key (.p8 en base64), la
+      # escribimos y exponemos su ruta; si no, el build queda sin notarizar.
+      - name: Preparar ASC API key (notarización macOS)
+        if: matrix.os == 'macos-14'
+        shell: bash
+        env:
+          KEY_B64: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -n "$KEY_B64" ]; then
+            echo "$KEY_B64" | base64 --decode > "$RUNNER_TEMP/asc_key.p8"
+            echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/asc_key.p8" >> "$GITHUB_ENV"
+          fi
+
       - name: Tauri build
         working-directory: reelfy-desktop
         env:
-          # linuxdeploy/appimagetool son AppImages que usan FUSE; los runners no
-          # lo permiten -> extract-and-run. NO_STRIP evita fallos al hacer strip.
+          # AppImage (no usado ahora, pero por si acaso): extract-and-run por FUSE.
           APPIMAGE_EXTRACT_AND_RUN: 1
           NO_STRIP: "true"
+          # Firma + notarización macOS (activa solo si los secrets existen; si no,
+          # Tauri hace build sin firmar y no rompe).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
 
       - name: Subir artefactos
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          retention-days: 7
+          retention-days: 14
+          # Solo instaladores (el .app crudo pierde symlinks al zipearse).
           path: |
             reelfy-desktop/src-tauri/target/release/bundle/**/*.dmg
-            reelfy-desktop/src-tauri/target/release/bundle/**/*.app
-            reelfy-desktop/src-tauri/target/release/bundle/**/*.AppImage
             reelfy-desktop/src-tauri/target/release/bundle/**/*.deb
             reelfy-desktop/src-tauri/target/release/bundle/**/*.exe
             reelfy-desktop/src-tauri/target/release/bundle/**/*.msi
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Descargar todos los artefactos
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publicar GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Reelfy ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/**/*.dmg
+            dist/**/*.deb
+            dist/**/*.exe
+            dist/**/*.msi
