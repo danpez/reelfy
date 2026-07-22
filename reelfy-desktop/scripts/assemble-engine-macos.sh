@@ -69,5 +69,9 @@ find "$ENGINE/python" -name __pycache__ -type d -prune -exec rm -rf {} +
 rm -rf "$ENGINE"/python/lib/python3.12/test \
        "$ENGINE"/python/lib/python3.12/site-packages/torch/test \
        "$ENGINE"/python/share 2>/dev/null || true
+# datos de prueba de librerías científicas: peso muerto y generan warnings de
+# notarización (.gz/.npz que Apple no puede desempacar).
+find "$ENGINE/python/lib/python3.12/site-packages" -type d \( -name tests -o -name test \) \
+     -prune -exec rm -rf {} + 2>/dev/null || true
 
 echo "OK -> $ENGINE ($(du -sh "$ENGINE" | cut -f1))"

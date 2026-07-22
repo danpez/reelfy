@@ -65,6 +65,9 @@ tar -xzf "$CACHE/python.tar.gz" -C "$ENGINE"          # -> engine/python (python
 & "$ENGINE/python/python.exe" -m pip install -q --no-warn-script-location `
   --extra-index-url https://download.pytorch.org/whl/cpu -r "$SPIKE/requirements.txt"
 Get-ChildItem -Recurse "$ENGINE/python" -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+# datos de prueba de librerias cientificas: peso muerto (ayuda al limite de NSIS)
+Get-ChildItem -Recurse "$ENGINE/python/Lib/site-packages" -Directory -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -in @('tests','test') } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
 $sz = (Get-ChildItem -Recurse $ENGINE -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1MB
 Write-Host ("OK -> $ENGINE ({0:N0} MB)" -f $sz)

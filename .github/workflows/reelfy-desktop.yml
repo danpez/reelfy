@@ -91,6 +91,51 @@ jobs:
         shell: pwsh
         run: reelfy-desktop/scripts/${{ matrix.script }}
 
+      # Apple exige que TODO binario Mach-O anidado venga firmado con Developer ID
+      # y timestamp seguro. Tauri firma el .app pero no los ~400 binarios del motor
+      # (python, torch —trae ejecutables sin extensión—, ffmpeg, ollama, whisper).
+      # Sin esto la notarización devuelve Invalid.
+      - name: Firmar binarios del motor (macOS, deep sign)
+        if: matrix.os == 'macos-14'
+        shell: bash
+        env:
+          CERT_B64: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASS: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SIGN_ID: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "$CERT_B64" ]; then echo "sin cert -> se omite la firma profunda"; exit 0; fi
+          KC="$RUNNER_TEMP/reelfy-sign.keychain-db"
+          KCPASS="ci$(openssl rand -hex 8)"
+          security create-keychain -p "$KCPASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCPASS" "$KC"
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PASS" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPASS" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          ENGINE="reelfy-desktop/src-tauri/engine"
+          ENT="$PWD/reelfy-desktop/src-tauri/entitlements.plist"
+          # 1) todo Mach-O detectado por contenido (no por extensión), hojas primero
+          LIST="$RUNNER_TEMP/macho.txt"; : > "$LIST"
+          while IFS= read -r f; do
+            case "$(file -b "$f" 2>/dev/null)" in Mach-O*) printf '%s\n' "$f" >> "$LIST";; esac
+          done < <(find "$ENGINE" -type f)
+          echo "binarios Mach-O a firmar: $(wc -l < "$LIST" | tr -d ' ')"
+          awk '{print gsub(/\//,"/")"\t"$0}' "$LIST" | sort -rn | cut -f2- | while IFS= read -r f; do
+            codesign --force --timestamp --options runtime --keychain "$KC" -s "$SIGN_ID" "$f" 2>/dev/null
+          done
+          # 2) los que hacen JIT/Metal necesitan entitlements
+          for j in "$ENGINE"/python/bin/python3.12 \
+                   "$ENGINE"/bin/ollama-runtime/ollama \
+                   "$ENGINE"/bin/ollama-runtime/lib/ollama/llama-server; do
+            [ -f "$j" ] && codesign --force --timestamp --options runtime --entitlements "$ENT" \
+              --keychain "$KC" -s "$SIGN_ID" "$j"
+          done
+          echo "firma profunda del motor completa"
+
       - name: npm ci
         working-directory: reelfy-desktop
         run: npm ci
