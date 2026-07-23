@@ -154,6 +154,12 @@ jobs:
             echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/asc_key.p8" >> "$GITHUB_ENV"
           fi
 
+      # La caché de Cargo restaura target/release/bundle con instaladores de
+      # builds anteriores (versión vieja) y el glob de subida los arrastraría.
+      - name: Limpiar bundles de la caché
+        shell: bash
+        run: rm -rf reelfy-desktop/src-tauri/target/release/bundle
+
       - name: Tauri build
         working-directory: reelfy-desktop
         env:
