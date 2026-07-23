@@ -57,7 +57,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             reelfy-desktop/src-tauri/target
-          key: cargo-${{ matrix.os }}-${{ hashFiles('reelfy-desktop/src-tauri/Cargo.lock') }}
+          # v2: invalidada tras renombrar el repo clipfy->reelfy (la caché vieja
+          # guardaba rutas absolutas .../clipfy/clipfy que ya no existen y rompían
+          # el build de Tauri con "failed to read plugin permissions").
+          key: cargo-v2-${{ matrix.os }}-${{ hashFiles('reelfy-desktop/src-tauri/Cargo.lock') }}
 
       - name: Deps de Linux (webkit + build + patchelf)
         if: matrix.os == 'ubuntu-22.04'
