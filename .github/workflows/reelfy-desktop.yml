@@ -175,8 +175,36 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
 
-      # Tauri notariza el .app pero no estampa el DMG: sin ticket embebido,
-      # Gatekeeper valida EN LÍNEA. Estampando, el DMG también valida offline.
+      # El DMG de Tauri se arma con AppleScript de Finder, que FALLA SILENCIOSO
+      # en runners headless -> DMG sin fondo ni layout (bug v0.2.0/v0.2.1).
+      # dmgbuild escribe el .DS_Store y el fondo DENTRO del DMG (sin Finder), así
+      # que el resultado es idéntico en CI y local. Reempaquetamos el .app
+      # (ya firmado+notarizado por Tauri) en un DMG de marca.
+      - name: DMG de marca (dmgbuild, sin Finder)
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: |
+          cd reelfy-desktop/src-tauri
+          DMG=$(ls target/release/bundle/dmg/*.dmg | head -1)
+          echo "reempaquetando $DMG"
+          VOL=$(hdiutil attach "$DMG" -nobrowse | grep -oE "/Volumes/.+" | head -1)
+          rm -rf target/release/bundle/macos/Reelfy.app
+          mkdir -p target/release/bundle/macos
+          cp -R "$VOL/Reelfy.app" target/release/bundle/macos/
+          hdiutil detach "$VOL"
+          # estampar la app (Tauri ya la notarizó; el ticket existe en Apple)
+          xcrun stapler staple target/release/bundle/macos/Reelfy.app || true
+          pipx install dmgbuild >/dev/null 2>&1 || python3 -m pip install -q --break-system-packages dmgbuild
+          DMGBUILD=$(command -v dmgbuild || echo "$HOME/.local/bin/dmgbuild")
+          rm -f "$DMG"
+          "$DMGBUILD" -s ../scripts/dmg_settings.py -D app=target/release/bundle/macos/Reelfy.app Reelfy "$DMG"
+          echo "== verificación: fondo y layout DENTRO del dmg =="
+          VOL=$(hdiutil attach "$DMG" -nobrowse | grep -oE "/Volumes/.+" | head -1)
+          ls -la "$VOL" | grep -iE "background|DS_Store"
+          hdiutil detach "$VOL"
+
+      # dmgbuild genera un DMG nuevo -> notarizarlo y estamparlo (validación
+      # offline). La app interna ya va notarizada y estampada.
       - name: Notarizar y estampar el DMG (validación offline)
         if: matrix.os == 'macos-14'
         shell: bash
