@@ -15,6 +15,9 @@ click==8.4.2
 # captions (el wedge) corre el mismo modelo MMS_FA exportado a ONNX int8 sobre
 # onnxruntime -> misma calidad (mediana 6 ms vs la versión torch), 1.7x más
 # rápido, ~1.5 GB menos por instalador, e igual en Windows (antes degradado).
+# Quitados además ~300 MB de peso muerto: sympy/networkx (eran deps de torch) y
+# numba/llvmlite (JIT opcional de librosa; sin ellos cae a numpy, imperceptible).
+# Verificado en Linux que onnxruntime, el alineador, librosa, cv2 y sklearn corren.
 decorator==5.3.1
 fastapi==0.139.0
 filelock==3.30.0
@@ -27,13 +30,9 @@ Jinja2==3.1.6
 joblib==1.5.3
 lazy-loader==0.5
 librosa==0.11.0
-llvmlite==0.48.0
 MarkupSafe==3.0.3
-mpmath==1.3.0
 msgpack==1.2.1
 narwhals==2.24.0
-networkx==3.6.1
-numba==0.66.0
 numpy==2.4.6
 onnxruntime==1.27.0
 opencv-python==5.0.0.93
@@ -55,7 +54,6 @@ scipy==1.18.0
 soundfile==0.14.0
 soxr==1.1.0
 starlette==1.3.1
-sympy==1.14.0
 threadpoolctl==3.6.0
 tqdm==4.68.4
 typing-inspection==0.4.2
