@@ -81,7 +81,10 @@ print(f"\n===== Reelfy arranque {time.strftime('%Y-%m-%d %H:%M:%S')} "
       f"(LLM embebido={BUNDLED_OLLAMA}) =====")
 
 app = FastAPI(title="Reelfy")
-JOBS: dict[str, dict] = {}
+
+# Cola de trabajos persistente (SQLite en DATA) + workers. Ver app/jobstore.py.
+import jobstore  # noqa: E402
+from jobstore import Progress  # noqa: E402
 
 # ---- ciclo de vida del ollama embebido ----
 _ollama_proc = None
@@ -367,20 +370,19 @@ def download_logs():
                              headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
-def _new(job_id, **kw):
-    JOBS[job_id] = dict(phase="analyzing", pct=0, message="Iniciando…", eta=None,
-                        elapsed=None, plan=None, clips=[], error=None, **kw)
+# ---- handlers de los workers (corren en el pool de jobstore) ----
 
+def _analyze(job_id, job):
+    """Handler 'analyze': job['params'] = {glossary, n}."""
+    prog = Progress(job_id)
+    p = job["params"] or {}
+    video = INPUT / f"{job_id}{job['ext']}"
 
-def _analyze(job_id, video, glossary, n):
-    job = JOBS[job_id]
-    try:
-        def step(p, m): job.update(pct=p, message=m)
-        plan = pipeline.analyze(video, glossary, n, on_step=step)
-        job.update(phase="review", pct=100, message="Análisis listo", plan=plan)
-    except Exception as e:  # noqa
-        traceback.print_exc()
-        job.update(phase="error", error=f"Análisis falló: {e}")
+    def step(pct, m):
+        prog.update(pct=pct, message=m)
+    plan = pipeline.analyze(video, p.get("glossary", ""), p.get("n", 2), on_step=step)
+    jobstore.update(job_id, state="review", phase="review", pct=100,
+                    message="Análisis listo", plan=plan)
 
 
 CUSTOM_KEYS = ("cap_color", "cap_font", "cap_scale", "cap_pos", "zoom_amt", "air", "logo")
@@ -390,34 +392,43 @@ def _custom(body):
     return {k: body[k] for k in CUSTOM_KEYS if body.get(k) is not None}
 
 
-def _render(job_id, plan, dynamic, enhance, style, anim, fmt, music, track, mvol, hook, lang,
-            custom):
-    job = JOBS[job_id]
+def _render(job_id, job):
+    """Handler 'render': job['params'] trae las opciones; job['plan'] el plan."""
+    prog = Progress(job_id)
+    p = job["params"] or {}
+    plan = job["plan"]
     n_shorts = max(1, sum(1 for h in plan.get("highlights", []) if h.get("enabled", True)))
     t0 = time.time()
 
-    def overall(stage, p):
+    def overall(stage, pct):
         # full render is the bulk (0..78%); shorts share the last 22%
         if stage == "full":
-            o = p * 0.78
+            o = pct * 0.78
         else:
             k = int(stage.replace("short", "")) if stage.startswith("short") else 1
-            o = 78 + ((k - 1) + p / 100) / n_shorts * 22
+            o = 78 + ((k - 1) + pct / 100) / n_shorts * 22
         el = time.time() - t0
         eta = (el / o * (100 - o)) if o > 1 else None
-        job.update(pct=round(o, 1), elapsed=round(el), eta=round(eta) if eta else None)
+        prog.update(pct=round(o, 1), elapsed=round(el), eta=round(eta) if eta else None)
 
-    try:
-        def step(m): job.update(message=m)
-        clips = pipeline.render_from_plan(plan, OUTPUT, dynamic=dynamic, enhance_audio=enhance,
-                                          style=style, anim=anim, fmt=fmt, music=music,
-                                          music_track=track, music_volume=mvol, hook=hook,
-                                          lang=lang, custom=custom,
-                                          on_step=step, on_pct=overall)
-        job.update(phase="done", pct=100, message="¡Listo!", clips=clips, eta=0)
-    except Exception as e:  # noqa
-        traceback.print_exc()
-        job.update(phase="error", error=f"Render falló: {e}")
+    def step(m):
+        prog.update(force=True, message=m)
+    clips = pipeline.render_from_plan(plan, OUTPUT, dynamic=p.get("dynamic", True),
+                                      enhance_audio=p.get("enhance", True),
+                                      style=p.get("style", "clasico"),
+                                      anim=p.get("anim", "none"), fmt=p.get("fmt", "9:16"),
+                                      music=p.get("music", False),
+                                      music_track=p.get("track", "ambient"),
+                                      music_volume=p.get("mvol", 0.26),
+                                      hook=p.get("hook", False), lang=p.get("lang", "es"),
+                                      custom=p.get("custom") or {},
+                                      on_step=step, on_pct=overall)
+    jobstore.update(job_id, state="done", phase="done", pct=100,
+                    message="¡Listo!", clips=clips, eta=0)
+
+
+jobstore.init()
+jobstore.start_workers({"analyze": _analyze, "render": _render})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -447,41 +458,51 @@ async def analyze(video: UploadFile, glossary: str = Form(""), highlights: int =
     with open(dst, "wb") as f:
         while chunk := await video.read(1 << 20):
             f.write(chunk)
-    _new(job_id, ext=ext)
-    threading.Thread(target=_analyze, args=(job_id, dst, glossary, highlights),
-                     daemon=True).start()
+    jobstore.create(job_id, kind="analyze", ext=ext,
+                    params={"glossary": glossary, "n": highlights})
     return {"job_id": job_id}
 
 
 @app.post("/render/{job_id}")
 async def render(job_id: str, req: Request):
-    job = JOBS.get(job_id)
+    job = jobstore.get(job_id)
     if not job:
         raise HTTPException(404, "Job no encontrado")
     body = await req.json()
     plan = body.get("plan") or job["plan"]
-    dynamic = bool(body.get("dynamic", True))
-    enhance = bool(body.get("enhance_audio", True))
-    style = body.get("style", "clasico"); anim = body.get("anim", "none")
-    fmt = body.get("format", "9:16")
-    music = bool(body.get("music", False))
-    track = body.get("music_track", "ambient")
-    mvol = float(body.get("music_volume", 0.26))
-    hook = bool(body.get("hook", False))
-    lang = body.get("lang", "es")
-    job.update(phase="rendering", pct=0, message="Preparando el render…", plan=plan)
-    threading.Thread(target=_render,
-                     args=(job_id, plan, dynamic, enhance, style, anim, fmt, music, track,
-                           mvol, hook, lang, _custom(body)),
-                     daemon=True).start()
+    if not plan:
+        raise HTTPException(409, "El job no tiene plan; analiza el video primero.")
+    params = dict(dynamic=bool(body.get("dynamic", True)),
+                  enhance=bool(body.get("enhance_audio", True)),
+                  style=body.get("style", "clasico"), anim=body.get("anim", "none"),
+                  fmt=body.get("format", "9:16"), music=bool(body.get("music", False)),
+                  track=body.get("music_track", "ambient"),
+                  mvol=float(body.get("music_volume", 0.26)),
+                  hook=bool(body.get("hook", False)), lang=body.get("lang", "es"),
+                  custom=_custom(body))
+    jobstore.requeue(job_id, kind="render", params=params, plan=plan,
+                     message="Preparando el render…")
     return {"ok": True}
+
+
+@app.post("/cancel/{job_id}")
+def cancel(job_id: str):
+    if not jobstore.get(job_id):
+        raise HTTPException(404, "Job no encontrado")
+    jobstore.request_cancel(job_id)
+    return {"ok": True}
+
+
+@app.get("/jobs")
+def jobs_recent():
+    return jobstore.recent()
 
 
 @app.post("/preview/{job_id}")
 async def preview(job_id: str, req: Request):
     """Render a fast low-res sample of the first seconds so the user sees the real
     look (captions/tracking/blur/zoom) before committing to the full export."""
-    job = JOBS.get(job_id)
+    job = jobstore.get(job_id)
     if not job:
         raise HTTPException(404, "Job no encontrado")
     body = await req.json()
@@ -568,7 +589,7 @@ def music(track: str):
 async def translate(job_id: str, req: Request):
     """Translate captions + short titles to EN for LIVE preview/editing in the studio.
     The (possibly edited) EN phrases are then sent back inside the plan at export."""
-    job = JOBS.get(job_id)
+    job = jobstore.get(job_id)
     if not job:
         raise HTTPException(404, "Job no encontrado")
     body = await req.json()
@@ -589,15 +610,15 @@ async def translate(job_id: str, req: Request):
 
 @app.get("/status/{job_id}")
 def status(job_id: str):
-    job = JOBS.get(job_id)
-    if not job:
+    st = jobstore.status(job_id)
+    if not st:
         raise HTTPException(404, "Job no encontrado")
-    return JSONResponse(job)
+    return JSONResponse(st)
 
 
 @app.get("/source/{job_id}")
 def source(job_id: str):
-    job = JOBS.get(job_id)
+    job = jobstore.get(job_id)
     if not job:
         raise HTTPException(404, "No existe")
     f = INPUT / f"{job_id}{job['ext']}"

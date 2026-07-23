@@ -112,16 +112,24 @@ def run(cmd, **kw):
 
 
 def run_ffmpeg_progress(cmd, total_dur, on_pct):
-    """Run ffmpeg emitting real progress (out_time) -> on_pct(0..100)."""
+    """Run ffmpeg emitting real progress (out_time) -> on_pct(0..100).
+    Si on_pct lanza (p.ej. cancelación del job), el ffmpeg en curso se MATA
+    antes de propagar — sin procesos zombie ni archivos a medio escribir."""
     full = [cmd[0], "-progress", "pipe:1", "-nostats"] + cmd[1:]
     p = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
-    for line in p.stdout:
-        if line.startswith("out_time_us=") and total_dur and on_pct:
-            try:
-                on_pct(min(100.0, int(line.split("=")[1]) / 1e6 / total_dur * 100))
-            except ValueError:
-                pass
-    p.wait()
+    try:
+        for line in p.stdout:
+            if line.startswith("out_time_us=") and total_dur and on_pct:
+                try:
+                    pct = min(100.0, int(line.split("=")[1]) / 1e6 / total_dur * 100)
+                except ValueError:
+                    continue                      # línea de progreso ilegible
+                on_pct(pct)                       # puede lanzar JobCanceled
+        p.wait()
+    except BaseException:
+        p.kill()
+        p.wait()
+        raise
     if p.returncode != 0:
         raise RuntimeError("ffmpeg failed")
 
