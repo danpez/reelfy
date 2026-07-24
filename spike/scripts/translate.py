@@ -14,6 +14,8 @@ import urllib.request
 import highlights as hl  # model name
 
 _CACHE: dict[str, list] = {}   # per-process; keyed by content hash
+LANGS = {"en": "inglés", "pt": "portugués brasileño", "fr": "francés",
+         "de": "alemán", "it": "italiano"}
 CHUNK = 16                      # lines per LLM call: keeps prompts well inside num_ctx
 
 
@@ -30,28 +32,30 @@ def _chat(system, user):
         return json.loads(r.read())["message"]["content"]
 
 
-def _translate_one(text):
+def _translate_one(text, lang="en"):
+    tgt = LANGS.get(lang, "inglés")
     try:
         got = json.loads(_chat(
-            "Traductor profesional español->inglés (subtítulos, registro hablado). "
+            f"Traductor profesional español->{tgt} (subtítulos, registro hablado). "
             "Conserva nombres propios. Responde SOLO JSON.",
             json.dumps({"text": text}, ensure_ascii=False) +
-            '\n\nDevuelve {"text": "<traducción al inglés>"}'))
+            f'\n\nDevuelve {{"text": "<traducción al {tgt}>"}}'))
         v = got.get("text")
         return v if isinstance(v, str) and v.strip() else None
     except Exception:  # noqa
         return None
 
 
-def _translate_chunk(texts, base):
-    """One numbered-dict LLM call for <=CHUNK lines. Returns {abs_index: en}."""
+def _translate_chunk(texts, base, lang="en"):
+    """One numbered-dict LLM call for <=CHUNK lines. Returns {abs_index: tgt}."""
+    tgt = LANGS.get(lang, "inglés")
     numbered = {str(base + i): t for i, t in enumerate(texts)}
-    system = ("Eres un traductor profesional de subtítulos español->inglés "
+    system = (f"Eres un traductor profesional de subtítulos español->{tgt} "
               "(registro hablado, conciso). Traduce CADA entrada por separado — "
               "NO unas ni dividas líneas. Conserva nombres propios. Responde SOLO JSON.")
     user = (json.dumps(numbered, ensure_ascii=False) +
             "\n\nDevuelve el MISMO objeto JSON (mismas claves) con cada valor "
-            "traducido al inglés.")
+            f"traducido al {tgt}.")
     try:
         raw = json.loads(_chat(system, user))
         if isinstance(raw, dict):
@@ -61,7 +65,7 @@ def _translate_chunk(texts, base):
     return {}
 
 
-def translate_texts(texts):
+def translate_texts(texts, lang="en"):
     """Translate Spanish strings to English with GUARANTEED 1:1 line coverage.
 
     Long transcripts are CHUNKED (long single prompts overflowed the LLM context
@@ -71,10 +75,10 @@ def translate_texts(texts):
         return texts
     got = {}
     for base in range(0, len(texts), CHUNK):
-        got.update(_translate_chunk(texts[base:base + CHUNK], base))
+        got.update(_translate_chunk(texts[base:base + CHUNK], base, lang))
     out, misses = [], 0
     for i, t in enumerate(texts):
-        v = got.get(str(i)) or _translate_one(t)
+        v = got.get(str(i)) or _translate_one(t, lang)
         if not v:
             misses += 1
         out.append(v or t)
@@ -83,14 +87,14 @@ def translate_texts(texts):
     return out
 
 
-def translate_phrases(phrases):
-    """phrases: [[{text,start,end},...],...] in Spanish -> same shape in English.
+def translate_phrases(phrases, lang="en"):
+    """phrases: [[{text,start,end},...],...] in Spanish -> same shape in `lang`.
     Cached per content so preview + render don't pay the LLM twice."""
     src = [" ".join(w["text"] for w in ph) for ph in phrases]
-    key = hashlib.sha1("\n".join(src).encode()).hexdigest()
+    key = hashlib.sha1((lang + "\n" + "\n".join(src)).encode()).hexdigest()
     if key in _CACHE:
         return _CACHE[key]
-    en_lines = translate_texts(src)
+    en_lines = translate_texts(src, lang)
     out = []
     for ph, line in zip(phrases, en_lines):
         words = line.split() or [ph[0]["text"]]

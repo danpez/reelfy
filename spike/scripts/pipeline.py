@@ -732,18 +732,19 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     stem = plan["stem"]; video = Path(plan["video"]); camera = plan.get("camera")
     out_dir = Path(out_dir); out_dir.mkdir(exist_ok=True)
     phrases, titles = plan["phrases"], {}
-    if lang == "en":
+    if lang != "es":
         hl_titles = [h.get("title", "") for h in plan["highlights"]]
-        if plan.get("phrases_en"):                     # pre-translated (and possibly
+        if lang == "en" and plan.get("phrases_en"):    # pre-translated (and possibly
             phrases = plan["phrases_en"]               # user-EDITED) in the studio
             ten = plan.get("titles_en") or []
             titles = dict(zip(hl_titles, ten)) if len(ten) == len(hl_titles) else {}
             if not titles:
                 titles = dict(zip(hl_titles, translate_mod.translate_texts(hl_titles)))
         else:
-            step("Traduciendo subtítulos al inglés…")
-            phrases = translate_mod.translate_phrases(phrases)
-            titles = dict(zip(hl_titles, translate_mod.translate_texts(hl_titles)))
+            name = translate_mod.LANGS.get(lang, lang)
+            step(f"Traduciendo subtítulos al {name}…")
+            phrases = translate_mod.translate_phrases(phrases, lang)
+            titles = dict(zip(hl_titles, translate_mod.translate_texts(hl_titles, lang)))
     c = custom or {}
     pf = PLATFORMS.get(platform or "none", PLATFORMS["none"])
     # safe-zone de la plataforma: sube los captions salvo que el usuario los
@@ -843,6 +844,8 @@ def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim
     stem = plan["stem"]
     if lang == "en":
         phrases = plan.get("phrases_en") or translate_mod.translate_phrases(plan["phrases"])
+    elif lang != "es":
+        phrases = translate_mod.translate_phrases(plan["phrases"], lang)
     else:
         phrases = plan["phrases"]
     c = custom or {}
