@@ -27,6 +27,37 @@ otra otro otras otros algo alguien nada nadie uno dos les etc vamos va voy""".sp
 
 _EMOJI_OK = set("🔥💰🚀😱✨💡🎯⚡❌✅😍🤯👀💪🎉⭐️❤️😂🙌🏆⏰")
 
+# heurística semántica ES -> emoji (respaldo cuando el LLM es tímido con emojis).
+# Cada entrada: (conjunto de raíces normalizadas, emoji). Se prueba por frase.
+_EMOJI_HEUR = [
+    (("dinero", "peso", "precio", "cuesta", "barato", "gratis", "descuento", "oferta",
+      "paga", "cobra", "invers", "ahorr", "vend", "compr"), "💰"),
+    (("increible", "espectacular", "brutal", "mejor", "buenisimo", "genial", "top",
+      "impresion", "calidad", "premium", "lujo"), "🔥"),
+    (("secreto", "nadie", "truco", "hack", "revel", "descubr", "sorpres"), "🤯"),
+    (("amor", "encanta", "hermos", "bell", "huele", "aroma", "perfum", "fragan", "rico"), "😍"),
+    (("rapido", "ya", "ahora", "instant", "veloz", "urgent"), "⚡"),
+    (("cuidado", "error", "problema", "malo", "peligr", "evita", "nunca"), "❌"),
+    (("perfecto", "listo", "funciona", "correcto", "exito", "logr", "consig"), "✅"),
+    (("atencion", "mira", "fijate", "observa", "nota", "importante", "clave"), "👀"),
+    (("fuerza", "poder", "potente", "duro", "resist"), "💪"),
+    (("tiempo", "hora", "dias", "semana", "mes", "año", "dura", "rapid"), "⏰"),
+    (("meta", "objetivo", "resultado", "prueba", "test", "compar"), "🎯"),
+    (("idea", "tip", "consejo", "aprend", "enseñ", "sabias", "dato"), "💡"),
+]
+
+
+def _heur_emoji(text):
+    n = " " + _norm_words(text) + " "
+    for roots, em in _EMOJI_HEUR:
+        if any(r in n for r in roots):
+            return em
+    return None
+
+
+def _norm_words(text):
+    return " ".join(_norm(w) for w in text.split())
+
 
 def _norm(s):
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
@@ -60,30 +91,30 @@ def _llm(prompt, timeout=45):
         return json.loads(r.read())["response"]
 
 
-def pick(phrases):
+def pick(phrases, emoji_density="some"):
     """phrases: lista de frases (lista de word-dicts). Devuelve por frase:
-    {"keywords": [textos], "emoji": str|None}. Nunca lanza (fallback heurístico)."""
+    {"keywords": [textos], "emoji": str|None}. Nunca lanza (fallback heurístico).
+
+    emoji_density: "none" | "some" (~1 de cada 3) | "lots" (~1 de cada 2). El LLM
+    sugiere; una heurística semántica RELLENA hasta la densidad objetivo, para que
+    los emojis SÍ aparezcan (el LLM solo tiende a devolver 0)."""
     texts = [" ".join(w["text"] for w in ph) for ph in phrases]
+    ratio = {"none": 0, "some": 3, "lots": 2}.get(emoji_density, 3)
+    target = 0 if ratio == 0 else max(1, round(len(texts) / ratio))
+    out = _heuristic(texts)          # base: heurística de keywords
     try:
         numbered = "\n".join(f"{i}: {t}" for i, t in enumerate(texts))
         prompt = f"""Eres editor de videos virales en español. Para CADA línea de subtítulo,
 elige las palabras con más carga (máximo 2: números, verbos fuertes, sustantivos clave,
-nombres) y opcionalmente UN emoji si la línea lo amerita (máximo 1 de cada 3 líneas
-con emoji; usa solo: 🔥 💰 🚀 😱 ✨ 💡 🎯 ⚡ ❌ ✅ 😍 🤯 👀 💪 🎉 ⭐️ ❤️ 🙌 🏆 ⏰).
-Nunca elijas artículos, preposiciones ni muletillas. Copia las palabras EXACTAMENTE
-como aparecen.
+nombres). Nunca elijas artículos, preposiciones ni muletillas. Copia las palabras
+EXACTAMENTE como aparecen.
 
 Líneas:
 {numbered}
 
-Responde SOLO JSON: {{"lines": [{{"i": 0, "keywords": ["palabra"], "emoji": "🔥" }}, ...]}}
-(emoji null si no aplica; incluye TODAS las líneas)."""
+Responde SOLO JSON: {{"lines": [{{"i": 0, "keywords": ["palabra"]}}, ...]}} con TODAS las líneas."""
         raw = json.loads(_llm(prompt))
-        lines = raw.get("lines") or raw.get("items") or []
-        out = _heuristic(texts)          # base: heurística; el LLM la refina
-        emoji_budget = max(1, len(texts) // 3)
-        used = 0
-        for it in lines:
+        for it in (raw.get("lines") or raw.get("items") or []):
             i = it.get("i")
             if not isinstance(i, int) or not (0 <= i < len(texts)):
                 continue
@@ -92,19 +123,31 @@ Responde SOLO JSON: {{"lines": [{{"i": 0, "keywords": ["palabra"], "emoji": "�
                    if _norm(k) in words_in_line and _norm(k) not in _STOP][:2]
             if kws:
                 out[i]["keywords"] = kws
-            em = it.get("emoji")
-            if em and em in _EMOJI_OK and used < emoji_budget:
-                out[i]["emoji"] = em
-                used += 1
-        return out
-    except Exception as e:  # noqa: LLM caído/timeout -> heurística
+    except Exception as e:  # noqa: LLM caído/timeout -> se queda la heurística de keywords
         print(f"   captionsmart: LLM no disponible ({e}); heurística")
-        return _heuristic(texts)
+
+    # ---- emojis: heurística semántica hasta la densidad objetivo, espaciados ----
+    if target:
+        cand = []
+        for i, t in enumerate(texts):
+            em = _heur_emoji(t)
+            if em:
+                cand.append((i, em))
+        used, last = 0, -99
+        for i, em in cand:
+            if used >= target:
+                break
+            if i - last < 2:            # no dos emojis en frases pegadas
+                continue
+            out[i]["emoji"] = em
+            used += 1
+            last = i
+    return out
 
 
-def annotate(phrases):
+def annotate(phrases, emoji_density="some"):
     """Marca in-place: word['kw']=True en keywords y ph[0]['emoji'] por frase."""
-    picks = pick(phrases)
+    picks = pick(phrases, emoji_density)
     for ph, p in zip(phrases, picks):
         kw_norm = {_norm(k) for k in p["keywords"]}
         for w in ph:

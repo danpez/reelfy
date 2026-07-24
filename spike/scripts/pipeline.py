@@ -341,47 +341,61 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             for w_ in ph:
                 token = _case(w_["text"].replace("{", "(").replace("}", ")"))
                 is_kw = smart and w_.get("kw")
-                rest = kwc if is_kw else base   # color al dejar de ser activa
+                # La palabra clave SOLO cambia de color cuando se pronuncia (es la
+                # activa) -> resalta con el color keyword; las demás palabras
+                # siempre en base (sin color persistente que rompa el estilo).
+                hi = kwc if is_kw else active_color
                 if w_ is active:
                     if fill:
                         # karaoke: la palabra activa BARRE del color base al acento
                         # durante su duración (transición de color: métricas intactas)
                         ms = max(60, int((end - start) * 1000))
-                        parts.append(f"{{\\c{rest}\\t(0,{ms},\\c{active_color})}}"
+                        parts.append(f"{{\\c{base}\\t(0,{ms},\\c{hi})}}"
                                      f"{token}{{\\c{base}}}")
                     else:
-                        parts.append(f"{{\\c{active_color}}}{token}{{\\c{base}}}")
-                elif is_kw:
-                    parts.append(f"{{\\c{kwc}}}{token}{{\\c{base}}}")
+                        parts.append(f"{{\\c{hi}}}{token}{{\\c{base}}}")
                 else:
                     parts.append(token)
             events.append([start, end, fs_tag + " ".join(parts), i == 0])
 
     events.sort(key=lambda e: e[0])
     anim_tag = ANIM.get(anim, "")
-    lines = []
+    # Emitir SIN HUECOS: un evento ultra-corto no se descarta (dejaría un frame en
+    # blanco = parpadeo), se funde extendiendo el anterior; los micro-huecos por
+    # redondeo se cierran. Así el bloque de subtítulos nunca desaparece dentro de
+    # una frase (solo se limpia tras una pausa real > MAX_HOLD).
+    emitted = []   # [start, end, text, is_first_of_phrase]
     for j, ev in enumerate(events):
-        s, _, txt, first = ev
+        s, e0, txt, first = ev
         nxt = events[j + 1][0] if j + 1 < len(events) else None
-        end = ev[1]
+        end = e0
         if nxt is not None:
             end = min(end, nxt)                      # never overlap next -> no duplicates
             if nxt - s > MAX_HOLD:                   # long pause -> let it clear
                 end = min(end, s + MAX_HOLD)
-        if end - s < MIN_DUR:                        # superseded by a ~simultaneous word: drop
-            continue                                #   (avoids overlap AND flicker/dup)
+        if end - s < MIN_DUR:                        # ultra-corto: fundir en el anterior
+            if emitted:
+                emitted[-1][1] = max(emitted[-1][1], end)
+            continue
+        if emitted and 0 < s - emitted[-1][1] < 0.05:  # cerrar micro-hueco (sin parpadeo)
+            emitted[-1][1] = s
+        emitted.append([s, end, txt, first])
+    lines = []
+    for s, end, txt, first in emitted:
         pre = anim_tag if (first and anim_tag) else ""
         lines.append(f"Dialogue: 0,{ass_time(s)},{ass_time(end)},Base,,0,0,0,,{pre}{txt}")
     Path(ass_path).write_text(header + "\n".join(lines) + "\n")
 
-    # ventanas de emoji por frase (overlay PNG flotante; máx 2.6 s cada una)
+    # ventanas de emoji por frase (overlay PNG flotante). Duración MÍNIMA visible
+    # de 1.4 s (aunque la frase sea corta) para que el emoji se note de verdad, y
+    # máximo 2.6 s. Antes duraba lo que la frase (a veces 0.3 s -> invisible).
     emojis = []
     if smart:
         for ph in phrases:
             em = ph[0].get("emoji") if ph else None
             if em:
                 s0, e0 = ph[0]["start"], ph[-1]["end"]
-                emojis.append((em, s0, min(e0, s0 + 2.6)))
+                emojis.append((em, s0, max(s0 + 1.4, min(e0, s0 + 2.6))))
     return emojis
 
 
