@@ -85,9 +85,10 @@
      El .card llena la pantalla; arriba preview|controles, abajo el timeline.
      Nada hace scroll de página -> el preview y el timeline NUNCA se solapan ni
      desaparecen; solo el panel de controles y el timeline scrollean internamente. */
-  .wrap:has(#s-editor.on){padding-bottom:16px}
-  #s-editor > .card{display:flex;flex-direction:column;height:calc(100vh - 56px);
-                    overflow:hidden;padding:16px 18px}
+  /* editor a TODO el ancho (sin márgenes desperdiciados) y sin scroll de página */
+  .wrap:has(#s-editor.on){max-width:none;padding:10px 12px 12px}
+  #s-editor > .card{display:flex;flex-direction:column;height:calc(100vh - 34px);
+                    overflow:hidden;padding:14px 16px}
   .studio{flex:1 1 auto;min-height:0;display:grid;
           grid-template-columns:minmax(210px,320px) 1fr;grid-template-rows:minmax(0,1fr) auto;
           gap:16px}
@@ -104,13 +105,13 @@
   }
   .cvwrap{position:relative;flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;width:100%}
   .stage .transport,.stage>.hint,.stage .chip{flex:none}
-  /* canvas y overlay comparten EXACTAMENTE las mismas reglas de tamaño (max-height +
-     max-width + aspect-ratio) -> se calculan idénticos; el overlay se centra con
-     inset:0/margin:auto, así cubre el canvas al pixel sin importar el alto/ancho. */
-  #cv{display:block;max-height:100%;max-width:100%;height:auto;width:auto;aspect-ratio:9/16;background:#000;
-      border-radius:12px;border:1px solid var(--line2);box-shadow:0 24px 70px -28px rgba(0,0,0,.9);touch-action:none}
-  #pvWin{position:absolute;inset:0;margin:auto;max-height:100%;max-width:100%;height:auto;width:auto;aspect-ratio:9/16;
-         object-fit:cover;border-radius:12px;display:none;pointer-events:none;background:#000}
+  /* EL PREVIEW es el video del render REAL (proxy). Sigue su aspecto INTRÍNSECO
+     (= el formato elegido: 9:16, 16:9…) -> nunca se recorta. */
+  #pvMain{display:block;max-height:100%;max-width:100%;height:auto;width:auto;background:#000;border-radius:12px;
+          border:1px solid var(--line2);box-shadow:0 24px 70px -28px rgba(0,0,0,.9)}
+  /* canvas = overlay TRANSPARENTE encima del video, solo para arrastrar subtítulos */
+  #cv{position:absolute;inset:0;margin:auto;max-height:100%;max-width:100%;height:auto;width:auto;
+      background:transparent;touch-action:none;cursor:grab}
   #pvWin.on{display:block}
   .pvbadge{position:absolute;top:8px;left:8px;display:none;align-items:center;gap:5px;font-size:10px;
            font-weight:700;letter-spacing:.04em;color:#fff;background:rgba(10,12,16,.7);
@@ -465,8 +466,8 @@
     <div class="studio">
       <div class="stage">
         <div class="cvwrap">
+          <video id="pvMain" playsinline></video>
           <canvas id="cv" width="540" height="960"></canvas>
-          <video id="pvWin" muted loop playsinline></video>
           <div class="pvbadge" id="pvBadge">● vista real</div>
         </div>
         <div class="transport">
@@ -616,8 +617,7 @@
     <div class="actionbar">
       <button class="btn ghost" id="cancel">Nuevo video</button>
       <span style="flex:1"></span>
-      <label class="swlabel" title="Al pausar, renderiza el look REAL en el playhead"><input type="checkbox" class="toggle" id="autoPv" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg>Vista real (auto)</label>
-      <button class="btn ghost" id="preview"><svg class="ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg>Ver resultado real</button>
+      <span class="pvbadge on" id="pvBadgeBar" style="position:static;display:inline-flex">● vista real</span>
       <button class="btn" id="render"><svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg>Exportar</button>
     </div>
   </div></section>
@@ -973,7 +973,7 @@ function undo(){ if(!UNDO.length)return; REDO.push(JSON.stringify(PLAN)); restor
 function redo(){ if(!REDO.length)return; UNDO.push(JSON.stringify(PLAN)); restore(REDO.pop()); }
 
 /* ============ EDITOR ============ */
-const V=$("#srcVid"), CV=$("#cv"), CTX=CV.getContext("2d");
+const V=$("#pvMain"), CV=$("#cv"), CTX=CV.getContext("2d");
 const OS=document.createElement("canvas");
 const OCTX=OS.getContext("2d");
 const FMTS={"9:16":{cw:540,ch:960,ow:1080,max:338},"1:1":{cw:720,ch:720,ow:1080,max:380},
@@ -1028,8 +1028,8 @@ function renderTracks(){
     if(e.target.closest(".mplay")) return;
     $("#mtrack").value=r.dataset.id;
     box.querySelectorAll(".mrow").forEach(x=>x.classList.toggle("sel",x===r));
-    if(M){M.src="";M=null;MSRC=null;} syncMusic(); renderMusicLane();
-    lastKey=null; scheduleRealPreview(200);
+    renderMusicLane();
+    PROXYKEY=null; buildProxy(200);
   });
   box.querySelectorAll(".mplay").forEach(b=>b.onclick=e=>{ e.stopPropagation(); previewTrack(b.dataset.id, b); });
 }
@@ -1098,12 +1098,11 @@ function openEditor(){
   $("#hook").onchange=renderTL;
   $("#tlzoom").oninput=e=>{ZTL=(+e.target.value)/10; $("#tlinner").style.width=(ZTL*100)+"%";};
   $("#undoBtn").onclick=undo; $("#redoBtn").onclick=redo;
-  V.src="/source/"+JOB;
   $("#tdur").textContent=fmtT(PLAN.duration);
   flatWords=P().flat();
   renderTL(); renderList(); renderSubs(); wireTransport(); wireCanvasDrag(); wireAutoPreview();
   requestAnimationFrame(draw);
-  scheduleRealPreview(600);          // primer render real del look al abrir el editor
+  PROXYKEY=null; PROXYREADY=false; buildProxy(200);   // el preview ES el render real
   $("#addShort").onclick=()=>{ mut();
     const t=V.currentTime||0, dur=PLAN.duration;
     const start=Math.min(t,Math.max(0,dur-8)), end=Math.min(start+30,dur);
@@ -1257,44 +1256,15 @@ function fitPlayhead(){
 function activeCut(t){ return (PLAN.cuts||[]).find(c=>c.enabled&&t>=c.start&&t<c.end); }
 function popScale(age){ return age<0.19?0.3+0.86*(age/0.19):age<0.33?1.16-0.16*((age-0.19)/0.14):1; }
 function draw(){
-  if(!PLAN) return;
+  if(!PLAN){ requestAnimationFrame(draw); return; }
   const t=V.currentTime, dur=PLAN.duration||1;
+  // el preview ES el render real (proxy uncut): al reproducir, saltamos los cortes
+  // habilitados para imitar el export (los silencios no van al resultado final).
   if(!V.paused && $("#dynamic").checked){ const c=activeCut(t); if(c&&c.end<dur-0.05) V.currentTime=c.end+0.01; }
-  const vw=V.videoWidth, vh=V.videoHeight;
-  if(vw){
-    const srcAr=vw/vh, outAr=CW/CH;
-    let fw,fh;
-    if(Math.abs(srcAr/outAr-1)<0.05||AIR<0.005){ fw=CW; fh=CH; }
-    else if(srcAr>outAr){ fw=CW*(1-AIR); fh=CH; }
-    else { fw=CW; fh=CH*(1-AIR); }
-    if(fw<CW||fh<CH){
-      const s=Math.max(OS.width/vw, OS.height/vh), bw=vw*s, bh=vh*s;
-      OCTX.drawImage(V,(OS.width-bw)/2,(OS.height-bh)/2,bw,bh);
-      CTX.imageSmoothingEnabled=true; CTX.imageSmoothingQuality="high";
-      CTX.drawImage(OS,0,0,CW,CH);
-      CTX.fillStyle="rgba(8,10,14,.28)"; CTX.fillRect(0,0,CW,CH);
-    }
-    const cw=Math.min(vw, vh*(fw/fh)), ch=Math.min(vh, vw*(fh/fw));
-    let cx=(vw-cw)/2;
-    if(cw<vw-2 && PLAN.camera&&PLAN.camera.length){
-      const i=Math.min(PLAN.camera.length-1, Math.max(0,Math.floor(t*30)));
-      cx=Math.min(Math.max(PLAN.camera[i]*vw-cw/2,0), vw-cw);
-    }
-    let z=1;
-    if($("#dynamic").checked&&ZAMT>0.004&&(PLAN.beats||[]).some(b=>t>=b&&t<b+1.1)) z=1+ZAMT;
-    const sw=cw/z, sh=ch/z, sx=cx+(cw-sw)/2, sy=((vh-ch)/2)+(ch-sh)/2;
-    CTX.drawImage(V, sx,sy,sw,sh, (CW-fw)/2,(CH-fh)/2, fw,fh);
-    // NO simulamos subtítulos/hook/emoji en el canvas: cualquier simulación difiere
-    // del render real. El canvas solo muestra el ENCUADRE (para navegar rápido);
-    // el LOOK exacto (100% = export) lo pinta el render real (ventana al pausar /
-    // 'ver resultado' al reproducir). Así el preview nunca miente.
-    drawLogo();
-  }
   $("#playhead").style.left=(t/dur*100)+"%";
   if(!SCRUBBING) $("#scrub").value=Math.round(t/dur*1000);
   $("#tcur").textContent=fmtT(t);
   highlightLiveWord(t);
-  duckMusic();
   requestAnimationFrame(draw);
 }
 function drawLogo(){
@@ -1408,20 +1378,26 @@ function duckMusic(){
   }
 }
 
-/* ---- canvas caption drag ---- */
+/* ---- arrastrar la posición vertical de los subtítulos (overlay transparente) ---- */
+function drawCapGuide(){                 // línea guía mientras arrastras
+  CTX.clearRect(0,0,CV.width,CV.height);
+  const y=CV.height*capPos();
+  CTX.strokeStyle="rgba(255,122,69,.9)"; CTX.lineWidth=2; CTX.setLineDash([10,7]);
+  CTX.beginPath(); CTX.moveTo(0,y); CTX.lineTo(CV.width,y); CTX.stroke(); CTX.setLineDash([]);
+}
 function wireCanvasDrag(){
-  CV.style.cursor="default";
   CV.onpointerdown=e=>{
     const r=CV.getBoundingClientRect();
-    const cy=(e.clientY-r.top)/r.height*CH;
-    if(Math.abs(cy-CH*capPos())>CH*0.07) return;
-    e.preventDefault(); CV.setPointerCapture(e.pointerId);
-    CV.style.cursor="ns-resize";
+    const cy=(e.clientY-r.top)/r.height;
+    if(Math.abs(cy-capPos())>0.12) return;             // agarra cerca de los subtítulos
+    e.preventDefault(); CV.setPointerCapture(e.pointerId); CV.style.cursor="ns-resize";
+    drawCapGuide();
     CV.onpointermove=ev=>{
       const y=(ev.clientY-r.top)/r.height;
-      CAPPOS=Math.min(0.93,Math.max(0.15,+y.toFixed(3)));
+      CAPPOS=Math.min(0.93,Math.max(0.15,+y.toFixed(3))); drawCapGuide();
     };
-    CV.onpointerup=()=>{CV.onpointermove=null;CV.onpointerup=null;CV.style.cursor="default";};
+    CV.onpointerup=()=>{CV.onpointermove=null;CV.onpointerup=null;CV.style.cursor="grab";
+      CTX.clearRect(0,0,CV.width,CV.height); PROXYKEY=null; buildProxy(150);};
   };
 }
 
@@ -1431,70 +1407,68 @@ function setPlayIcon(playing){
   $("#playIco").innerHTML=`<use href="#i-${playing?"pause":"play"}"/>`;
 }
 
-/* ===== Auto-preview: RENDER REAL por ventana (pixel-perfect, elección de Kevin) =====
-   Pausado -> render real del look exacto en el playhead (~1.8s, cacheado).
-   Reproduciendo/arrastrando -> canvas rápido (navegación). Cada cambio del panel
-   re-renderiza. Así TODO ajuste se ve idéntico al export. */
-let AUTO=true, RTIMER=null, RSEQ=0, WINCACHE=new Map(), lastKey=null;
+/* ===== Preview SIEMPRE REAL: el video del preview ES el render real (proxy) =====
+   El preview reproduce un PROXY (render real a 540p, SIN recortar silencios para
+   sincronizar con el timeline). Reproducir/pausar/scrub actúan sobre ese video ->
+   los subtítulos y TODO el look se ven SIEMPRE, también al reproducir. Cada cambio
+   del panel re-renderiza el proxy (debounce), conservando la posición. */
+let PXT=null, PXSEQ=0, PROXYKEY=null, PROXYREADY=false;
 function pvBadge(state){            // 'busy' | 'real' | null
-  const b=$("#pvBadge"); if(!b) return;
-  b.classList.toggle("on", !!state);
-  b.classList.toggle("busy", state==="busy");
-  b.innerHTML = state==="busy" ? '<b>◍</b> actualizando…' : '● vista real';
+  const html = state==="busy" ? '<b>◍</b> actualizando vista…' : '● vista real';
+  [["#pvBadge",true],["#pvBadgeBar",false]].forEach(([sel,hide])=>{
+    const b=$(sel); if(!b) return;
+    if(hide) b.classList.toggle("on", !!state);       // el de la preview se oculta si null
+    b.classList.toggle("busy", state==="busy");
+    b.innerHTML = html;
+  });
 }
-function hideWin(){ const w=$("#pvWin"); w.classList.remove("on"); pvBadge(null); try{w.pause();}catch(e){} }
-function showWin(url){ const w=$("#pvWin"); w.src=url; w.classList.add("on"); try{w.currentTime=0;w.play().catch(()=>{});}catch(e){} pvBadge("real"); }
-function scheduleRealPreview(delay=480){ if(!AUTO||!PLAN||!JOB) return; clearTimeout(RTIMER); RTIMER=setTimeout(realPreview, delay); }
-async function realPreview(){
-  if(!AUTO||!PLAN||!JOB||!V.paused) return;          // solo con el video pausado
-  const t=V.currentTime||0, opts=renderOpts();
-  const key=JSON.stringify(opts)+"@"+(Math.round(t*2)/2);
-  if(key===lastKey && $("#pvWin").classList.contains("on")) return;
-  if(WINCACHE.has(key)){ lastKey=key; showWin(WINCACHE.get(key)); return; }
-  const seq=++RSEQ; pvBadge("busy");
+function buildProxy(delay=500){
+  if(!PLAN||!JOB) return;
+  clearTimeout(PXT); PXT=setTimeout(_buildProxy, delay);
+}
+async function _buildProxy(){
+  if(!PLAN||!JOB) return;
+  const opts=renderOpts();
+  const key=JSON.stringify(opts);
+  if(key===PROXYKEY && PROXYREADY) return;           // nada cambió
+  const seq=++PXSEQ; pvBadge("busy");
+  const wasPlaying=!V.paused, at=V.currentTime||0;
   try{
     const r=await fetch("/preview/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({plan:PLAN, ...opts, start:t})});
+      body:JSON.stringify({plan:PLAN, ...opts, full:true})});
     if(!r.ok) throw 0;
     const {file}=await r.json();
-    if(seq!==RSEQ) return;                            // otro cambio ganó: descartar
-    const url="/video/"+file+"?k="+Date.now();
-    if(WINCACHE.size>40){ WINCACHE.clear(); }
-    WINCACHE.set(key,url); lastKey=key; showWin(url);
-  }catch(e){ pvBadge(null); }
+    if(seq!==PXSEQ) return;                           // otro cambio ganó
+    PROXYKEY=key; PROXYREADY=true;
+    V.onloadeddata=()=>{ try{ V.currentTime=Math.min(at, (PLAN.duration||1)-0.1); }catch(e){}
+      if(wasPlaying) V.play().catch(()=>{}); pvBadge("real"); };
+    V.src="/video/"+file+"?k="+Date.now();
+  }catch(e){ if(seq===PXSEQ) pvBadge(null); }
 }
 function wireAutoPreview(){
   const panel=document.querySelector(".panel");
+  const kick=()=>{ PROXYKEY=null; buildProxy(); };
   if(panel){
-    panel.addEventListener("input", ()=>{ lastKey=null; scheduleRealPreview(); }, true);
-    panel.addEventListener("change", ()=>{ lastKey=null; scheduleRealPreview(); }, true);
-    panel.addEventListener("click", e=>{ if(e.target.closest(".seg button")){ lastKey=null; scheduleRealPreview(); } }, true);
+    panel.addEventListener("input", kick, true);
+    panel.addEventListener("change", kick, true);
+    panel.addEventListener("click", e=>{ if(e.target.closest(".seg button")) kick(); }, true);
   }
-  // arrastrar en el canvas (reposicionar subtítulos) o hacer clic: mostrar canvas y re-render al soltar
-  CV.addEventListener("pointerdown", hideWin);
-  CV.addEventListener("pointerup", ()=>{ lastKey=null; scheduleRealPreview(); });
-  const at=$("#autoPv");
-  if(at) at.onchange=e=>{ AUTO=e.target.checked; if(AUTO){ lastKey=null; scheduleRealPreview(120); } else hideWin(); };
 }
 function wireTransport(){
   const play=$("#play");
-  play.onclick=()=>{
-    ensureAudio(); AC&&AC.resume();
-    if(V.paused){ V.play(); if($("#music").checked)syncMusic(); }
-    else{ V.pause(); M&&M.pause(); }
-  };
-  V.onplay=()=>{setPlayIcon(true); hideWin(); if($("#music").checked&&M)M.play().catch(()=>{});};
-  V.onpause=()=>{setPlayIcon(false); M&&M.pause(); scheduleRealPreview(150);};
+  // El preview (V) es el PROXY real: reproduce/pausa/scrub actúan sobre él; el
+  // audio+música va horneado. No hay audio separado que sincronizar.
+  play.onclick=()=>{ if(V.paused) V.play().catch(()=>{}); else V.pause(); };
+  V.onplay=()=>setPlayIcon(true);
+  V.onpause=()=>setPlayIcon(false);
   const scrub=$("#scrub");
-  scrub.oninput=()=>{ SCRUBBING=true; hideWin(); V.currentTime=scrub.value/1000*PLAN.duration; };
-  scrub.onchange=()=>{ SCRUBBING=false; if(M)M.currentTime=V.currentTime%32; lastKey=null; scheduleRealPreview(150); };
+  scrub.oninput=()=>{ SCRUBBING=true; V.currentTime=scrub.value/1000*PLAN.duration; };
+  scrub.onchange=()=>{ SCRUBBING=false; };
   $("#ruler").onpointerdown=e=>{
-    hideWin();
     const seekAt=ev=>{ const r=$("#ruler").getBoundingClientRect();
-      V.currentTime=Math.min(Math.max(0,(ev.clientX-r.left)/r.width),1)*PLAN.duration; };
+      V.currentTime=Math.min(Math.max(0,(ev.clientX-r.left)/r.width),1)*(PLAN.duration||1); };
     seekAt(e);
-    const mv=ev=>seekAt(ev), up=()=>{window.removeEventListener("pointermove",mv);window.removeEventListener("pointerup",up);
-      if(M)M.currentTime=V.currentTime%32; lastKey=null; scheduleRealPreview(150);};
+    const mv=ev=>seekAt(ev), up=()=>{window.removeEventListener("pointermove",mv);window.removeEventListener("pointerup",up);};
     window.addEventListener("pointermove",mv); window.addEventListener("pointerup",up);
   };
   document.addEventListener("keydown",e=>{
@@ -1721,19 +1695,6 @@ function renderSubs(){
 }
 
 /* ---- preview sample + export ---- */
-$("#preview").onclick=async()=>{
-  const b=$("#preview"); const old=b.innerHTML; b.disabled=true;
-  b.innerHTML='<span class="spinner"></span> Generando resultado…';
-  try{
-    // full=true -> PROXY del video COMPLETO con el pipeline REAL (=export, 540p):
-    // reproducción 100% idéntica al resultado final (con cortes de silencio, etc).
-    const r=await(await fetch("/preview/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({plan:PLAN,...renderOpts(),full:true})})).json();
-    if(r.file){ $("#pvOut").src="/video/"+r.file+"?t="+Date.now(); $("#modal").classList.add("on"); }
-    else fail(r.detail||"No se pudo generar el resultado.");
-  }catch(e){ alert("No se pudo generar el resultado."); }
-  b.disabled=false; b.innerHTML=old;
-};
 $("#pvClose").onclick=e=>{e.preventDefault();$("#modal").classList.remove("on");$("#pvOut").pause();};
 $("#modal").onclick=e=>{if(e.target===$("#modal")){$("#modal").classList.remove("on");$("#pvOut").pause();}};
 $("#render").onclick=async()=>{

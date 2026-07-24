@@ -789,7 +789,7 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
                      anim="none", fmt="9:16", music=False, music_track="ambient",
                      music_volume=0.26, hook=False, lang="es", custom=None,
                      smart=True, platform="none", broll=False, proxy=False,
-                     proxy_out=None, on_step=None, on_pct=None):
+                     proxy_out=None, trim=True, on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -838,8 +838,10 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     # keeps = complement of the ENABLED cuts from the plan (the user can restore any
     # cut in the editor). Highlight timestamps get remapped onto the trimmed timeline.
     keeps = None
-    if dynamic:
-        src_dur = plan.get("duration") or probe_duration(video)
+    if dynamic and trim:      # trim=False (preview proxy): NO recorta silencios ->
+        src_dur = plan.get("duration") or probe_duration(video)   # sincroniza con el
+        #                                     timeline (mismo tiempo original) y mantiene
+        #                                     zoom/captions/tracking visibles.
         cuts = sorted((c for c in plan.get("cuts", []) if c.get("enabled", True)),
                       key=lambda c: c["start"])
         if cuts:

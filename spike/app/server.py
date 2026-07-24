@@ -663,14 +663,16 @@ async def preview(job_id: str, req: Request):
         out = OUTPUT / (f"{job_id}_win.mp4" if windowed else f"{job_id}_preview.mp4")
     try:
         if full:
-            # PROXY = MISMO camino que el export (cortes/tracking/captions/audio/
-            # música), solo a 540p y sin shorts -> reproducción 100% idéntica.
+            # PROXY del preview: MISMO look que el export (tracking/zoom/captions/
+            # colores/audio/música) a 540p, pero SIN recortar silencios (trim=False)
+            # para que sincronice con el timeline original. Los cortes se aplican solo
+            # al exportar (y en la reproducción se saltan con JS). Sin hook (solo shorts).
             await run_in_threadpool(
                 pipeline.render_from_plan, plan, OUTPUT, bool(body.get("dynamic", True)),
                 enhance, style, anim, fmt, music, track, mvol,
-                bool(body.get("hook", False)), lang, _custom(body),
+                False, lang, _custom(body),
                 bool(body.get("smart", True)), body.get("platform", "none"),
-                bool(body.get("broll", False)), True, str(out))
+                bool(body.get("broll", False)), True, str(out), False)
         else:
             await run_in_threadpool(pipeline.render_preview, plan, out, secs, enhance, style, anim,
                                     fmt, music, track, mvol, lang, _custom(body),
