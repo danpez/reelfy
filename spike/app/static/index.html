@@ -105,13 +105,10 @@
   }
   .cvwrap{position:relative;flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;width:100%}
   .stage .transport,.stage>.hint,.stage .chip{flex:none}
-  /* EL PREVIEW es el video del render REAL (proxy). Sigue su aspecto INTRÍNSECO
-     (= el formato elegido: 9:16, 16:9…) -> nunca se recorta. */
-  #pvMain{display:block;max-height:100%;max-width:100%;height:auto;width:auto;background:#000;border-radius:12px;
-          border:1px solid var(--line2);box-shadow:0 24px 70px -28px rgba(0,0,0,.9)}
-  /* canvas = overlay TRANSPARENTE encima del video, solo para arrastrar subtítulos */
-  #cv{position:absolute;inset:0;margin:auto;max-height:100%;max-width:100%;height:auto;width:auto;
-      background:transparent;touch-action:none;cursor:grab}
+  /* preview en TIEMPO REAL: el canvas compone video + subtítulos + todo en vivo.
+     Sigue el aspecto del formato (CW×CH) -> 16:9, 9:16… nunca se recorta. */
+  #cv{display:block;max-height:100%;max-width:100%;height:auto;width:auto;background:#000;border-radius:12px;
+      border:1px solid var(--line2);box-shadow:0 24px 70px -28px rgba(0,0,0,.9);touch-action:none;cursor:grab}
   #pvWin.on{display:block}
   .pvbadge{position:absolute;top:8px;left:8px;display:none;align-items:center;gap:5px;font-size:10px;
            font-weight:700;letter-spacing:.04em;color:#fff;background:rgba(10,12,16,.7);
@@ -466,9 +463,8 @@
     <div class="studio">
       <div class="stage">
         <div class="cvwrap">
-          <video id="pvMain" playsinline></video>
           <canvas id="cv" width="540" height="960"></canvas>
-          <div class="pvbadge" id="pvBadge">● vista real</div>
+          <div class="pvbadge" id="pvBadge">● tiempo real</div>
         </div>
         <div class="transport">
           <button class="tbtn" id="play" title="Espacio"><svg class="ic" viewBox="0 0 24 24" id="playIco"><use href="#i-play"/></svg></button>
@@ -617,7 +613,7 @@
     <div class="actionbar">
       <button class="btn ghost" id="cancel">Nuevo video</button>
       <span style="flex:1"></span>
-      <span class="pvbadge on" id="pvBadgeBar" style="position:static;display:inline-flex">● vista real</span>
+      <span class="pvbadge on" id="pvBadgeBar" style="position:static;display:inline-flex">● tiempo real</span>
       <button class="btn" id="render"><svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg>Exportar</button>
     </div>
   </div></section>
@@ -973,7 +969,7 @@ function undo(){ if(!UNDO.length)return; REDO.push(JSON.stringify(PLAN)); restor
 function redo(){ if(!REDO.length)return; UNDO.push(JSON.stringify(PLAN)); restore(REDO.pop()); }
 
 /* ============ EDITOR ============ */
-const V=$("#pvMain"), CV=$("#cv"), CTX=CV.getContext("2d");
+const V=$("#srcVid"), CV=$("#cv"), CTX=CV.getContext("2d");
 const OS=document.createElement("canvas");
 const OCTX=OS.getContext("2d");
 const FMTS={"9:16":{cw:540,ch:960,ow:1080,max:338},"1:1":{cw:720,ch:720,ow:1080,max:380},
@@ -987,10 +983,11 @@ function setFormat(v){
   OS.height=48; OS.width=Math.max(2,Math.round(48*CW/CH));
 }
 setFormat("9:16");
-const CAPSTYLE={clasico:{size:78,active:"#ffb020",upper:false},amarillo:{size:84,active:"#ffe14d",upper:true},
-                neon:{size:80,active:"#ff50f0",upper:false},minimal:{size:70,active:"#ffffff",upper:false},
-                karaoke:{size:80,active:"#ffb020",upper:true},caja:{size:72,active:"#ffb020",upper:false},
-                impacto:{size:92,active:"#4ad2ff",upper:true}};
+const CAPSTYLE={
+  clasico:{size:78,active:"#ffb020",upper:false,kw:"#7cff32",outline:5},
+  amarillo:{size:84,active:"#ffe14d",upper:true,kw:"#3690ff",outline:6},
+  neon:{size:80,active:"#ff50f0",upper:false,kw:"#4af0ff",outline:5},
+  minimal:{size:70,active:"#ffffff",upper:false,kw:"#f2bd0f",outline:4}};
 let flatWords=[], liveWordEl=null, ZTL=1;
 
 /* ---- biblioteca de música: buscar por mood/género/nombre + preview ---- */
@@ -1028,8 +1025,7 @@ function renderTracks(){
     if(e.target.closest(".mplay")) return;
     $("#mtrack").value=r.dataset.id;
     box.querySelectorAll(".mrow").forEach(x=>x.classList.toggle("sel",x===r));
-    renderMusicLane();
-    PROXYKEY=null; buildProxy(200);
+    if(M){M.src="";M=null;MSRC=null;} syncMusic(); renderMusicLane();
   });
   box.querySelectorAll(".mplay").forEach(b=>b.onclick=e=>{ e.stopPropagation(); previewTrack(b.dataset.id, b); });
 }
@@ -1098,11 +1094,11 @@ function openEditor(){
   $("#hook").onchange=renderTL;
   $("#tlzoom").oninput=e=>{ZTL=(+e.target.value)/10; $("#tlinner").style.width=(ZTL*100)+"%";};
   $("#undoBtn").onclick=undo; $("#redoBtn").onclick=redo;
+  V.src="/source/"+JOB;               // video crudo -> el canvas compone en tiempo real
   $("#tdur").textContent=fmtT(PLAN.duration);
   flatWords=P().flat();
-  renderTL(); renderList(); renderSubs(); wireTransport(); wireCanvasDrag(); wireAutoPreview();
+  renderTL(); renderList(); renderSubs(); wireTransport(); wireCanvasDrag();
   requestAnimationFrame(draw);
-  PROXYKEY=null; PROXYREADY=false; buildProxy(200);   // el preview ES el render real
   $("#addShort").onclick=()=>{ mut();
     const t=V.currentTime||0, dur=PLAN.duration;
     const start=Math.min(t,Math.max(0,dur-8)), end=Math.min(start+30,dur);
@@ -1258,13 +1254,43 @@ function popScale(age){ return age<0.19?0.3+0.86*(age/0.19):age<0.33?1.16-0.16*(
 function draw(){
   if(!PLAN){ requestAnimationFrame(draw); return; }
   const t=V.currentTime, dur=PLAN.duration||1;
-  // el preview ES el render real (proxy uncut): al reproducir, saltamos los cortes
-  // habilitados para imitar el export (los silencios no van al resultado final).
   if(!V.paused && $("#dynamic").checked){ const c=activeCut(t); if(c&&c.end<dur-0.05) V.currentTime=c.end+0.01; }
+  const vw=V.videoWidth, vh=V.videoHeight;
+  if(vw){
+    // ---- encuadre: fondo desenfocado + aire + tracking + zoom (como el export) ----
+    const srcAr=vw/vh, outAr=CW/CH;
+    let fw,fh;
+    if(Math.abs(srcAr/outAr-1)<0.05||AIR<0.005){ fw=CW; fh=CH; }
+    else if(srcAr>outAr){ fw=CW*(1-AIR); fh=CH; }
+    else { fw=CW; fh=CH*(1-AIR); }
+    CTX.clearRect(0,0,CW,CH);
+    if(fw<CW||fh<CH){
+      const s=Math.max(OS.width/vw, OS.height/vh), bw=vw*s, bh=vh*s;
+      OCTX.drawImage(V,(OS.width-bw)/2,(OS.height-bh)/2,bw,bh);
+      CTX.imageSmoothingEnabled=true; CTX.imageSmoothingQuality="high";
+      CTX.drawImage(OS,0,0,CW,CH);
+      CTX.fillStyle="rgba(8,10,14,.30)"; CTX.fillRect(0,0,CW,CH);
+    }
+    const cw=Math.min(vw, vh*(fw/fh)), ch=Math.min(vh, vw*(fh/fw));
+    let cx=(vw-cw)/2;
+    if(cw<vw-2 && $("#dynamic").checked && PLAN.camera&&PLAN.camera.length){
+      const i=Math.min(PLAN.camera.length-1, Math.max(0,Math.floor(t*30)));
+      cx=Math.min(Math.max(PLAN.camera[i]*vw-cw/2,0), vw-cw);
+    }
+    let z=1;
+    if($("#dynamic").checked&&ZAMT>0.004&&(PLAN.beats||[]).some(b=>t>=b&&t<b+1.1)) z=1+ZAMT;
+    const sw=cw/z, sh=ch/z, sx=cx+(cw-sw)/2, sy=((vh-ch)/2)+(ch-sh)/2;
+    CTX.drawImage(V, sx,sy,sw,sh, (CW-fw)/2,(CH-fh)/2, fw,fh);
+    drawBrollMarker(t);          // B-roll: marca dónde se insertará
+    drawCaption(t);              // subtítulos PRECISOS (todos los ajustes, en vivo)
+    drawEmoji(t);
+    drawLogo();
+  }
   $("#playhead").style.left=(t/dur*100)+"%";
   if(!SCRUBBING) $("#scrub").value=Math.round(t/dur*1000);
   $("#tcur").textContent=fmtT(t);
   highlightLiveWord(t);
+  duckMusic();
   requestAnimationFrame(draw);
 }
 function drawLogo(){
@@ -1274,36 +1300,45 @@ function drawLogo(){
   const y=LOGO_POS==="tl"||LOGO_POS==="tr"?m:CH-h-m;
   CTX.save(); CTX.globalAlpha=0.9; CTX.drawImage(logoImg,x,y,w,h); CTX.restore();
 }
+function capCase(txt){
+  const cs = CASE || ((CAPSTYLE[STYLE]||{}).upper ? "upper":"none");
+  if(cs==="upper") return txt.toUpperCase();
+  if(cs==="lower") return txt.toLowerCase();
+  if(cs==="title") return txt.replace(/\S+/g,w=>w.charAt(0).toUpperCase()+w.slice(1).toLowerCase());
+  return txt;
+}
+/* subtítulos PRECISOS en tiempo real: refleja base/resalte/clave, efecto
+   (normal/karaoke/caja), mayúsculas, contorno, sombra, margen, tamaño, fuente,
+   posición y animación — todo al instante, sin re-render. */
 function drawCaption(t){
+  const smart=$("#smart")?$("#smart").checked:true;
   const ph=P().find(p=>p.length&&t>=p[0].start&&t<p[p.length-1].end+0.05);
   if(!ph) return;
   const st=CAPSTYLE[STYLE]||CAPSTYLE.clasico;
-  let fsz=st.size*CAPS*CW/OW;
-  const activeColor=CAPC||st.active;
+  let fsz=(st.size)*CAPS*CW/OW;
+  const baseCol=BASEC||"#ffffff";
+  const activeCol=CAPC||st.active;
+  const kwCol=KWC||st.kw||activeCol;
+  const outline=(OUTLINE!=null?OUTLINE:st.outline)*CW/OW*1.1;
+  const shadow=(SHADOW!=null?SHADOW:2)*CW/OW*2;
+  const marginH=(MARGIN!=null?MARGIN:140)*CW/OW;
   const age=t-ph[0].start;
   let scale=1, alpha=1;
   if(ANIM==="pop"){ scale=popScale(age); alpha=Math.min(1,age/0.12); }
   else if(ANIM==="fade"){ alpha=Math.min(1,age/0.15); }
-  CTX.save();
-  CTX.globalAlpha=alpha;
+  CTX.save(); CTX.globalAlpha=alpha;
   const y=CH*capPos();
   CTX.translate(CW/2,y); CTX.scale(scale,scale); CTX.translate(-CW/2,-y);
   const setF=()=>CTX.font=`700 ${fsz}px "${CAPF}", Arial`;
-  setF();
-  CTX.textBaseline="alphabetic"; CTX.lineJoin="round"; CTX.strokeStyle="#000";
-  const words=ph.map(w=>st.upper?w.text.toUpperCase():w.text);
-  const fszBase=fsz, maxW=CW*0.92;
-  const measure=()=>{setF();
-    return {ws:words.map(x=>CTX.measureText(x).width), sp:CTX.measureText(" ").width};};
+  setF(); CTX.textBaseline="alphabetic"; CTX.lineJoin="round";
+  const words=ph.map(w=>capCase(w.text));
+  const maxW=CW-2*marginH;
+  const measure=()=>{setF(); return {ws:words.map(x=>CTX.measureText(x).width), sp:CTX.measureText(" ").width};};
   let m=measure(), totalW=m.ws.reduce((a,b)=>a+b,0)+m.sp*(words.length-1);
-  if(totalW>maxW){
-    fsz=Math.max(fszBase*0.6, fsz*maxW/totalW);
-    m=measure(); totalW=m.ws.reduce((a,b)=>a+b,0)+m.sp*(words.length-1);
-  }
-  CTX.lineWidth=fsz/6;
+  if(totalW>maxW){ fsz=Math.max(fsz*0.6, fsz*maxW/totalW); m=measure(); totalW=m.ws.reduce((a,b)=>a+b,0)+m.sp*(words.length-1); }
   let rows=[ph.map((w,i)=>({w,txt:words[i],wd:m.ws[i]}))];
   if(totalW>maxW&&words.length>1){
-    let best=1, diff=1e9;
+    let best=1,diff=1e9;
     for(let k=1;k<words.length;k++){
       const a=m.ws.slice(0,k).reduce((x,y)=>x+y,0)+m.sp*(k-1);
       const b=m.ws.slice(k).reduce((x,y)=>x+y,0)+m.sp*(words.length-k-1);
@@ -1311,19 +1346,57 @@ function drawCaption(t){
     }
     rows=[rows[0].slice(0,best),rows[0].slice(best)];
   }
-  const lh=fsz*1.18, y0=y-(rows.length-1)*lh;
+  const lh=fsz*1.2, y0=y-(rows.length-1)*lh;
   rows.forEach((row,r)=>{
     const rw=row.reduce((a,c)=>a+c.wd,0)+m.sp*(row.length-1);
-    let x=(CW-rw)/2; const ry=y0+r*lh;
+    const ry=y0+r*lh; let x=(CW-rw)/2;
+    if(EFFECT==="box"){ // fondo sólido detrás de la línea
+      CTX.fillStyle="rgba(0,0,0,.62)";
+      const pad=fsz*0.18; roundRect(CTX,x-pad,ry-fsz*0.92,rw+pad*2,fsz*1.22,fsz*0.14); CTX.fill();
+    }
     row.forEach(c=>{
       const active=t>=c.w.start&&t<c.w.end;
-      CTX.strokeText(c.txt,x,ry);
-      CTX.fillStyle=active?activeColor:"#fff";
-      CTX.fillText(c.txt,x,ry);
+      const hi = (smart&&c.w.kw)?kwCol:activeCol;
+      // contorno + sombra
+      if(outline>0){ CTX.lineWidth=outline; CTX.strokeStyle="#000"; CTX.strokeText(c.txt,x,ry); }
+      if(shadow>0){ CTX.shadowColor="rgba(0,0,0,.75)"; CTX.shadowBlur=shadow; CTX.shadowOffsetY=shadow*0.5; }
+      if(active&&EFFECT==="karaoke"){ // barrido base->resalte
+        const prog=Math.max(0,Math.min(1,(t-c.w.start)/Math.max(0.08,c.w.end-c.w.start)));
+        CTX.fillStyle=baseCol; CTX.fillText(c.txt,x,ry);
+        CTX.save(); CTX.beginPath(); CTX.rect(x,ry-fsz,c.wd*prog,fsz*1.4); CTX.clip();
+        CTX.fillStyle=hi; CTX.fillText(c.txt,x,ry); CTX.restore();
+      }else{
+        CTX.fillStyle=active?hi:baseCol; CTX.fillText(c.txt,x,ry);
+      }
+      CTX.shadowBlur=0; CTX.shadowOffsetY=0;
       x+=c.wd+m.sp;
     });
   });
   CTX.restore();
+}
+function roundRect(c,x,y,w,h,r){ c.beginPath();
+  c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r);
+  c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath(); }
+function drawEmoji(t){
+  if(!($("#smart")&&$("#smart").checked)) return;
+  const ph=P().find(p=>p.length&&p[0].emoji&&t>=p[0].start&&t<Math.max(p[0].start+1.4,Math.min(p[p.length-1].end,p[0].start+2.6)));
+  if(!ph||!ph[0].emoji) return;
+  const sz=CW*0.12; CTX.save(); CTX.font=`${sz}px "Apple Color Emoji","Segoe UI Emoji",sans-serif`;
+  CTX.textAlign="center"; CTX.textBaseline="middle";
+  CTX.fillText(ph[0].emoji, CW/2, CH*(capPos()-0.16)); CTX.restore(); CTX.textAlign="left";
+}
+function drawBrollMarker(t){
+  if(!($("#broll")&&$("#broll").checked)||!PLAN.broll) return;
+  const b=PLAN.broll.find(x=>x.enabled!==false&&t>=x.start&&t<x.end);
+  if(!b) return;
+  CTX.save();
+  CTX.fillStyle="rgba(10,12,16,.72)"; const bw=CW*0.9, bh=CW*0.5, bx=(CW-bw)/2, by=CH*0.30;
+  roundRect(CTX,bx,by,bw,bh,CW*0.02); CTX.fill();
+  CTX.fillStyle="#ff7a45"; CTX.font=`700 ${CW*0.035}px Arial`; CTX.textAlign="center";
+  CTX.fillText("🎬 B-ROLL", CW/2, by+bh*0.42);
+  CTX.fillStyle="#fff"; CTX.font=`${CW*0.03}px Arial`;
+  CTX.fillText('"'+b.query+'"', CW/2, by+bh*0.62);
+  CTX.restore(); CTX.textAlign="left";
 }
 function drawHook(t){
   if(!$("#hook").checked) return;
@@ -1397,7 +1470,7 @@ function wireCanvasDrag(){
       CAPPOS=Math.min(0.93,Math.max(0.15,+y.toFixed(3))); drawCapGuide();
     };
     CV.onpointerup=()=>{CV.onpointermove=null;CV.onpointerup=null;CV.style.cursor="grab";
-      CTX.clearRect(0,0,CV.width,CV.height); PROXYKEY=null; buildProxy(150);};
+      CTX.clearRect(0,0,CV.width,CV.height);};
   };
 }
 
@@ -1412,63 +1485,25 @@ function setPlayIcon(playing){
    sincronizar con el timeline). Reproducir/pausar/scrub actúan sobre ese video ->
    los subtítulos y TODO el look se ven SIEMPRE, también al reproducir. Cada cambio
    del panel re-renderiza el proxy (debounce), conservando la posición. */
-let PXT=null, PXSEQ=0, PROXYKEY=null, PROXYREADY=false;
-function pvBadge(state){            // 'busy' | 'real' | null
-  const html = state==="busy" ? '<b>◍</b> actualizando vista…' : '● vista real';
-  [["#pvBadge",true],["#pvBadgeBar",false]].forEach(([sel,hide])=>{
-    const b=$(sel); if(!b) return;
-    if(hide) b.classList.toggle("on", !!state);       // el de la preview se oculta si null
-    b.classList.toggle("busy", state==="busy");
-    b.innerHTML = html;
-  });
-}
-function buildProxy(delay=500){
-  if(!PLAN||!JOB) return;
-  clearTimeout(PXT); PXT=setTimeout(_buildProxy, delay);
-}
-async function _buildProxy(){
-  if(!PLAN||!JOB) return;
-  const opts=renderOpts();
-  const key=JSON.stringify(opts);
-  if(key===PROXYKEY && PROXYREADY) return;           // nada cambió
-  const seq=++PXSEQ; pvBadge("busy");
-  const wasPlaying=!V.paused, at=V.currentTime||0;
-  try{
-    const r=await fetch("/preview/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({plan:PLAN, ...opts, full:true})});
-    if(!r.ok) throw 0;
-    const {file}=await r.json();
-    if(seq!==PXSEQ) return;                           // otro cambio ganó
-    PROXYKEY=key; PROXYREADY=true;
-    V.onloadeddata=()=>{ try{ V.currentTime=Math.min(at, (PLAN.duration||1)-0.1); }catch(e){}
-      if(wasPlaying) V.play().catch(()=>{}); pvBadge("real"); };
-    V.src="/video/"+file+"?k="+Date.now();
-  }catch(e){ if(seq===PXSEQ) pvBadge(null); }
-}
-function wireAutoPreview(){
-  const panel=document.querySelector(".panel");
-  const kick=()=>{ PROXYKEY=null; buildProxy(); };
-  if(panel){
-    panel.addEventListener("input", kick, true);
-    panel.addEventListener("change", kick, true);
-    panel.addEventListener("click", e=>{ if(e.target.closest(".seg button")) kick(); }, true);
-  }
-}
+// El preview es tiempo real (canvas): NO hay re-render; el badge es solo informativo.
 function wireTransport(){
   const play=$("#play");
-  // El preview (V) es el PROXY real: reproduce/pausa/scrub actúan sobre él; el
-  // audio+música va horneado. No hay audio separado que sincronizar.
-  play.onclick=()=>{ if(V.paused) V.play().catch(()=>{}); else V.pause(); };
-  V.onplay=()=>setPlayIcon(true);
-  V.onpause=()=>setPlayIcon(false);
+  play.onclick=()=>{
+    ensureAudio(); AC&&AC.resume();
+    if(V.paused){ V.play().catch(()=>{}); if($("#music").checked)syncMusic(); }
+    else{ V.pause(); M&&M.pause(); }
+  };
+  V.onplay=()=>{setPlayIcon(true); if($("#music").checked&&M)M.play().catch(()=>{});};
+  V.onpause=()=>{setPlayIcon(false); M&&M.pause();};
   const scrub=$("#scrub");
   scrub.oninput=()=>{ SCRUBBING=true; V.currentTime=scrub.value/1000*PLAN.duration; };
-  scrub.onchange=()=>{ SCRUBBING=false; };
+  scrub.onchange=()=>{ SCRUBBING=false; if(M)M.currentTime=V.currentTime%32; };
   $("#ruler").onpointerdown=e=>{
     const seekAt=ev=>{ const r=$("#ruler").getBoundingClientRect();
       V.currentTime=Math.min(Math.max(0,(ev.clientX-r.left)/r.width),1)*(PLAN.duration||1); };
     seekAt(e);
-    const mv=ev=>seekAt(ev), up=()=>{window.removeEventListener("pointermove",mv);window.removeEventListener("pointerup",up);};
+    const mv=ev=>seekAt(ev), up=()=>{window.removeEventListener("pointermove",mv);window.removeEventListener("pointerup",up);
+      if(M)M.currentTime=V.currentTime%32;};
     window.addEventListener("pointermove",mv); window.addEventListener("pointerup",up);
   };
   document.addEventListener("keydown",e=>{
