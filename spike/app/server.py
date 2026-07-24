@@ -620,8 +620,26 @@ async def set_settings(req: Request):
 
 @app.get("/tracks")
 def tracks():
+    """Catálogo de música con metadata (título, género, moods, descripción) para el
+    buscador del Studio. Cae a los .m4a sueltos si no hay tracks.json."""
     d = SPIKE / "assets/music"
-    return [p.stem for p in sorted(d.glob("*.m4a"))] if d.exists() else []
+    if not d.exists():
+        return {"tracks": []}
+    meta = {}
+    mf = d / "tracks.json"
+    if mf.exists():
+        try:
+            for t in json.loads(mf.read_text()).get("tracks", []):
+                meta[t["id"]] = t
+        except Exception:  # noqa
+            pass
+    out = []
+    for p in sorted(d.glob("*.m4a")):
+        m = meta.get(p.stem, {})
+        out.append({"id": p.stem, "title": m.get("title", p.stem.capitalize()),
+                    "genre": m.get("genre", ""), "moods": m.get("moods", []),
+                    "desc": m.get("desc", ""), "bpm": m.get("bpm")})
+    return {"tracks": out}
 
 
 @app.get("/music/{track}")

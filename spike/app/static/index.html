@@ -135,6 +135,25 @@
         text-transform:none;opacity:0;visibility:hidden;transition:opacity .15s;z-index:50;pointer-events:none;
         box-shadow:0 10px 30px -10px rgba(0,0,0,.8)}
   .info:hover::after{opacity:1;visibility:visible}
+  /* biblioteca de música */
+  .moodchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+  .mchip{font-size:11px;padding:4px 10px;border-radius:20px;border:1px solid var(--line2);background:var(--sunken);
+         color:var(--muted);cursor:pointer;transition:all .12s;text-transform:capitalize}
+  .mchip:hover{border-color:var(--brand)}
+  .mchip.on{background:#1d1512;border-color:var(--brand);color:var(--brand2)}
+  .mlist{display:flex;flex-direction:column;gap:6px;max-height:230px;overflow:auto;padding-right:3px}
+  .mrow{display:flex;align-items:center;gap:10px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;
+        background:var(--panel2);cursor:pointer;transition:all .12s}
+  .mrow:hover{border-color:var(--line2)}
+  .mrow.sel{border-color:var(--brand);background:#17130f}
+  .mplay{width:30px;height:30px;flex:none;border-radius:50%;border:1px solid var(--line2);background:var(--sunken);
+         color:var(--brand2);cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .mplay:hover{border-color:var(--brand)}
+  .mplay .ic{width:13px;height:13px}
+  .minfo{flex:1;min-width:0}
+  .mtitle{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mtags{font-size:10.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+  .mrow.sel .mtitle{color:var(--brand2)}
   .pgroup h4 .soft{text-transform:none;letter-spacing:0;font-weight:400;color:var(--faint)}
   .seg{display:inline-flex;gap:2px;background:var(--sunken);border:1px solid var(--line);border-radius:9px;padding:3px;flex-wrap:wrap}
   .seg button{border:0;background:none;color:var(--muted);padding:6px 11px;border-radius:6px;cursor:pointer;
@@ -443,10 +462,18 @@
             <label class="swlabel"><input type="checkbox" class="toggle" id="broll"> <svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>B-roll 🎬 <span class="info" data-tip="Inserta clips de video de stock (Pexels) relacionados con lo que dices. Requiere internet. Podrás aprobar cada inserción.">i</span></label>
             <label class="swlabel"><input type="checkbox" class="toggle" id="music"> <svg class="ic" viewBox="0 0 24 24"><use href="#i-music"/></svg>Música <span class="info" data-tip="Añade una pista de fondo con ducking (baja al hablar). Elige por mood/género abajo.">i</span></label>
           </div>
-          <div class="optrow" id="musrow" style="display:none">
-            <div><label>Pista</label><select id="mtrack" class="selinp"></select></div>
-            <div><label>Volumen <span id="mvollbl">26%</span></label>
-              <input type="range" id="mvol" min="4" max="60" value="26" class="rng"></div>
+          <div id="musrow" style="display:none">
+            <input type="hidden" id="mtrack" value="">
+            <div class="optrow">
+              <div style="flex:1"><label>Buscar música <span class="info" data-tip="Filtra por mood (tranquilo, energético…), género o nombre.">i</span></label>
+                <input type="text" id="mSearch" class="selinp" placeholder="mood, género o nombre…" style="width:100%"></div>
+            </div>
+            <div class="moodchips" id="mMoods"></div>
+            <div class="mlist" id="mList"></div>
+            <div class="hint" id="mOnline" style="margin-top:6px">🌐 Catálogo en línea (más pistas) — próximamente.</div>
+            <div class="optrow" style="margin-top:8px">
+              <div style="flex:1"><label>Volumen <span id="mvollbl">26%</span> <span class="info" data-tip="Qué tan fuerte suena la música bajo tu voz. Baja automáticamente al hablar (ducking).">i</span></label>
+                <input type="range" id="mvol" min="4" max="60" value="26" class="rng" style="width:100%"></div></div>
           </div>
         </div>
         <div class="pgroup insp" id="inspGroup" style="display:none"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-zoom"/></svg>Inspector</h4>
@@ -689,10 +716,53 @@ const CAPSTYLE={clasico:{size:78,active:"#ffb020",upper:false},amarillo:{size:84
                 impacto:{size:92,active:"#4ad2ff",upper:true}};
 let flatWords=[], liveWordEl=null, ZTL=1;
 
+/* ---- biblioteca de música: buscar por mood/género/nombre + preview ---- */
+let TRACKS=[], MFILTER="", MMOOD="", mPrev=null, mPrevId=null;
 async function loadTracks(){
-  try{ const t=await(await fetch("/tracks")).json();
-    $("#mtrack").innerHTML=t.map(x=>`<option value="${x}">${x[0].toUpperCase()+x.slice(1)}</option>`).join("");
-  }catch(e){}
+  try{ const d=await(await fetch("/tracks")).json(); TRACKS=d.tracks||d||[]; }
+  catch(e){ TRACKS=[]; }
+  // chips de mood únicos
+  const moods=[...new Set(TRACKS.flatMap(t=>t.moods||[]))].sort();
+  $("#mMoods").innerHTML=moods.map(m=>`<span class="mchip" data-m="${m}">${m}</span>`).join("");
+  $("#mMoods").querySelectorAll(".mchip").forEach(c=>c.onclick=()=>{
+    MMOOD = MMOOD===c.dataset.m ? "" : c.dataset.m;
+    $("#mMoods").querySelectorAll(".mchip").forEach(x=>x.classList.toggle("on",x.dataset.m===MMOOD));
+    renderTracks();
+  });
+  if(!$("#mtrack").value && TRACKS[0]) $("#mtrack").value=TRACKS[0].id;
+  renderTracks();
+}
+function renderTracks(){
+  const q=MFILTER.toLowerCase().trim();
+  const list=TRACKS.filter(t=>{
+    if(MMOOD && !(t.moods||[]).includes(MMOOD)) return false;
+    if(!q) return true;
+    return (t.title+" "+t.genre+" "+(t.moods||[]).join(" ")+" "+(t.desc||"")).toLowerCase().includes(q);
+  });
+  const sel=$("#mtrack").value;
+  const box=$("#mList");
+  if(!list.length){ box.innerHTML='<div class="hint">Sin resultados. Prueba otro mood o término.</div>'; return; }
+  box.innerHTML=list.map(t=>`<div class="mrow ${t.id===sel?"sel":""}" data-id="${t.id}">
+      <button class="mplay" data-id="${t.id}" title="Escuchar">${ICO("play")}</button>
+      <div class="minfo"><div class="mtitle">${t.title}</div>
+        <div class="mtags">${t.genre}${t.moods&&t.moods.length?" · "+t.moods.slice(0,3).join(", "):""}</div></div>
+    </div>`).join("");
+  box.querySelectorAll(".mrow").forEach(r=>r.onclick=e=>{
+    if(e.target.closest(".mplay")) return;
+    $("#mtrack").value=r.dataset.id;
+    box.querySelectorAll(".mrow").forEach(x=>x.classList.toggle("sel",x===r));
+    if(M){M.src="";M=null;MSRC=null;} syncMusic(); renderMusicLane();
+    lastKey=null; scheduleRealPreview(200);
+  });
+  box.querySelectorAll(".mplay").forEach(b=>b.onclick=e=>{ e.stopPropagation(); previewTrack(b.dataset.id, b); });
+}
+function previewTrack(id, btn){
+  if(mPrev && mPrevId===id){ mPrev.pause(); mPrev=null; mPrevId=null;
+    if(btn) btn.innerHTML=ICO("play"); return; }
+  if(mPrev){ mPrev.pause(); document.querySelectorAll(".mplay").forEach(x=>x.innerHTML=ICO("play")); }
+  mPrev=new Audio("/music/"+id); mPrevId=id; mPrev.volume=0.7;
+  mPrev.play().catch(()=>{}); if(btn) btn.innerHTML=ICO("pause");
+  mPrev.onended=()=>{ if(btn) btn.innerHTML=ICO("play"); mPrev=null; mPrevId=null; };
 }
 function loadLogo(){
   const im=new Image();
@@ -744,8 +814,8 @@ function openEditor(){
   $("#presetSave").onclick=savePreset;
   $("#presetDel").onclick=deletePreset;
   $("#presetSel").onchange=e=>{ if(e.target.value) applyPreset(e.target.value); };
-  $("#music").onchange=e=>{ $("#musrow").style.display=e.target.checked?"flex":"none"; syncMusic(); renderMusicLane(); };
-  $("#mtrack").onchange=()=>{ if(M){M.src="";M=null;MSRC=null;} syncMusic(); renderMusicLane(); };
+  $("#music").onchange=e=>{ $("#musrow").style.display=e.target.checked?"block":"none"; syncMusic(); renderMusicLane(); };
+  $("#mSearch").oninput=e=>{ MFILTER=e.target.value; renderTracks(); };
   $("#mvol").oninput=e=>$("#mvollbl").textContent=e.target.value+"%";
   $("#enhance").onchange=applyEnhance;
   $("#hook").onchange=renderTL;
@@ -832,7 +902,7 @@ function applyPreset(name){
   $("#logoOn").checked=LOGO_ON; $("#logoSize").value=Math.round(LOGO_SIZE*100);
   $("#dynamic").checked=c.dynamic??true; $("#enhance").checked=c.enhance??true;
   $("#hook").checked=c.hook??true; $("#music").checked=!!c.music;
-  $("#musrow").style.display=c.music?"flex":"none";
+  $("#musrow").style.display=c.music?"block":"none";
   if(c.music_track)$("#mtrack").value=c.music_track;
   if(c.music_volume){$("#mvol").value=c.music_volume;$("#mvollbl").textContent=c.music_volume+"%";}
   applyEnhance(); syncMusic(); renderMusicLane(); renderTL();

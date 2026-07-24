@@ -1,0 +1,29 @@
+{
+  "_note": "Catálogo de música local (royalty-free, pre-licenciada). Para añadir una pista: deja el .m4a en esta carpeta y agrega su entrada aquí. moods/genre alimentan el buscador del Studio.",
+  "tracks": [
+    {
+      "id": "ambient",
+      "title": "Ambient Glow",
+      "genre": "Ambiental",
+      "moods": ["tranquilo", "relajado", "elegante", "inspirador"],
+      "desc": "Atmósfera suave y limpia. Ideal para hablar a cámara, productos y lujo.",
+      "bpm": 90
+    },
+    {
+      "id": "lofi",
+      "title": "Lofi Days",
+      "genre": "Lofi",
+      "moods": ["chill", "relajado", "casual", "cálido"],
+      "desc": "Lofi cálido y desenfadado. Vlogs, rutinas y contenido cercano.",
+      "bpm": 78
+    },
+    {
+      "id": "uplift",
+      "title": "Uplift",
+      "genre": "Pop / Corporate",
+      "moods": ["energético", "feliz", "motivador", "positivo"],
+      "desc": "Enérgico y motivador. Tips, ventas y llamados a la acción.",
+      "bpm": 120
+    }
+  ]
+}
