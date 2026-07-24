@@ -75,10 +75,22 @@ def _hex_ass(hex_color):
 
 # caption style presets (ASS colours are &HAABBGGRR). base text is always white/bold.
 STYLES = {
-    "clasico":  dict(size=78, active="&H0000E5FF", outline=5, upper=False),  # white + amber
-    "amarillo": dict(size=84, active="&H0000F0FF", outline=6, upper=True),   # ALL CAPS + yellow
-    "neon":     dict(size=80, active="&H00F050FF", outline=5, upper=False),  # white + magenta
-    "minimal":  dict(size=70, active="&H00FFFFFF", outline=4, upper=False),  # clean, no colour pop
+    # kw = color persistente de las palabras clave (resaltado inteligente).
+    # border/boxcolor -> BorderStyle 3 (caja opaca). fill -> barrido karaoke.
+    "clasico":  dict(size=78, active="&H0000E5FF", outline=5, upper=False,   # white + amber
+                     kw="&H0032FF7C"),                                       # kw lime
+    "amarillo": dict(size=84, active="&H0000F0FF", outline=6, upper=True,    # CAPS + yellow
+                     kw="&H00FF9036"),                                       # kw azul eléctrico
+    "neon":     dict(size=80, active="&H00F050FF", outline=5, upper=False,   # white + magenta
+                     kw="&H00FFF04A"),                                       # kw cian
+    "minimal":  dict(size=70, active="&H00FFFFFF", outline=4, upper=False,   # clean
+                     kw="&H000FBDF2"),                                       # kw dorado suave
+    "karaoke":  dict(size=80, active="&H0000E5FF", outline=5, upper=True,    # barrido de color
+                     kw="&H0032FF7C", fill=True),                            # dentro de la palabra
+    "caja":     dict(size=72, active="&H0000E5FF", outline=9, upper=False,   # caja oscura detrás
+                     kw="&H0032FF7C", border=3, boxcolor="&H66000000"),
+    "impacto":  dict(size=92, active="&H00FFD24A", outline=7, upper=True,    # XL + cian
+                     kw="&H000FBDF2"),
 }
 
 # output format presets (label -> (w, h))
@@ -234,7 +246,8 @@ def ass_time(t):
 
 
 def build_ass(phrases, ass_path, w=W, h=H, style="clasico", anim="none",
-              cap_color=None, cap_font=None, cap_scale=1.0, cap_pos=0.776):
+              cap_color=None, cap_font=None, cap_scale=1.0, cap_pos=0.776,
+              smart=True):
     """Word-by-word highlight captions, ROCK-STABLE position.
 
     Highlight is COLOR-ONLY (glyph metrics never change) so the phrase stays pinned;
@@ -242,15 +255,23 @@ def build_ass(phrases, ass_path, w=W, h=H, style="clasico", anim="none",
     never duplicate or vanish. Personalization: `cap_color` (hex) overrides the
     highlight color, `cap_font` the family, `cap_scale` the size, `cap_pos` the
     vertical baseline position (fraction of height from the top).
+
+    Resaltado inteligente (`smart`): las palabras marcadas kw=True por
+    captionsmart se pintan del color acento del estilo de forma PERSISTENTE
+    (solo color -> cero reflow). Devuelve las ventanas de emoji por frase
+    [(emoji, start, end)] para overlay (libass no renderiza emoji: tofu).
     """
     st = dict(STYLES.get(style, STYLES["clasico"]))
     st["size"] = max(24, int(st["size"] * float(cap_scale or 1.0)))
     active_color = (_hex_ass(cap_color) if cap_color else None) or st["active"]
+    kw_color = st.get("kw", active_color)
     font = cap_font or FONT
     cap_pos = min(0.93, max(0.15, float(cap_pos or 0.776)))
     margin_v = round(h * (1 - cap_pos))   # ASS MarginV = distance from the bottom
     MIN_DUR = 0.06
     MAX_HOLD = 1.2   # after this much silence the caption clears (natural)
+    border = st.get("border", 1)
+    outcolor = st.get("boxcolor", "&H00000000")
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {w}
@@ -258,8 +279,8 @@ PlayResY: {h}
 WrapStyle: 0
 
 [V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Outline, Shadow, Alignment, MarginL, MarginR, MarginV
-Style: Base,{font},{st["size"]},{BASE_COLOR},&H00000000,&H80000000,1,{st["outline"]},2,2,{MARGIN_H},{MARGIN_H},{margin_v}
+Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, BorderStyle
+Style: Base,{font},{st["size"]},{BASE_COLOR},{outcolor},&H80000000,1,{st["outline"]},2,2,{MARGIN_H},{MARGIN_H},{margin_v},{border}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -284,17 +305,28 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         fs = _fit_size(plain, st["size"], max_line_w, floor=int(st["size"] * 0.6))
         fs_tag = f"{{\\fs{fs}}}" if fs != st["size"] else ""
         for i, active in enumerate(ph):
+            start = active["start"]
+            end = ph[i + 1]["start"] if i + 1 < len(ph) else active["end"]
             parts = []
             for w_ in ph:
                 token = w_["text"].replace("{", "(").replace("}", ")")
                 if st["upper"]:
                     token = token.upper()
+                is_kw = smart and w_.get("kw")
+                rest = kw_color if is_kw else BASE_COLOR   # color al dejar de ser activa
                 if w_ is active:
-                    parts.append(f"{{\\c{active_color}}}{token}{{\\c{BASE_COLOR}}}")
+                    if st.get("fill"):
+                        # karaoke: la palabra activa BARRE del color base al acento
+                        # durante su duración (transición de color: métricas intactas)
+                        ms = max(60, int((end - start) * 1000))
+                        parts.append(f"{{\\c{rest}\\t(0,{ms},\\c{active_color})}}"
+                                     f"{token}{{\\c{BASE_COLOR}}}")
+                    else:
+                        parts.append(f"{{\\c{active_color}}}{token}{{\\c{BASE_COLOR}}}")
+                elif is_kw:
+                    parts.append(f"{{\\c{kw_color}}}{token}{{\\c{BASE_COLOR}}}")
                 else:
                     parts.append(token)
-            start = active["start"]
-            end = ph[i + 1]["start"] if i + 1 < len(ph) else active["end"]
             events.append([start, end, fs_tag + " ".join(parts), i == 0])
 
     events.sort(key=lambda e: e[0])
@@ -313,6 +345,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         pre = anim_tag if (first and anim_tag) else ""
         lines.append(f"Dialogue: 0,{ass_time(s)},{ass_time(end)},Base,,0,0,0,,{pre}{txt}")
     Path(ass_path).write_text(header + "\n".join(lines) + "\n")
+
+    # ventanas de emoji por frase (overlay PNG flotante; máx 2.6 s cada una)
+    emojis = []
+    if smart:
+        for ph in phrases:
+            em = ph[0].get("emoji") if ph else None
+            if em:
+                s0, e0 = ph[0]["start"], ph[-1]["end"]
+                emojis.append((em, s0, min(e0, s0 + 2.6)))
+    return emojis
 
 
 def is_hdr(video):
@@ -342,11 +384,41 @@ def _tonemap(video):
 
 BRAND_DIR = paths_mod.BRAND
 
+# fuentes de emoji A COLOR por SO (libass no las renderiza: se hacen overlay PNG)
+_EMOJI_FONTS = [
+    "/System/Library/Fonts/Apple Color Emoji.ttc",          # macOS (sbix, strike 160)
+    "C:/Windows/Fonts/seguiemj.ttf",                         # Windows (COLR)
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",     # Linux (CBDT)
+]
+
+
+def render_emoji_png(emoji, out_path):
+    """PNG transparente con el emoji A COLOR (Pillow embedded_color). None si el
+    SO no tiene fuente de emoji a color -> los emojis simplemente se omiten."""
+    from PIL import Image, ImageDraw, ImageFont
+    for fp in _EMOJI_FONTS:
+        if not Path(fp).exists():
+            continue
+        try:
+            size = 160 if "Apple" in fp else 128   # Apple: strike bitmap fijo
+            f = ImageFont.truetype(fp, size)
+            img = Image.new("RGBA", (size * 2, size * 2), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            d.text((size // 2, size // 2), emoji, font=f, embedded_color=True)
+            box = img.getbbox()
+            if not box:
+                return None
+            img.crop(box).save(out_path)
+            return str(out_path)
+        except Exception:  # noqa
+            continue
+    return None
+
 
 def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None,
                      on_pct=None, preview_secs=None, enhance_audio=False,
                      out_w=W, out_h=H, camera=None, keeps=None,
-                     zoom_amt=ZOOM_IN, air=None, logo=None):
+                     zoom_amt=ZOOM_IN, air=None, logo=None, emojis=None):
     """Composite a FIXED blurred background + a dynamic foreground video, burn captions.
 
     Layers (frame/margins never move; only the video moves): static blurred BG cover +
@@ -407,6 +479,16 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
           f"[fgsrc]{','.join(fg)}[fg];"
           f"[bg][fg]overlay=x=(W-w)/2:y=(H-h)/2[c];"
           f"[c]subtitles={ass_path}")
+    # emojis del resaltado inteligente: overlay PNG flotante centrado ARRIBA del
+    # bloque de captions, visible en la ventana de su frase (timeline original,
+    # ANTES del recorte de silencios para que siga a sus frames como los subs).
+    if emojis:
+        ew = (round(ow * 0.115) // 2) * 2                  # ~11.5% del ancho
+        ey = round(oh * 0.60)                              # sobre los captions (~0.776)
+        for k, (png, es, ee) in enumerate(emojis[:14]):    # tope sano de overlays
+            vf += (f"[e{k}a];movie='{png}',scale={ew}:-1,format=rgba[em{k}];"
+                   f"[e{k}a][em{k}]overlay=x=(W-w)/2:y={ey}:"
+                   f"enable='between(t,{es:.3f},{ee:.3f})'")
     if logo:
         lf = BRAND_DIR / "logo.png"
         if lf.exists():
@@ -572,6 +654,12 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
         except Exception as e:  # noqa
             print(f"   alignment failed ({e}); whisper timings")
     phrases = group_phrases(words)
+    step(60, "Marcando palabras clave y emojis (IA)…")
+    try:
+        import captionsmart
+        captionsmart.annotate(phrases)     # marca word['kw'] y emoji por frase
+    except Exception as e:  # noqa: sin LLM el video sale igual, solo sin resaltado
+        print(f"   captionsmart falló ({e}); sin resaltado inteligente")
     step(66, "Eligiendo los mejores momentos (IA)…")
     highlights = hl.select_highlights(hl.build_sentences(words), n=n)
     for h in highlights:
@@ -595,7 +683,10 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
         "stem": stem, "video": str(video), "wav": str(wav),
         "dims": [src_w, src_h], "duration": probe_duration(video),
         "cmds_path": str(cmds), "camera": camera,
-        "phrases": [[{"text": w["text"], "start": w["start"], "end": w["end"]} for w in ph]
+        "phrases": [[{"text": w["text"], "start": w["start"], "end": w["end"],
+                      # resaltado inteligente: conservar keywords y emoji de frase
+                      **({"kw": True} if w.get("kw") else {}),
+                      **({"emoji": w["emoji"]} if w.get("emoji") else {})} for w in ph]
                     for ph in phrases],
         "highlights": highlights,
         "beats": beats,
@@ -603,10 +694,22 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
     }
 
 
+def _emoji_overlays(emoji_windows, stem):
+    """[(emoji, s, e)] -> [(png, s, e)] renderizando cada emoji único una vez."""
+    out, cache = [], {}
+    for em, s, e in emoji_windows:
+        if em not in cache:
+            png = WORK / f"{stem}_em_{len(cache)}.png"
+            cache[em] = render_emoji_png(em, png)
+        if cache[em]:
+            out.append((cache[em], s, e))
+    return out or None
+
+
 def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="clasico",
                      anim="none", fmt="9:16", music=False, music_track="ambient",
                      music_volume=0.26, hook=False, lang="es", custom=None,
-                     on_step=None, on_pct=None):
+                     smart=True, on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -632,9 +735,11 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
             titles = dict(zip(hl_titles, translate_mod.translate_texts(hl_titles)))
     c = custom or {}
     ass = WORK / f"{stem}.ass"
-    build_ass(phrases, ass, ow, oh, style, anim,           # rebuild from edited captions
-              c.get("cap_color"), c.get("cap_font"),
-              c.get("cap_scale", 1.0), c.get("cap_pos", 0.776))
+    emoji_windows = build_ass(phrases, ass, ow, oh, style, anim,   # rebuild from edited captions
+                              c.get("cap_color"), c.get("cap_font"),
+                              c.get("cap_scale", 1.0), c.get("cap_pos", 0.776),
+                              smart=smart)
+    emojis = _emoji_overlays(emoji_windows, stem)
     beats = plan.get("beats") if dynamic else None
 
     # ZERO-CASCADE: silence-trim happens INSIDE the main render (one encode total).
@@ -678,7 +783,7 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     reframe_and_burn(video, ass, full, cmds_path=plan["cmds_path"], beats=beats,
                      enhance_audio=enhance_audio, out_w=ow, out_h=oh, camera=camera,
                      keeps=keeps, zoom_amt=float(c.get("zoom_amt", ZOOM_IN)),
-                     air=c.get("air"), logo=c.get("logo"),
+                     air=c.get("air"), logo=c.get("logo"), emojis=emojis,
                      on_pct=(lambda p: on_pct("full", p)) if on_pct else None)
     if music:
         step("Añadiendo música de fondo…")
@@ -712,7 +817,7 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
 
 def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim="none",
                    fmt="9:16", music=False, music_track="ambient", music_volume=0.26,
-                   lang="es", custom=None):
+                   lang="es", custom=None, smart=True):
     """Fast, low-res sample of the first `secs` (the real look: captions, tracking,
     blurred bg, zoom, studio audio, music, chosen style/format/lang) — preview before export."""
     ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
@@ -723,16 +828,18 @@ def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim
         phrases = plan["phrases"]
     c = custom or {}
     ass = WORK / f"{stem}.ass"
-    build_ass(phrases, ass, ow, oh, style, anim,
-              c.get("cap_color"), c.get("cap_font"),
-              c.get("cap_scale", 1.0), c.get("cap_pos", 0.776))
+    emoji_windows = build_ass(phrases, ass, ow, oh, style, anim,
+                              c.get("cap_color"), c.get("cap_font"),
+                              c.get("cap_scale", 1.0), c.get("cap_pos", 0.776),
+                              smart=smart)
+    emojis = _emoji_overlays([w for w in emoji_windows if w[1] < secs], stem)
     out = Path(out)
     tmp = out.with_name(out.stem + "_raw.mp4") if music else out
     reframe_and_burn(Path(plan["video"]), ass, tmp, cmds_path=plan["cmds_path"],
                      beats=plan.get("beats"), preview_secs=secs, enhance_audio=enhance_audio,
                      out_w=ow, out_h=oh, camera=plan.get("camera"),
                      zoom_amt=float(c.get("zoom_amt", ZOOM_IN)),
-                     air=c.get("air"), logo=c.get("logo"))
+                     air=c.get("air"), logo=c.get("logo"), emojis=emojis)
     if music:
         add_music(tmp, out, music_track, music_volume); tmp.unlink(missing_ok=True)
     return out

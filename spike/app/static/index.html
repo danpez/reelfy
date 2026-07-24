@@ -351,7 +351,9 @@
           <div class="optrow">
             <div><label>Subtítulos</label><div class="seg" id="segStyle">
               <button data-v="clasico" class="sel">Clásico</button><button data-v="amarillo">Amarillo</button>
-              <button data-v="neon">Neón</button><button data-v="minimal">Minimal</button></div></div>
+              <button data-v="neon">Neón</button><button data-v="minimal">Minimal</button>
+              <button data-v="karaoke">Karaoke</button><button data-v="caja">Caja</button>
+              <button data-v="impacto">Impacto</button></div></div>
             <div><label>Animación</label><div class="seg" id="segAnim">
               <button data-v="pop" class="sel">Pop</button><button data-v="fade">Fade</button><button data-v="none">No</button></div></div>
           </div>
@@ -382,6 +384,7 @@
           </div>
           <div class="optrow">
             <label class="swlabel"><input type="checkbox" class="toggle" id="hook" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Hook</label>
+            <label class="swlabel"><input type="checkbox" class="toggle" id="smart" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Resaltado IA ✨</label>
             <label class="swlabel"><input type="checkbox" class="toggle" id="music"> <svg class="ic" viewBox="0 0 24 24"><use href="#i-music"/></svg>Música</label>
           </div>
           <div class="optrow" id="musrow" style="display:none">
@@ -501,6 +504,7 @@ const musOpts=()=>({music:$("#music").checked,music_track:$("#mtrack").value||"a
 const customOpts=()=>({cap_color:CAPC,cap_font:CAPF!=="Arial"?CAPF:null,cap_scale:CAPS,cap_pos:CAPPOS,
   zoom_amt:ZAMT,air:AIR,logo:LOGO_ON?{pos:LOGO_POS,size:LOGO_SIZE,opacity:0.9}:null});
 const renderOpts=()=>({dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,hook:$("#hook").checked,
+                       smart:$("#smart").checked,
                        style:STYLE,anim:ANIM,format:FMT,lang:LANG,...musOpts(),...customOpts()});
 function seg(id,set){const el=$(id);el.querySelectorAll("button").forEach(b=>b.onclick=()=>{
   el.querySelectorAll("button").forEach(x=>x.classList.remove("sel"));b.classList.add("sel");set(b.dataset.v);});}
@@ -618,7 +622,9 @@ function setFormat(v){
 }
 setFormat("9:16");
 const CAPSTYLE={clasico:{size:78,active:"#ffb020",upper:false},amarillo:{size:84,active:"#ffe14d",upper:true},
-                neon:{size:80,active:"#ff50f0",upper:false},minimal:{size:70,active:"#ffffff",upper:false}};
+                neon:{size:80,active:"#ff50f0",upper:false},minimal:{size:70,active:"#ffffff",upper:false},
+                karaoke:{size:80,active:"#ffb020",upper:true},caja:{size:72,active:"#ffb020",upper:false},
+                impacto:{size:92,active:"#4ad2ff",upper:true}};
 let flatWords=[], liveWordEl=null, ZTL=1;
 
 async function loadTracks(){

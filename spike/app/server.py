@@ -422,6 +422,7 @@ def _render(job_id, job):
                                       music_volume=p.get("mvol", 0.26),
                                       hook=p.get("hook", False), lang=p.get("lang", "es"),
                                       custom=p.get("custom") or {},
+                                      smart=p.get("smart", True),
                                       on_step=step, on_pct=overall)
     jobstore.update(job_id, state="done", phase="done", pct=100,
                     message="¡Listo!", clips=clips, eta=0)
@@ -479,7 +480,7 @@ async def render(job_id: str, req: Request):
                   track=body.get("music_track", "ambient"),
                   mvol=float(body.get("music_volume", 0.26)),
                   hook=bool(body.get("hook", False)), lang=body.get("lang", "es"),
-                  custom=_custom(body))
+                  smart=bool(body.get("smart", True)), custom=_custom(body))
     jobstore.requeue(job_id, kind="render", params=params, plan=plan,
                      message="Preparando el render…")
     return {"ok": True}
@@ -516,7 +517,8 @@ async def preview(job_id: str, req: Request):
     lang = body.get("lang", "es")
     try:
         await run_in_threadpool(pipeline.render_preview, plan, out, 7, enhance, style, anim,
-                                fmt, music, track, mvol, lang, _custom(body))
+                                fmt, music, track, mvol, lang, _custom(body),
+                                bool(body.get("smart", True)))
     except Exception as e:  # noqa
         raise HTTPException(500, f"Preview falló: {e}")
     return {"file": out.name}
