@@ -97,6 +97,17 @@ STYLES = {
 FORMATS = {"9:16": (1080, 1920), "1:1": (1080, 1080), "4:5": (1080, 1350),
            "16:9": (1920, 1080)}
 
+# ---- presets de PLATAFORMA (D2): safe-zones reales de cada UI + duración ----
+# cap_pos: los captions suben para no chocar con la descripción/botonera de la
+# app; max_short recorta los shorts al límite de la plataforma; suffix va al
+# nombre de archivo para que el usuario sepa qué subir a dónde.
+PLATFORMS = {
+    "none":   dict(suffix="",        cap_pos=None,  max_short=None),
+    "tiktok": dict(suffix="_tiktok", cap_pos=0.72,  max_short=600),   # desc + rail derecho
+    "reels":  dict(suffix="_reels",  cap_pos=0.68,  max_short=90),    # overlay inferior alto
+    "shorts": dict(suffix="_shorts", cap_pos=0.74,  max_short=60),    # título inferior + rail
+}
+
 # ---- framing: FIXED blurred background + dynamic foreground video on top ----
 # The bg is a static cover-crop of the scene, blurred, NEVER panned/zoomed (fixed).
 # ALL motion (tracking pan, zoom punches) lives in the foreground layer only, so the
@@ -418,7 +429,7 @@ def render_emoji_png(emoji, out_path):
 def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None,
                      on_pct=None, preview_secs=None, enhance_audio=False,
                      out_w=W, out_h=H, camera=None, keeps=None,
-                     zoom_amt=ZOOM_IN, air=None, logo=None, emojis=None):
+                     zoom_amt=ZOOM_IN, air=None, logo=None, emojis=None, emoji_y=None):
     """Composite a FIXED blurred background + a dynamic foreground video, burn captions.
 
     Layers (frame/margins never move; only the video moves): static blurred BG cover +
@@ -484,7 +495,7 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
     # ANTES del recorte de silencios para que siga a sus frames como los subs).
     if emojis:
         ew = (round(ow * 0.115) // 2) * 2                  # ~11.5% del ancho
-        ey = round(oh * 0.60)                              # sobre los captions (~0.776)
+        ey = emoji_y if emoji_y is not None else round(oh * 0.60)
         for k, (png, es, ee) in enumerate(emojis[:14]):    # tope sano de overlays
             vf += (f"[e{k}a];movie='{png}',scale={ew}:-1,format=rgba[em{k}];"
                    f"[e{k}a][em{k}]overlay=x=(W-w)/2:y={ey}:"
@@ -709,7 +720,7 @@ def _emoji_overlays(emoji_windows, stem):
 def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="clasico",
                      anim="none", fmt="9:16", music=False, music_track="ambient",
                      music_volume=0.26, hook=False, lang="es", custom=None,
-                     smart=True, on_step=None, on_pct=None):
+                     smart=True, platform="none", on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -734,10 +745,14 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
             phrases = translate_mod.translate_phrases(phrases)
             titles = dict(zip(hl_titles, translate_mod.translate_texts(hl_titles)))
     c = custom or {}
+    pf = PLATFORMS.get(platform or "none", PLATFORMS["none"])
+    # safe-zone de la plataforma: sube los captions salvo que el usuario los
+    # haya colocado explícitamente (su ajuste manda)
+    cap_pos = c.get("cap_pos") or pf["cap_pos"] or 0.776
     ass = WORK / f"{stem}.ass"
     emoji_windows = build_ass(phrases, ass, ow, oh, style, anim,   # rebuild from edited captions
                               c.get("cap_color"), c.get("cap_font"),
-                              c.get("cap_scale", 1.0), c.get("cap_pos", 0.776),
+                              c.get("cap_scale", 1.0), cap_pos,
                               smart=smart)
     emojis = _emoji_overlays(emoji_windows, stem)
     beats = plan.get("beats") if dynamic else None
@@ -779,11 +794,12 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
         return acc
 
     step("Montando el video…")
-    full = out_dir / f"{stem}_reelfy.mp4"
+    full = out_dir / f"{stem}_reelfy{pf['suffix']}.mp4"
     reframe_and_burn(video, ass, full, cmds_path=plan["cmds_path"], beats=beats,
                      enhance_audio=enhance_audio, out_w=ow, out_h=oh, camera=camera,
                      keeps=keeps, zoom_amt=float(c.get("zoom_amt", ZOOM_IN)),
                      air=c.get("air"), logo=c.get("logo"), emojis=emojis,
+                     emoji_y=round(oh * (cap_pos - 0.18)),
                      on_pct=(lambda p: on_pct("full", p)) if on_pct else None)
     if music:
         step("Añadiendo música de fondo…")
@@ -794,8 +810,11 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     enabled = [h for h in plan["highlights"] if h.get("enabled", True)]
     for k, h in enumerate(enabled, 1):
         step(f"Cortando short {k}…")
-        clip = out_dir / f"{stem}_short{k}.mp4"
-        cut_clip(full, remap(h["start"]), remap(h["end"]), clip,
+        clip = out_dir / f"{stem}_short{k}{pf['suffix']}.mp4"
+        s0, e0 = remap(h["start"]), remap(h["end"])
+        if pf["max_short"] and e0 - s0 > pf["max_short"]:   # límite de la plataforma
+            e0 = s0 + pf["max_short"]
+        cut_clip(full, s0, e0, clip,
                  on_pct=(lambda p, k=k: on_pct(f"short{k}", p)) if on_pct else None)
         title = titles.get(h.get("title", ""), h.get("title", ""))
         if hook and title:
@@ -839,7 +858,8 @@ def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim
                      beats=plan.get("beats"), preview_secs=secs, enhance_audio=enhance_audio,
                      out_w=ow, out_h=oh, camera=plan.get("camera"),
                      zoom_amt=float(c.get("zoom_amt", ZOOM_IN)),
-                     air=c.get("air"), logo=c.get("logo"), emojis=emojis)
+                     air=c.get("air"), logo=c.get("logo"), emojis=emojis,
+                     emoji_y=round(oh * (float(c.get("cap_pos", 0.776)) - 0.18)))
     if music:
         add_music(tmp, out, music_track, music_volume); tmp.unlink(missing_ok=True)
     return out

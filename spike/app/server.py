@@ -423,6 +423,7 @@ def _render(job_id, job):
                                       hook=p.get("hook", False), lang=p.get("lang", "es"),
                                       custom=p.get("custom") or {},
                                       smart=p.get("smart", True),
+                                      platform=p.get("platform", "none"),
                                       on_step=step, on_pct=overall)
     jobstore.update(job_id, state="done", phase="done", pct=100,
                     message="¡Listo!", clips=clips, eta=0)
@@ -480,7 +481,8 @@ async def render(job_id: str, req: Request):
                   track=body.get("music_track", "ambient"),
                   mvol=float(body.get("music_volume", 0.26)),
                   hook=bool(body.get("hook", False)), lang=body.get("lang", "es"),
-                  smart=bool(body.get("smart", True)), custom=_custom(body))
+                  smart=bool(body.get("smart", True)),
+                  platform=body.get("platform", "none"), custom=_custom(body))
     jobstore.requeue(job_id, kind="render", params=params, plan=plan,
                      message="Preparando el render…")
     return {"ok": True}

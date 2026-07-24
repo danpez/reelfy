@@ -369,6 +369,9 @@
             <div><label>Formato</label><div class="seg" id="segFmt">
               <button data-v="9:16" class="sel">9:16</button><button data-v="1:1">1:1</button>
               <button data-v="4:5">4:5</button><button data-v="16:9">16:9</button></div></div>
+            <div><label>Plataforma</label><div class="seg" id="segPlat">
+              <button data-v="none" class="sel">Genérico</button><button data-v="tiktok">TikTok</button>
+              <button data-v="reels">Reels</button><button data-v="shorts">Shorts</button></div></div>
             <div><label>Idioma</label><div class="seg" id="segLang">
               <button data-v="es" class="sel">ES</button><button data-v="en">EN</button></div></div>
           </div>
@@ -496,7 +499,7 @@ const $=s=>document.querySelector(s);
 const ICO=n=>`<svg class="ic" viewBox="0 0 24 24"><use href="#i-${n}"/></svg>`;
 function show(id){document.querySelectorAll('.screen').forEach(e=>e.classList.remove('on'));$(id).classList.add('on');}
 const fmtT=s=>`${Math.floor(Math.max(0,s)/60)}:${String(Math.floor(Math.max(0,s))%60).padStart(2,'0')}`;
-let FILES=[], JOB=null, PLAN=null, STYLE="clasico", FMT="9:16", ANIM="pop", LANG="es";
+let FILES=[], JOB=null, PLAN=null, STYLE="clasico", FMT="9:16", ANIM="pop", LANG="es", PLATFORM="none";
 let CAPC=null, CAPF="Arial", CAPS=1.0, CAPPOS=0.776, ZAMT=0.10, AIR=0.16;
 let LOGO_ON=false, LOGO_POS="br", LOGO_SIZE=0.14, logoImg=null;
 const P=()=>LANG==="en"&&PLAN.phrases_en?PLAN.phrases_en:PLAN.phrases;
@@ -504,7 +507,7 @@ const musOpts=()=>({music:$("#music").checked,music_track:$("#mtrack").value||"a
 const customOpts=()=>({cap_color:CAPC,cap_font:CAPF!=="Arial"?CAPF:null,cap_scale:CAPS,cap_pos:CAPPOS,
   zoom_amt:ZAMT,air:AIR,logo:LOGO_ON?{pos:LOGO_POS,size:LOGO_SIZE,opacity:0.9}:null});
 const renderOpts=()=>({dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,hook:$("#hook").checked,
-                       smart:$("#smart").checked,
+                       smart:$("#smart").checked,platform:PLATFORM,
                        style:STYLE,anim:ANIM,format:FMT,lang:LANG,...musOpts(),...customOpts()});
 function seg(id,set){const el=$(id);el.querySelectorAll("button").forEach(b=>b.onclick=()=>{
   el.querySelectorAll("button").forEach(x=>x.classList.remove("sel"));b.classList.add("sel");set(b.dataset.v);});}
@@ -640,7 +643,7 @@ function loadLogo(){
 }
 function openEditor(){
   show("#s-editor");
-  seg("#segStyle",v=>STYLE=v); seg("#segAnim",v=>ANIM=v); seg("#segFmt",setFormat);
+  seg("#segStyle",v=>STYLE=v); seg("#segAnim",v=>ANIM=v); seg("#segFmt",setFormat); seg("#segPlat",v=>PLATFORM=v);
   seg("#segLang",setLang);
   seg("#segSize",v=>CAPS=+v);
   seg("#segLogo",v=>LOGO_POS=v);
