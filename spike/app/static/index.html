@@ -124,6 +124,17 @@
   .pgroup h4{margin:0 0 12px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;
              letter-spacing:.1em;display:flex;align-items:center;gap:7px}
   .pgroup h4 .ic{width:13px;height:13px;color:var(--faint)}
+  /* icono de info con tooltip (feedback para usuarios sin experiencia) */
+  .info{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;
+        border-radius:50%;border:1px solid var(--line2);color:var(--muted);font-size:9px;font-weight:700;
+        font-style:normal;cursor:help;position:relative;vertical-align:middle;margin-left:2px;line-height:1}
+  .info:hover{color:var(--brand2);border-color:var(--brand)}
+  .info::after{content:attr(data-tip);position:absolute;bottom:150%;left:50%;transform:translateX(-50%);
+        width:190px;background:#0c0e13;border:1px solid var(--line2);border-radius:8px;padding:8px 10px;
+        font-size:11px;font-weight:500;color:var(--text);line-height:1.4;text-align:left;letter-spacing:0;
+        text-transform:none;opacity:0;visibility:hidden;transition:opacity .15s;z-index:50;pointer-events:none;
+        box-shadow:0 10px 30px -10px rgba(0,0,0,.8)}
+  .info:hover::after{opacity:1;visibility:visible}
   .pgroup h4 .soft{text-transform:none;letter-spacing:0;font-weight:400;color:var(--faint)}
   .seg{display:inline-flex;gap:2px;background:var(--sunken);border:1px solid var(--line);border-radius:9px;padding:3px;flex-wrap:wrap}
   .seg button{border:0;background:none;color:var(--muted);padding:6px 11px;border-radius:6px;cursor:pointer;
@@ -375,21 +386,34 @@
         </div>
         <div class="pgroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-type"/></svg>Estilo</h4>
           <div class="optrow">
-            <div><label>Subtítulos</label><div class="seg" id="segStyle">
+            <div><label>Base <span class="info" data-tip="Punto de partida del estilo. Puedes ajustar todo debajo a tu gusto.">i</span></label><div class="seg" id="segStyle">
               <button data-v="clasico" class="sel">Clásico</button><button data-v="amarillo">Amarillo</button>
-              <button data-v="neon">Neón</button><button data-v="minimal">Minimal</button>
-              <button data-v="karaoke">Karaoke</button><button data-v="caja">Caja</button>
-              <button data-v="impacto">Impacto</button></div></div>
-            <div><label>Animación</label><div class="seg" id="segAnim">
-              <button data-v="pop" class="sel">Pop</button><button data-v="fade">Fade</button><button data-v="none">No</button></div></div>
+              <button data-v="neon">Neón</button><button data-v="minimal">Minimal</button></div></div>
+            <div><label>Efecto <span class="info" data-tip="Normal: palabra activa en color. Karaoke: la palabra se llena de color al pronunciarse. Caja: fondo sólido detrás del texto.">i</span></label><div class="seg" id="segEffect">
+              <button data-v="none" class="sel">Normal</button><button data-v="karaoke">Karaoke</button><button data-v="box">Caja</button></div></div>
           </div>
           <div class="optrow">
-            <div><label>Color resalte</label><input type="color" id="capColor" class="clr" value="#ffb020"></div>
+            <div><label>Color base <span class="info" data-tip="Color del texto que NO está resaltado.">i</span></label><input type="color" id="baseColor" class="clr" value="#ffffff"></div>
+            <div><label>Color resalte <span class="info" data-tip="Color de la palabra que se está pronunciando.">i</span></label><input type="color" id="capColor" class="clr" value="#ffb020"></div>
+            <div><label>Color clave <span class="info" data-tip="Color especial para las palabras clave, solo cuando se pronuncian (Resaltado IA).">i</span></label><input type="color" id="kwColor" class="clr" value="#7cff32"></div>
+          </div>
+          <div class="optrow">
+            <div><label>Mayúsculas <span class="info" data-tip="Cómo se escribe el texto.">i</span></label><div class="seg" id="segCase">
+              <button data-v="none" class="sel">Aa</button><button data-v="upper">AA</button><button data-v="lower">aa</button><button data-v="title">Ab</button></div></div>
             <div><label>Fuente</label><select id="capFont" class="selinp">
               <option>Arial</option><option>Helvetica Neue</option><option>Avenir Next</option>
               <option>Futura</option><option>Georgia</option><option>Impact</option></select></div>
             <div><label>Tamaño</label><div class="seg" id="segSize">
               <button data-v="0.85">S</button><button data-v="1" class="sel">M</button><button data-v="1.18">L</button></div></div>
+          </div>
+          <div class="optrow">
+            <div><label>Contorno <span id="outLbl">5</span> <span class="info" data-tip="Grosor del borde negro del texto.">i</span></label><input type="range" id="capOutline" class="rng" min="0" max="12" value="5"></div>
+            <div><label>Sombra <span id="shLbl">2</span></label><input type="range" id="capShadow" class="rng" min="0" max="8" value="2"></div>
+            <div><label>Margen lateral <span id="marLbl">140</span></label><input type="range" id="capMargin" class="rng" min="40" max="300" value="140"></div>
+          </div>
+          <div class="optrow">
+            <div><label>Animación</label><div class="seg" id="segAnim">
+              <button data-v="pop" class="sel">Pop</button><button data-v="fade">Fade</button><button data-v="none">No</button></div></div>
           </div>
           <div class="optrow">
             <div><label>Formato</label><div class="seg" id="segFmt">
@@ -410,14 +434,14 @@
         </div>
         <div class="pgroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-insp"/></svg>Procesado</h4>
           <div class="optrow">
-            <label class="swlabel"><input type="checkbox" class="toggle" id="dynamic" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Cortes + zoom</label>
-            <label class="swlabel"><input type="checkbox" class="toggle" id="enhance" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-mic"/></svg>Audio estudio</label>
+            <label class="swlabel"><input type="checkbox" class="toggle" id="dynamic" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Cortes + zoom <span class="info" data-tip="Recorta silencios y muletillas automáticamente y hace acercamientos suaves en los momentos de énfasis.">i</span></label>
+            <label class="swlabel"><input type="checkbox" class="toggle" id="enhance" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-mic"/></svg>Audio estudio <span class="info" data-tip="Limpia el ruido, quita golpes de aire y nivela el volumen al estándar de redes (-14 LUFS).">i</span></label>
           </div>
           <div class="optrow">
-            <label class="swlabel"><input type="checkbox" class="toggle" id="hook" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Hook</label>
-            <label class="swlabel"><input type="checkbox" class="toggle" id="smart" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Resaltado IA ✨</label>
-            <label class="swlabel"><input type="checkbox" class="toggle" id="broll"> <svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>B-roll 🎬</label>
-            <label class="swlabel"><input type="checkbox" class="toggle" id="music"> <svg class="ic" viewBox="0 0 24 24"><use href="#i-music"/></svg>Música</label>
+            <label class="swlabel"><input type="checkbox" class="toggle" id="hook" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Hook <span class="info" data-tip="Añade un título llamativo animado al inicio de cada short (el gancho para retener al espectador).">i</span></label>
+            <label class="swlabel"><input type="checkbox" class="toggle" id="smart" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Resaltado IA ✨ <span class="info" data-tip="La IA detecta las palabras clave (se pintan con su color al pronunciarse) y añade emojis relevantes al tema.">i</span></label>
+            <label class="swlabel"><input type="checkbox" class="toggle" id="broll"> <svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>B-roll 🎬 <span class="info" data-tip="Inserta clips de video de stock (Pexels) relacionados con lo que dices. Requiere internet. Podrás aprobar cada inserción.">i</span></label>
+            <label class="swlabel"><input type="checkbox" class="toggle" id="music"> <svg class="ic" viewBox="0 0 24 24"><use href="#i-music"/></svg>Música <span class="info" data-tip="Añade una pista de fondo con ducking (baja al hablar). Elige por mood/género abajo.">i</span></label>
           </div>
           <div class="optrow" id="musrow" style="display:none">
             <div><label>Pista</label><select id="mtrack" class="selinp"></select></div>
@@ -536,8 +560,11 @@ const capPos=()=>CAPPOS||PLAT_POS[PLATFORM]||0.776;
 let LOGO_ON=false, LOGO_POS="br", LOGO_SIZE=0.14, logoImg=null;
 const P=()=>LANG==="en"&&PLAN.phrases_en?PLAN.phrases_en:PLAN.phrases;
 const musOpts=()=>({music:$("#music").checked,music_track:$("#mtrack").value||"ambient",music_volume:(+$("#mvol").value)/100});
+let BASEC=null, KWC=null, EFFECT="none", CASE="none", OUTLINE=null, SHADOW=null, MARGIN=null;
 const customOpts=()=>({cap_color:CAPC,cap_font:CAPF!=="Arial"?CAPF:null,cap_scale:CAPS,cap_pos:CAPPOS,
-  zoom_amt:ZAMT,air:AIR,logo:LOGO_ON?{pos:LOGO_POS,size:LOGO_SIZE,opacity:0.9}:null});
+  zoom_amt:ZAMT,air:AIR,logo:LOGO_ON?{pos:LOGO_POS,size:LOGO_SIZE,opacity:0.9}:null,
+  base_color:BASEC,kw_color:KWC,effect:EFFECT,cap_case:CASE,
+  cap_outline:OUTLINE,cap_shadow:SHADOW,cap_margin:MARGIN});
 const renderOpts=()=>({dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,hook:$("#hook").checked,
                        smart:$("#smart").checked,platform:PLATFORM,broll:$("#broll").checked,
                        style:STYLE,anim:ANIM,format:FMT,lang:LANG,...musOpts(),...customOpts()});
@@ -689,6 +716,13 @@ function openEditor(){
   seg("#segLogo",v=>LOGO_POS=v);
   loadTracks(); loadLogo(); loadPresets();
   $("#capColor").oninput=e=>CAPC=e.target.value;
+  $("#baseColor").oninput=e=>BASEC=e.target.value;
+  $("#kwColor").oninput=e=>KWC=e.target.value;
+  seg("#segEffect",v=>EFFECT=v);
+  seg("#segCase",v=>CASE=v);
+  $("#capOutline").oninput=e=>{OUTLINE=+e.target.value; $("#outLbl").textContent=e.target.value;};
+  $("#capShadow").oninput=e=>{SHADOW=+e.target.value; $("#shLbl").textContent=e.target.value;};
+  $("#capMargin").oninput=e=>{MARGIN=+e.target.value; $("#marLbl").textContent=e.target.value;};
   $("#capFont").onchange=e=>CAPF=e.target.value;
   $("#air").oninput=e=>{AIR=(+e.target.value)/100; $("#airLbl").textContent=e.target.value+"%";};
   $("#zoomAmt").oninput=e=>{ZAMT=(+e.target.value)/100; $("#zoomLbl").textContent=e.target.value+"%";};
@@ -750,8 +784,10 @@ function openEditor(){
 function gatherPreset(){
   return {style:STYLE,anim:ANIM,format:FMT,lang:LANG,cap_color:CAPC,cap_font:CAPF,cap_scale:CAPS,
     cap_pos:CAPPOS,zoom_amt:ZAMT,air:AIR,logo_on:LOGO_ON,logo_pos:LOGO_POS,logo_size:LOGO_SIZE,
+    base_color:BASEC,kw_color:KWC,effect:EFFECT,cap_case:CASE,cap_outline:OUTLINE,
+    cap_shadow:SHADOW,cap_margin:MARGIN,platform:PLATFORM,
     dynamic:$("#dynamic").checked,enhance:$("#enhance").checked,hook:$("#hook").checked,
-    music:$("#music").checked,music_track:$("#mtrack").value,music_volume:+$("#mvol").value};
+    smart:$("#smart").checked,music:$("#music").checked,music_track:$("#mtrack").value,music_volume:+$("#mvol").value};
 }
 let PRESETS={};
 async function loadPresets(){
@@ -779,8 +815,17 @@ function applyPreset(name){
   CAPC=c.cap_color||null; CAPF=c.cap_font||"Arial"; CAPS=c.cap_scale||1; CAPPOS=c.cap_pos||null;
   ZAMT=c.zoom_amt??0.10; AIR=c.air??0.16;
   LOGO_ON=!!c.logo_on; LOGO_POS=c.logo_pos||"br"; LOGO_SIZE=c.logo_size||0.14;
+  BASEC=c.base_color||null; KWC=c.kw_color||null; EFFECT=c.effect||"none"; CASE=c.cap_case||"none";
+  OUTLINE=c.cap_outline??null; SHADOW=c.cap_shadow??null; MARGIN=c.cap_margin??null;
+  if(c.platform){ PLATFORM=c.platform; segSet("#segPlat",PLATFORM); }
+  if("smart" in c) $("#smart").checked=!!c.smart;
   segSet("#segStyle",STYLE); segSet("#segAnim",ANIM); segSet("#segFmt",FMT);
   segSet("#segSize",CAPS); segSet("#segLogo",LOGO_POS);
+  segSet("#segEffect",EFFECT); segSet("#segCase",CASE);
+  if(BASEC)$("#baseColor").value=BASEC; if(KWC)$("#kwColor").value=KWC;
+  if(OUTLINE!=null){$("#capOutline").value=OUTLINE;$("#outLbl").textContent=OUTLINE;}
+  if(SHADOW!=null){$("#capShadow").value=SHADOW;$("#shLbl").textContent=SHADOW;}
+  if(MARGIN!=null){$("#capMargin").value=MARGIN;$("#marLbl").textContent=MARGIN;}
   if(CAPC)$("#capColor").value=CAPC; $("#capFont").value=CAPF;
   $("#air").value=Math.round(AIR*100); $("#airLbl").textContent=Math.round(AIR*100)+"%";
   $("#zoomAmt").value=Math.round(ZAMT*100); $("#zoomLbl").textContent=Math.round(ZAMT*100)+"%";
