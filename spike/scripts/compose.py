@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Composición de línea de tiempo (editor v1): arma varios videos/imágenes en la
+PISTA PRINCIPAL (recortados y en orden) + capas OVERLAY encimadas, y produce UN
+solo video. Ese video compuesto es la "fuente" que luego pasa por el pipeline de
+IA (transcripción, subtítulos, cortes, etc.) manteniendo la línea de tiempo del
+usuario + los cambios de la IA encima.
+
+Enfoque robusto en 2 pasos (evita los problemas de un filter_complex gigante):
+  1) Normalizar cada segmento de la pista principal a un archivo temporal con los
+     MISMOS parámetros (resolución/fps/audio) -> concat demuxer los une sin re-encode.
+  2) Componer las capas overlay sobre el video principal (pocas, manejable).
+"""
+import json
+import subprocess
+from pathlib import Path
+
+import paths
+
+FFMPEG = str(paths.FFMPEG)
+FFPROBE = str(paths.FFPROBE)
+
+
+def _run(cmd):
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def probe(path):
+    """dims, duración y si tiene audio."""
+    r = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
+                        "stream=width,height,codec_type", "-show_entries", "format=duration",
+                        "-of", "json", str(path)], capture_output=True, text=True)
+    try:
+        d = json.loads(r.stdout)
+    except Exception:  # noqa
+        return {"w": 0, "h": 0, "dur": 0.0, "audio": False, "type": "video"}
+    w = h = 0
+    audio = False
+    for s in d.get("streams", []):
+        if s.get("codec_type") == "video" and not w:
+            w, h = s.get("width", 0), s.get("height", 0)
+        if s.get("codec_type") == "audio":
+            audio = True
+    dur = float(d.get("format", {}).get("duration") or 0)
+    return {"w": w, "h": h, "dur": round(dur, 3), "audio": audio,
+            "type": "video" if dur > 0 else "image"}
+
+
+def _has_audio(path):
+    r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "a",
+                        "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
+                       capture_output=True, text=True)
+    return bool(r.stdout.strip())
+
+
+def _norm_video(src, t_in, t_out, out, w, h, fps):
+    """Recorta [in,out] y normaliza a WxH/fps con audio 48k estéreo (silencio si
+    no tiene). cover-crop para llenar el lienzo sin deformar."""
+    vf = (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+          f"crop={w}:{h},fps={fps},setsar=1,format=yuv420p")
+    dur = max(0.1, t_out - t_in)
+    cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src), "-t", f"{dur:.3f}"]
+    if not _has_audio(src):
+        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
+                "-map", "0:v:0", "-map", "1:a:0"]
+    cmd += ["-vf", vf, "-c:v", "h264_videotoolbox", "-b:v", "12M",
+            "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)]
+    _run(cmd)
+
+
+def _norm_image(src, dur, out, w, h, fps):
+    """Imagen fija -> clip de `dur` s a WxH/fps con audio en silencio."""
+    vf = (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+          f"crop={w}:{h},fps={fps},setsar=1,format=yuv420p")
+    _run([FFMPEG, "-y", "-loop", "1", "-t", f"{dur:.3f}", "-i", str(src),
+          "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
+          "-vf", vf, "-c:v", "h264_videotoolbox", "-b:v", "12M",
+          "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", "-shortest", str(out)])
+
+
+def _overlay_xy(pos, W, H, mx, my):
+    return {
+        "tl": (f"{mx}", f"{my}"), "tr": (f"W-w-{mx}", f"{my}"),
+        "bl": (f"{mx}", f"H-h-{my}"), "br": (f"W-w-{mx}", f"H-h-{my}"),
+        "center": ("(W-w)/2", "(H-h)/2"),
+    }.get(pos, ("(W-w)/2", "(H-h)/2"))
+
+
+def compose(spec, out, work, on_step=None):
+    """spec: ver módulo. Devuelve la ruta del video compuesto (out)."""
+    def step(m):
+        if on_step:
+            on_step(m)
+
+    work = Path(work)
+    work.mkdir(parents=True, exist_ok=True)
+    main = [s for s in spec.get("main", []) if s.get("path")]
+    if not main:
+        raise ValueError("La composición no tiene clips en la pista principal.")
+    fps = int(spec.get("fps", 30))
+
+    # lienzo: dimensiones del primer VIDEO (o del primer clip); pipeline reencuadra luego
+    W = H = 0
+    for s in main:
+        if s.get("type") == "video":
+            p = probe(s["path"]); W, H = p["w"], p["h"]; break
+    if not W:
+        p = probe(main[0]["path"]); W, H = (p["w"] or 1080), (p["h"] or 1920)
+    W -= W % 2; H -= H % 2
+
+    # 1) normalizar cada segmento
+    parts = []
+    for i, s in enumerate(main):
+        step(f"Preparando clip {i + 1}/{len(main)}…")
+        seg = work / f"seg_{i:03d}.mp4"
+        if s.get("type") == "image":
+            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps)
+        else:
+            t_in = float(s.get("in", 0)); t_out = float(s.get("out", t_in + 5))
+            _norm_video(s["path"], t_in, t_out, seg, W, H, fps)
+        parts.append(seg)
+
+    # 2) concat (demuxer: mismos parámetros -> sin re-encode)
+    step("Uniendo la línea de tiempo…")
+    listf = work / "concat.txt"
+    listf.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts))
+    main_mp4 = work / "main.mp4"
+    _run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(listf),
+          "-c", "copy", str(main_mp4)])
+
+    # 3) overlays (capas encimadas)
+    overlays = [o for o in spec.get("overlays", []) if o.get("path")]
+    if not overlays:
+        Path(main_mp4).replace(out)
+        return str(out)
+
+    step("Encimando capas…")
+    inputs = ["-i", str(main_mp4)]
+    fc = []
+    last = "0:v"
+    mx, my = round(W * 0.04), round(H * 0.04)
+    for k, o in enumerate(overlays[:8], start=1):
+        typ = o.get("type", "image")
+        st = float(o.get("start", 0)); dur = float(o.get("dur", 2.5))
+        if typ == "image":
+            inputs += ["-loop", "1", "-t", f"{dur:.3f}", "-i", str(o["path"])]
+        else:
+            inputs += ["-i", str(o["path"])]
+        ow = max(2, round(W * float(o.get("size", 0.35)))); ow -= ow % 2
+        ox, oy = _overlay_xy(o.get("pos", "center"), W, H, mx, my)
+        lbl = f"ov{k}"
+        fc.append(f"[{k}:v]scale={ow}:-2,setsar=1,format=yuva420p[s{k}]")
+        fc.append(f"[{last}][s{k}]overlay={ox}:{oy}:enable='between(t,{st:.3f},{st + dur:.3f})'[{lbl}]")
+        last = lbl
+    filt = ";".join(fc)
+    _run([FFMPEG, "-y", *inputs, "-filter_complex", filt,
+          "-map", f"[{last}]", "-map", "0:a?", "-c:v", "h264_videotoolbox", "-b:v", "12M",
+          "-c:a", "aac", "-b:a", "192k", str(out)])
+    return str(out)

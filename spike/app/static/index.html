@@ -154,6 +154,49 @@
   .mtitle{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .mtags{font-size:10.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
   .mrow.sel .mtitle{color:var(--brand2)}
+  /* ---- editor de línea de tiempo (ensamblaje) ---- */
+  .asm{display:grid;grid-template-columns:1fr 340px;gap:18px;margin-bottom:16px}
+  @media(max-width:900px){.asm{grid-template-columns:1fr}}
+  .asm-stage{display:flex;flex-direction:column;gap:10px;align-items:center}
+  #asmPrev{width:100%;max-width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;border:1px solid var(--line2)}
+  .asm-side{display:flex;flex-direction:column;gap:12px}
+  .asm-srclist{display:flex;flex-wrap:wrap;gap:8px;max-height:220px;overflow:auto}
+  .asm-src{width:88px;cursor:grab;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--panel2);position:relative}
+  .asm-src:hover{border-color:var(--brand)}
+  .asm-src img{width:100%;height:56px;object-fit:cover;display:block;background:#000}
+  .asm-src .nm{font-size:9.5px;padding:3px 5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .asm-src .badge2{position:absolute;top:3px;left:3px;font-size:8px;font-weight:700;padding:1px 5px;border-radius:6px;background:rgba(10,12,16,.75);color:var(--brand2)}
+  .asm-src .add{position:absolute;bottom:20px;right:3px;display:flex;gap:3px}
+  .asm-src .add button{font-size:8px;font-weight:700;padding:2px 5px;border-radius:6px;border:1px solid var(--line2);background:rgba(10,12,16,.85);color:#fff;cursor:pointer}
+  .asm-src .add button:hover{border-color:var(--brand);color:var(--brand2)}
+  .asm-tl{border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--panel2);margin-bottom:16px}
+  .asm-trackrow{display:flex;align-items:stretch;gap:10px;margin-bottom:8px}
+  .asm-trackrow:last-child{margin-bottom:0}
+  .asm-tlabel{width:64px;flex:none;font-size:10.5px;font-weight:700;color:var(--muted);text-transform:uppercase;
+              letter-spacing:.06em;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;
+              border-right:1px solid var(--line);}
+  .asm-tlabel .ic{width:14px;height:14px}
+  .asm-track{flex:1;min-height:64px;display:flex;gap:6px;align-items:center;padding:6px;border-radius:8px;
+             background:var(--sunken);overflow-x:auto}
+  .asm-track.ov{min-height:52px}
+  .asm-track.dragover{outline:2px dashed var(--brand);outline-offset:-2px}
+  .asm-empty{color:var(--faint);font-size:11px;padding:0 8px;pointer-events:none}
+  .asm-clip{position:relative;flex:none;height:52px;min-width:70px;border-radius:7px;overflow:hidden;cursor:pointer;
+            border:2px solid transparent;background:#000}
+  .asm-track.ov .asm-clip{height:40px}
+  .asm-clip img{width:100%;height:100%;object-fit:cover;display:block;opacity:.85}
+  .asm-clip.sel{border-color:var(--brand)}
+  .asm-clip .dur{position:absolute;bottom:2px;right:3px;font-size:8.5px;font-weight:700;color:#fff;
+                 background:rgba(10,12,16,.8);padding:0 4px;border-radius:4px}
+  .asm-clip .x{position:absolute;top:1px;right:2px;width:14px;height:14px;border-radius:50%;background:rgba(10,12,16,.8);
+               color:#fff;font-size:10px;line-height:14px;text-align:center;cursor:pointer;display:none}
+  .asm-clip:hover .x{display:block}
+  .asm-clip.dragging{opacity:.4}
+  .asm-insp-row{margin-bottom:10px}
+  .asm-insp-row label{display:flex;justify-content:space-between}
+  .cornergrid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;max-width:120px}
+  .cornergrid button{padding:6px;border:1px solid var(--line2);background:var(--sunken);border-radius:6px;cursor:pointer;color:var(--muted)}
+  .cornergrid button.sel{border-color:var(--brand);background:#1d1512;color:var(--brand2)}
   .pgroup h4 .soft{text-transform:none;letter-spacing:0;font-weight:400;color:var(--faint)}
   .seg{display:inline-flex;gap:2px;background:var(--sunken);border:1px solid var(--line);border-radius:9px;padding:3px;flex-wrap:wrap}
   .seg button{border:0;background:none;color:var(--muted);padding:6px 11px;border-radius:6px;cursor:pointer;
@@ -358,8 +401,49 @@
       <div class="bar"><i id="g-fill"></i></div>
       <div class="hint" id="g-msg" style="margin-top:8px">Se prepara una sola vez: modelo de voz, IA de lenguaje y sincronía (~4 GB). No cierres la app.</div>
     </div>
-    <div style="margin-top:20px"><button class="btn" id="go" disabled><svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Procesar con IA</button></div>
-    <div class="hint" id="setupHint">La IA transcribe, sincroniza subtítulos, elige momentos, detecta silencios y calcula la cámara. Después tú ajustas todo en el editor.</div>
+    <div style="margin-top:20px;display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn" id="go" disabled><svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Procesar con IA</button>
+      <button class="btn ghost" id="goEdit" disabled><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Editor de línea de tiempo</button>
+    </div>
+    <div class="hint" id="setupHint">Procesar con IA: rápido, un video → subtítulos y cortes. Editor de línea de tiempo: monta varios videos e imágenes, recórtalos, reordénalos y encima capas; luego aplicas la IA sobre tu composición.</div>
+  </div></section>
+
+  <!-- ============ EDITOR DE LÍNEA DE TIEMPO (ensamblaje antes de la IA) ============ -->
+  <section class="screen" id="s-assembly"><div class="card">
+    <h3><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Editor de línea de tiempo <span class="info" data-tip="Monta tu composición: varios videos e imágenes, recórtalos, reordénalos y encima capas. Al pulsar 'Aplicar IA' se procesa (subtítulos, cortes, etc.) sobre TU línea de tiempo.">i</span></h3>
+    <div class="asm">
+      <div class="asm-stage">
+        <video id="asmPrev" playsinline controls></video>
+        <div class="hint" id="asmPrevHint" style="text-align:center">Selecciona un clip para previsualizarlo y recortarlo.</div>
+      </div>
+      <div class="asm-side">
+        <div class="pgroup">
+          <h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>Fuentes
+            <button class="btn ghost mini" id="asmAdd" style="margin-left:auto"><svg class="ic" viewBox="0 0 24 24"><use href="#i-upload"/></svg>Añadir</button></h4>
+          <div id="asmSrcList" class="asm-srclist"><div class="hint">Añade videos o imágenes.</div></div>
+        </div>
+        <div class="pgroup" id="asmInspWrap">
+          <h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-insp"/></svg>Ajustes del elemento</h4>
+          <div id="asmInspector"><div class="hint">Selecciona un elemento del timeline para ajustarlo.</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="asm-tl">
+      <div class="asm-trackrow">
+        <div class="asm-tlabel"><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>Video</div>
+        <div class="asm-track" id="asmMain"><div class="asm-empty">Arrastra fuentes aquí o usa “+ pista” en cada fuente.</div></div>
+      </div>
+      <div class="asm-trackrow">
+        <div class="asm-tlabel"><svg class="ic" viewBox="0 0 24 24"><use href="#i-image"/></svg>Capas</div>
+        <div class="asm-track ov" id="asmOverlay"><div class="asm-empty">Imágenes/videos encimados (logos, stickers, b-roll manual).</div></div>
+      </div>
+    </div>
+    <div class="actionbar">
+      <button class="btn ghost" id="asmBack">← Atrás</button>
+      <span style="flex:1"></span>
+      <input type="text" id="asmGloss" class="selinp" placeholder="Nombres/tema (mejora la IA)" style="max-width:240px">
+      <button class="btn" id="asmApply"><svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Aplicar IA →</button>
+    </div>
   </div></section>
 
   <section class="screen" id="s-analyzing"><div class="card">
@@ -625,9 +709,180 @@ function pick(files){
     fl.innerHTML=files.map(f=>`<div class="f">${ICO("film")} ${f.name}<span class="sz">${(f.size/1048576).toFixed(1)} MB</span></div>`).join("");
     $("#go").innerHTML=ICO("spark")+`Procesar ${files.length} videos (lote)`;
   }
-  $("#go").disabled=!ENGINE_READY;
+  $("#go").disabled=!ENGINE_READY; $("#goEdit").disabled=!ENGINE_READY;
 }
 $("#go").onclick=()=>FILES.length>1?runBatch():runSingle();
+
+/* ============ EDITOR DE LÍNEA DE TIEMPO (ensamblaje) ============ */
+let ASM={sources:[],main:[],overlays:[],sel:null};
+const uid=()=>"a"+Math.floor(Math.random()*1e9).toString(36);
+const asmMainDur=()=>ASM.main.reduce((a,it)=>a+(it.type==="image"?it.dur:(it.out-it.in)),0);
+async function enterAssembly(files){
+  ASM={sources:[],main:[],overlays:[],sel:null};
+  show("#s-assembly"); asmRenderSources(); asmRenderTL(); asmRenderInspector();
+  if(files&&files.length){
+    $("#asmSrcList").innerHTML='<div class="hint"><span class="spinner"></span> Subiendo…</div>';
+    await asmUpload(files);
+    const fv=ASM.sources.find(s=>s.type==="video")||ASM.sources[0];
+    if(fv) asmAddMain(fv.id);
+  }
+}
+async function asmUpload(files){
+  if(!files||!files.length) return;
+  const fd=new FormData(); [...files].forEach(f=>fd.append("files",f));
+  try{ const r=await(await fetch("/sources",{method:"POST",body:fd})).json();
+    (r.sources||[]).forEach(s=>ASM.sources.push(s));
+  }catch(e){ alert("No se pudieron subir los archivos."); }
+  asmRenderSources();
+}
+function asmRenderSources(){
+  const box=$("#asmSrcList");
+  if(!ASM.sources.length){ box.innerHTML='<div class="hint">Añade videos o imágenes.</div>'; return; }
+  box.innerHTML=ASM.sources.map(s=>`<div class="asm-src" draggable="true" data-sid="${s.id}">
+     <span class="badge2">${s.type==="video"?"VIDEO":"IMG"}</span>
+     <img src="${s.thumb||''}" alt="">
+     <div class="add"><button data-add="main" data-sid="${s.id}" title="Añadir a Video">+V</button><button data-add="ov" data-sid="${s.id}" title="Añadir a Capas">+C</button></div>
+     <div class="nm">${s.name||s.id}</div></div>`).join("");
+  box.querySelectorAll(".asm-src").forEach(el=>el.ondragstart=e=>e.dataTransfer.setData("sid",el.dataset.sid));
+  box.querySelectorAll("[data-add]").forEach(b=>b.onclick=e=>{e.stopPropagation();
+    b.dataset.add==="main"?asmAddMain(b.dataset.sid):asmAddOverlay(b.dataset.sid);});
+}
+function asmAddMain(sid){
+  const s=ASM.sources.find(x=>x.id===sid); if(!s) return;
+  const it={_id:uid(),sid,type:s.type,name:s.name,thumb:s.thumb,srcdur:s.dur||0};
+  if(s.type==="image") it.dur=3.0; else { it.in=0; it.out=Math.max(0.5,s.dur||5); }
+  ASM.main.push(it); asmRenderTL(); asmSelect("main",it._id);
+}
+function asmAddOverlay(sid){
+  const s=ASM.sources.find(x=>x.id===sid); if(!s) return;
+  const it={_id:uid(),sid,type:s.type,name:s.name,thumb:s.thumb,srcdur:s.dur||0,
+    start:0,dur:s.type==="image"?2.5:Math.min(3,s.dur||3),pos:"center",size:0.35};
+  ASM.overlays.push(it); asmRenderTL(); asmSelect("overlay",it._id);
+}
+function asmClipHTML(it,track){
+  const dur=track==="main"?(it.type==="image"?it.dur:(it.out-it.in)):it.dur;
+  const sel=ASM.sel&&ASM.sel.id===it._id?"sel":"";
+  return `<div class="asm-clip ${sel}" draggable="${track==='main'}" data-id="${it._id}" data-track="${track}">
+     <img src="${it.thumb||''}"><span class="dur">${dur.toFixed(1)}s</span><span class="x" data-id="${it._id}" data-track="${track}">×</span></div>`;
+}
+function asmRenderTL(){
+  const m=$("#asmMain");
+  m.innerHTML=ASM.main.length?ASM.main.map(it=>asmClipHTML(it,"main")).join(""):'<div class="asm-empty">Arrastra fuentes aquí o usa “+V”.</div>';
+  const o=$("#asmOverlay");
+  o.innerHTML=ASM.overlays.length?ASM.overlays.map(it=>asmClipHTML(it,"overlay")).join(""):'<div class="asm-empty">Imágenes/videos encimados (logos, stickers, b-roll manual).</div>';
+  asmWireClips();
+}
+function asmWireClips(){
+  document.querySelectorAll("#asmMain .asm-clip, #asmOverlay .asm-clip").forEach(el=>{
+    el.onclick=e=>{ if(e.target.classList.contains("x")) return; asmSelect(el.dataset.track,el.dataset.id); };
+    el.querySelector(".x").onclick=e=>{ e.stopPropagation(); asmDelete(el.dataset.track,el.dataset.id); };
+    if(el.dataset.track==="main"){
+      el.ondragstart=e=>{ el.classList.add("dragging"); e.dataTransfer.setData("reorder",el.dataset.id); };
+      el.ondragend=()=>el.classList.remove("dragging");
+      el.ondragover=e=>e.preventDefault();
+      el.ondrop=e=>{ e.preventDefault(); const from=e.dataTransfer.getData("reorder");
+        if(from&&from!==el.dataset.id) asmReorder(from,el.dataset.id); };
+    }
+  });
+}
+function asmReorder(fromId,toId){
+  const a=ASM.main.findIndex(x=>x._id===fromId), b=ASM.main.findIndex(x=>x._id===toId);
+  if(a<0||b<0) return; const [it]=ASM.main.splice(a,1); ASM.main.splice(b,0,it); asmRenderTL();
+}
+function asmDelete(track,id){
+  const arr=track==="main"?ASM.main:ASM.overlays;
+  const i=arr.findIndex(x=>x._id===id); if(i>=0) arr.splice(i,1);
+  if(ASM.sel&&ASM.sel.id===id) ASM.sel=null;
+  asmRenderTL(); asmRenderInspector();
+}
+function asmItem(){ if(!ASM.sel) return null;
+  return (ASM.sel.track==="main"?ASM.main:ASM.overlays).find(x=>x._id===ASM.sel.id); }
+function asmSelect(track,id){
+  ASM.sel={track,id}; asmRenderTL();
+  const it=asmItem(); const p=$("#asmPrev");
+  if(it&&it.type==="video"){ p.style.display="block"; p.poster="";
+    if(!p.src.includes("/source/"+it.sid)) p.src="/source/"+it.sid;
+    p.onloadedmetadata=()=>{ if(track==="main") p.currentTime=it.in||0; };
+    try{ if(track==="main"&&p.readyState>0) p.currentTime=it.in||0; }catch(e){}
+  }else if(it){ p.removeAttribute("src"); p.load(); p.poster=it.thumb||""; p.style.display="block"; }
+  asmRenderInspector();
+}
+function asmRenderInspector(){
+  const box=$("#asmInspector"); const it=asmItem();
+  if(!it){ box.innerHTML='<div class="hint">Selecciona un elemento del timeline para ajustarlo.</div>'; return; }
+  const p=$("#asmPrev"); let h="";
+  if(ASM.sel.track==="main"){
+    if(it.type==="image"){
+      h=`<div class="asm-insp-row"><label>Duración <span>${it.dur.toFixed(1)}s</span></label>
+         <input type="range" class="rng" id="ai-dur" min="0.5" max="15" step="0.1" value="${it.dur}"></div>`;
+    }else{
+      h=`<div class="asm-insp-row"><label>Inicio del recorte <span>${(it.in||0).toFixed(1)}s</span></label>
+         <input type="range" class="rng" id="ai-in" min="0" max="${it.srcdur.toFixed(2)}" step="0.1" value="${it.in||0}"></div>
+       <div class="asm-insp-row"><label>Fin del recorte <span>${(it.out||0).toFixed(1)}s</span></label>
+         <input type="range" class="rng" id="ai-out" min="0" max="${it.srcdur.toFixed(2)}" step="0.1" value="${it.out||0}"></div>
+       <div class="hint">Duración del clip: ${(it.out-it.in).toFixed(1)}s</div>`;
+    }
+  }else{
+    const cor=v=>`<button data-pos="${v}" class="${it.pos===v?'sel':''}">${v==='center'?'●':'▪'}</button>`;
+    h=`<div class="asm-insp-row"><label>Aparece en <span>${it.start.toFixed(1)}s</span></label>
+        <input type="range" class="rng" id="ao-start" min="0" max="${Math.max(1,asmMainDur()).toFixed(1)}" step="0.1" value="${it.start}"></div>
+      <div class="asm-insp-row"><label>Duración <span>${it.dur.toFixed(1)}s</span></label>
+        <input type="range" class="rng" id="ao-dur" min="0.5" max="15" step="0.1" value="${it.dur}"></div>
+      <div class="asm-insp-row"><label>Tamaño <span>${Math.round(it.size*100)}%</span></label>
+        <input type="range" class="rng" id="ao-size" min="10" max="90" step="1" value="${Math.round(it.size*100)}"></div>
+      <div class="asm-insp-row"><label>Posición</label><div class="cornergrid" id="ao-pos">
+        ${cor('tl')}<button disabled></button>${cor('tr')}
+        <button disabled></button>${cor('center')}<button disabled></button>
+        ${cor('bl')}<button disabled></button>${cor('br')}</div></div>`;
+  }
+  box.innerHTML=h;
+  let _tlt=null;
+  const bind=(id,fn,fmt)=>{ const el=$("#"+id); if(!el) return;
+    el.oninput=e=>{ const v=+e.target.value; fn(v);
+      const span=el.parentElement.querySelector("label span"); if(span&&fmt) span.textContent=fmt(v);
+      clearTimeout(_tlt); _tlt=setTimeout(asmRenderTL,150); }; };
+  if(ASM.sel.track==="main"){
+    if(it.type==="image") bind("ai-dur",v=>{it.dur=v;}, v=>v.toFixed(1)+"s");
+    else{
+      bind("ai-in",v=>{ it.in=Math.min(v,it.out-0.3); try{p.currentTime=it.in;}catch(e){} }, v=>v.toFixed(1)+"s");
+      bind("ai-out",v=>{ it.out=Math.max(v,it.in+0.3); try{p.currentTime=Math.max(0,it.out-0.05);}catch(e){} }, v=>v.toFixed(1)+"s");
+    }
+  }else{
+    bind("ao-start",v=>{it.start=v;}, v=>v.toFixed(1)+"s");
+    bind("ao-dur",v=>{it.dur=v;}, v=>v.toFixed(1)+"s");
+    bind("ao-size",v=>{it.size=v/100;}, v=>Math.round(v)+"%");
+    box.querySelectorAll("#ao-pos [data-pos]").forEach(b=>b.onclick=()=>{it.pos=b.dataset.pos;asmRenderInspector();asmRenderTL();});
+  }
+}
+function asmDropTrack(track){
+  const el=track==="main"?$("#asmMain"):$("#asmOverlay");
+  el.ondragover=e=>{ e.preventDefault(); el.classList.add("dragover"); };
+  el.ondragleave=()=>el.classList.remove("dragover");
+  el.ondrop=e=>{ e.preventDefault(); el.classList.remove("dragover");
+    const sid=e.dataTransfer.getData("sid"); if(sid){ track==="main"?asmAddMain(sid):asmAddOverlay(sid); } };
+}
+async function asmApply(){
+  if(!ASM.main.length){ alert("Agrega al menos un clip a la pista Video."); return; }
+  const body={
+    main:ASM.main.map(it=>it.type==="image"?{sid:it.sid,type:"image",dur:it.dur}
+                                           :{sid:it.sid,type:"video",in:it.in,out:it.out}),
+    overlays:ASM.overlays.map(it=>({sid:it.sid,type:it.type,start:it.start,dur:it.dur,pos:it.pos,size:it.size})),
+    glossary:$("#asmGloss").value||"", highlights:2 };
+  show("#s-analyzing"); setBar("#a-fill",2); $("#a-msg").textContent="Montando tu línea de tiempo…";
+  let resp; try{ resp=await fetch("/compose",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); }
+  catch(e){ return fail("No se pudo iniciar el procesamiento."); }
+  const r=await resp.json().catch(()=>({}));
+  if(resp.status===409){ show("#s-setup"); ENGINE_READY=false; initSetup(); return; }
+  if(r.detail) return fail(r.detail);
+  JOB=r.job_id; PLAN=null; poll();
+}
+$("#goEdit").onclick=()=>enterAssembly(FILES);
+$("#asmBack").onclick=()=>show("#s-setup");
+$("#asmApply").onclick=asmApply;
+$("#asmAdd").onclick=()=>{ const fi=Object.assign(document.createElement("input"),
+  {type:"file",accept:"video/*,image/*",multiple:true});
+  fi.onchange=()=>asmUpload([...fi.files]); fi.click(); };
+asmDropTrack("main"); asmDropTrack("overlay");
 
 /* ---- primer arranque: modelo de voz + detección de ollama ---- */
 let ENGINE_READY=true, LICENSED=true;
@@ -648,7 +903,7 @@ async function initSetup(){
   LICENSED=s.licensed!==false;
   $("#licGate").style.display=LICENSED?"none":"block";
   if(s.state==="ready"){ ENGINE_READY=LICENSED; $("#setupGate").style.display="none";
-    $("#go").disabled=!(ENGINE_READY&&FILES.length);
+    $("#go").disabled=!(ENGINE_READY&&FILES.length); $("#goEdit").disabled=!ENGINE_READY;
     if(!LICENSED) setTimeout(initSetup,4000);
     return; }
   ENGINE_READY=false; $("#go").disabled=true;

@@ -385,6 +385,28 @@ def _analyze(job_id, job):
                     message="Análisis listo", plan=plan)
 
 
+def _compose(job_id, job):
+    """Handler 'compose': arma la composición del timeline (varios clips/imágenes +
+    overlays) en UN video y luego lo analiza como cualquier fuente. job['params'] =
+    {spec, glossary, n}. La IA se aplica sobre la composición (timeline + IA)."""
+    import compose as compose_mod
+    prog = Progress(job_id)
+    p = job["params"] or {}
+    spec = p.get("spec") or {}
+    video = INPUT / f"{job_id}.mp4"
+
+    def cstep(m):
+        prog.update(pct=4, message=m)
+    prog.update(pct=2, message="Montando tu línea de tiempo…")
+    compose_mod.compose(spec, str(video), paths.WORK / f"compose_{job_id}", on_step=cstep)
+
+    def step(pct, m):
+        prog.update(pct=pct, message=m)
+    plan = pipeline.analyze(video, p.get("glossary", ""), p.get("n", 2), on_step=step)
+    jobstore.update(job_id, state="review", phase="review", pct=100,
+                    message="Análisis listo", plan=plan)
+
+
 CUSTOM_KEYS = ("cap_color", "cap_font", "cap_scale", "cap_pos", "zoom_amt", "air", "logo",
                "base_color", "kw_color", "cap_outline", "cap_shadow", "cap_case",
                "cap_margin", "effect")
@@ -433,7 +455,7 @@ def _render(job_id, job):
 
 
 jobstore.init()
-jobstore.start_workers({"analyze": _analyze, "render": _render})
+jobstore.start_workers({"analyze": _analyze, "render": _render, "compose": _compose})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -465,6 +487,111 @@ async def analyze(video: UploadFile, glossary: str = Form(""), highlights: int =
             f.write(chunk)
     jobstore.create(job_id, kind="analyze", ext=ext,
                     params={"glossary": glossary, "n": highlights})
+    return {"job_id": job_id}
+
+
+SOURCES = INPUT / "sources"
+
+
+@app.post("/sources")
+async def add_sources(files: list[UploadFile]):
+    """Sube uno o varios archivos fuente (video o imagen) para el editor de timeline.
+    Devuelve por cada uno: id, tipo, duración, dimensiones y una miniatura."""
+    import compose as compose_mod
+    SOURCES.mkdir(parents=True, exist_ok=True)
+    out = []
+    for up in files:
+        ext = Path(up.filename or "f").suffix.lower()
+        is_img = ext in (".jpg", ".jpeg", ".png", ".webp", ".heic")
+        is_vid = ext in (".mp4", ".mov", ".m4v", ".mkv", ".webm")
+        if not (is_img or is_vid):
+            continue
+        sid = uuid.uuid4().hex[:12]
+        dst = SOURCES / f"{sid}{ext}"
+        with open(dst, "wb") as f:
+            while chunk := await up.read(1 << 20):
+                f.write(chunk)
+        info = compose_mod.probe(dst)
+        typ = "image" if is_img else "video"
+        thumb = SOURCES / f"{sid}_t.jpg"
+        try:
+            if is_img:
+                subprocess.run([str(paths.FFMPEG), "-y", "-i", str(dst), "-vf",
+                                "scale=320:-2", "-frames:v", "1", str(thumb)],
+                               check=True, stderr=subprocess.DEVNULL)
+            else:
+                ss = min(1.0, (info.get("dur") or 2) / 2)
+                subprocess.run([str(paths.FFMPEG), "-y", "-ss", str(ss), "-i", str(dst),
+                                "-vf", "scale=320:-2", "-frames:v", "1", str(thumb)],
+                               check=True, stderr=subprocess.DEVNULL)
+        except Exception:  # noqa
+            thumb = None
+        out.append({"id": sid, "name": up.filename, "type": typ, "ext": ext,
+                    "dur": info.get("dur", 0), "w": info.get("w", 0), "h": info.get("h", 0),
+                    "thumb": f"/source/{sid}/thumb" if thumb else None})
+    return {"sources": out}
+
+
+@app.get("/source/{sid}/thumb")
+def source_thumb(sid: str):
+    sid = Path(sid).stem
+    f = SOURCES / f"{sid}_t.jpg"
+    if not f.exists():
+        raise HTTPException(404, "No existe")
+    return FileResponse(f, media_type="image/jpeg")
+
+
+@app.get("/source/{sid}")
+def source_file(sid: str):
+    sid = Path(sid).stem
+    for p in SOURCES.glob(f"{sid}.*"):
+        if not p.name.endswith("_t.jpg"):
+            return FileResponse(p, headers={"Accept-Ranges": "bytes"})
+    raise HTTPException(404, "No existe")
+
+
+@app.post("/compose")
+async def compose_timeline(req: Request):
+    """Recibe la composición del timeline y arranca compose->analyze en un job.
+    body: {main:[{sid,type,in,out|dur}], overlays:[{sid,type,start,dur,pos,size}],
+           glossary, highlights}."""
+    if not paths.engine_ready():
+        raise HTTPException(409, "El motor de IA aún se está preparando (primer arranque).")
+    if not _lic_state()["licensed"]:
+        raise HTTPException(403, "Activa tu licencia de Reelfy para procesar videos.")
+    body = await req.json()
+
+    def resolve(sid):
+        for p in SOURCES.glob(f"{Path(sid).stem}.*"):
+            if not p.name.endswith("_t.jpg"):
+                return str(p)
+        return None
+    main = []
+    for s in body.get("main", []):
+        path = resolve(s.get("sid", ""))
+        if not path:
+            continue
+        item = {"path": path, "type": s.get("type", "video")}
+        if item["type"] == "image":
+            item["dur"] = float(s.get("dur", 3.0))
+        else:
+            item["in"] = float(s.get("in", 0)); item["out"] = float(s.get("out", 0) or 5)
+        main.append(item)
+    if not main:
+        raise HTTPException(400, "Agrega al menos un clip a la pista principal.")
+    overlays = []
+    for o in body.get("overlays", []):
+        path = resolve(o.get("sid", ""))
+        if not path:
+            continue
+        overlays.append({"path": path, "type": o.get("type", "image"),
+                         "start": float(o.get("start", 0)), "dur": float(o.get("dur", 2.5)),
+                         "pos": o.get("pos", "center"), "size": float(o.get("size", 0.35))})
+    spec = {"fps": 30, "main": main, "overlays": overlays}
+    job_id = uuid.uuid4().hex[:12]
+    jobstore.create(job_id, kind="compose", ext=".mp4",
+                    params={"spec": spec, "glossary": body.get("glossary", ""),
+                            "n": int(body.get("highlights", 2))})
     return {"job_id": job_id}
 
 
