@@ -25,6 +25,7 @@ import align as align_mod
 import edit as edit_mod
 import thumbnail as thumb_mod
 import translate as translate_mod
+import broll as broll_mod
 
 from paths import SPIKE, DATA, WORK, WCLI, FFMPEG, FFPROBE  # noqa: E402
 import paths as paths_mod  # noqa: E402
@@ -429,7 +430,8 @@ def render_emoji_png(emoji, out_path):
 def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None,
                      on_pct=None, preview_secs=None, enhance_audio=False,
                      out_w=W, out_h=H, camera=None, keeps=None,
-                     zoom_amt=ZOOM_IN, air=None, logo=None, emojis=None, emoji_y=None):
+                     zoom_amt=ZOOM_IN, air=None, logo=None, emojis=None, emoji_y=None,
+                     broll=None):
     """Composite a FIXED blurred background + a dynamic foreground video, burn captions.
 
     Layers (frame/margins never move; only the video moves): static blurred BG cover +
@@ -488,8 +490,18 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
     vf = (f"split=2[bgsrc][fgsrc];"
           f"[bgsrc]{','.join(bg)}[bg];"
           f"[fgsrc]{','.join(fg)}[fg];"
-          f"[bg][fg]overlay=x=(W-w)/2:y=(H-h)/2[c];"
-          f"[c]subtitles={ass_path}")
+          f"[bg][fg]overlay=x=(W-w)/2:y=(H-h)/2[c]")
+    # B-roll: cutaways de stock a PANTALLA COMPLETA, DEBAJO de los captions y en
+    # timeline original (como subs/emojis). setpts desplaza el clip a su ventana;
+    # eof_action=pass devuelve al video base si el clip es más corto.
+    last = "c"
+    for j, (bp, bs, be) in enumerate((broll or [])[:6]):
+        vf += (f";movie='{bp}',scale={ow}:{oh}:force_original_aspect_ratio=increase,"
+               f"crop={ow}:{oh},fps={fps},format=yuv420p,setpts=PTS+{bs:.3f}/TB[bk{j}];"
+               f"[{last}][bk{j}]overlay=eof_action=pass:"
+               f"enable='between(t,{bs:.3f},{be:.3f})'[r{j}]")
+        last = f"r{j}"
+    vf += f";[{last}]subtitles={ass_path}" if broll else f";[c]subtitles={ass_path}"
     # emojis del resaltado inteligente: overlay PNG flotante centrado ARRIBA del
     # bloque de captions, visible en la ventana de su frase (timeline original,
     # ANTES del recorte de silencios para que siga a sus frames como los subs).
@@ -677,6 +689,9 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
         h["enabled"] = True
     step(78, "Detectando momentos de énfasis…")
     beats, _ = edit_mod.emphasis_beats(wav)
+    broll_sugg = broll_mod.suggest(hl.build_sentences(words), probe_duration(video))
+    if broll_sugg:
+        print(f"   broll: {[b['query'] for b in broll_sugg]}")
     step(84, "Detectando silencios y muletillas…")
     keeps, src_len = edit_mod.keep_segments(str(wav))
     cuts, t_prev = [], 0.0                 # complement of keeps = editable cut track
@@ -702,6 +717,7 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
         "highlights": highlights,
         "beats": beats,
         "cuts": cuts,
+        "broll": broll_sugg,
     }
 
 
@@ -720,7 +736,7 @@ def _emoji_overlays(emoji_windows, stem):
 def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="clasico",
                      anim="none", fmt="9:16", music=False, music_track="ambient",
                      music_volume=0.26, hook=False, lang="es", custom=None,
-                     smart=True, platform="none", on_step=None, on_pct=None):
+                     smart=True, platform="none", broll=False, on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -756,6 +772,10 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
                               c.get("cap_scale", 1.0), cap_pos,
                               smart=smart)
     emojis = _emoji_overlays(emoji_windows, stem)
+    broll_clips = None
+    if broll and plan.get("broll"):
+        step("Buscando B-roll de stock…")
+        broll_clips = broll_mod.resolve(plan["broll"])
     beats = plan.get("beats") if dynamic else None
 
     # ZERO-CASCADE: silence-trim happens INSIDE the main render (one encode total).
@@ -800,7 +820,7 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
                      enhance_audio=enhance_audio, out_w=ow, out_h=oh, camera=camera,
                      keeps=keeps, zoom_amt=float(c.get("zoom_amt", ZOOM_IN)),
                      air=c.get("air"), logo=c.get("logo"), emojis=emojis,
-                     emoji_y=round(oh * (cap_pos - 0.18)),
+                     emoji_y=round(oh * (cap_pos - 0.18)), broll=broll_clips,
                      on_pct=(lambda p: on_pct("full", p)) if on_pct else None)
     if music:
         step("Añadiendo música de fondo…")

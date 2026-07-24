@@ -424,6 +424,7 @@ def _render(job_id, job):
                                       custom=p.get("custom") or {},
                                       smart=p.get("smart", True),
                                       platform=p.get("platform", "none"),
+                                      broll=p.get("broll", False),
                                       on_step=step, on_pct=overall)
     jobstore.update(job_id, state="done", phase="done", pct=100,
                     message="¡Listo!", clips=clips, eta=0)
@@ -482,7 +483,8 @@ async def render(job_id: str, req: Request):
                   mvol=float(body.get("music_volume", 0.26)),
                   hook=bool(body.get("hook", False)), lang=body.get("lang", "es"),
                   smart=bool(body.get("smart", True)),
-                  platform=body.get("platform", "none"), custom=_custom(body))
+                  platform=body.get("platform", "none"),
+                  broll=bool(body.get("broll", False)), custom=_custom(body))
     jobstore.requeue(job_id, kind="render", params=params, plan=plan,
                      message="Preparando el render…")
     return {"ok": True}
@@ -573,6 +575,21 @@ def delete_preset(name: str):
     data.pop(name, None)
     PRESETS_F.write_text(json.dumps(data, ensure_ascii=False, indent=1))
     return {"ok": True, "presets": list(data.keys())}
+
+
+@app.get("/settings")
+def get_settings():
+    import broll as broll_mod
+    return {"pexels": bool(broll_mod.get_key())}
+
+
+@app.post("/settings")
+async def set_settings(req: Request):
+    import broll as broll_mod
+    body = await req.json()
+    if body.get("pexels_key"):
+        broll_mod.set_key(body["pexels_key"])
+    return {"ok": True, "pexels": bool(broll_mod.get_key())}
 
 
 @app.get("/tracks")

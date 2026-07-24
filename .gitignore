@@ -48,3 +48,6 @@ spike/logs/
 # Reelfy Tauri: motor ensamblado (pesado, por build/CI)
 reelfy-desktop/src-tauri/engine/
 reelfy-desktop/src-tauri/gen/
+
+# clave Pexels y ajustes locales (DATA en dev)
+spike/settings.json

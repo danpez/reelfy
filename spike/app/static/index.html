@@ -390,6 +390,7 @@
           <div class="optrow">
             <label class="swlabel"><input type="checkbox" class="toggle" id="hook" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Hook</label>
             <label class="swlabel"><input type="checkbox" class="toggle" id="smart" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Resaltado IA ✨</label>
+            <label class="swlabel"><input type="checkbox" class="toggle" id="broll"> <svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>B-roll 🎬</label>
             <label class="swlabel"><input type="checkbox" class="toggle" id="music"> <svg class="ic" viewBox="0 0 24 24"><use href="#i-music"/></svg>Música</label>
           </div>
           <div class="optrow" id="musrow" style="display:none">
@@ -509,7 +510,7 @@ const musOpts=()=>({music:$("#music").checked,music_track:$("#mtrack").value||"a
 const customOpts=()=>({cap_color:CAPC,cap_font:CAPF!=="Arial"?CAPF:null,cap_scale:CAPS,cap_pos:CAPPOS,
   zoom_amt:ZAMT,air:AIR,logo:LOGO_ON?{pos:LOGO_POS,size:LOGO_SIZE,opacity:0.9}:null});
 const renderOpts=()=>({dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,hook:$("#hook").checked,
-                       smart:$("#smart").checked,platform:PLATFORM,
+                       smart:$("#smart").checked,platform:PLATFORM,broll:$("#broll").checked,
                        style:STYLE,anim:ANIM,format:FMT,lang:LANG,...musOpts(),...customOpts()});
 function seg(id,set){const el=$(id);el.querySelectorAll("button").forEach(b=>b.onclick=()=>{
   el.querySelectorAll("button").forEach(x=>x.classList.remove("sel"));b.classList.add("sel");set(b.dataset.v);});}
@@ -646,6 +647,14 @@ function loadLogo(){
 function openEditor(){
   show("#s-editor");
   seg("#segStyle",v=>STYLE=v); seg("#segAnim",v=>ANIM=v); seg("#segFmt",setFormat); seg("#segPlat",v=>PLATFORM=v);
+  $("#broll").addEventListener("change", async e=>{
+    if(!e.target.checked) return;
+    const st = await (await fetch("/settings")).json();
+    if(st.pexels) return;
+    const k = prompt("El B-roll usa videos de stock de Pexels (gratis).\nPega tu API key de https://www.pexels.com/api/ :");
+    if(k && k.trim().length > 20){ await fetch("/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pexels_key:k.trim()})}); }
+    else { e.target.checked = false; alert("Sin clave de Pexels el B-roll queda desactivado."); }
+  });
   seg("#segLang",setLang);
   seg("#segSize",v=>CAPS=+v);
   seg("#segLogo",v=>LOGO_POS=v);
