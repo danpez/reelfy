@@ -385,7 +385,9 @@ def _analyze(job_id, job):
                     message="Análisis listo", plan=plan)
 
 
-CUSTOM_KEYS = ("cap_color", "cap_font", "cap_scale", "cap_pos", "zoom_amt", "air", "logo")
+CUSTOM_KEYS = ("cap_color", "cap_font", "cap_scale", "cap_pos", "zoom_amt", "air", "logo",
+               "base_color", "kw_color", "cap_outline", "cap_shadow", "cap_case",
+               "cap_margin", "effect")
 
 
 def _custom(body):

@@ -259,7 +259,8 @@ def ass_time(t):
 
 def build_ass(phrases, ass_path, w=W, h=H, style="clasico", anim="none",
               cap_color=None, cap_font=None, cap_scale=1.0, cap_pos=0.776,
-              smart=True):
+              smart=True, base_color=None, kw_color=None, cap_outline=None,
+              cap_shadow=None, cap_case=None, cap_margin=None, effect=None):
     """Word-by-word highlight captions, ROCK-STABLE position.
 
     Highlight is COLOR-ONLY (glyph metrics never change) so the phrase stays pinned;
@@ -273,17 +274,34 @@ def build_ass(phrases, ass_path, w=W, h=H, style="clasico", anim="none",
     (solo color -> cero reflow). Devuelve las ventanas de emoji por frase
     [(emoji, start, end)] para overlay (libass no renderiza emoji: tofu).
     """
+    # El "estilo" es solo un PRESET de arranque; cada atributo se puede sobreescribir
+    # individualmente (personalización total). Un preset guardado manda todos juntos.
     st = dict(STYLES.get(style, STYLES["clasico"]))
-    st["size"] = max(24, int(st["size"] * float(cap_scale or 1.0)))
+    size = max(24, int(st["size"] * float(cap_scale or 1.0)))
     active_color = (_hex_ass(cap_color) if cap_color else None) or st["active"]
-    kw_color = st.get("kw", active_color)
+    base = (_hex_ass(base_color) if base_color else None) or BASE_COLOR
+    kwc = (_hex_ass(kw_color) if kw_color else None) or st.get("kw", active_color)
     font = cap_font or FONT
     cap_pos = min(0.93, max(0.15, float(cap_pos or 0.776)))
+    margin_h = int(cap_margin) if cap_margin is not None else MARGIN_H
     margin_v = round(h * (1 - cap_pos))   # ASS MarginV = distance from the bottom
+    outline = float(cap_outline) if cap_outline is not None else st["outline"]
+    shadow = float(cap_shadow) if cap_shadow is not None else 2
+    # efecto: explícito, o inferido del preset (karaoke = barrido, caja = fondo)
+    eff = effect or ("karaoke" if st.get("fill") else
+                     ("box" if st.get("border", 1) == 3 else "none"))
+    fill = eff == "karaoke"
+    border = 3 if eff == "box" else 1
+    outcolor = (st.get("boxcolor") or "&H66000000") if eff == "box" else "&H00000000"
+    # mayúsculas / minúsculas / Capitalizar / normal
+    case = cap_case or ("upper" if st.get("upper") else "none")
+
+    def _case(t):
+        return {"upper": t.upper(), "lower": t.lower(),
+                "title": t.title()}.get(case, t)
+
     MIN_DUR = 0.06
     MAX_HOLD = 1.2   # after this much silence the caption clears (natural)
-    border = st.get("border", 1)
-    outcolor = st.get("boxcolor", "&H00000000")
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {w}
@@ -292,7 +310,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, BorderStyle
-Style: Base,{font},{st["size"]},{BASE_COLOR},{outcolor},&H80000000,1,{st["outline"]},2,2,{MARGIN_H},{MARGIN_H},{margin_v},{border}
+Style: Base,{font},{size},{base},{outcolor},&H80000000,1,{outline},{shadow},2,{margin_h},{margin_h},{margin_v},{border}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -306,37 +324,35 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         "pop":  r"{\fad(70,0)\t(0,150,\fscx112\fscy112)\t(150,270,\fscx100\fscy100)}",
         "slide": r"{\fad(120,0)\t(0,220,\frz0)}",  # subtle settle
     }
-    max_line_w = (w - 2 * MARGIN_H) * 0.97
+    max_line_w = (w - 2 * margin_h) * 0.97
     events = []   # [start, end, text, is_first_of_phrase]
     for ph in phrases:
         # AUTO-FIT: if this phrase is wider than the safe area at the base size,
         # shrink its font (per-phrase \fs tag) so it NEVER clips off-screen.
-        plain = " ".join((t["text"].upper() if st["upper"] else t["text"]) for t in ph)
+        plain = " ".join(_case(t["text"]) for t in ph)
         # shrink at most to 60% of the base size; beyond that ASS wraps to 2 lines
         # (stable within a phrase because the text never changes between events)
-        fs = _fit_size(plain, st["size"], max_line_w, floor=int(st["size"] * 0.6))
-        fs_tag = f"{{\\fs{fs}}}" if fs != st["size"] else ""
+        fs = _fit_size(plain, size, max_line_w, floor=int(size * 0.6))
+        fs_tag = f"{{\\fs{fs}}}" if fs != size else ""
         for i, active in enumerate(ph):
             start = active["start"]
             end = ph[i + 1]["start"] if i + 1 < len(ph) else active["end"]
             parts = []
             for w_ in ph:
-                token = w_["text"].replace("{", "(").replace("}", ")")
-                if st["upper"]:
-                    token = token.upper()
+                token = _case(w_["text"].replace("{", "(").replace("}", ")"))
                 is_kw = smart and w_.get("kw")
-                rest = kw_color if is_kw else BASE_COLOR   # color al dejar de ser activa
+                rest = kwc if is_kw else base   # color al dejar de ser activa
                 if w_ is active:
-                    if st.get("fill"):
+                    if fill:
                         # karaoke: la palabra activa BARRE del color base al acento
                         # durante su duración (transición de color: métricas intactas)
                         ms = max(60, int((end - start) * 1000))
                         parts.append(f"{{\\c{rest}\\t(0,{ms},\\c{active_color})}}"
-                                     f"{token}{{\\c{BASE_COLOR}}}")
+                                     f"{token}{{\\c{base}}}")
                     else:
-                        parts.append(f"{{\\c{active_color}}}{token}{{\\c{BASE_COLOR}}}")
+                        parts.append(f"{{\\c{active_color}}}{token}{{\\c{base}}}")
                 elif is_kw:
-                    parts.append(f"{{\\c{kw_color}}}{token}{{\\c{BASE_COLOR}}}")
+                    parts.append(f"{{\\c{kwc}}}{token}{{\\c{base}}}")
                 else:
                     parts.append(token)
             events.append([start, end, fs_tag + " ".join(parts), i == 0])
@@ -769,8 +785,11 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     ass = WORK / f"{stem}.ass"
     emoji_windows = build_ass(phrases, ass, ow, oh, style, anim,   # rebuild from edited captions
                               c.get("cap_color"), c.get("cap_font"),
-                              c.get("cap_scale", 1.0), cap_pos,
-                              smart=smart)
+                              c.get("cap_scale", 1.0), cap_pos, smart=smart,
+                              base_color=c.get("base_color"), kw_color=c.get("kw_color"),
+                              cap_outline=c.get("cap_outline"), cap_shadow=c.get("cap_shadow"),
+                              cap_case=c.get("cap_case"), cap_margin=c.get("cap_margin"),
+                              effect=c.get("effect"))
     emojis = _emoji_overlays(emoji_windows, stem)
     broll_clips = None
     if broll and plan.get("broll"):
@@ -872,8 +891,11 @@ def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim
     ass = WORK / f"{stem}.ass"
     emoji_windows = build_ass(phrases, ass, ow, oh, style, anim,
                               c.get("cap_color"), c.get("cap_font"),
-                              c.get("cap_scale", 1.0), c.get("cap_pos", 0.776),
-                              smart=smart)
+                              c.get("cap_scale", 1.0), c.get("cap_pos", 0.776), smart=smart,
+                              base_color=c.get("base_color"), kw_color=c.get("kw_color"),
+                              cap_outline=c.get("cap_outline"), cap_shadow=c.get("cap_shadow"),
+                              cap_case=c.get("cap_case"), cap_margin=c.get("cap_margin"),
+                              effect=c.get("effect"))
     emojis = _emoji_overlays([w for w in emoji_windows if w[1] < secs], stem)
     out = Path(out)
     tmp = out.with_name(out.stem + "_raw.mp4") if music else out
