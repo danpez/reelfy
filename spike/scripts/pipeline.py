@@ -736,7 +736,8 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
         h["enabled"] = True
     step(78, "Detectando momentos de énfasis…")
     beats, _ = edit_mod.emphasis_beats(wav)
-    broll_sugg = broll_mod.suggest(hl.build_sentences(words), probe_duration(video))
+    broll_sugg = broll_mod.suggest(hl.build_sentences(words), probe_duration(video),
+                                   topic=glossary)   # ancla el stock al tema/producto real
     if broll_sugg:
         print(f"   broll: {[b['query'] for b in broll_sugg]}")
     step(84, "Detectando silencios y muletillas…")

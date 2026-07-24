@@ -58,16 +58,23 @@ def _llm(prompt, timeout=60):
         return json.loads(r.read())["response"]
 
 
-def suggest(sentences, duration, max_n=4):
+def suggest(sentences, duration, max_n=4, topic=""):
     """sentences: [{text,start,end}]. Devuelve [{query,start,end,enabled}] con
-    momentos donde un corte a stock APOYA lo dicho. Nunca lanza."""
+    momentos donde un corte a stock APOYA lo dicho. `topic` (glosario/producto del
+    video) ANCLA las búsquedas para que el stock sea RELEVANTE al tema real y no
+    invente cosas ajenas. Nunca lanza. OFF por defecto en la UI: solo sugiere."""
     try:
         lines = "\n".join(f"[{s['start']:.1f}s] {s['text']}" for s in sentences)
+        anchor = ""
+        if topic and topic.strip():
+            anchor = (f"\nTEMA/PRODUCTO REAL del video: «{topic.strip()}». TODAS las búsquedas "
+                      f"deben ser coherentes con ese tema — NO inventes marcas/productos ajenos "
+                      f"ni muestres cosas que contradigan lo que se ve. Si dudas, usa el tema real.")
         prompt = f"""Eres editor de video. Del siguiente guion hablado (español), elige hasta
 {max_n} momentos donde un corte a video de stock REFUERCE visualmente lo que se dice
 (objetos, lugares, acciones concretas — no elijas momentos donde el hablante es lo
 importante). Para cada uno da un término de búsqueda VISUAL en INGLÉS (2-4 palabras,
-concreto: "perfume bottle spray", "city night traffic").
+concreto y GENÉRICO, sin marcas inventadas: "perfume bottle", "pouring coffee").{anchor}
 
 Guion:
 {lines}
