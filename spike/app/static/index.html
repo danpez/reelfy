@@ -474,7 +474,7 @@
       <button class="btn ghost" id="cancel">Nuevo video</button>
       <span style="flex:1"></span>
       <label class="swlabel" title="Al pausar, renderiza el look REAL en el playhead"><input type="checkbox" class="toggle" id="autoPv" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg>Vista real (auto)</label>
-      <button class="btn ghost" id="preview"><svg class="ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg>Muestra exacta (7s)</button>
+      <button class="btn ghost" id="preview"><svg class="ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg>Ver resultado real</button>
       <button class="btn" id="render"><svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg>Exportar</button>
     </div>
   </div></section>
@@ -519,7 +519,7 @@
 
 <div class="modal" id="modal"><div class="box">
   <video id="pvOut" controls autoplay playsinline></video>
-  <div class="cap">Muestra exacta de los primeros segundos · <a href="#" id="pvClose" style="color:var(--brand2)">cerrar</a></div>
+  <div class="cap">Resultado real (100% igual al export, en baja resolución) · <a href="#" id="pvClose" style="color:var(--brand2)">cerrar</a></div>
 </div></div>
 
 <video id="srcVid" style="display:none" playsinline></video>
@@ -892,8 +892,10 @@ function draw(){
     if($("#dynamic").checked&&ZAMT>0.004&&(PLAN.beats||[]).some(b=>t>=b&&t<b+1.1)) z=1+ZAMT;
     const sw=cw/z, sh=ch/z, sx=cx+(cw-sw)/2, sy=((vh-ch)/2)+(ch-sh)/2;
     CTX.drawImage(V, sx,sy,sw,sh, (CW-fw)/2,(CH-fh)/2, fw,fh);
-    drawCaption(t);
-    drawHook(t);
+    // NO simulamos subtítulos/hook/emoji en el canvas: cualquier simulación difiere
+    // del render real. El canvas solo muestra el ENCUADRE (para navegar rápido);
+    // el LOOK exacto (100% = export) lo pinta el render real (ventana al pausar /
+    // 'ver resultado' al reproducir). Así el preview nunca miente.
     drawLogo();
   }
   $("#playhead").style.left=(t/dur*100)+"%";
@@ -1328,13 +1330,16 @@ function renderSubs(){
 
 /* ---- preview sample + export ---- */
 $("#preview").onclick=async()=>{
-  const b=$("#preview"); const old=b.innerHTML; b.disabled=true; b.innerHTML='<span class="spinner"></span> Generando…';
+  const b=$("#preview"); const old=b.innerHTML; b.disabled=true;
+  b.innerHTML='<span class="spinner"></span> Generando resultado…';
   try{
+    // full=true -> PROXY del video COMPLETO con el pipeline REAL (=export, 540p):
+    // reproducción 100% idéntica al resultado final (con cortes de silencio, etc).
     const r=await(await fetch("/preview/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({plan:PLAN,...renderOpts()})})).json();
+      body:JSON.stringify({plan:PLAN,...renderOpts(),full:true})})).json();
     if(r.file){ $("#pvOut").src="/video/"+r.file+"?t="+Date.now(); $("#modal").classList.add("on"); }
-    else fail(r.detail||"No se pudo generar la muestra.");
-  }catch(e){ alert("No se pudo generar la muestra."); }
+    else fail(r.detail||"No se pudo generar el resultado.");
+  }catch(e){ alert("No se pudo generar el resultado."); }
   b.disabled=false; b.innerHTML=old;
 };
 $("#pvClose").onclick=e=>{e.preventDefault();$("#modal").classList.remove("on");$("#pvOut").pause();};

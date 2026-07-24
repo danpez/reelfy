@@ -461,7 +461,7 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
                      on_pct=None, preview_secs=None, preview_start=0.0, enhance_audio=False,
                      out_w=W, out_h=H, camera=None, keeps=None,
                      zoom_amt=ZOOM_IN, air=None, logo=None, emojis=None, emoji_y=None,
-                     broll=None):
+                     broll=None, low_res=False):
     """Composite a FIXED blurred background + a dynamic foreground video, burn captions.
 
     Layers (frame/margins never move; only the video moves): static blurred BG cover +
@@ -568,6 +568,10 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
     bitrate = "12M"
     seek = []
     windowed = bool(preview_secs and preview_start and preview_start > 0.05)
+    if low_res and not preview_secs:      # PROXY: mismo pipeline (=export), solo 540p
+        pv_h = (round(540 * oh / ow) // 2) * 2
+        vf += f",scale=540:{pv_h}"
+        bitrate = "6M"
     if preview_secs:                      # fast low-res sample (ventana del preview)
         pv_h = (round(540 * oh / ow) // 2) * 2
         vf += f",scale=540:{pv_h}"
@@ -784,7 +788,8 @@ def _emoji_overlays(emoji_windows, stem):
 def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="clasico",
                      anim="none", fmt="9:16", music=False, music_track="ambient",
                      music_volume=0.26, hook=False, lang="es", custom=None,
-                     smart=True, platform="none", broll=False, on_step=None, on_pct=None):
+                     smart=True, platform="none", broll=False, proxy=False,
+                     proxy_out=None, on_step=None, on_pct=None):
     """Heavy phase: apply the (possibly edited) plan -> full video + enabled shorts.
     on_pct(stage, percent) reports real ffmpeg progress per stage."""
     def step(m):
@@ -865,18 +870,22 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
             acc += b - a
         return acc
 
-    step("Montando el video…")
-    full = out_dir / f"{stem}_reelfy{pf['suffix']}.mp4"
+    step("Montando el video…" if not proxy else "Generando vista real…")
+    full = Path(proxy_out) if (proxy and proxy_out) else out_dir / f"{stem}_reelfy{pf['suffix']}.mp4"
     reframe_and_burn(video, ass, full, cmds_path=plan["cmds_path"], beats=beats,
                      enhance_audio=enhance_audio, out_w=ow, out_h=oh, camera=camera,
                      keeps=keeps, zoom_amt=float(c.get("zoom_amt", ZOOM_IN)),
                      air=c.get("air"), logo=c.get("logo"), emojis=emojis,
-                     emoji_y=round(oh * (cap_pos - 0.18)), broll=broll_clips,
+                     emoji_y=round(oh * (cap_pos - 0.18)), broll=broll_clips, low_res=proxy,
                      on_pct=(lambda p: on_pct("full", p)) if on_pct else None)
     if music:
         step("Añadiendo música de fondo…")
         tmp = out_dir / f"{plan['stem']}_mus.mp4"
         add_music(full, tmp, music_track, music_volume); tmp.replace(full)
+    # PROXY (vista real completa): mismo pipeline+cortes que el export, solo 540p.
+    # No genera shorts ni miniaturas: es solo para reproducir el resultado exacto.
+    if proxy:
+        return [{"name": "Vista real", "file": full.name}]
     clips = [{"name": "Video completo", "file": full.name}]
 
     enabled = [h for h in plan["highlights"] if h.get("enabled", True)]

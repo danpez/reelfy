@@ -520,17 +520,35 @@ async def preview(job_id: str, req: Request):
     music = bool(body.get("music", False))
     track = body.get("music_track", "ambient"); mvol = float(body.get("music_volume", 0.26))
     lang = body.get("lang", "es")
-    # start>0 => auto-preview: VENTANA corta (4s) alrededor del playhead, solo-video,
-    # con nombre por-ventana para no pisar renders en vuelo (el front hace debounce+caché).
+    # 3 modos de preview, todos con el pipeline REAL (=export, solo baja resolución):
+    #  - full=true      -> PROXY del video COMPLETO (reproducción exacta, con audio)
+    #  - start>0        -> VENTANA de 4s alrededor del playhead (frame exacto al pausar)
+    #  - start=0        -> primeros 7s
     start = float(body.get("start", 0) or 0)
-    windowed = start > 0.05
-    secs = 4 if windowed else 7
-    out = OUTPUT / (f"{job_id}_win.mp4" if windowed else f"{job_id}_preview.mp4")
+    full = bool(body.get("full", False))
+    windowed = (not full) and start > 0.05
+    if full:
+        secs = float((plan or {}).get("duration") or 0) or 7
+        start = 0.0
+        out = OUTPUT / f"{job_id}_proxy.mp4"
+    else:
+        secs = 4 if windowed else 7
+        out = OUTPUT / (f"{job_id}_win.mp4" if windowed else f"{job_id}_preview.mp4")
     try:
-        await run_in_threadpool(pipeline.render_preview, plan, out, secs, enhance, style, anim,
-                                fmt, music, track, mvol, lang, _custom(body),
-                                bool(body.get("smart", True)), start,
-                                body.get("platform", "none"), bool(body.get("broll", False)))
+        if full:
+            # PROXY = MISMO camino que el export (cortes/tracking/captions/audio/
+            # música), solo a 540p y sin shorts -> reproducción 100% idéntica.
+            await run_in_threadpool(
+                pipeline.render_from_plan, plan, OUTPUT, bool(body.get("dynamic", True)),
+                enhance, style, anim, fmt, music, track, mvol,
+                bool(body.get("hook", False)), lang, _custom(body),
+                bool(body.get("smart", True)), body.get("platform", "none"),
+                bool(body.get("broll", False)), True, str(out))
+        else:
+            await run_in_threadpool(pipeline.render_preview, plan, out, secs, enhance, style, anim,
+                                    fmt, music, track, mvol, lang, _custom(body),
+                                    bool(body.get("smart", True)), start,
+                                    body.get("platform", "none"), bool(body.get("broll", False)))
     except Exception as e:  # noqa
         raise HTTPException(500, f"Preview falló: {e}")
     return {"file": out.name}
