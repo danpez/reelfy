@@ -231,7 +231,20 @@ pub fn run() {
                 let state: tauri::State<Engine> = window.state();
                 let child = state.0.lock().unwrap().take();
                 if let Some(mut c) = child {
-                    let _ = c.kill();
+                    // SIGTERM primero: así uvicorn sale limpio y su atexit
+                    // TERMINA el ollama embebido. Con kill() directo (SIGKILL)
+                    // el ollama quedaba huérfano comiendo RAM tras cerrar la app.
+                    #[cfg(unix)]
+                    {
+                        unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+                        for _ in 0..30 {
+                            if matches!(c.try_wait(), Ok(Some(_))) {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+                    let _ = c.kill(); // no salió a la buena (o Windows): forzar
                 }
             }
         })
