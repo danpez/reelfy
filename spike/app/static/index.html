@@ -170,6 +170,11 @@
   .mtitle{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .mtags{font-size:10.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
   .mrow.sel .mtitle{color:var(--brand2)}
+  .brow{display:flex;align-items:center;gap:9px;padding:8px 10px;border:1px solid var(--line);border-radius:9px;
+        background:var(--panel2);margin-bottom:7px;opacity:.55;transition:opacity .12s}
+  .brow.on{opacity:1;border-color:var(--line2)}
+  .brow .bq{font-size:12px;padding:5px 8px}
+  .brow .badge{margin-top:4px}
   /* ---- editor de línea de tiempo (ensamblaje) ---- */
   .asm{display:grid;grid-template-columns:1fr 340px;gap:18px;margin-bottom:16px}
   @media(max-width:900px){.asm{grid-template-columns:1fr}}
@@ -576,6 +581,9 @@
                 <input type="range" id="mvol" min="4" max="60" value="26" class="rng" style="width:100%"></div></div>
           </div>
         </div>
+        <div class="pgroup" id="brollGroup" style="display:none"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>Inserciones de B-roll <span class="info" data-tip="Cada corte a video de stock que la IA sugiere. Actívalo/desactívalo, edita el término de búsqueda o bórralo. Solo se aplican los activados.">i</span></h4>
+          <div id="brollList"></div>
+        </div>
         <div class="pgroup insp" id="inspGroup" style="display:none"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-zoom"/></svg>Inspector</h4>
           <div id="inspBody"></div>
         </div>
@@ -613,6 +621,7 @@
         <div class="trk"><div class="tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-type"/></svg>Subtítulos</div><div class="lane" id="trkCaps"></div></div>
         <div class="trk"><div class="tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-zoom"/></svg>Zooms</div><div class="lane" id="trkBeats"></div></div>
         <div class="trk"><div class="tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>Shorts</div><div class="lane" id="trkShorts"></div></div>
+        <div class="trk" id="trkBrollRow" style="display:none"><div class="tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>B-roll</div><div class="lane" id="trkBroll"></div></div>
         <div class="trk" id="trkMusicRow" style="display:none"><div class="tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-music"/></svg>Música</div><div class="lane" id="trkMusic"></div></div>
       </div></div>
       <div class="tlfoot">
@@ -1059,17 +1068,19 @@ function openEditor(){
   show("#s-editor");
   seg("#segStyle",v=>STYLE=v); seg("#segAnim",v=>ANIM=v); seg("#segFmt",setFormat); seg("#segPlat",v=>PLATFORM=v);
   $("#broll").addEventListener("change", async e=>{
-    if(!e.target.checked) return;
+    if(!e.target.checked){ renderBroll(); renderTL(); return; }
     const st = await (await fetch("/settings")).json();
-    if(st.pexels) return;
-    const k = prompt("El B-roll usa videos de stock de Pexels (gratis).\nPega tu API key de https://www.pexels.com/api/ :");
-    if(k && k.trim().length > 20){ await fetch("/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pexels_key:k.trim()})}); }
-    else { e.target.checked = false; alert("Sin clave de Pexels el B-roll queda desactivado."); }
+    if(!st.pexels){
+      const k = prompt("El B-roll usa videos de stock de Pexels (gratis).\nPega tu API key de https://www.pexels.com/api/ :");
+      if(k && k.trim().length > 20){ await fetch("/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pexels_key:k.trim()})}); }
+      else { e.target.checked = false; alert("Sin clave de Pexels el B-roll queda desactivado."); return; }
+    }
+    renderBroll(); renderTL();
   });
   seg("#segLang",setLang);
   seg("#segSize",v=>CAPS=+v);
   seg("#segLogo",v=>LOGO_POS=v);
-  loadTracks(); loadLogo(); loadPresets();
+  loadTracks(); loadLogo(); loadPresets(); renderBroll();
   $("#capColor").oninput=e=>CAPC=e.target.value;
   $("#baseColor").oninput=e=>BASEC=e.target.value;
   $("#kwColor").oninput=e=>KWC=e.target.value;
@@ -1246,6 +1257,28 @@ function syncMusic(){
     M.oncanplaythrough=()=>chip(null); }
   M.currentTime=(V.currentTime||0)%32;
   if(!V.paused) M.play().catch(()=>{});
+}
+/* Lista de inserciones de B-roll: aprobar/desactivar, editar término, borrar.
+   Solo las activadas se aplican al exportar (la IA sugiere; tú apruebas). */
+function renderBroll(){
+  const on=$("#broll")&&$("#broll").checked;
+  $("#brollGroup").style.display=on?"block":"none";
+  if(!on) return;
+  const items=(PLAN&&PLAN.broll)||[]; const box=$("#brollList");
+  if(!items.length){ box.innerHTML='<div class="hint">La IA no sugirió B-roll para este video. Puedes añadir uno manual con el botón de abajo.</div>'; }
+  else box.innerHTML=items.map((b,i)=>`<div class="brow ${b.enabled!==false?'on':''}">
+      <input type="checkbox" class="toggle" ${b.enabled!==false?'checked':''} data-i="${i}">
+      <div style="flex:1;min-width:0"><input class="selinp bq" value="${(b.query||'').replace(/"/g,'&quot;')}" data-i="${i}" spellcheck="false" style="width:100%">
+        <div class="badge">${fmtT(b.start)}–${fmtT(b.end)}</div></div>
+      <button class="btn ghost mini bx" data-i="${i}" title="Quitar">✕</button></div>`).join("");
+  box.innerHTML+=`<button class="btn ghost mini" id="brollAdd" style="margin-top:8px"><svg class="ic" viewBox="0 0 24 24"><use href="#i-plus"/></svg>Añadir en el playhead</button>`;
+  box.querySelectorAll("input[type=checkbox]").forEach(c=>c.onchange=e=>{items[+e.target.dataset.i].enabled=e.target.checked; renderBroll(); renderTL();});
+  box.querySelectorAll(".bq").forEach(q=>q.oninput=e=>{items[+e.target.dataset.i].query=e.target.value;});
+  box.querySelectorAll(".bx").forEach(x=>x.onclick=e=>{items.splice(+e.target.dataset.i,1); renderBroll(); renderTL();});
+  const add=$("#brollAdd"); if(add) add.onclick=()=>{ const t=V.currentTime||0;
+    if(!PLAN.broll) PLAN.broll=[];
+    PLAN.broll.push({query:"stock footage",start:+t.toFixed(2),end:+Math.min(t+2.2,(PLAN.duration||t+2.2)-0.3).toFixed(2),enabled:true});
+    PLAN.broll.sort((a,b)=>a.start-b.start); renderBroll(); renderTL(); };
 }
 function renderMusicLane(){
   const on=$("#music").checked;
@@ -1725,8 +1758,20 @@ function renderTL(){
       inspect({type:"short",i:i}); el.classList.add("selel"); };
     ts.appendChild(el);
   });
-  renderMusicLane();
+  renderMusicLane(); renderBrollLane();
   setTimeout(fitPlayhead,0);
+}
+function renderBrollLane(){
+  const on=$("#broll")&&$("#broll").checked, dur=PLAN.duration||1;
+  $("#trkBrollRow").style.display=on?"grid":"none";
+  const lane=$("#trkBroll"); if(!lane) return; lane.innerHTML="";
+  if(!on) return;
+  (PLAN.broll||[]).forEach(b=>{
+    const el=document.createElement("div"); el.className="beat"+(b.enabled===false?" off":"");
+    el.style.cssText=`position:absolute;top:6px;height:calc(100% - 12px);border-radius:5px;background:linear-gradient(90deg,#ff7a45,#ff9a5f);opacity:${b.enabled===false?.3:.9};`;
+    el.style.left=(b.start/dur*100)+"%"; el.style.width=Math.max(1.2,(b.end-b.start)/dur*100)+"%";
+    el.title="🎬 "+b.query; lane.appendChild(el);
+  });
 }
 function updateBadge(i){
   const h=PLAN.highlights[i], b=document.getElementById("badge-"+i);
