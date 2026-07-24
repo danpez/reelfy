@@ -94,8 +94,21 @@
     .stage #cv{max-width:190px}
     .panel{order:1;max-height:none}
   }
-  #cv{width:100%;max-width:338px;aspect-ratio:9/16;background:#000;border-radius:12px;border:1px solid var(--line2);
+  .cvwrap{position:relative;width:100%;max-width:338px}
+  @media(max-width:900px){.cvwrap{max-width:190px}}
+  #cv{display:block;width:100%;aspect-ratio:9/16;background:#000;border-radius:12px;border:1px solid var(--line2);
       box-shadow:0 24px 70px -28px rgba(0,0,0,.9);touch-action:none}
+  /* overlay del render REAL (auto-preview): cubre el canvas; no captura punteros
+     para que arrastrar subtítulos siga funcionando sobre el canvas de abajo */
+  #pvWin{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:12px;
+         display:none;pointer-events:none;background:#000}
+  #pvWin.on{display:block}
+  .pvbadge{position:absolute;top:8px;left:8px;display:none;align-items:center;gap:5px;font-size:10px;
+           font-weight:700;letter-spacing:.04em;color:#fff;background:rgba(10,12,16,.7);
+           border:1px solid var(--line2);border-radius:20px;padding:3px 9px;backdrop-filter:blur(6px)}
+  .pvbadge.on{display:inline-flex}
+  .pvbadge.busy{color:var(--brand2)}
+  .pvbadge b{color:var(--brand2);font-size:13px;line-height:0}
   .transport{display:flex;align-items:center;gap:12px;width:100%;max-width:430px}
   .tbtn{width:40px;height:40px;border-radius:50%;border:1px solid var(--line2);background:var(--panel2);color:#fff;
         cursor:pointer;transition:all .15s var(--ease);flex:none;display:flex;align-items:center;justify-content:center}
@@ -329,7 +342,11 @@
   <section class="screen" id="s-editor"><div class="card">
     <div class="studio">
       <div class="stage">
-        <canvas id="cv" width="540" height="960"></canvas>
+        <div class="cvwrap">
+          <canvas id="cv" width="540" height="960"></canvas>
+          <video id="pvWin" muted loop playsinline></video>
+          <div class="pvbadge" id="pvBadge">● vista real</div>
+        </div>
         <div class="transport">
           <button class="tbtn" id="play" title="Espacio"><svg class="ic" viewBox="0 0 24 24" id="playIco"><use href="#i-play"/></svg></button>
           <input type="range" class="rng" id="scrub" min="0" max="1000" value="0" style="flex:1;width:auto">
@@ -456,6 +473,7 @@
     <div class="actionbar">
       <button class="btn ghost" id="cancel">Nuevo video</button>
       <span style="flex:1"></span>
+      <label class="swlabel" title="Al pausar, renderiza el look REAL en el playhead"><input type="checkbox" class="toggle" id="autoPv" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg>Vista real (auto)</label>
       <button class="btn ghost" id="preview"><svg class="ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg>Muestra exacta (7s)</button>
       <button class="btn" id="render"><svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg>Exportar</button>
     </div>
@@ -512,7 +530,9 @@ const ICO=n=>`<svg class="ic" viewBox="0 0 24 24"><use href="#i-${n}"/></svg>`;
 function show(id){document.querySelectorAll('.screen').forEach(e=>e.classList.remove('on'));$(id).classList.add('on');}
 const fmtT=s=>`${Math.floor(Math.max(0,s)/60)}:${String(Math.floor(Math.max(0,s))%60).padStart(2,'0')}`;
 let FILES=[], JOB=null, PLAN=null, STYLE="clasico", FMT="9:16", ANIM="pop", LANG="es", PLATFORM="none";
-let CAPC=null, CAPF="Arial", CAPS=1.0, CAPPOS=0.776, ZAMT=0.10, AIR=0.16;
+let CAPC=null, CAPF="Arial", CAPS=1.0, CAPPOS=null, ZAMT=0.10, AIR=0.16;
+const PLAT_POS={none:0.776,tiktok:0.72,reels:0.68,shorts:0.74};
+const capPos=()=>CAPPOS||PLAT_POS[PLATFORM]||0.776;
 let LOGO_ON=false, LOGO_POS="br", LOGO_SIZE=0.14, logoImg=null;
 const P=()=>LANG==="en"&&PLAN.phrases_en?PLAN.phrases_en:PLAN.phrases;
 const musOpts=()=>({music:$("#music").checked,music_track:$("#mtrack").value||"ambient",music_volume:(+$("#mvol").value)/100});
@@ -700,8 +720,9 @@ function openEditor(){
   V.src="/source/"+JOB;
   $("#tdur").textContent=fmtT(PLAN.duration);
   flatWords=P().flat();
-  renderTL(); renderList(); renderSubs(); wireTransport(); wireCanvasDrag();
+  renderTL(); renderList(); renderSubs(); wireTransport(); wireCanvasDrag(); wireAutoPreview();
   requestAnimationFrame(draw);
+  scheduleRealPreview(600);          // primer render real del look al abrir el editor
   $("#addShort").onclick=()=>{ mut();
     const t=V.currentTime||0, dur=PLAN.duration;
     const start=Math.min(t,Math.max(0,dur-8)), end=Math.min(start+30,dur);
@@ -755,7 +776,7 @@ async function deletePreset(){
 function applyPreset(name){
   const c=PRESETS[name]; if(!c)return;
   STYLE=c.style||"clasico"; ANIM=c.anim||"pop"; setFormat(c.format||"9:16");
-  CAPC=c.cap_color||null; CAPF=c.cap_font||"Arial"; CAPS=c.cap_scale||1; CAPPOS=c.cap_pos||0.776;
+  CAPC=c.cap_color||null; CAPF=c.cap_font||"Arial"; CAPS=c.cap_scale||1; CAPPOS=c.cap_pos||null;
   ZAMT=c.zoom_amt??0.10; AIR=c.air??0.16;
   LOGO_ON=!!c.logo_on; LOGO_POS=c.logo_pos||"br"; LOGO_SIZE=c.logo_size||0.14;
   segSet("#segStyle",STYLE); segSet("#segAnim",ANIM); segSet("#segFmt",FMT);
@@ -901,7 +922,7 @@ function drawCaption(t){
   else if(ANIM==="fade"){ alpha=Math.min(1,age/0.15); }
   CTX.save();
   CTX.globalAlpha=alpha;
-  const y=CH*CAPPOS;
+  const y=CH*capPos();
   CTX.translate(CW/2,y); CTX.scale(scale,scale); CTX.translate(-CW/2,-y);
   const setF=()=>CTX.font=`700 ${fsz}px "${CAPF}", Arial`;
   setF();
@@ -999,7 +1020,7 @@ function wireCanvasDrag(){
   CV.onpointerdown=e=>{
     const r=CV.getBoundingClientRect();
     const cy=(e.clientY-r.top)/r.height*CH;
-    if(Math.abs(cy-CH*CAPPOS)>CH*0.07) return;
+    if(Math.abs(cy-CH*capPos())>CH*0.07) return;
     e.preventDefault(); CV.setPointerCapture(e.pointerId);
     CV.style.cursor="ns-resize";
     CV.onpointermove=ev=>{
@@ -1015,6 +1036,52 @@ let SCRUBBING=false;
 function setPlayIcon(playing){
   $("#playIco").innerHTML=`<use href="#i-${playing?"pause":"play"}"/>`;
 }
+
+/* ===== Auto-preview: RENDER REAL por ventana (pixel-perfect, elección de Kevin) =====
+   Pausado -> render real del look exacto en el playhead (~1.8s, cacheado).
+   Reproduciendo/arrastrando -> canvas rápido (navegación). Cada cambio del panel
+   re-renderiza. Así TODO ajuste se ve idéntico al export. */
+let AUTO=true, RTIMER=null, RSEQ=0, WINCACHE=new Map(), lastKey=null;
+function pvBadge(state){            // 'busy' | 'real' | null
+  const b=$("#pvBadge"); if(!b) return;
+  b.classList.toggle("on", !!state);
+  b.classList.toggle("busy", state==="busy");
+  b.innerHTML = state==="busy" ? '<b>◍</b> actualizando…' : '● vista real';
+}
+function hideWin(){ const w=$("#pvWin"); w.classList.remove("on"); pvBadge(null); try{w.pause();}catch(e){} }
+function showWin(url){ const w=$("#pvWin"); w.src=url; w.classList.add("on"); try{w.currentTime=0;w.play().catch(()=>{});}catch(e){} pvBadge("real"); }
+function scheduleRealPreview(delay=480){ if(!AUTO||!PLAN||!JOB) return; clearTimeout(RTIMER); RTIMER=setTimeout(realPreview, delay); }
+async function realPreview(){
+  if(!AUTO||!PLAN||!JOB||!V.paused) return;          // solo con el video pausado
+  const t=V.currentTime||0, opts=renderOpts();
+  const key=JSON.stringify(opts)+"@"+(Math.round(t*2)/2);
+  if(key===lastKey && $("#pvWin").classList.contains("on")) return;
+  if(WINCACHE.has(key)){ lastKey=key; showWin(WINCACHE.get(key)); return; }
+  const seq=++RSEQ; pvBadge("busy");
+  try{
+    const r=await fetch("/preview/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({plan:PLAN, ...opts, start:t})});
+    if(!r.ok) throw 0;
+    const {file}=await r.json();
+    if(seq!==RSEQ) return;                            // otro cambio ganó: descartar
+    const url="/video/"+file+"?k="+Date.now();
+    if(WINCACHE.size>40){ WINCACHE.clear(); }
+    WINCACHE.set(key,url); lastKey=key; showWin(url);
+  }catch(e){ pvBadge(null); }
+}
+function wireAutoPreview(){
+  const panel=document.querySelector(".panel");
+  if(panel){
+    panel.addEventListener("input", ()=>{ lastKey=null; scheduleRealPreview(); }, true);
+    panel.addEventListener("change", ()=>{ lastKey=null; scheduleRealPreview(); }, true);
+    panel.addEventListener("click", e=>{ if(e.target.closest(".seg button")){ lastKey=null; scheduleRealPreview(); } }, true);
+  }
+  // arrastrar en el canvas (reposicionar subtítulos) o hacer clic: mostrar canvas y re-render al soltar
+  CV.addEventListener("pointerdown", hideWin);
+  CV.addEventListener("pointerup", ()=>{ lastKey=null; scheduleRealPreview(); });
+  const at=$("#autoPv");
+  if(at) at.onchange=e=>{ AUTO=e.target.checked; if(AUTO){ lastKey=null; scheduleRealPreview(120); } else hideWin(); };
+}
 function wireTransport(){
   const play=$("#play");
   play.onclick=()=>{
@@ -1022,17 +1089,18 @@ function wireTransport(){
     if(V.paused){ V.play(); if($("#music").checked)syncMusic(); }
     else{ V.pause(); M&&M.pause(); }
   };
-  V.onplay=()=>{setPlayIcon(true); if($("#music").checked&&M)M.play().catch(()=>{});};
-  V.onpause=()=>{setPlayIcon(false); M&&M.pause();};
+  V.onplay=()=>{setPlayIcon(true); hideWin(); if($("#music").checked&&M)M.play().catch(()=>{});};
+  V.onpause=()=>{setPlayIcon(false); M&&M.pause(); scheduleRealPreview(150);};
   const scrub=$("#scrub");
-  scrub.oninput=()=>{ SCRUBBING=true; V.currentTime=scrub.value/1000*PLAN.duration; };
-  scrub.onchange=()=>{ SCRUBBING=false; if(M)M.currentTime=V.currentTime%32; };
+  scrub.oninput=()=>{ SCRUBBING=true; hideWin(); V.currentTime=scrub.value/1000*PLAN.duration; };
+  scrub.onchange=()=>{ SCRUBBING=false; if(M)M.currentTime=V.currentTime%32; lastKey=null; scheduleRealPreview(150); };
   $("#ruler").onpointerdown=e=>{
+    hideWin();
     const seekAt=ev=>{ const r=$("#ruler").getBoundingClientRect();
       V.currentTime=Math.min(Math.max(0,(ev.clientX-r.left)/r.width),1)*PLAN.duration; };
     seekAt(e);
     const mv=ev=>seekAt(ev), up=()=>{window.removeEventListener("pointermove",mv);window.removeEventListener("pointerup",up);
-      if(M)M.currentTime=V.currentTime%32;};
+      if(M)M.currentTime=V.currentTime%32; lastKey=null; scheduleRealPreview(150);};
     window.addEventListener("pointermove",mv); window.addEventListener("pointerup",up);
   };
   document.addEventListener("keydown",e=>{
