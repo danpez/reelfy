@@ -52,9 +52,10 @@ def _has_audio(path):
     return bool(r.stdout.strip())
 
 
-def _norm_video(src, t_in, t_out, out, w, h, fps):
+def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0):
     """Recorta [in,out] y normaliza a WxH/fps con audio 48k estéreo (silencio si
-    no tiene). cover-crop para llenar el lienzo sin deformar."""
+    no tiene). cover-crop para llenar el lienzo sin deformar. `vol` ajusta el
+    volumen del clip (0 = mudo)."""
     vf = (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
           f"crop={w}:{h},fps={fps},setsar=1,format=yuv420p")
     dur = max(0.1, t_out - t_in)
@@ -62,7 +63,8 @@ def _norm_video(src, t_in, t_out, out, w, h, fps):
     if not _has_audio(src):
         cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
                 "-map", "0:v:0", "-map", "1:a:0"]
-    cmd += ["-vf", vf, "-c:v", "h264_videotoolbox", "-b:v", "12M",
+    af = f"volume={max(0.0, float(vol)):.3f},aresample=48000"
+    cmd += ["-vf", vf, "-af", af, "-c:v", "h264_videotoolbox", "-b:v", "12M",
             "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)]
     _run(cmd)
 
@@ -116,7 +118,8 @@ def compose(spec, out, work, on_step=None):
             _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps)
         else:
             t_in = float(s.get("in", 0)); t_out = float(s.get("out", t_in + 5))
-            _norm_video(s["path"], t_in, t_out, seg, W, H, fps)
+            vol = 0.0 if s.get("mute") else float(s.get("vol", 1.0))
+            _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol)
         parts.append(seg)
 
     # 2) concat (demuxer: mismos parámetros -> sin re-encode)

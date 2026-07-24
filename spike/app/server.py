@@ -576,6 +576,7 @@ async def compose_timeline(req: Request):
             item["dur"] = float(s.get("dur", 3.0))
         else:
             item["in"] = float(s.get("in", 0)); item["out"] = float(s.get("out", 0) or 5)
+            item["vol"] = float(s.get("vol", 1.0)); item["mute"] = bool(s.get("mute", False))
         main.append(item)
     if not main:
         raise HTTPException(400, "Agrega al menos un clip a la pista principal.")
