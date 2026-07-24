@@ -444,7 +444,7 @@ def render_emoji_png(emoji, out_path):
 
 
 def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, beats=None,
-                     on_pct=None, preview_secs=None, enhance_audio=False,
+                     on_pct=None, preview_secs=None, preview_start=0.0, enhance_audio=False,
                      out_w=W, out_h=H, camera=None, keeps=None,
                      zoom_amt=ZOOM_IN, air=None, logo=None, emojis=None, emoji_y=None,
                      broll=None):
@@ -552,18 +552,35 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
         if not preview_secs:
             total = sum(b - a for a, b in keeps)
     bitrate = "12M"
-    if preview_secs:                      # fast low-res sample of the first seconds
+    seek = []
+    windowed = bool(preview_secs and preview_start and preview_start > 0.05)
+    if preview_secs:                      # fast low-res sample (ventana del preview)
         pv_h = (round(540 * oh / ow) // 2) * 2
         vf += f",scale=540:{pv_h}"
         bitrate = "6M"
-    cmd = [FFMPEG, "-y", "-hwaccel", "videotoolbox", "-i", str(video), "-vf", vf,
-           "-c:v", "h264_videotoolbox", "-b:v", bitrate]
-    if af_parts:
-        cmd += ["-af", ",".join(af_parts)]
-    # 192k base: shorts derive from this render, so give downstream steps headroom
-    cmd += ["-c:a", "aac", "-b:a", "192k"]
+        if windowed:
+            # VENTANA ARBITRARIA alrededor del playhead: input-seek (-ss ANTES de
+            # -i, rápido: salta al keyframe) + setpts=PTS+start/TB para RESTAURAR
+            # el tiempo absoluto, de modo que subtítulos/tracking/beats/emojis/
+            # B-roll (todos en tiempo absoluto) sigan alineados. Verificado: la
+            # palabra correcta se resalta y cuesta ~1.3s aun a t=90 de un video 3min.
+            # Solo-video: es una vista del LOOK; el audio se oye en 'Muestra exacta'.
+            seek = ["-ss", f"{preview_start:.3f}"]
+            vf = f"setpts=PTS+{preview_start:.3f}/TB," + vf
+    cmd = [FFMPEG, "-y", "-hwaccel", "videotoolbox"] + seek + ["-i", str(video),
+           "-vf", vf, "-c:v", "h264_videotoolbox", "-b:v", bitrate]
+    if windowed:
+        cmd += ["-an"]                    # preview de ventana: sin audio (rápido y sin desync)
+    else:
+        if af_parts:
+            cmd += ["-af", ",".join(af_parts)]
+        # 192k base: shorts derive from this render, so give downstream steps headroom
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
     if preview_secs:
-        cmd += ["-t", str(preview_secs)]
+        # windowed: setpts dejó los PTS en tiempo absoluto -> acotar con -to (fin
+        # absoluto). Con -t, ffmpeg ve PTS ya > secs y no codifica nada.
+        cmd += (["-to", f"{preview_start + preview_secs:.3f}"] if windowed
+                else ["-t", str(preview_secs)])
     cmd += [str(out)]
     if on_pct:
         run_ffmpeg_progress(cmd, total, on_pct)
@@ -876,9 +893,10 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
 
 def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim="none",
                    fmt="9:16", music=False, music_track="ambient", music_volume=0.26,
-                   lang="es", custom=None, smart=True):
-    """Fast, low-res sample of the first `secs` (the real look: captions, tracking,
-    blurred bg, zoom, studio audio, music, chosen style/format/lang) — preview before export."""
+                   lang="es", custom=None, smart=True, start=0.0, platform="none", broll=False):
+    """Fast, low-res sample (the real look: captions, tracking, blurred bg, zoom,
+    studio audio, music, chosen style/format/lang). `start`>0 rinde una VENTANA
+    alrededor de ese segundo (auto-preview del playhead); start=0 los primeros `secs`."""
     ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
     stem = plan["stem"]
     if lang == "en":
@@ -888,24 +906,37 @@ def render_preview(plan, out, secs=7, enhance_audio=False, style="clasico", anim
     else:
         phrases = plan["phrases"]
     c = custom or {}
+    pf = PLATFORMS.get(platform or "none", PLATFORMS["none"])
+    cap_pos = c.get("cap_pos") or pf["cap_pos"] or 0.776
     ass = WORK / f"{stem}.ass"
     emoji_windows = build_ass(phrases, ass, ow, oh, style, anim,
                               c.get("cap_color"), c.get("cap_font"),
-                              c.get("cap_scale", 1.0), c.get("cap_pos", 0.776), smart=smart,
+                              c.get("cap_scale", 1.0), cap_pos, smart=smart,
                               base_color=c.get("base_color"), kw_color=c.get("kw_color"),
                               cap_outline=c.get("cap_outline"), cap_shadow=c.get("cap_shadow"),
                               cap_case=c.get("cap_case"), cap_margin=c.get("cap_margin"),
                               effect=c.get("effect"))
-    emojis = _emoji_overlays([w for w in emoji_windows if w[1] < secs], stem)
+    # emojis dentro de la ventana del preview [start, start+secs]
+    lo, hi = start, start + secs
+    emojis = _emoji_overlays([w for w in emoji_windows if lo <= w[1] <= hi or lo <= w[2] <= hi], stem)
+    # B-roll: mostrar el clip real en su ventana (si cae en el preview)
+    broll_clips = None
+    if broll and plan.get("broll"):
+        try:
+            broll_clips = broll_mod.resolve([b for b in plan["broll"]
+                                             if b.get("enabled", True) and b["end"] >= lo and b["start"] <= hi])
+        except Exception as e:  # noqa
+            print(f"   preview broll: {e}")
     out = Path(out)
     tmp = out.with_name(out.stem + "_raw.mp4") if music else out
     reframe_and_burn(Path(plan["video"]), ass, tmp, cmds_path=plan["cmds_path"],
-                     beats=plan.get("beats"), preview_secs=secs, enhance_audio=enhance_audio,
+                     beats=plan.get("beats"), preview_secs=secs, preview_start=start,
+                     broll=broll_clips, enhance_audio=enhance_audio,
                      out_w=ow, out_h=oh, camera=plan.get("camera"),
                      zoom_amt=float(c.get("zoom_amt", ZOOM_IN)),
                      air=c.get("air"), logo=c.get("logo"), emojis=emojis,
-                     emoji_y=round(oh * (float(c.get("cap_pos", 0.776)) - 0.18)))
-    if music:
+                     emoji_y=round(oh * (cap_pos - 0.18)))
+    if music and not (start and start > 0.05):    # ventana solo-video: sin música
         add_music(tmp, out, music_track, music_volume); tmp.unlink(missing_ok=True)
     return out
 

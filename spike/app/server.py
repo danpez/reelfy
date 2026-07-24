@@ -514,17 +514,23 @@ async def preview(job_id: str, req: Request):
         raise HTTPException(404, "Job no encontrado")
     body = await req.json()
     plan = body.get("plan") or job["plan"]
-    out = OUTPUT / f"{job_id}_preview.mp4"
     enhance = bool(body.get("enhance_audio", True))
     style = body.get("style", "clasico"); anim = body.get("anim", "none")
     fmt = body.get("format", "9:16")
     music = bool(body.get("music", False))
     track = body.get("music_track", "ambient"); mvol = float(body.get("music_volume", 0.26))
     lang = body.get("lang", "es")
+    # start>0 => auto-preview: VENTANA corta (4s) alrededor del playhead, solo-video,
+    # con nombre por-ventana para no pisar renders en vuelo (el front hace debounce+caché).
+    start = float(body.get("start", 0) or 0)
+    windowed = start > 0.05
+    secs = 4 if windowed else 7
+    out = OUTPUT / (f"{job_id}_win.mp4" if windowed else f"{job_id}_preview.mp4")
     try:
-        await run_in_threadpool(pipeline.render_preview, plan, out, 7, enhance, style, anim,
+        await run_in_threadpool(pipeline.render_preview, plan, out, secs, enhance, style, anim,
                                 fmt, music, track, mvol, lang, _custom(body),
-                                bool(body.get("smart", True)))
+                                bool(body.get("smart", True)), start,
+                                body.get("platform", "none"), bool(body.get("broll", False)))
     except Exception as e:  # noqa
         raise HTTPException(500, f"Preview falló: {e}")
     return {"file": out.name}
