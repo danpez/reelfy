@@ -90,18 +90,28 @@
   #s-editor > .card{display:flex;flex-direction:column;height:calc(100vh - 34px);
                     overflow:hidden;padding:14px 16px}
   .studio{flex:1 1 auto;min-height:0;display:grid;
-          grid-template-columns:minmax(210px,320px) 1fr;grid-template-rows:minmax(0,1fr) auto;
-          gap:16px}
+          grid-template-columns:var(--sw,320px) 8px 1fr;
+          grid-template-rows:minmax(0,1fr) 8px var(--th,300px);gap:0 12px}
   .stage{grid-row:1;grid-column:1;display:flex;flex-direction:column;align-items:center;
          justify-content:center;gap:8px;min-height:0;overflow:hidden}
-  .panel{grid-row:1;grid-column:2;min-height:0;max-height:100%;overflow-y:auto;padding-right:6px}
-  .studio > .tlwrap.span2{grid-row:2;grid-column:1 / -1;max-height:40vh;overflow:auto;margin:0}
+  .panel{grid-row:1;grid-column:3;min-height:0;max-height:100%;overflow-y:auto;padding-right:6px}
+  .studio > .tlwrap.span2{grid-row:3;grid-column:1 / -1;overflow:auto;margin:0}
+  /* divisores arrastrables */
+  .rz{position:relative;z-index:5}
+  .rz::after{content:"";position:absolute;background:var(--line2);border-radius:3px;transition:background .12s}
+  .rz:hover::after{background:var(--brand)}
+  .rz-col{grid-row:1;grid-column:2;cursor:col-resize}
+  .rz-col::after{top:50%;left:50%;transform:translate(-50%,-50%);width:4px;height:46px}
+  .rz-row{grid-row:2;grid-column:1 / -1;cursor:row-resize}
+  .rz-row::after{top:50%;left:50%;transform:translate(-50%,-50%);height:4px;width:56px}
   @media(max-width:820px){
     #s-editor > .card{height:auto;min-height:calc(100vh - 34px)}
-    .studio{grid-template-columns:1fr;grid-template-rows:auto auto auto}
+    .studio{grid-template-columns:1fr;grid-template-rows:auto auto auto auto}
     .stage{grid-row:1;grid-column:1;max-height:46vh}
+    .rz-col{display:none}
     .panel{grid-row:2;grid-column:1;max-height:none}
-    .studio > .tlwrap.span2{grid-row:3;max-height:none}
+    .rz-row{grid-row:3;grid-column:1}
+    .studio > .tlwrap.span2{grid-row:4;grid-column:1;max-height:none}
   }
   .cvwrap{position:relative;flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;width:100%}
   .stage .transport,.stage>.hint,.stage .chip{flex:none}
@@ -474,6 +484,7 @@
         <div class="chip" id="chip"><span class="spinner"></span> <span id="chipTxt"></span></div>
         <div class="hint" style="margin-top:0;text-align:center">Arrastra los subtítulos en la preview para reposicionarlos.<br>Espacio reproduce · ← → ±1s · , . frame · ⌘Z deshacer · I/O bordes del short seleccionado</div>
       </div>
+      <div class="rz rz-col" id="rzCol" title="Arrastra para redimensionar"></div>
       <div class="panel">
         <div class="pgroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-tag"/></svg>Marca</h4>
           <div class="optrow">
@@ -575,6 +586,7 @@
           <div class="subs" id="subs"></div>
         </div>
       </div>
+    <div class="rz rz-row" id="rzRow" title="Arrastra para ajustar el alto del timeline"></div>
     <div class="tlwrap span2" id="tlwrap">
       <div class="tlhead">
         <div class="tltools">
@@ -1097,7 +1109,7 @@ function openEditor(){
   V.src="/source/"+JOB;               // video crudo -> el canvas compone en tiempo real
   $("#tdur").textContent=fmtT(PLAN.duration);
   flatWords=P().flat();
-  renderTL(); renderList(); renderSubs(); wireTransport(); wireCanvasDrag();
+  renderTL(); renderList(); renderSubs(); wireTransport(); wireCanvasDrag(); wireResizers();
   requestAnimationFrame(draw);
   $("#addShort").onclick=()=>{ mut();
     const t=V.currentTime||0, dur=PLAN.duration;
@@ -1457,6 +1469,23 @@ function drawCapGuide(){                 // línea guía mientras arrastras
   const y=CV.height*capPos();
   CTX.strokeStyle="rgba(255,122,69,.9)"; CTX.lineWidth=2; CTX.setLineDash([10,7]);
   CTX.beginPath(); CTX.moveTo(0,y); CTX.lineTo(CV.width,y); CTX.stroke(); CTX.setLineDash([]);
+}
+/* divisores arrastrables: ancho preview↔ajustes (--sw) y alto del timeline (--th) */
+function wireResizers(){
+  const studio=document.querySelector(".studio");
+  const drag=(axis)=>(e)=>{
+    e.preventDefault(); document.body.style.cursor=axis==="col"?"col-resize":"row-resize";
+    const move=ev=>{ const r=studio.getBoundingClientRect();
+      if(axis==="col"){ let w=ev.clientX-r.left-6; w=Math.max(180,Math.min(w,r.width-340));
+        studio.style.setProperty("--sw",w+"px"); }
+      else{ let h=r.bottom-ev.clientY-4; h=Math.max(110,Math.min(h,r.height-180));
+        studio.style.setProperty("--th",h+"px"); } };
+    const up=()=>{window.removeEventListener("pointermove",move);window.removeEventListener("pointerup",up);document.body.style.cursor="";};
+    window.addEventListener("pointermove",move); window.addEventListener("pointerup",up);
+  };
+  const c=$("#rzCol"), rw=$("#rzRow");
+  if(c) c.onpointerdown=drag("col");
+  if(rw) rw.onpointerdown=drag("row");
 }
 function wireCanvasDrag(){
   CV.onpointerdown=e=>{
