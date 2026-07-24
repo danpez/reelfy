@@ -81,30 +81,36 @@
   .spinner{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.25);border-top-color:currentColor;
            border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px}
   @keyframes spin{to{transform:rotate(360deg)}}
-  /* studio layout */
-  .studio{display:grid;grid-template-columns:minmax(300px,400px) 1fr;gap:20px;align-items:start}
-  /* el previsualizador se queda FIJO a la vista mientras haces scroll en los controles */
-  .stage{display:flex;flex-direction:column;align-items:center;gap:12px;
-         position:sticky;top:16px;align-self:start;z-index:15}
-  @media(max-width:900px){
-    .studio{grid-template-columns:1fr}
-    /* pantallas chicas: preview SIEMPRE visible, anclado ABAJO como barra fija */
-    .stage{order:2;position:sticky;top:auto;bottom:0;background:var(--panel);
-           padding:10px 0 6px;border-top:1px solid var(--line);margin-top:8px}
-    .stage #cv{max-width:190px}
-    .panel{order:1;max-height:none}
+  /* ---- layout del editor: altura FIJA de viewport (tipo editor pro) ----
+     El .card llena la pantalla; arriba preview|controles, abajo el timeline.
+     Nada hace scroll de página -> el preview y el timeline NUNCA se solapan ni
+     desaparecen; solo el panel de controles y el timeline scrollean internamente. */
+  .wrap:has(#s-editor.on){padding-bottom:16px}
+  #s-editor > .card{display:flex;flex-direction:column;height:calc(100vh - 56px);
+                    overflow:hidden;padding:16px 18px}
+  .studio{flex:1 1 auto;min-height:0;display:grid;
+          grid-template-columns:minmax(210px,320px) 1fr;grid-template-rows:minmax(0,1fr) auto;
+          gap:16px}
+  .stage{grid-row:1;grid-column:1;display:flex;flex-direction:column;align-items:center;
+         justify-content:center;gap:8px;min-height:0;overflow:hidden}
+  .panel{grid-row:1;grid-column:2;min-height:0;max-height:100%;overflow-y:auto;padding-right:6px}
+  .studio > .tlwrap.span2{grid-row:2;grid-column:1 / -1;max-height:40vh;overflow:auto;margin:0}
+  @media(max-width:820px){
+    #s-editor > .card{height:auto;min-height:calc(100vh - 34px)}
+    .studio{grid-template-columns:1fr;grid-template-rows:auto auto auto}
+    .stage{grid-row:1;grid-column:1;max-height:46vh}
+    .panel{grid-row:2;grid-column:1;max-height:none}
+    .studio > .tlwrap.span2{grid-row:3;max-height:none}
   }
-  /* timeline dentro de .studio, a todo el ancho -> el preview (sticky, col 1) se
-     mantiene visible mientras haces scroll por controles Y por el timeline */
-  .studio > .tlwrap.span2{grid-column:1 / -1}
-  .cvwrap{position:relative;width:100%;max-width:338px}
-  @media(max-width:900px){.cvwrap{max-width:190px}}
-  #cv{display:block;width:100%;aspect-ratio:9/16;background:#000;border-radius:12px;border:1px solid var(--line2);
-      box-shadow:0 24px 70px -28px rgba(0,0,0,.9);touch-action:none}
-  /* overlay del render REAL (auto-preview): cubre el canvas; no captura punteros
-     para que arrastrar subtítulos siga funcionando sobre el canvas de abajo */
-  #pvWin{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:12px;
-         display:none;pointer-events:none;background:#000}
+  .cvwrap{position:relative;flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;width:100%}
+  .stage .transport,.stage>.hint,.stage .chip{flex:none}
+  /* canvas y overlay comparten EXACTAMENTE las mismas reglas de tamaño (max-height +
+     max-width + aspect-ratio) -> se calculan idénticos; el overlay se centra con
+     inset:0/margin:auto, así cubre el canvas al pixel sin importar el alto/ancho. */
+  #cv{display:block;max-height:100%;max-width:100%;height:auto;width:auto;aspect-ratio:9/16;background:#000;
+      border-radius:12px;border:1px solid var(--line2);box-shadow:0 24px 70px -28px rgba(0,0,0,.9);touch-action:none}
+  #pvWin{position:absolute;inset:0;margin:auto;max-height:100%;max-width:100%;height:auto;width:auto;aspect-ratio:9/16;
+         object-fit:cover;border-radius:12px;display:none;pointer-events:none;background:#000}
   #pvWin.on{display:block}
   .pvbadge{position:absolute;top:8px;left:8px;display:none;align-items:center;gap:5px;font-size:10px;
            font-weight:700;letter-spacing:.04em;color:#fff;background:rgba(10,12,16,.7);
@@ -132,12 +138,11 @@
         border-radius:50%;border:1px solid var(--line2);color:var(--muted);font-size:9px;font-weight:700;
         font-style:normal;cursor:help;position:relative;vertical-align:middle;margin-left:2px;line-height:1}
   .info:hover{color:var(--brand2);border-color:var(--brand)}
-  .info::after{content:attr(data-tip);position:absolute;bottom:150%;left:50%;transform:translateX(-50%);
-        width:190px;background:#0c0e13;border:1px solid var(--line2);border-radius:8px;padding:8px 10px;
-        font-size:11px;font-weight:500;color:var(--text);line-height:1.4;text-align:left;letter-spacing:0;
-        text-transform:none;opacity:0;visibility:hidden;transition:opacity .15s;z-index:50;pointer-events:none;
-        box-shadow:0 10px 30px -10px rgba(0,0,0,.8)}
-  .info:hover::after{opacity:1;visibility:visible}
+  /* el tooltip se dibuja con JS como elemento fixed (#tipbox) para NO cortarse en
+     paneles con overflow. Ver wireTooltips(). */
+  #tipbox{position:fixed;z-index:9999;max-width:220px;background:#0c0e13;border:1px solid var(--line2);
+          border-radius:8px;padding:8px 11px;font-size:11px;font-weight:500;color:var(--text);line-height:1.45;
+          box-shadow:0 12px 34px -10px rgba(0,0,0,.85);pointer-events:none;display:none}
   /* biblioteca de música */
   .moodchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
   .mchip{font-size:11px;padding:4px 10px;border-radius:20px;border:1px solid var(--line2);background:var(--sunken);
@@ -664,6 +669,20 @@
 
 <script>
 const $=s=>document.querySelector(s);
+/* tooltips flotantes (position:fixed) para que NO se corten dentro de paneles con overflow */
+(function wireTooltips(){
+  let tb=null;
+  document.addEventListener("mouseover",e=>{
+    const el=e.target.closest(".info[data-tip]"); if(!el) return;
+    if(!tb){ tb=document.createElement("div"); tb.id="tipbox"; document.body.appendChild(tb); }
+    tb.textContent=el.dataset.tip; tb.style.display="block";
+    const r=el.getBoundingClientRect(), t=tb.getBoundingClientRect();
+    let top=r.top-t.height-8; if(top<8) top=r.bottom+8;
+    let left=r.left+r.width/2-t.width/2; left=Math.max(8,Math.min(left,innerWidth-t.width-8));
+    tb.style.top=top+"px"; tb.style.left=left+"px";
+  });
+  document.addEventListener("mouseout",e=>{ if(e.target.closest(".info[data-tip]")&&tb) tb.style.display="none"; });
+})();
 const ICO=n=>`<svg class="ic" viewBox="0 0 24 24"><use href="#i-${n}"/></svg>`;
 function show(id){document.querySelectorAll('.screen').forEach(e=>e.classList.remove('on'));$(id).classList.add('on');}
 const fmtT=s=>`${Math.floor(Math.max(0,s)/60)}:${String(Math.floor(Math.max(0,s))%60).padStart(2,'0')}`;
@@ -804,7 +823,7 @@ function asmSelect(track,id){
   ASM.sel={track,id}; asmRenderTL();
   const it=asmItem(); const p=$("#asmPrev");
   if(it&&it.type==="video"){ p.style.display="block"; p.poster="";
-    if(!p.src.includes("/source/"+it.sid)) p.src="/source/"+it.sid;
+    if(!p.src.includes("/tlsource/"+it.sid)) p.src="/tlsource/"+it.sid;
     p.onloadedmetadata=()=>{ if(track==="main") p.currentTime=it.in||0; };
     try{ if(track==="main"&&p.readyState>0) p.currentTime=it.in||0; }catch(e){}
   }else if(it){ p.removeAttribute("src"); p.load(); p.poster=it.thumb||""; p.style.display="block"; }

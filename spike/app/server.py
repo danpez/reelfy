@@ -528,11 +528,11 @@ async def add_sources(files: list[UploadFile]):
             thumb = None
         out.append({"id": sid, "name": up.filename, "type": typ, "ext": ext,
                     "dur": info.get("dur", 0), "w": info.get("w", 0), "h": info.get("h", 0),
-                    "thumb": f"/source/{sid}/thumb" if thumb else None})
+                    "thumb": f"/tlsource/{sid}/thumb" if thumb else None})
     return {"sources": out}
 
 
-@app.get("/source/{sid}/thumb")
+@app.get("/tlsource/{sid}/thumb")
 def source_thumb(sid: str):
     sid = Path(sid).stem
     f = SOURCES / f"{sid}_t.jpg"
@@ -541,7 +541,7 @@ def source_thumb(sid: str):
     return FileResponse(f, media_type="image/jpeg")
 
 
-@app.get("/source/{sid}")
+@app.get("/tlsource/{sid}")
 def source_file(sid: str):
     sid = Path(sid).stem
     for p in SOURCES.glob(f"{sid}.*"):
