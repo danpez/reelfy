@@ -85,8 +85,8 @@
      El .card llena la pantalla; arriba preview|controles, abajo el timeline.
      Nada hace scroll de página -> el preview y el timeline NUNCA se solapan ni
      desaparecen; solo el panel de controles y el timeline scrollean internamente. */
-  /* editor a TODO el ancho (sin márgenes desperdiciados) y sin scroll de página */
-  .wrap:has(#s-editor.on){max-width:none;padding:10px 12px 12px}
+  /* editores a TODO el ancho (sin márgenes desperdiciados) y sin scroll de página */
+  .wrap:has(#s-editor.on),.wrap:has(#s-assembly.on){max-width:none;padding:10px 12px 12px}
   #s-editor > .card{display:flex;flex-direction:column;height:calc(100vh - 34px);
                     overflow:hidden;padding:14px 16px}
   .studio{flex:1 1 auto;min-height:0;display:grid;
@@ -867,7 +867,7 @@ function asmRenderTL(){
       <span class="lbl">${c.type==="image"?"🖼 ":""}${c.name||c.sid}</span>
       <div class="hnd2 l"></div><div class="hnd2 r"></div>`;
     lane.appendChild(el);
-    el.onclick=e=>{ if(!el._moved) asmSelect("clip",c._id); };
+    el.onclick=e=>{ if(!c._moved) asmSelect("clip",c._id); };
     asmWireClipDrag(el,c,i);
   });
   // capas
@@ -878,7 +878,7 @@ function asmRenderTL(){
     el.innerHTML=`<div class="thumb" style="background-image:url('${o.thumb||''}')"></div>
       <span class="lbl">${o.name||o.sid}</span><div class="hnd2 l"></div><div class="hnd2 r"></div>`;
     ov.appendChild(el);
-    el.onclick=()=>{ if(!el._moved) asmSelect("overlay",o._id); };
+    el.onclick=()=>{ if(!o._moved) asmSelect("overlay",o._id); };
     asmWireOverlayDrag(el,o);
   });
   $("#asmDur").textContent=fmtT(total);
@@ -887,48 +887,42 @@ function asmRenderTL(){
 function asmUpdatePH(){ $("#asmPH").style.left=(66+ASM.t*ASM.px)+"px";
   $("#asmScrub").value=Math.round(ASM.t/Math.max(asmMainDur(),0.1)*1000);
   $("#asmCur").textContent=fmtT(ASM.t); }
-/* recorte por bordes + arrastre para mover/reordenar (pista principal) */
-function asmWireClipDrag(el,c,i){
-  const px=()=>ASM.px, lane=$("#asmMain");
-  el.querySelector(".hnd2.l").onpointerdown=e=>{ e.stopPropagation(); e.preventDefault();
-    const x0=e.clientX; const in0=c.in, dur0=c.dur; el.setPointerCapture(e.pointerId);
-    const mv=ev=>{ const d=(ev.clientX-x0)/px();
-      if(c.type==="image"){ c.dur=Math.max(0.3,dur0-d); }
-      else { c.in=Math.min(Math.max(0,in0+d), c.out-0.3); }
-      asmRenderTL(); };
-    const up=()=>{el.onpointermove=null;el.onpointerup=null;}; el.onpointermove=mv; el.onpointerup=up; };
-  el.querySelector(".hnd2.r").onpointerdown=e=>{ e.stopPropagation(); e.preventDefault();
-    const x0=e.clientX; const out0=c.out, dur0=c.dur; el.setPointerCapture(e.pointerId);
-    const mv=ev=>{ const d=(ev.clientX-x0)/px();
-      if(c.type==="image"){ c.dur=Math.max(0.3,dur0+d); }
-      else { c.out=Math.max(Math.min(c.srcdur||1e9,out0+d), c.in+0.3); }
-      asmRenderTL(); };
-    const up=()=>{el.onpointermove=null;el.onpointerup=null;}; el.onpointermove=mv; el.onpointerup=up; };
-  // arrastrar el cuerpo -> mover/reordenar
-  el.onpointerdown=e=>{ if(e.target.classList.contains("hnd2"))return; e.preventDefault();
-    el._moved=false; const x0=e.clientX; el.setPointerCapture(e.pointerId); el.classList.add("dragging");
-    const mv=ev=>{ if(Math.abs(ev.clientX-x0)>4) el._moved=true;
-      const laneR=lane.getBoundingClientRect(); const xc=ev.clientX-laneR.left;
-      let acc=0, target=ASM.clips.length-1;
+/* Arrastre robusto: usa listeners de WINDOW (sobreviven a asmRenderTL, que
+   reconstruye el DOM en cada cambio y antes rompía el drag a mitad). */
+function asmDrag(e,onMove,onEnd){
+  e.preventDefault(); const x0=e.clientX; let moved=false;
+  const mv=ev=>{ if(Math.abs(ev.clientX-x0)>3) moved=true; onMove((ev.clientX-x0)/ASM.px, ev); };
+  const up=()=>{ window.removeEventListener("pointermove",mv); window.removeEventListener("pointerup",up);
+    document.body.style.cursor=""; if(onEnd) onEnd(moved); };
+  window.addEventListener("pointermove",mv); window.addEventListener("pointerup",up);
+}
+function asmWireClipDrag(el,c){
+  const lane=$("#asmMain");
+  el.querySelector(".hnd2.l").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize";
+    const in0=c.in,dur0=c.dur;
+    asmDrag(e,d=>{ if(c.type==="image") c.dur=Math.max(0.3,dur0-d);
+      else c.in=Math.min(Math.max(0,in0+d),c.out-0.3); asmRenderTL(); }); };
+  el.querySelector(".hnd2.r").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize";
+    const out0=c.out,dur0=c.dur;
+    asmDrag(e,d=>{ if(c.type==="image") c.dur=Math.max(0.3,dur0+d);
+      else c.out=Math.max(Math.min(c.srcdur||1e9,out0+d),c.in+0.3); asmRenderTL(); }); };
+  el.onpointerdown=e=>{ if(e.target.classList.contains("hnd2"))return; c._moved=false;
+    document.body.style.cursor="grabbing";
+    asmDrag(e,(d,ev)=>{ const laneR=lane.getBoundingClientRect(), xc=ev.clientX-laneR.left;
+      let acc=0,target=ASM.clips.length-1;
       for(let k=0;k<ASM.clips.length;k++){ const w=clipLen(ASM.clips[k])*ASM.px; if(xc<acc+w/2){target=k;break;} acc+=w; }
       const cur=ASM.clips.indexOf(c);
-      if(target!==cur){ ASM.clips.splice(cur,1); ASM.clips.splice(target,0,c); asmRenderTL(); } };
-    const up=()=>{el.onpointermove=null;el.onpointerup=null;el.classList.remove("dragging");}; el.onpointermove=mv; el.onpointerup=up; };
+      if(target!==cur&&cur>=0){ ASM.clips.splice(cur,1); ASM.clips.splice(target,0,c); asmRenderTL(); } },
+      m=>{ c._moved=m; }); };
 }
 function asmWireOverlayDrag(el,o){
-  const px=()=>ASM.px;
-  el.querySelector(".hnd2.l").onpointerdown=e=>{ e.stopPropagation();e.preventDefault(); const x0=e.clientX,s0=o.start,d0=o.dur;
-    el.setPointerCapture(e.pointerId);
-    el.onpointermove=ev=>{ const d=(ev.clientX-x0)/px(); o.start=Math.max(0,s0+d); o.dur=Math.max(0.3,d0-d); asmRenderTL(); };
-    el.onpointerup=()=>{el.onpointermove=null;el.onpointerup=null;}; };
-  el.querySelector(".hnd2.r").onpointerdown=e=>{ e.stopPropagation();e.preventDefault(); const x0=e.clientX,d0=o.dur;
-    el.setPointerCapture(e.pointerId);
-    el.onpointermove=ev=>{ o.dur=Math.max(0.3,d0+(ev.clientX-x0)/px()); asmRenderTL(); };
-    el.onpointerup=()=>{el.onpointermove=null;el.onpointerup=null;}; };
-  el.onpointerdown=e=>{ if(e.target.classList.contains("hnd2"))return; e.preventDefault();
-    el._moved=false; const x0=e.clientX,s0=o.start; el.setPointerCapture(e.pointerId); el.classList.add("dragging");
-    el.onpointermove=ev=>{ if(Math.abs(ev.clientX-x0)>4)el._moved=true; o.start=Math.max(0,s0+(ev.clientX-x0)/px()); asmRenderTL(); };
-    el.onpointerup=()=>{el.onpointermove=null;el.onpointerup=null;el.classList.remove("dragging");}; };
+  el.querySelector(".hnd2.l").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize";
+    const s0=o.start,d0=o.dur; asmDrag(e,d=>{ o.start=Math.max(0,s0+d); o.dur=Math.max(0.3,d0-d); asmRenderTL(); }); };
+  el.querySelector(".hnd2.r").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize";
+    const d0=o.dur; asmDrag(e,d=>{ o.dur=Math.max(0.3,d0+d); asmRenderTL(); }); };
+  el.onpointerdown=e=>{ if(e.target.classList.contains("hnd2"))return; o._moved=false;
+    document.body.style.cursor="grabbing"; const s0=o.start;
+    asmDrag(e,d=>{ o.start=Math.max(0,s0+d); asmRenderTL(); }, m=>{ o._moved=m; }); };
 }
 /* ---- player de composición en tiempo real ---- */
 function asmClipAt(t){ let acc=0;
