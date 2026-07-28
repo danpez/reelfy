@@ -957,6 +957,8 @@ document.addEventListener("keydown",e=>{
   else if(e.key==="s"||e.key==="S"){ e.preventDefault(); asmSplit(); }
   else if(e.key==="ArrowLeft"){ e.preventDefault(); asmPause(); asmGoto(ASM.t-(e.shiftKey?1:1/30),true); }
   else if(e.key==="ArrowRight"){ e.preventDefault(); asmPause(); asmGoto(ASM.t+(e.shiftKey?1:1/30),true); }
+  else if(e.key==="Home"){ e.preventDefault(); asmPause(); asmGoto(0,true); }
+  else if(e.key==="End"){ e.preventDefault(); asmPause(); asmGoto(asmMainDur(),true); }
   else if(e.key==="+"||e.key==="="){ const z=$("#asmZoom"); z.value=Math.min(8,+z.value+0.5); z.oninput({target:z}); }
   else if(e.key==="-"){ const z=$("#asmZoom"); z.value=Math.max(1,+z.value-0.5); z.oninput({target:z}); }
 });
@@ -1173,8 +1175,19 @@ $("#asmSnapBtn").onclick=()=>{ ASM.snap=!ASM.snap; $("#asmSnapBtn").classList.to
 $("#asmFitBtn").onclick=()=>{ ASM.zoom=1; $("#asmZoom").value=1; asmFit(); asmUpdatePH(); };
 $("#asmDelSel").onclick=asmDelSel;
 $("#asmZoom").oninput=e=>{ ASM.zoom=+e.target.value; asmRenderTL(); asmUpdatePH(); };
-$("#asmRuler").onpointerdown=e=>{ asmPause(); const r=$("#asmRuler").getBoundingClientRect();
-  asmGoto((e.clientX-r.left)/ASM.px,true); };
+// arrastrar en la regla = scrubbing (mueve el playhead siguiendo el mouse)
+function asmRulerScrub(e){ asmPause();
+  const seek=ev=>{ const r=$("#asmRuler").getBoundingClientRect();
+    asmGoto(Math.max(0,(ev.clientX-r.left)/ASM.px),true); };
+  seek(e);
+  const mv=ev=>seek(ev), up=()=>{window.removeEventListener("pointermove",mv);window.removeEventListener("pointerup",up);};
+  window.addEventListener("pointermove",mv); window.addEventListener("pointerup",up);
+}
+$("#asmRuler").onpointerdown=asmRulerScrub;
+$("#asmPH").style.pointerEvents="none";
+// clic en zona vacía de una pista = deseleccionar
+["#asmMain","#asmOverlay"].forEach(sel=>{ const el=$(sel);
+  el.addEventListener("pointerdown",e=>{ if(e.target===el){ ASM.sel=null; asmRenderTL(); asmInspector(); asmRenderOverlays(ASM.t); } }); });
 asmDropTrack("main"); asmDropTrack("overlay");
 window.addEventListener("resize",()=>{ if($("#s-assembly").classList.contains("on")){ asmFit(); asmUpdatePH(); } });
 
