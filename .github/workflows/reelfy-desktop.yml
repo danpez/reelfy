@@ -258,3 +258,45 @@ jobs:
             dist/**/*.deb
             dist/**/*-setup.exe
             dist/**/*.msi
+
+      # ---- Distribución pública para el SITIO ----
+      # El sitio (reelfy.mixiuh.online/download) baja de danpez/reelfy-releases con
+      # nombres LIMPIOS y estables (Reelfy-Setup.exe / Reelfy.dmg / Reelfy.deb) vía
+      # 'latest'. Aquí renombramos y republicamos ahí en cada tag. Requiere un secret
+      # RELEASES_TOKEN (PAT fine-grained con contents:write en danpez/reelfy-releases).
+      # Si el secret no existe, estos pasos se OMITEN sin romper el release principal.
+      - name: ¿Hay RELEASES_TOKEN?
+        id: reltoken
+        env:
+          TOK: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          if [ -n "$TOK" ]; then echo "ok=true" >> "$GITHUB_OUTPUT";
+          else echo "ok=false" >> "$GITHUB_OUTPUT";
+            echo "::warning::RELEASES_TOKEN no configurado; se omite la publicación en reelfy-releases (la página de descarga no se actualizará sola).";
+          fi
+
+      - name: Renombrar instaladores con nombres limpios
+        if: steps.reltoken.outputs.ok == 'true'
+        run: |
+          mkdir -p public
+          exe=$(find dist -name '*-setup.exe' | head -1); [ -n "$exe" ] && cp "$exe" public/Reelfy-Setup.exe
+          dmg=$(find dist -name '*.dmg'       | head -1); [ -n "$dmg" ] && cp "$dmg" public/Reelfy.dmg
+          deb=$(find dist -name '*.deb'       | head -1); [ -n "$deb" ] && cp "$deb" public/Reelfy.deb
+          echo "REL_TAG=${GITHUB_REF_NAME#reelfy-}" >> "$GITHUB_ENV"   # reelfy-v0.4.0 -> v0.4.0
+          ls -la public
+
+      - name: Publicar en reelfy-releases (nombres limpios, para el sitio)
+        if: steps.reltoken.outputs.ok == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: danpez/reelfy-releases
+          token: ${{ secrets.RELEASES_TOKEN }}
+          name: Reelfy ${{ env.REL_TAG }}
+          tag_name: ${{ env.REL_TAG }}
+          draft: false
+          prerelease: false
+          body: "Instaladores de Reelfy ${{ env.REL_TAG }}. Notas: https://github.com/danpez/reelfy/releases/tag/${{ github.ref_name }}"
+          files: |
+            public/Reelfy-Setup.exe
+            public/Reelfy.dmg
+            public/Reelfy.deb
