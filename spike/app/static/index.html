@@ -502,8 +502,8 @@
         <div class="asm-ph" id="asmPH"></div>
         <div class="asm-snapg" id="asmSnapG"></div>
         <div class="asm-ruler" id="asmRuler"></div>
-        <div class="asm-trk"><div class="asm-tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>Video</div><div class="asm-lane" id="asmMain"></div></div>
-        <div class="asm-trk"><div class="asm-tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-image"/></svg>Capas</div><div class="asm-lane ov" id="asmOverlay"></div></div>
+        <div id="asmLayers"></div>
+        <div class="asm-trk"><div class="asm-tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-image"/></svg>Stickers</div><div class="asm-lane ov" id="asmOverlay"></div></div>
       </div></div>
     </div>
     <div class="actionbar">
@@ -832,6 +832,17 @@ function asmSnap(time, exclude, includePH){ ASM._snap=null; if(!ASM.snap) return
   if(best!=null){ ASM._lock=best; asmSnapShow(best); return best; }
   return time; }
 function asmSnapShow(t){ ASM._snap=t; const g=$("#asmSnapG"); if(g){g.style.display="block";g.style.left=(66+t*ASM.px)+"px";} }
+function asmAllowedStart(c,layer,desired){ const L=clipLen(c); let start=Math.max(0,desired);
+  const others=ASM.clips.filter(x=>x!==c&&(x.layer||0)===layer).sort((a,b)=>(a.start||0)-(b.start||0));
+  for(const o of others){ const os=o.start||0,oe=clipEnd(o);
+    if(start<oe-1e-4&&start+L>os+1e-4){ if((desired+L/2)<(os+oe)/2) start=Math.max(0,os-L); else start=oe; } }
+  return start; }
+// capa bajo el puntero (o -1 above/-2 below para crear)
+function asmLayerAtY(y){ const box=$("#asmLayers").getBoundingClientRect();
+  if(y<box.top-4) return 'new-top'; if(y>box.bottom+4) return 'new-bottom';
+  const lanes=[...$("#asmLayers").querySelectorAll('.asm-lane')];
+  for(const ln of lanes){ const r=ln.getBoundingClientRect(); if(y>=r.top&&y<=r.bottom) return +ln.dataset.layer; }
+  return null; }
 const asmP=()=>$("#asmPlayer"), asmI=()=>$("#asmImg");
 
 async function enterAssembly(files){
@@ -867,7 +878,8 @@ function asmRenderSources(){
 }
 function asmAddClip(sid,quiet){
   const s=ASM.sources.find(x=>x.id===sid); if(!s) return; if(!quiet) asmPush();
-  const c={_id:uid(),sid,type:s.type,name:s.name,thumb:s.thumb,srcdur:s.dur||0,vol:1,mute:false,fadeIn:0,fadeOut:0,start:asmMainDur()};
+  const l0end=ASM.clips.filter(x=>(x.layer||0)===0).reduce((a,x)=>Math.max(a,clipEnd(x)),0);
+  const c={_id:uid(),sid,type:s.type,name:s.name,thumb:s.thumb,srcdur:s.dur||0,vol:1,mute:false,fadeIn:0,fadeOut:0,layer:0,start:l0end};
   if(s.type==="image") c.dur=3.0; else { c.in=0; c.out=Math.max(0.5,s.dur||5); }
   ASM.clips.push(c); asmFit(); if(!quiet) asmSelect("clip",c._id);
 }
@@ -902,23 +914,33 @@ function asmRenderTL(){
     m.style.left=(s*px)+"px"; m.textContent=fmtRuler(s,step); ruler.appendChild(m);
     const tk=document.createElement("div"); tk.className="tk"; tk.style.left=(s*px)+"px"; ruler.appendChild(tk); }
   // pista principal
-  const lane=$("#asmMain"); lane.innerHTML="";
-  ASM.clips.forEach((c,i)=>{
-    const st=clipStart(i), w=Math.max(14,clipLen(c)*px);
-    const el=document.createElement("div"); el.className="clip2"+(ASM.sel&&ASM.sel.id===c._id?" sel":"");
-    el.style.left=(st*px)+"px"; el.style.width=w+"px"; el.dataset.id=c._id; el.dataset.i=i;
-    const fiW=(c.fadeIn||0)*px, foW=(c.fadeOut||0)*px;
-    el.innerHTML=`<div class="thumb" style="background-image:url('${c.thumb||''}')"></div>
-      ${fiW>1?`<div class="fadetri l" style="width:${fiW}px"></div>`:''}${foW>1?`<div class="fadetri r" style="width:${foW}px"></div>`:''}
-      ${c.type!=="image"?`<span class="vol">${c.mute?'🔇':Math.round(c.vol*100)+'%'}</span>`:''}
-      ${c.trans&&c.trans.type==='crossfade'?`<span class="tbadge" title="Crossfade ${c.trans.dur}s">⇄</span>`:''}
-      <span class="lbl">${c.type==="image"?"🖼 ":""}${c.name||c.sid}</span>
-      <div class="hnd2 l"></div><div class="hnd2 r"></div>`;
-    lane.appendChild(el);
-    el.onclick=e=>{ if(!c._moved) asmSelect("clip",c._id); };
-    asmWireClipDrag(el,c,i);
-  });
-  // capas
+  // ---- CAPAS de video: una lane por capa (base=0 abajo, superiores arriba) ----
+  const maxL=ASM.clips.reduce((a,c)=>Math.max(a,c.layer||0),0);
+  const cont=$("#asmLayers"); cont.innerHTML="";
+  for(let L=maxL;L>=0;L--){   // de arriba (mayor) hacia abajo (0)
+    const trk=document.createElement("div"); trk.className="asm-trk";
+    trk.innerHTML=`<div class="asm-tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>Video ${L+1}</div>`;
+    const lane=document.createElement("div"); lane.className="asm-lane"; lane.dataset.layer=L;
+    trk.appendChild(lane); cont.appendChild(trk);
+    // deseleccionar al clic en vacío de la lane
+    lane.addEventListener("pointerdown",e=>{ if(e.target===lane){ ASM.sel=null; asmRenderTL(); asmInspector(); asmRenderOverlays(ASM.t); } });
+    ASM.clips.filter(c=>(c.layer||0)===L).forEach(c=>{
+      const st=c.start||0, w=Math.max(14,clipLen(c)*px);
+      const el=document.createElement("div"); el.className="clip2"+(ASM.sel&&ASM.sel.id===c._id?" sel":"");
+      el.style.left=(st*px)+"px"; el.style.width=w+"px"; el.dataset.id=c._id;
+      const fiW=(c.fadeIn||0)*px, foW=(c.fadeOut||0)*px;
+      el.innerHTML=`<div class="thumb" style="background-image:url('${c.thumb||''}')"></div>
+        ${fiW>1?`<div class="fadetri l" style="width:${fiW}px"></div>`:''}${foW>1?`<div class="fadetri r" style="width:${foW}px"></div>`:''}
+        ${c.type!=="image"?`<span class="vol">${c.mute?'🔇':Math.round(c.vol*100)+'%'}</span>`:''}
+        ${c.trans&&c.trans.type==='crossfade'?`<span class="tbadge" title="Crossfade ${c.trans.dur}s">⇄</span>`:''}
+        <span class="lbl">${c.type==="image"?"🖼 ":""}${c.name||c.sid}</span>
+        <div class="hnd2 l"></div><div class="hnd2 r"></div>`;
+      lane.appendChild(el);
+      el.onclick=e=>{ if(!c._moved) asmSelect("clip",c._id); };
+      asmWireClipDrag(el,c);
+    });
+  }
+  // stickers/overlays
   const ov=$("#asmOverlay"); ov.innerHTML="";
   ASM.overlays.forEach(o=>{
     const el=document.createElement("div"); el.className="clip2"+(ASM.sel&&ASM.sel.id===o._id?" sel":"");
@@ -991,13 +1013,21 @@ function asmWireClipDrag(el,c){
       if(c.type==="image") c.dur=Math.max(0.3,newEnd-st);
       else c.out=Math.max(Math.min(c.srcdur||1e9,c.in+(newEnd-st)),c.in+0.3);
       asmRenderTL(); asmGoto(clipEnd(c)-0.05,true); },()=>asmSelect("clip",c._id)); };
-  // CUERPO: mover LIBRE en el timeline (con snap magnético), permite huecos
+  // CUERPO: mover LIBRE (horizontal con snap+sin solape) y VERTICAL entre CAPAS.
   el.onpointerdown=e=>{ if(e.target.classList.contains("hnd2"))return; c._moved=false; asmPush();
     document.body.style.cursor="grabbing"; const st0=c.start||0, L=clipLen(c);
-    asmDrag(e,d=>{ let ns=asmSnap(st0+d,c); const ne=asmSnap(st0+d+L,c)-L;   // snap por ambos bordes
+    el.style.pointerEvents="none";   // para detectar la lane bajo el puntero
+    asmDrag(e,(d,ev)=>{
+      // capa objetivo según Y
+      const ly=asmLayerAtY(ev.clientY); const maxL=ASM.clips.reduce((a,x)=>Math.max(a,x.layer||0),0);
+      if(ly==='new-top') c.layer=maxL+1;
+      else if(ly==='new-bottom'){ ASM.clips.forEach(x=>{ if(x!==c) x.layer=(x.layer||0)+1; }); c.layer=0; }
+      else if(typeof ly==='number') c.layer=ly;
+      // horizontal: snap por ambos bordes + sin solape en la capa destino
+      let ns=asmSnap(st0+d,c); const ne=asmSnap(st0+d+L,c)-L;
       if(Math.abs(ne-(st0+d))<Math.abs(ns-(st0+d))) ns=ne;
-      c.start=Math.max(0,ns); asmRenderTL(); },
-      m=>{ c._moved=m; asmSelect("clip",c._id); }); };
+      c.start=asmAllowedStart(c,c.layer||0,Math.max(0,ns)); asmRenderTL(); },
+      m=>{ c._moved=m; el.style.pointerEvents=""; asmSelect("clip",c._id); }); };
 }
 function asmWireOverlayDrag(el,o){
   el.querySelector(".hnd2.l").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize"; asmPush();
@@ -1009,9 +1039,9 @@ function asmWireOverlayDrag(el,o){
     asmDrag(e,d=>{ let ns=asmSnap(s0+d,o); const ne=asmSnap(s0+d+L,o)-L; if(Math.abs(ne-(s0+d))<Math.abs(ns-(s0+d)))ns=ne; o.start=Math.max(0,ns); asmRenderTL(); }, m=>{ o._moved=m; asmSelect("overlay",o._id); }); };
 }
 /* ---- player de composición en tiempo real ---- */
-function asmClipAt(t){   // por POSICIÓN: el clip cuyo [start,end) contiene t (null si es hueco)
-  let best=null;
-  ASM.clips.forEach((c,i)=>{ const s=c.start||0; if(t>=s&&t<clipEnd(c)) best={clip:c,i,start:s,local:t-s}; });
+function asmClipAt(t){   // por POSICIÓN y CAPA: gana la capa más alta que cubre t
+  let best=null,bl=-1;
+  ASM.clips.forEach((c,i)=>{ const s=c.start||0; if(t>=s&&t<clipEnd(c)&&(c.layer||0)>=bl){ bl=(c.layer||0); best={clip:c,i,start:s,local:t-s}; } });
   return best; }
 function asmGoto(t,seek){
   t=Math.max(0,Math.min(t,asmMainDur()));
@@ -1165,8 +1195,8 @@ async function asmApply(){
   if(!ASM.clips.length){ alert("Agrega al menos un clip a la pista Video."); return; }
   asmPause();
   const body={
-    main:ASM.clips.map(c=>c.type==="image"?{sid:c.sid,type:"image",dur:c.dur,start:c.start||0,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}
-       :{sid:c.sid,type:"video",in:c.in,out:c.out,vol:c.vol,mute:c.mute,start:c.start||0,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}),
+    main:ASM.clips.map(c=>c.type==="image"?{sid:c.sid,type:"image",dur:c.dur,start:c.start||0,layer:c.layer||0,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}
+       :{sid:c.sid,type:"video",in:c.in,out:c.out,vol:c.vol,mute:c.mute,start:c.start||0,layer:c.layer||0,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}),
     overlays:ASM.overlays.map(o=>({sid:o.sid,type:o.type,start:o.start,dur:o.dur,pos:o.pos,size:o.size})),
     glossary:$("#asmGloss").value||"", highlights:2 };
   show("#s-analyzing"); setBar("#a-fill",2); $("#a-msg").textContent="Montando tu línea de tiempo…";

@@ -157,11 +157,17 @@ def compose(spec, out, work, on_step=None):
         p = probe(main[0]["path"]); W, H = (p["w"] or 1080), (p["h"] or 1920)
     W -= W % 2; H -= H % 2
 
-    # POSICIÓN LIBRE: ordenar por start, rellenar HUECOS con negro, colapsar solapes.
     def _len(s):
         return float(s.get("dur", 3.0)) if s.get("type") == "image" else \
             float(s.get("out", 5)) - float(s.get("in", 0))
-    ordered = sorted(main, key=lambda s: float(s.get("start", 0) or 0))
+    # CAPAS: la capa 0 es la base; las superiores se encimarán full-frame.
+    base = [s for s in main if int(s.get("layer", 0) or 0) == 0]
+    upper = [s for s in main if int(s.get("layer", 0) or 0) > 0]
+    if not base:
+        base = main; upper = []      # todo en una capa si no hay base explícita
+
+    # POSICIÓN LIBRE: ordenar por start, rellenar HUECOS con negro, colapsar solapes.
+    ordered = sorted(base, key=lambda s: float(s.get("start", 0) or 0))
     seq = []            # lista de (tipo, dato, trans) en orden de reproducción
     cursor = 0.0
     for s in ordered:
@@ -203,18 +209,38 @@ def compose(spec, out, work, on_step=None):
         _run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(listf),
               "-c", "copy", str(main_mp4)])
 
-    # 3) overlays (capas encimadas)
+    # 3) encimar CAPAS superiores (full-frame, en su posición temporal) + STICKERS (PiP)
     overlays = [o for o in spec.get("overlays", []) if o.get("path")]
-    if not overlays:
+    if not overlays and not upper:
         Path(main_mp4).replace(out)
         return str(out)
 
     step("Encimando capas…")
+    # normalizar cada clip de capa superior a un segmento (recorte + fade)
+    upper_segs = []   # (seg_path, start, len)
+    for j, s in enumerate(sorted(upper, key=lambda x: (int(x.get("layer", 1)), float(x.get("start", 0) or 0)))):
+        seg = work / f"up_{j:03d}.mp4"
+        fin = float(s.get("fadeIn", 0) or 0); fout = float(s.get("fadeOut", 0) or 0)
+        if s.get("type") == "image":
+            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout)
+        else:
+            _norm_video(s["path"], float(s.get("in", 0)), float(s.get("out", 5)), seg, W, H, fps,
+                        0.0 if s.get("mute") else float(s.get("vol", 1.0)), fin, fout)
+        upper_segs.append((seg, float(s.get("start", 0) or 0), _len(s)))
+
     inputs = ["-i", str(main_mp4)]
     fc = []
     last = "0:v"
+    idx = 1
     mx, my = round(W * 0.04), round(H * 0.04)
-    for k, o in enumerate(overlays[:8], start=1):
+    # capas superiores: full-frame, aparecen en [start, start+len] (setpts las posiciona)
+    for seg, st, ln in upper_segs:
+        inputs += ["-i", str(seg)]
+        fc.append(f"[{idx}:v]setpts=PTS+{st:.3f}/TB,format=yuva420p[u{idx}]")
+        fc.append(f"[{last}][u{idx}]overlay=0:0:enable='between(t,{st:.3f},{st + ln:.3f})'[l{idx}]")
+        last = f"l{idx}"; idx += 1
+    # stickers/overlays PiP: escalados y posicionados
+    for o in overlays[:8]:
         typ = o.get("type", "image")
         st = float(o.get("start", 0)); dur = float(o.get("dur", 2.5))
         if typ == "image":
@@ -222,21 +248,15 @@ def compose(spec, out, work, on_step=None):
         else:
             inputs += ["-i", str(o["path"])]
         ow = max(2, round(W * float(o.get("size", 0.35)))); ow -= ow % 2
-        oh = round(ow * 9 / 16)   # aprox para centrar por x/y (el alto real lo fija -2)
         if o.get("x") is not None and o.get("y") is not None:
-            # posición LIBRE: x/y = centro como fracción 0..1 (arrastrado en el preview)
-            cx = float(o["x"]) * W
-            cy = float(o["y"]) * H
-            ox = f"{round(cx)}-overlay_w/2"
-            oy = f"{round(cy)}-overlay_h/2"
+            ox = f"{round(float(o['x']) * W)}-overlay_w/2"
+            oy = f"{round(float(o['y']) * H)}-overlay_h/2"
         else:
             ox, oy = _overlay_xy(o.get("pos", "center"), W, H, mx, my)
-        lbl = f"ov{k}"
-        fc.append(f"[{k}:v]scale={ow}:-2,setsar=1,format=yuva420p[s{k}]")
-        fc.append(f"[{last}][s{k}]overlay={ox}:{oy}:enable='between(t,{st:.3f},{st + dur:.3f})'[{lbl}]")
-        last = lbl
-    filt = ";".join(fc)
-    _run([FFMPEG, "-y", *inputs, "-filter_complex", filt,
+        fc.append(f"[{idx}:v]scale={ow}:-2,setsar=1,format=yuva420p[s{idx}]")
+        fc.append(f"[{last}][s{idx}]overlay={ox}:{oy}:enable='between(t,{st:.3f},{st + dur:.3f})'[l{idx}]")
+        last = f"l{idx}"; idx += 1
+    _run([FFMPEG, "-y", *inputs, "-filter_complex", ";".join(fc),
           "-map", f"[{last}]", "-map", "0:a?", "-c:v", "h264_videotoolbox", "-b:v", "12M",
           "-c:a", "aac", "-b:a", "192k", str(out)])
     return str(out)
