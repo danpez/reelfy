@@ -585,9 +585,12 @@ async def compose_timeline(req: Request):
         path = resolve(o.get("sid", ""))
         if not path:
             continue
-        overlays.append({"path": path, "type": o.get("type", "image"),
-                         "start": float(o.get("start", 0)), "dur": float(o.get("dur", 2.5)),
-                         "pos": o.get("pos", "center"), "size": float(o.get("size", 0.35))})
+        ov = {"path": path, "type": o.get("type", "image"),
+              "start": float(o.get("start", 0)), "dur": float(o.get("dur", 2.5)),
+              "pos": o.get("pos", "center"), "size": float(o.get("size", 0.35))}
+        if o.get("x") is not None and o.get("y") is not None:
+            ov["x"] = float(o["x"]); ov["y"] = float(o["y"])
+        overlays.append(ov)
     spec = {"fps": 30, "main": main, "overlays": overlays}
     job_id = uuid.uuid4().hex[:12]
     jobstore.create(job_id, kind="compose", ext=".mp4",

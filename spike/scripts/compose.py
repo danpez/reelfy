@@ -149,7 +149,15 @@ def compose(spec, out, work, on_step=None):
         else:
             inputs += ["-i", str(o["path"])]
         ow = max(2, round(W * float(o.get("size", 0.35)))); ow -= ow % 2
-        ox, oy = _overlay_xy(o.get("pos", "center"), W, H, mx, my)
+        oh = round(ow * 9 / 16)   # aprox para centrar por x/y (el alto real lo fija -2)
+        if o.get("x") is not None and o.get("y") is not None:
+            # posición LIBRE: x/y = centro como fracción 0..1 (arrastrado en el preview)
+            cx = float(o["x"]) * W
+            cy = float(o["y"]) * H
+            ox = f"{round(cx)}-overlay_w/2"
+            oy = f"{round(cy)}-overlay_h/2"
+        else:
+            ox, oy = _overlay_xy(o.get("pos", "center"), W, H, mx, my)
         lbl = f"ov{k}"
         fc.append(f"[{k}:v]scale={ow}:-2,setsar=1,format=yuva420p[s{k}]")
         fc.append(f"[{last}][s{k}]overlay={ox}:{oy}:enable='between(t,{st:.3f},{st + dur:.3f})'[{lbl}]")
