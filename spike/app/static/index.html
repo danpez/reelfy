@@ -1188,7 +1188,7 @@ function asmDelSel(){ const it=asmSel(); if(!it) return; asmPush();
   const arr=ASM.sel.track==="clip"?ASM.clips:ASM.overlays; const k=arr.indexOf(it); if(k>=0)arr.splice(k,1);
   ASM.sel=null; ASM.ci=-1; asmFit(); asmInspector(); asmGoto(Math.min(ASM.t,asmMainDur()),true); }
 function asmDropTrack(track){
-  const el=track==="main"?$("#asmMain"):$("#asmOverlay");
+  const el=track==="main"?$("#asmLayers"):$("#asmOverlay");
   el.ondragover=e=>{ e.preventDefault(); el.classList.add("dragover"); };
   el.ondragleave=()=>el.classList.remove("dragover");
   el.ondrop=e=>{ e.preventDefault(); el.classList.remove("dragover");
@@ -1235,7 +1235,7 @@ function asmRulerScrub(e){ asmPause();
 $("#asmRuler").onpointerdown=asmRulerScrub;
 $("#asmPH").style.pointerEvents="none";
 // clic en zona vacía de una pista = deseleccionar
-["#asmMain","#asmOverlay"].forEach(sel=>{ const el=$(sel);
+["#asmLayers","#asmOverlay"].forEach(sel=>{ const el=$(sel); if(!el) return;
   el.addEventListener("pointerdown",e=>{ if(e.target===el){ ASM.sel=null; asmRenderTL(); asmInspector(); asmRenderOverlays(ASM.t); } }); });
 asmDropTrack("main"); asmDropTrack("overlay");
 window.addEventListener("resize",()=>{ if($("#s-assembly").classList.contains("on")){ asmFit(); asmUpdatePH(); } });
