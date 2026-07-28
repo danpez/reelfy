@@ -10,6 +10,11 @@ build/
 __pycache__/
 *.pyc
 
+# Runtime de trabajos (SQLite del server) — no versionar
+jobs.db
+jobs.db-shm
+jobs.db-wal
+
 # Spike: heavy artifacts (models, source videos, renders, intermediate work, build)
 # Se conservan en el repo los assets/modelos PEQUEÑOS que el CI necesita para
 # ensamblar la app (música, marca, yunet, rnnoise); lo pesado sigue ignorado.
