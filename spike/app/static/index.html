@@ -214,6 +214,7 @@
           box-shadow:0 0 6px rgba(255,90,60,.6)}
   .asm-ph::before{content:"";position:absolute;top:-1px;left:-4px;border-left:5px solid transparent;
                   border-right:5px solid transparent;border-top:7px solid var(--brand)}
+  .asm-snapg{position:absolute;top:0;height:100%;width:0;border-left:1px dashed #35e08a;z-index:8;left:0;display:none}
   .asm-trk{display:flex;align-items:stretch;border-bottom:1px solid var(--line)}
   .asm-trk:last-child{border-bottom:0}
   .asm-tlab{width:66px;flex:none;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;
@@ -233,8 +234,9 @@
   .clip2 .hnd2{position:absolute;top:0;width:9px;height:100%;cursor:ew-resize;z-index:3}
   .clip2 .hnd2.l{left:0}.clip2 .hnd2.r{right:0}
   .clip2 .fadetri{position:absolute;top:0;height:100%;z-index:2;pointer-events:none}
-  .clip2 .fadetri.l{left:0;background:linear-gradient(90deg,rgba(0,0,0,.75),transparent)}
-  .clip2 .fadetri.r{right:0;background:linear-gradient(270deg,rgba(0,0,0,.75),transparent)}
+  .clip2 .fadetri{background:rgba(8,10,14,.82)}
+  .clip2 .fadetri.l{left:0;clip-path:polygon(0 0,0 100%,100% 100%)}
+  .clip2 .fadetri.r{right:0;clip-path:polygon(0 100%,100% 0,100% 100%)}
   .clip2 .tbadge{position:absolute;left:2px;top:2px;font-size:11px;color:#fff;background:var(--brand);border-radius:4px;padding:0 3px;z-index:3;pointer-events:none}
   .clip2 .hnd2::after{content:"";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:3px;height:40%;
                       background:rgba(255,255,255,.5);border-radius:2px}
@@ -492,11 +494,13 @@
         <button class="btn ghost mini" id="asmSplit" title="Dividir el clip en el playhead (S)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Dividir</button>
         <button class="btn ghost mini" id="asmDelSel" title="Eliminar el clip seleccionado"><svg class="ic" viewBox="0 0 24 24"><use href="#i-trash"/></svg>Eliminar</button>
         <span style="flex:1"></span>
+        <button class="btn ghost mini" id="asmFitBtn" title="Ajustar todo al ancho">Ajustar</button>
         <span class="hint" style="margin:0">Zoom</span>
         <input type="range" id="asmZoom" class="rng" min="1" max="8" step="0.1" value="1" style="width:120px">
       </div>
       <div class="asm-scroll" id="asmScroll"><div class="asm-inner" id="asmInner">
         <div class="asm-ph" id="asmPH"></div>
+        <div class="asm-snapg" id="asmSnapG"></div>
         <div class="asm-ruler" id="asmRuler"></div>
         <div class="asm-trk"><div class="asm-tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>Video</div><div class="asm-lane" id="asmMain"></div></div>
         <div class="asm-trk"><div class="asm-tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-image"/></svg>Capas</div><div class="asm-lane ov" id="asmOverlay"></div></div>
@@ -811,10 +815,11 @@ function asmSnapTargets(exclude){ const t=[0, ASM.t];
   ASM.clips.forEach(c=>{ if(c!==exclude){ t.push(c.start||0); t.push(clipEnd(c)); } });
   ASM.overlays.forEach(o=>{ t.push(o.start); t.push(o.start+o.dur); });
   return t; }
-function asmSnap(time, exclude){ if(!ASM.snap) return time;
+function asmSnap(time, exclude){ ASM._snap=null; if(!ASM.snap) return time;
   const thr=10/ASM.px;   // 10px de tolerancia
   let best=time, bd=thr;
   asmSnapTargets(exclude).forEach(tg=>{ const d=Math.abs(time-tg); if(d<bd){bd=d;best=tg;} });
+  if(best!==time){ ASM._snap=best; const g=$("#asmSnapG"); if(g){g.style.display="block";g.style.left=(66+best*ASM.px)+"px";} }
   return best; }
 const asmP=()=>$("#asmPlayer"), asmI=()=>$("#asmImg");
 
@@ -929,7 +934,7 @@ function asmDrag(e,onMove,onEnd){
   e.preventDefault(); const x0=e.clientX; let moved=false;
   const mv=ev=>{ if(Math.abs(ev.clientX-x0)>3) moved=true; onMove((ev.clientX-x0)/ASM.px, ev); };
   const up=()=>{ window.removeEventListener("pointermove",mv); window.removeEventListener("pointerup",up);
-    document.body.style.cursor=""; if(onEnd) onEnd(moved); };
+    document.body.style.cursor=""; ASM._snap=null; const g=$("#asmSnapG"); if(g)g.style.display="none"; if(onEnd) onEnd(moved); };
   window.addEventListener("pointermove",mv); window.addEventListener("pointerup",up);
 }
 /* ---- deshacer / rehacer del editor ---- */
@@ -1165,6 +1170,7 @@ $("#asmScrub").oninput=e=>{ asmPause(); asmGoto(+e.target.value/1000*asmMainDur(
 $("#asmSplit").onclick=asmSplit;
 $("#asmUndo2").onclick=asmUndo; $("#asmRedo2").onclick=asmRedo;
 $("#asmSnapBtn").onclick=()=>{ ASM.snap=!ASM.snap; $("#asmSnapBtn").classList.toggle("sel",ASM.snap); };
+$("#asmFitBtn").onclick=()=>{ ASM.zoom=1; $("#asmZoom").value=1; asmFit(); asmUpdatePH(); };
 $("#asmDelSel").onclick=asmDelSel;
 $("#asmZoom").oninput=e=>{ ASM.zoom=+e.target.value; asmRenderTL(); asmUpdatePH(); };
 $("#asmRuler").onpointerdown=e=>{ asmPause(); const r=$("#asmRuler").getBoundingClientRect();
