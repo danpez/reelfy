@@ -810,17 +810,28 @@ const clipLen=c=>c.type==="image"?c.dur:(c.out-c.in);
 const clipEnd=c=>(c.start||0)+clipLen(c);
 const asmMainDur=()=>ASM.clips.reduce((a,c)=>Math.max(a,clipEnd(c)),0);
 function clipStart(i){ const c=ASM.clips[i]; return c?(c.start||0):0; }
-// puntos de imán: 0, playhead, y los bordes de todos los demás clips/overlays
-function asmSnapTargets(exclude){ const t=[0, ASM.t];
-  ASM.clips.forEach(c=>{ if(c!==exclude){ t.push(c.start||0); t.push(clipEnd(c)); } });
-  ASM.overlays.forEach(o=>{ t.push(o.start); t.push(o.start+o.dur); });
+// puntos de imán con PRIORIDAD por importancia: bordes de clip (3) > playhead (2)
+// > bordes de imagen/overlay (1); el 0 del timeline es clip-nivel.
+function asmSnapTargets(exclude, includePH){ const t=[{t:0,p:3}];
+  if(includePH) t.push({t:ASM.t,p:2});
+  ASM.clips.forEach(c=>{ if(c!==exclude){ const pr=c.type==="image"?1:3; t.push({t:c.start||0,p:pr}); t.push({t:clipEnd(c),p:pr}); } });
+  ASM.overlays.forEach(o=>{ if(o!==exclude){ t.push({t:o.start,p:1}); t.push({t:o.start+o.dur,p:1}); } });
   return t; }
-function asmSnap(time, exclude){ ASM._snap=null; if(!ASM.snap) return time;
-  const thr=10/ASM.px;   // 10px de tolerancia
-  let best=time, bd=thr;
-  asmSnapTargets(exclude).forEach(tg=>{ const d=Math.abs(time-tg); if(d<bd){bd=d;best=tg;} });
-  if(best!==time){ ASM._snap=best; const g=$("#asmSnapG"); if(g){g.style.display="block";g.style.left=(66+best*ASM.px)+"px";} }
-  return best; }
+// Snap con RESISTENCIA (histéresis): agarra a 9px, suelta a 16px. Prioriza por
+// importancia y, a igual prioridad, por cercanía.
+function asmSnap(time, exclude, includePH){ ASM._snap=null; if(!ASM.snap) return time;
+  const grab=9/ASM.px, rel=16/ASM.px;
+  const tgs=asmSnapTargets(exclude, includePH!==false);
+  // si estábamos pegados a un objetivo y seguimos dentro del radio de "soltar", quédate
+  if(ASM._lock!=null){ const near=tgs.find(g=>Math.abs(g.t-ASM._lock)<1e-4);
+    if(near && Math.abs(time-ASM._lock)<rel){ asmSnapShow(ASM._lock); return ASM._lock; }
+    ASM._lock=null; }
+  let best=null, bp=-1, bd=grab;
+  tgs.forEach(g=>{ const d=Math.abs(time-g.t);
+    if(d<grab && (g.p>bp || (g.p===bp && d<bd))){ best=g.t; bp=g.p; bd=d; } });
+  if(best!=null){ ASM._lock=best; asmSnapShow(best); return best; }
+  return time; }
+function asmSnapShow(t){ ASM._snap=t; const g=$("#asmSnapG"); if(g){g.style.display="block";g.style.left=(66+t*ASM.px)+"px";} }
 const asmP=()=>$("#asmPlayer"), asmI=()=>$("#asmImg");
 
 async function enterAssembly(files){
@@ -880,6 +891,7 @@ function asmFitPx(){ const w=($("#asmScroll").clientWidth||800)-66-24;
 function asmFit(){ ASM.basePx=asmFitPx(); asmRenderTL(); }
 function asmRenderTL(){
   const total=Math.max(asmMainDur(),0.5);
+  if((ASM.zoom||1)<=1.01) ASM.basePx=asmFitPx();   // zoom mínimo SIEMPRE muestra todo
   ASM.px=(ASM.basePx||asmFitPx())*(ASM.zoom||1);
   const px=ASM.px;
   const inner=$("#asmInner"); inner.style.minWidth=(66+total*px+20)+"px";
@@ -934,7 +946,7 @@ function asmDrag(e,onMove,onEnd){
   e.preventDefault(); const x0=e.clientX; let moved=false;
   const mv=ev=>{ if(Math.abs(ev.clientX-x0)>3) moved=true; onMove((ev.clientX-x0)/ASM.px, ev); };
   const up=()=>{ window.removeEventListener("pointermove",mv); window.removeEventListener("pointerup",up);
-    document.body.style.cursor=""; ASM._snap=null; const g=$("#asmSnapG"); if(g)g.style.display="none"; if(onEnd) onEnd(moved); };
+    document.body.style.cursor=""; ASM._snap=null; ASM._lock=null; const g=$("#asmSnapG"); if(g)g.style.display="none"; if(onEnd) onEnd(moved); };
   window.addEventListener("pointermove",mv); window.addEventListener("pointerup",up);
 }
 /* ---- deshacer / rehacer del editor ---- */
@@ -1134,8 +1146,10 @@ function asmInspector(){
 function asmSplit(){
   const at=asmClipAt(ASM.t); if(!at||at.clip.type==="image"||at.local<0.3||at.local>clipLen(at.clip)-0.3) return; asmPush();
   const c=at.clip, cut=c.in+at.local;
-  const nc={_id:uid(),sid:c.sid,type:"video",name:c.name,thumb:c.thumb,srcdur:c.srcdur,vol:c.vol,mute:c.mute,in:cut,out:c.out,fadeIn:0,fadeOut:c.fadeOut||0};
-  c.out=cut; c.fadeOut=0; ASM.clips.splice(at.i+1,0,nc); asmRenderTL();
+  // la parte NUEVA arranca en el playhead (start correcto) -> no se encima
+  const nc={_id:uid(),sid:c.sid,type:"video",name:c.name,thumb:c.thumb,srcdur:c.srcdur,vol:c.vol,mute:c.mute,
+    layer:c.layer||0,start:(c.start||0)+at.local,in:cut,out:c.out,fadeIn:0,fadeOut:c.fadeOut||0};
+  c.out=cut; c.fadeOut=0; ASM.clips.splice(ASM.clips.indexOf(c)+1,0,nc); asmRenderTL(); asmSelect("clip",nc._id);
 }
 function asmDelSel(){ const it=asmSel(); if(!it) return; asmPush();
   const arr=ASM.sel.track==="clip"?ASM.clips:ASM.overlays; const k=arr.indexOf(it); if(k>=0)arr.splice(k,1);
@@ -1178,9 +1192,11 @@ $("#asmZoom").oninput=e=>{ ASM.zoom=+e.target.value; asmRenderTL(); asmUpdatePH(
 // arrastrar en la regla = scrubbing (mueve el playhead siguiendo el mouse)
 function asmRulerScrub(e){ asmPause();
   const seek=ev=>{ const r=$("#asmRuler").getBoundingClientRect();
-    asmGoto(Math.max(0,(ev.clientX-r.left)/ASM.px),true); };
+    let raw=Math.max(0,(ev.clientX-r.left)/ASM.px);
+    asmGoto(asmSnap(raw,null,false),true); };   // el playhead se imanta a bordes de clip
   seek(e);
-  const mv=ev=>seek(ev), up=()=>{window.removeEventListener("pointermove",mv);window.removeEventListener("pointerup",up);};
+  const mv=ev=>seek(ev), up=()=>{window.removeEventListener("pointermove",mv);window.removeEventListener("pointerup",up);
+    ASM._snap=null; ASM._lock=null; const g=$("#asmSnapG"); if(g)g.style.display="none";};
   window.addEventListener("pointermove",mv); window.addEventListener("pointerup",up);
 }
 $("#asmRuler").onpointerdown=asmRulerScrub;
