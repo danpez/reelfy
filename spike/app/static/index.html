@@ -476,7 +476,9 @@
     </div>
     <div class="asm-tl2" id="asmTLwrap">
       <div class="asm-tltools">
-        <button class="btn ghost mini" id="asmSplit" title="Dividir el clip en el playhead"><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Dividir</button>
+        <button class="btn ghost mini" id="asmUndo2" title="Deshacer (⌘Z)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-undo"/></svg></button>
+        <button class="btn ghost mini" id="asmRedo2" title="Rehacer (⇧⌘Z)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-redo"/></svg></button>
+        <button class="btn ghost mini" id="asmSplit" title="Dividir el clip en el playhead (S)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Dividir</button>
         <button class="btn ghost mini" id="asmDelSel" title="Eliminar el clip seleccionado"><svg class="ic" viewBox="0 0 24 24"><use href="#i-trash"/></svg>Eliminar</button>
         <span style="flex:1"></span>
         <span class="hint" style="margin:0">Zoom</span>
@@ -785,7 +787,7 @@ function pick(files){
 $("#go").onclick=()=>enterAssembly(FILES);
 
 /* ============ EDITOR DE VIDEO PROFESIONAL (timeline) ============ */
-let ASM={sources:[],clips:[],overlays:[],sel:null,t:0,playing:false,px:120,zoom:1,ci:-1};
+let ASM={sources:[],clips:[],overlays:[],sel:null,t:0,playing:false,px:120,basePx:0,zoom:1,ci:-1};
 const uid=()=>"a"+Math.floor(Math.random()*1e9).toString(36);
 const clipLen=c=>c.type==="image"?c.dur:(c.out-c.in);
 const asmMainDur=()=>ASM.clips.reduce((a,c)=>a+clipLen(c),0);
@@ -793,7 +795,7 @@ function clipStart(i){ let s=0; for(let k=0;k<i;k++) s+=clipLen(ASM.clips[k]); r
 const asmP=()=>$("#asmPlayer"), asmI=()=>$("#asmImg");
 
 async function enterAssembly(files){
-  ASM={sources:[],clips:[],overlays:[],sel:null,t:0,playing:false,px:120,zoom:1,ci:-1};
+  ASM={sources:[],clips:[],overlays:[],sel:null,t:0,playing:false,px:120,basePx:0,zoom:1,ci:-1};
   show("#s-assembly"); asmRenderSources(); asmRenderTL(); asmInspector();
   asmP().onended=null;
   if(files&&files.length){
@@ -802,7 +804,7 @@ async function enterAssembly(files){
     ASM.sources.forEach(s=>asmAddClip(s.id,true));   // precarga todo lo subido en orden
     asmGoto(0,true);
   }
-  setTimeout(()=>{ asmRenderTL(); asmUpdatePH(); },60);   // layout listo -> ajustar a ancho
+  setTimeout(()=>{ asmFit(); asmUpdatePH(); },60);   // layout listo -> ajustar a ancho
 }
 async function asmUpload(files){
   if(!files||!files.length) return;
@@ -824,13 +826,13 @@ function asmRenderSources(){
     b.dataset.add==="main"?asmAddClip(b.dataset.sid):asmAddOverlay(b.dataset.sid);});
 }
 function asmAddClip(sid,quiet){
-  const s=ASM.sources.find(x=>x.id===sid); if(!s) return;
+  const s=ASM.sources.find(x=>x.id===sid); if(!s) return; if(!quiet) asmPush();
   const c={_id:uid(),sid,type:s.type,name:s.name,thumb:s.thumb,srcdur:s.dur||0,vol:1,mute:false};
   if(s.type==="image") c.dur=3.0; else { c.in=0; c.out=Math.max(0.5,s.dur||5); }
-  ASM.clips.push(c); asmRenderTL(); if(!quiet) asmSelect("clip",c._id);
+  ASM.clips.push(c); asmFit(); if(!quiet) asmSelect("clip",c._id);
 }
 function asmAddOverlay(sid){
-  const s=ASM.sources.find(x=>x.id===sid); if(!s) return;
+  const s=ASM.sources.find(x=>x.id===sid); if(!s) return; asmPush();
   const o={_id:uid(),sid,type:s.type,name:s.name,thumb:s.thumb,srcdur:s.dur||0,
     start:ASM.t||0,dur:s.type==="image"?2.5:Math.min(3,s.dur||3),pos:"center",size:0.35};
   ASM.overlays.push(o); asmRenderTL(); asmSelect("overlay",o._id);
@@ -844,10 +846,12 @@ function fmtRuler(s,step){
 }
 function asmFitPx(){ const w=($("#asmScroll").clientWidth||800)-66-24;
   return Math.max(8, w/Math.max(asmMainDur(),0.1)); }
+// basePx = px/seg a zoom 1 (ajuste-a-ancho). Se recalcula SOLO al cargar/redimensionar
+// /añadir clip (asmFit), NO al recortar -> así el recorte SÍ encoge el clip visualmente.
+function asmFit(){ ASM.basePx=asmFitPx(); asmRenderTL(); }
 function asmRenderTL(){
   const total=Math.max(asmMainDur(),0.5);
-  // zoom MÍNIMO (=1) muestra TODO; zoom>1 acerca. px = ajuste-a-ancho * zoom.
-  ASM.px=asmFitPx()*(ASM.zoom||1);
+  ASM.px=(ASM.basePx||asmFitPx())*(ASM.zoom||1);
   const px=ASM.px;
   const inner=$("#asmInner"); inner.style.minWidth=(66+total*px+20)+"px";
   // regla con paso "bonito" (~72px entre marcas) y decimales al acercar
@@ -896,17 +900,43 @@ function asmDrag(e,onMove,onEnd){
     document.body.style.cursor=""; if(onEnd) onEnd(moved); };
   window.addEventListener("pointermove",mv); window.addEventListener("pointerup",up);
 }
+/* ---- deshacer / rehacer del editor ---- */
+let ASM_UNDO=[], ASM_REDO=[];
+function asmSnap(){ return JSON.stringify({clips:ASM.clips,overlays:ASM.overlays}); }
+function asmPush(){ ASM_UNDO.push(asmSnap()); if(ASM_UNDO.length>80)ASM_UNDO.shift(); ASM_REDO=[]; }
+function asmRestore(snap){ const d=JSON.parse(snap); ASM.clips=d.clips; ASM.overlays=d.overlays;
+  ASM.sel=null; ASM.ci=-1; asmFit(); asmInspector(); asmGoto(Math.min(ASM.t,asmMainDur()),true); }
+function asmUndo(){ if(!ASM_UNDO.length)return; ASM_REDO.push(asmSnap()); asmRestore(ASM_UNDO.pop()); }
+function asmRedo(){ if(!ASM_REDO.length)return; ASM_UNDO.push(asmSnap()); asmRestore(ASM_REDO.pop()); }
+/* ---- atajos de teclado del editor ---- */
+document.addEventListener("keydown",e=>{
+  if(!$("#s-assembly").classList.contains("on")) return;
+  if(e.target.isContentEditable||/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+  const meta=e.metaKey||e.ctrlKey;
+  if(e.code==="Space"){ e.preventDefault(); ASM.playing?asmPause():asmPlay(); }
+  else if(meta&&(e.key==="z"||e.key==="Z")){ e.preventDefault(); e.shiftKey?asmRedo():asmUndo(); }
+  else if(meta&&e.key==="y"){ e.preventDefault(); asmRedo(); }
+  else if(e.key==="Delete"||e.key==="Backspace"){ if(ASM.sel){ e.preventDefault(); asmDelSel(); } }
+  else if(e.key==="s"||e.key==="S"){ e.preventDefault(); asmSplit(); }
+  else if(e.key==="ArrowLeft"){ e.preventDefault(); asmPause(); asmGoto(ASM.t-(e.shiftKey?1:1/30),true); }
+  else if(e.key==="ArrowRight"){ e.preventDefault(); asmPause(); asmGoto(ASM.t+(e.shiftKey?1:1/30),true); }
+  else if(e.key==="+"||e.key==="="){ const z=$("#asmZoom"); z.value=Math.min(8,+z.value+0.5); z.oninput({target:z}); }
+  else if(e.key==="-"){ const z=$("#asmZoom"); z.value=Math.max(1,+z.value-0.5); z.oninput({target:z}); }
+});
 function asmWireClipDrag(el,c){
   const lane=$("#asmMain");
+  const cs=()=>clipStart(ASM.clips.indexOf(c));
   el.querySelector(".hnd2.l").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize";
-    const in0=c.in,dur0=c.dur;
+    asmPush(); const in0=c.in,dur0=c.dur;
     asmDrag(e,d=>{ if(c.type==="image") c.dur=Math.max(0.3,dur0-d);
-      else c.in=Math.min(Math.max(0,in0+d),c.out-0.3); asmRenderTL(); }); };
+      else c.in=Math.min(Math.max(0,in0+d),c.out-0.3); asmRenderTL();
+      asmGoto(cs()+0.03,true); },()=>asmSelect("clip",c._id)); };   // muestra el frame de inicio
   el.querySelector(".hnd2.r").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize";
-    const out0=c.out,dur0=c.dur;
+    asmPush(); const out0=c.out,dur0=c.dur;
     asmDrag(e,d=>{ if(c.type==="image") c.dur=Math.max(0.3,dur0+d);
-      else c.out=Math.max(Math.min(c.srcdur||1e9,out0+d),c.in+0.3); asmRenderTL(); }); };
-  el.onpointerdown=e=>{ if(e.target.classList.contains("hnd2"))return; c._moved=false;
+      else c.out=Math.max(Math.min(c.srcdur||1e9,out0+d),c.in+0.3); asmRenderTL();
+      asmGoto(cs()+clipLen(c)-0.05,true); },()=>asmSelect("clip",c._id)); };  // muestra el frame de fin
+  el.onpointerdown=e=>{ if(e.target.classList.contains("hnd2"))return; c._moved=false; asmPush();
     document.body.style.cursor="grabbing";
     asmDrag(e,(d,ev)=>{ const laneR=lane.getBoundingClientRect(), xc=ev.clientX-laneR.left;
       let acc=0,target=ASM.clips.length-1;
@@ -916,11 +946,11 @@ function asmWireClipDrag(el,c){
       m=>{ c._moved=m; }); };
 }
 function asmWireOverlayDrag(el,o){
-  el.querySelector(".hnd2.l").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize";
+  el.querySelector(".hnd2.l").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize"; asmPush();
     const s0=o.start,d0=o.dur; asmDrag(e,d=>{ o.start=Math.max(0,s0+d); o.dur=Math.max(0.3,d0-d); asmRenderTL(); }); };
-  el.querySelector(".hnd2.r").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize";
+  el.querySelector(".hnd2.r").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize"; asmPush();
     const d0=o.dur; asmDrag(e,d=>{ o.dur=Math.max(0.3,d0+d); asmRenderTL(); }); };
-  el.onpointerdown=e=>{ if(e.target.classList.contains("hnd2"))return; o._moved=false;
+  el.onpointerdown=e=>{ if(e.target.classList.contains("hnd2"))return; o._moved=false; asmPush();
     document.body.style.cursor="grabbing"; const s0=o.start;
     asmDrag(e,d=>{ o.start=Math.max(0,s0+d); asmRenderTL(); }, m=>{ o._moved=m; }); };
 }
@@ -1013,14 +1043,14 @@ function asmInspector(){
   }
 }
 function asmSplit(){
-  const at=asmClipAt(ASM.t); if(!at||at.clip.type==="image"||at.local<0.3||at.local>clipLen(at.clip)-0.3) return;
+  const at=asmClipAt(ASM.t); if(!at||at.clip.type==="image"||at.local<0.3||at.local>clipLen(at.clip)-0.3) return; asmPush();
   const c=at.clip, cut=c.in+at.local;
   const nc={_id:uid(),sid:c.sid,type:"video",name:c.name,thumb:c.thumb,srcdur:c.srcdur,vol:c.vol,mute:c.mute,in:cut,out:c.out};
   c.out=cut; ASM.clips.splice(at.i+1,0,nc); asmRenderTL();
 }
-function asmDelSel(){ const it=asmSel(); if(!it) return;
+function asmDelSel(){ const it=asmSel(); if(!it) return; asmPush();
   const arr=ASM.sel.track==="clip"?ASM.clips:ASM.overlays; const k=arr.indexOf(it); if(k>=0)arr.splice(k,1);
-  ASM.sel=null; ASM.ci=-1; asmRenderTL(); asmInspector(); asmGoto(Math.min(ASM.t,asmMainDur()),true); }
+  ASM.sel=null; ASM.ci=-1; asmFit(); asmInspector(); asmGoto(Math.min(ASM.t,asmMainDur()),true); }
 function asmDropTrack(track){
   const el=track==="main"?$("#asmMain"):$("#asmOverlay");
   el.ondragover=e=>{ e.preventDefault(); el.classList.add("dragover"); };
@@ -1051,12 +1081,13 @@ $("#asmAdd").onclick=()=>{ const fi=Object.assign(document.createElement("input"
 $("#asmPlay").onclick=()=>ASM.playing?asmPause():asmPlay();
 $("#asmScrub").oninput=e=>{ asmPause(); asmGoto(+e.target.value/1000*asmMainDur(),true); };
 $("#asmSplit").onclick=asmSplit;
+$("#asmUndo2").onclick=asmUndo; $("#asmRedo2").onclick=asmRedo;
 $("#asmDelSel").onclick=asmDelSel;
 $("#asmZoom").oninput=e=>{ ASM.zoom=+e.target.value; asmRenderTL(); asmUpdatePH(); };
 $("#asmRuler").onpointerdown=e=>{ asmPause(); const r=$("#asmRuler").getBoundingClientRect();
   asmGoto((e.clientX-r.left)/ASM.px,true); };
 asmDropTrack("main"); asmDropTrack("overlay");
-window.addEventListener("resize",()=>{ if($("#s-assembly").classList.contains("on")){ asmRenderTL(); asmUpdatePH(); } });
+window.addEventListener("resize",()=>{ if($("#s-assembly").classList.contains("on")){ asmFit(); asmUpdatePH(); } });
 
 /* ---- primer arranque: modelo de voz + detección de ollama ---- */
 let ENGINE_READY=true, LICENSED=true;
