@@ -202,6 +202,7 @@
   .asm-tl2{flex:0 0 auto;border:1px solid var(--line);border-radius:12px;background:var(--panel2);
            display:flex;flex-direction:column;max-height:42vh}
   .asm-tltools{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line)}
+  .asm-tltools .btn.sel{border-color:var(--brand);color:var(--brand2);background:#1d1512}
   .asm-scroll{overflow-x:auto;overflow-y:hidden;padding:0 0 8px}
   .asm-inner{position:relative;min-width:100%}
   .asm-ruler{position:relative;height:22px;border-bottom:1px solid var(--line);margin-left:66px}
@@ -485,6 +486,7 @@
       <div class="asm-tltools">
         <button class="btn ghost mini" id="asmUndo2" title="Deshacer (⌘Z)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-undo"/></svg></button>
         <button class="btn ghost mini" id="asmRedo2" title="Rehacer (⇧⌘Z)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-redo"/></svg></button>
+        <button class="btn ghost mini sel" id="asmSnapBtn" title="Imán / ajuste magnético"><svg class="ic" viewBox="0 0 24 24"><use href="#i-tag"/></svg>Imán</button>
         <button class="btn ghost mini" id="asmSplit" title="Dividir el clip en el playhead (S)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Dividir</button>
         <button class="btn ghost mini" id="asmDelSel" title="Eliminar el clip seleccionado"><svg class="ic" viewBox="0 0 24 24"><use href="#i-trash"/></svg>Eliminar</button>
         <span style="flex:1"></span>
@@ -794,15 +796,28 @@ function pick(files){
 $("#go").onclick=()=>enterAssembly(FILES);
 
 /* ============ EDITOR DE VIDEO PROFESIONAL (timeline) ============ */
-let ASM={sources:[],clips:[],overlays:[],sel:null,t:0,playing:false,px:120,basePx:0,zoom:1,ci:-1};
+let ASM={sources:[],clips:[],overlays:[],sel:null,t:0,playing:false,px:120,basePx:0,zoom:1,ci:-1,snap:true};
 const uid=()=>"a"+Math.floor(Math.random()*1e9).toString(36);
+// MODELO por POSICIÓN LIBRE: cada clip tiene start (posición en el timeline).
+// Se permiten huecos (se rellenan con negro al exportar) y snapping magnético.
 const clipLen=c=>c.type==="image"?c.dur:(c.out-c.in);
-const asmMainDur=()=>ASM.clips.reduce((a,c)=>a+clipLen(c),0);
-function clipStart(i){ let s=0; for(let k=0;k<i;k++) s+=clipLen(ASM.clips[k]); return s; }
+const clipEnd=c=>(c.start||0)+clipLen(c);
+const asmMainDur=()=>ASM.clips.reduce((a,c)=>Math.max(a,clipEnd(c)),0);
+function clipStart(i){ const c=ASM.clips[i]; return c?(c.start||0):0; }
+// puntos de imán: 0, playhead, y los bordes de todos los demás clips/overlays
+function asmSnapTargets(exclude){ const t=[0, ASM.t];
+  ASM.clips.forEach(c=>{ if(c!==exclude){ t.push(c.start||0); t.push(clipEnd(c)); } });
+  ASM.overlays.forEach(o=>{ t.push(o.start); t.push(o.start+o.dur); });
+  return t; }
+function asmSnap(time, exclude){ if(!ASM.snap) return time;
+  const thr=10/ASM.px;   // 10px de tolerancia
+  let best=time, bd=thr;
+  asmSnapTargets(exclude).forEach(tg=>{ const d=Math.abs(time-tg); if(d<bd){bd=d;best=tg;} });
+  return best; }
 const asmP=()=>$("#asmPlayer"), asmI=()=>$("#asmImg");
 
 async function enterAssembly(files){
-  ASM={sources:[],clips:[],overlays:[],sel:null,t:0,playing:false,px:120,basePx:0,zoom:1,ci:-1};
+  ASM={sources:[],clips:[],overlays:[],sel:null,t:0,playing:false,px:120,basePx:0,zoom:1,ci:-1,snap:true};
   show("#s-assembly"); asmRenderSources(); asmRenderTL(); asmInspector();
   asmP().onended=null;
   if(files&&files.length){
@@ -834,7 +849,7 @@ function asmRenderSources(){
 }
 function asmAddClip(sid,quiet){
   const s=ASM.sources.find(x=>x.id===sid); if(!s) return; if(!quiet) asmPush();
-  const c={_id:uid(),sid,type:s.type,name:s.name,thumb:s.thumb,srcdur:s.dur||0,vol:1,mute:false,fadeIn:0,fadeOut:0};
+  const c={_id:uid(),sid,type:s.type,name:s.name,thumb:s.thumb,srcdur:s.dur||0,vol:1,mute:false,fadeIn:0,fadeOut:0,start:asmMainDur()};
   if(s.type==="image") c.dur=3.0; else { c.in=0; c.out=Math.max(0.5,s.dur||5); }
   ASM.clips.push(c); asmFit(); if(!quiet) asmSelect("clip",c._id);
 }
@@ -912,12 +927,12 @@ function asmDrag(e,onMove,onEnd){
 }
 /* ---- deshacer / rehacer del editor ---- */
 let ASM_UNDO=[], ASM_REDO=[];
-function asmSnap(){ return JSON.stringify({clips:ASM.clips,overlays:ASM.overlays}); }
-function asmPush(){ ASM_UNDO.push(asmSnap()); if(ASM_UNDO.length>80)ASM_UNDO.shift(); ASM_REDO=[]; }
+function asmSnapshot(){ return JSON.stringify({clips:ASM.clips,overlays:ASM.overlays}); }
+function asmPush(){ ASM_UNDO.push(asmSnapshot()); if(ASM_UNDO.length>80)ASM_UNDO.shift(); ASM_REDO=[]; }
 function asmRestore(snap){ const d=JSON.parse(snap); ASM.clips=d.clips; ASM.overlays=d.overlays;
   ASM.sel=null; ASM.ci=-1; asmFit(); asmInspector(); asmGoto(Math.min(ASM.t,asmMainDur()),true); }
-function asmUndo(){ if(!ASM_UNDO.length)return; ASM_REDO.push(asmSnap()); asmRestore(ASM_UNDO.pop()); }
-function asmRedo(){ if(!ASM_REDO.length)return; ASM_UNDO.push(asmSnap()); asmRestore(ASM_REDO.pop()); }
+function asmUndo(){ if(!ASM_UNDO.length)return; ASM_REDO.push(asmSnapshot()); asmRestore(ASM_UNDO.pop()); }
+function asmRedo(){ if(!ASM_REDO.length)return; ASM_UNDO.push(asmSnapshot()); asmRestore(ASM_REDO.pop()); }
 /* ---- atajos de teclado del editor ---- */
 document.addEventListener("keydown",e=>{
   if(!$("#s-assembly").classList.contains("on")) return;
@@ -934,54 +949,58 @@ document.addEventListener("keydown",e=>{
   else if(e.key==="-"){ const z=$("#asmZoom"); z.value=Math.max(1,+z.value-0.5); z.oninput({target:z}); }
 });
 function asmWireClipDrag(el,c){
-  const lane=$("#asmMain");
-  const cs=()=>clipStart(ASM.clips.indexOf(c));
+  // borde IZQUIERDO: recorta manteniendo fijo el borde derecho (mueve start + in)
   el.querySelector(".hnd2.l").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize";
-    asmPush(); const in0=c.in,dur0=c.dur;
-    asmDrag(e,d=>{ if(c.type==="image") c.dur=Math.max(0.3,dur0-d);
-      else c.in=Math.min(Math.max(0,in0+d),c.out-0.3); asmRenderTL();
-      asmGoto(cs()+0.03,true); },()=>asmSelect("clip",c._id)); };   // muestra el frame de inicio
+    asmPush(); const in0=c.in,dur0=c.dur,st0=c.start||0,end0=clipEnd(c);
+    asmDrag(e,d=>{ let newStart=asmSnap(st0+d,c);   // snap del borde izquierdo
+      newStart=Math.max(0,Math.min(newStart,end0-0.3));
+      const delta=newStart-st0;
+      if(c.type==="image"){ c.start=newStart; c.dur=Math.max(0.3,dur0-delta); }
+      else{ const room=Math.min(delta,c.out-0.3-in0); c.in=in0+room; c.start=st0+room; }
+      asmRenderTL(); asmGoto((c.start||0)+0.03,true); },()=>asmSelect("clip",c._id)); };
+  // borde DERECHO: recorta manteniendo fijo el borde izquierdo (cambia largo)
   el.querySelector(".hnd2.r").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize";
-    asmPush(); const out0=c.out,dur0=c.dur;
-    asmDrag(e,d=>{ if(c.type==="image") c.dur=Math.max(0.3,dur0+d);
-      else c.out=Math.max(Math.min(c.srcdur||1e9,out0+d),c.in+0.3); asmRenderTL();
-      asmGoto(cs()+clipLen(c)-0.05,true); },()=>asmSelect("clip",c._id)); };  // muestra el frame de fin
+    asmPush(); const out0=c.out,dur0=c.dur,st=c.start||0;
+    asmDrag(e,d=>{ let newEnd=asmSnap(st+ (c.type==="image"?dur0:(out0-c.in)) +d, c);
+      if(c.type==="image") c.dur=Math.max(0.3,newEnd-st);
+      else c.out=Math.max(Math.min(c.srcdur||1e9,c.in+(newEnd-st)),c.in+0.3);
+      asmRenderTL(); asmGoto(clipEnd(c)-0.05,true); },()=>asmSelect("clip",c._id)); };
+  // CUERPO: mover LIBRE en el timeline (con snap magnético), permite huecos
   el.onpointerdown=e=>{ if(e.target.classList.contains("hnd2"))return; c._moved=false; asmPush();
-    document.body.style.cursor="grabbing";
-    asmDrag(e,(d,ev)=>{ const laneR=lane.getBoundingClientRect(), xc=ev.clientX-laneR.left;
-      let acc=0,target=ASM.clips.length-1;
-      for(let k=0;k<ASM.clips.length;k++){ const w=clipLen(ASM.clips[k])*ASM.px; if(xc<acc+w/2){target=k;break;} acc+=w; }
-      const cur=ASM.clips.indexOf(c);
-      if(target!==cur&&cur>=0){ ASM.clips.splice(cur,1); ASM.clips.splice(target,0,c); asmRenderTL(); } },
-      m=>{ c._moved=m; }); };
+    document.body.style.cursor="grabbing"; const st0=c.start||0, L=clipLen(c);
+    asmDrag(e,d=>{ let ns=asmSnap(st0+d,c); const ne=asmSnap(st0+d+L,c)-L;   // snap por ambos bordes
+      if(Math.abs(ne-(st0+d))<Math.abs(ns-(st0+d))) ns=ne;
+      c.start=Math.max(0,ns); asmRenderTL(); },
+      m=>{ c._moved=m; asmSelect("clip",c._id); }); };
 }
 function asmWireOverlayDrag(el,o){
   el.querySelector(".hnd2.l").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize"; asmPush();
-    const s0=o.start,d0=o.dur; asmDrag(e,d=>{ o.start=Math.max(0,s0+d); o.dur=Math.max(0.3,d0-d); asmRenderTL(); }); };
+    const s0=o.start,d0=o.dur,e0=o.start+o.dur; asmDrag(e,d=>{ let ns=asmSnap(s0+d,o); ns=Math.max(0,Math.min(ns,e0-0.3)); o.start=ns; o.dur=e0-ns; asmRenderTL(); }); };
   el.querySelector(".hnd2.r").onpointerdown=e=>{ e.stopPropagation(); document.body.style.cursor="ew-resize"; asmPush();
-    const d0=o.dur; asmDrag(e,d=>{ o.dur=Math.max(0.3,d0+d); asmRenderTL(); }); };
+    const d0=o.dur,s0=o.start; asmDrag(e,d=>{ let ne=asmSnap(s0+d0+d,o); o.dur=Math.max(0.3,ne-s0); asmRenderTL(); }); };
   el.onpointerdown=e=>{ if(e.target.classList.contains("hnd2"))return; o._moved=false; asmPush();
-    document.body.style.cursor="grabbing"; const s0=o.start;
-    asmDrag(e,d=>{ o.start=Math.max(0,s0+d); asmRenderTL(); }, m=>{ o._moved=m; }); };
+    document.body.style.cursor="grabbing"; const s0=o.start,L=o.dur;
+    asmDrag(e,d=>{ let ns=asmSnap(s0+d,o); const ne=asmSnap(s0+d+L,o)-L; if(Math.abs(ne-(s0+d))<Math.abs(ns-(s0+d)))ns=ne; o.start=Math.max(0,ns); asmRenderTL(); }, m=>{ o._moved=m; asmSelect("overlay",o._id); }); };
 }
 /* ---- player de composición en tiempo real ---- */
-function asmClipAt(t){ let acc=0;
-  for(let i=0;i<ASM.clips.length;i++){ const L=clipLen(ASM.clips[i]); if(t<acc+L||i===ASM.clips.length-1) return {clip:ASM.clips[i],i,start:acc,local:t-acc}; acc+=L; }
-  return null; }
+function asmClipAt(t){   // por POSICIÓN: el clip cuyo [start,end) contiene t (null si es hueco)
+  let best=null;
+  ASM.clips.forEach((c,i)=>{ const s=c.start||0; if(t>=s&&t<clipEnd(c)) best={clip:c,i,start:s,local:t-s}; });
+  return best; }
 function asmGoto(t,seek){
   t=Math.max(0,Math.min(t,asmMainDur()));
   ASM.t=t; const at=asmClipAt(t);
-  if(at){
-    if(at.i!==ASM.ci || seek){ ASM.ci=at.i;
-      if(at.clip.type==="image"){ asmP().style.display="none"; asmP().pause();
-        asmI().src="/tlsource/"+at.clip.sid; asmI().style.display="block"; }
-      else{ asmI().style.display="none"; asmP().style.display="block";
-        if(!asmP().src.includes("/tlsource/"+at.clip.sid)) asmP().src="/tlsource/"+at.clip.sid;
-        const local=at.clip.in+at.local;
-        const setT=()=>{try{asmP().currentTime=local;}catch(e){}};
-        if(asmP().readyState>0) setT(); else asmP().onloadeddata=setT;
-      }
-    } else if(at.clip.type!=="image"){ /* video activo: se reproduce solo */ }
+  if(!at){   // HUECO -> negro
+    ASM.ci=-1; asmP().pause(); asmP().style.display="none"; asmI().style.display="none";
+  } else if(at.i!==ASM.ci || seek){ ASM.ci=at.i;
+    if(at.clip.type==="image"){ asmP().style.display="none"; asmP().pause();
+      asmI().src="/tlsource/"+at.clip.sid; asmI().style.display="block"; }
+    else{ asmI().style.display="none"; asmP().style.display="block";
+      if(!asmP().src.includes("/tlsource/"+at.clip.sid)) asmP().src="/tlsource/"+at.clip.sid;
+      const local=at.clip.in+at.local;
+      const setT=()=>{try{asmP().currentTime=local;}catch(e){}};
+      if(asmP().readyState>0) setT(); else asmP().onloadeddata=setT;
+    }
   }
   asmRenderOverlays(t); asmUpdatePH();
 }
@@ -1029,11 +1048,11 @@ function asmTick(){
   if(at && at.clip.type!=="image"){
     if(asmP().paused) asmP().play().catch(()=>{});
     const nt=at.start+(asmP().currentTime-at.clip.in);
-    if(asmP().currentTime>=at.clip.out-0.02 || nt>=at.start+clipLen(at.clip)-0.02){ asmGoto(at.start+clipLen(at.clip)+0.001,true); }
+    if(asmP().currentTime>=at.clip.out-0.02 || nt>=clipEnd(at.clip)-0.02){ asmGoto(clipEnd(at.clip)+0.001,true); }
     else { ASM.t=nt; asmRenderOverlays(ASM.t); asmUpdatePH(); }
   } else {
-    ASM.t+=1/30;               // imagen: avanza el reloj manualmente
-    if(at) asmGoto(ASM.t,false); else asmGoto(ASM.t,false);
+    ASM.t+=1/30;               // imagen o HUECO: avanza el reloj manualmente
+    asmGoto(ASM.t,false);
   }
   if(ASM.t>=asmMainDur()-0.01){ asmPause(); ASM.t=0; asmGoto(0,true); return; }
   asmRAF=requestAnimationFrame(asmTick);
@@ -1118,8 +1137,8 @@ async function asmApply(){
   if(!ASM.clips.length){ alert("Agrega al menos un clip a la pista Video."); return; }
   asmPause();
   const body={
-    main:ASM.clips.map(c=>c.type==="image"?{sid:c.sid,type:"image",dur:c.dur,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}
-       :{sid:c.sid,type:"video",in:c.in,out:c.out,vol:c.vol,mute:c.mute,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}),
+    main:ASM.clips.map(c=>c.type==="image"?{sid:c.sid,type:"image",dur:c.dur,start:c.start||0,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}
+       :{sid:c.sid,type:"video",in:c.in,out:c.out,vol:c.vol,mute:c.mute,start:c.start||0,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}),
     overlays:ASM.overlays.map(o=>({sid:o.sid,type:o.type,start:o.start,dur:o.dur,pos:o.pos,size:o.size})),
     glossary:$("#asmGloss").value||"", highlights:2 };
   show("#s-analyzing"); setBar("#a-fill",2); $("#a-msg").textContent="Montando tu línea de tiempo…";
@@ -1138,6 +1157,7 @@ $("#asmPlay").onclick=()=>ASM.playing?asmPause():asmPlay();
 $("#asmScrub").oninput=e=>{ asmPause(); asmGoto(+e.target.value/1000*asmMainDur(),true); };
 $("#asmSplit").onclick=asmSplit;
 $("#asmUndo2").onclick=asmUndo; $("#asmRedo2").onclick=asmRedo;
+$("#asmSnapBtn").onclick=()=>{ ASM.snap=!ASM.snap; $("#asmSnapBtn").classList.toggle("sel",ASM.snap); };
 $("#asmDelSel").onclick=asmDelSel;
 $("#asmZoom").oninput=e=>{ ASM.zoom=+e.target.value; asmRenderTL(); asmUpdatePH(); };
 $("#asmRuler").onpointerdown=e=>{ asmPause(); const r=$("#asmRuler").getBoundingClientRect();

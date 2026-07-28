@@ -91,6 +91,15 @@ def _norm_image(src, dur, out, w, h, fps, fin=0.0, fout=0.0):
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", "-shortest", str(out)])
 
 
+def _norm_black(dur, out, w, h, fps):
+    """Segmento NEGRO con silencio (para rellenar huecos de posicionamiento libre)."""
+    _run([FFMPEG, "-y", "-f", "lavfi", "-t", f"{dur:.3f}", "-i",
+          f"color=c=black:s={w}x{h}:r={fps}",
+          "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
+          "-c:v", "h264_videotoolbox", "-b:v", "12M", "-c:a", "aac", "-ar", "48000",
+          "-ac", "2", "-b:a", "192k", "-shortest", str(out)])
+
+
 def _overlay_xy(pos, W, H, mx, my):
     return {
         "tl": (f"{mx}", f"{my}"), "tr": (f"W-w-{mx}", f"{my}"),
@@ -148,23 +157,41 @@ def compose(spec, out, work, on_step=None):
         p = probe(main[0]["path"]); W, H = (p["w"] or 1080), (p["h"] or 1920)
     W -= W % 2; H -= H % 2
 
+    # POSICIÓN LIBRE: ordenar por start, rellenar HUECOS con negro, colapsar solapes.
+    def _len(s):
+        return float(s.get("dur", 3.0)) if s.get("type") == "image" else \
+            float(s.get("out", 5)) - float(s.get("in", 0))
+    ordered = sorted(main, key=lambda s: float(s.get("start", 0) or 0))
+    seq = []            # lista de (tipo, dato, trans) en orden de reproducción
+    cursor = 0.0
+    for s in ordered:
+        st = float(s.get("start", 0) or 0)
+        if st > cursor + 0.05:                       # hueco -> negro
+            seq.append(("black", st - cursor, None))
+        seq.append(("clip", s, s.get("trans")))
+        cursor = max(cursor, st) + _len(s)
+
     # 1) normalizar cada segmento
-    parts = []
-    for i, s in enumerate(main):
-        step(f"Preparando clip {i + 1}/{len(main)}…")
+    parts, trans = [], []
+    for i, (kind, data, tr) in enumerate(seq):
+        step(f"Preparando {i + 1}/{len(seq)}…")
         seg = work / f"seg_{i:03d}.mp4"
-        fin = float(s.get("fadeIn", 0) or 0); fout = float(s.get("fadeOut", 0) or 0)
-        if s.get("type") == "image":
-            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout)
+        if kind == "black":
+            _norm_black(float(data), seg, W, H, fps); trans.append(None)
         else:
-            t_in = float(s.get("in", 0)); t_out = float(s.get("out", t_in + 5))
-            vol = 0.0 if s.get("mute") else float(s.get("vol", 1.0))
-            _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout)
+            s = data
+            fin = float(s.get("fadeIn", 0) or 0); fout = float(s.get("fadeOut", 0) or 0)
+            if s.get("type") == "image":
+                _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout)
+            else:
+                t_in = float(s.get("in", 0)); t_out = float(s.get("out", t_in + 5))
+                vol = 0.0 if s.get("mute") else float(s.get("vol", 1.0))
+                _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout)
+            trans.append(tr)
         parts.append(seg)
 
     # 2) unir: si hay TRANSICIONES (crossfade) usa xfade; si no, concat demuxer (rápido)
     step("Uniendo la línea de tiempo…")
-    trans = [m.get("trans") for m in main]
     main_mp4 = work / "main.mp4"
     has_trans = any(t and t.get("type") == "crossfade" and float(t.get("dur", 0)) > 0.05
                     for t in trans[1:])
