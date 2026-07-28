@@ -1,0 +1,49 @@
+name: Sincronizar descarga pública
+
+# Toma los instaladores YA construidos de un release de danpez/reelfy y los
+# republica en danpez/reelfy-releases con nombres LIMPIOS (Reelfy-Setup.exe /
+# Reelfy.dmg / Reelfy.deb), que es de donde baja el sitio vía 'latest'. NO
+# reconstruye nada: solo descarga y sube. Útil para releases hechos antes de que
+# existiera el paso automático inline (p.ej. v0.4.0). Requiere el secret
+# RELEASES_TOKEN (PAT fine-grained con contents:write en danpez/reelfy-releases).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag en danpez/reelfy a publicar (ej. reelfy-v0.4.0)"
+        required: true
+        default: "reelfy-v0.4.0"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Descargar instaladores del release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # lee este repo (danpez/reelfy)
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          mkdir -p dl public
+          gh release download "$TAG" -R danpez/reelfy -D dl
+          cp "$(find dl -name '*-setup.exe' | head -1)" public/Reelfy-Setup.exe
+          cp "$(find dl -name '*.dmg'       | head -1)" public/Reelfy.dmg
+          cp "$(find dl -name '*.deb'       | head -1)" public/Reelfy.deb
+          echo "CLEAN=${TAG#reelfy-}" >> "$GITHUB_ENV"   # reelfy-v0.4.0 -> v0.4.0
+          ls -la public
+
+      - name: Publicar en reelfy-releases (nombres limpios)
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}   # escribe en reelfy-releases
+        run: |
+          set -euo pipefail
+          NOTES="Instaladores de Reelfy ${CLEAN}. Notas: https://github.com/danpez/reelfy/releases/tag/${{ github.event.inputs.tag }}"
+          if gh release view "$CLEAN" -R danpez/reelfy-releases >/dev/null 2>&1; then
+            gh release upload "$CLEAN" -R danpez/reelfy-releases public/* --clobber
+          else
+            gh release create "$CLEAN" -R danpez/reelfy-releases -t "Reelfy $CLEAN" -n "$NOTES" public/*
+          fi
+          echo "Publicado $CLEAN en danpez/reelfy-releases"
