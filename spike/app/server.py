@@ -573,6 +573,8 @@ async def compose_timeline(req: Request):
             continue
         item = {"path": path, "type": s.get("type", "video"),
                 "fadeIn": float(s.get("fadeIn", 0) or 0), "fadeOut": float(s.get("fadeOut", 0) or 0)}
+        if isinstance(s.get("trans"), dict) and s["trans"].get("type") == "crossfade":
+            item["trans"] = {"type": "crossfade", "dur": float(s["trans"].get("dur", 0.5))}
         if item["type"] == "image":
             item["dur"] = float(s.get("dur", 3.0))
         else:

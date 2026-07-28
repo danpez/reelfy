@@ -233,6 +233,7 @@
   .clip2 .fadetri{position:absolute;top:0;height:100%;z-index:2;pointer-events:none}
   .clip2 .fadetri.l{left:0;background:linear-gradient(90deg,rgba(0,0,0,.75),transparent)}
   .clip2 .fadetri.r{right:0;background:linear-gradient(270deg,rgba(0,0,0,.75),transparent)}
+  .clip2 .tbadge{position:absolute;left:2px;top:2px;font-size:11px;color:#fff;background:var(--brand);border-radius:4px;padding:0 3px;z-index:3;pointer-events:none}
   .clip2 .hnd2::after{content:"";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:3px;height:40%;
                       background:rgba(255,255,255,.5);border-radius:2px}
   .clip2:hover .hnd2::after{background:var(--brand)}
@@ -876,6 +877,7 @@ function asmRenderTL(){
     el.innerHTML=`<div class="thumb" style="background-image:url('${c.thumb||''}')"></div>
       ${fiW>1?`<div class="fadetri l" style="width:${fiW}px"></div>`:''}${foW>1?`<div class="fadetri r" style="width:${foW}px"></div>`:''}
       ${c.type!=="image"?`<span class="vol">${c.mute?'🔇':Math.round(c.vol*100)+'%'}</span>`:''}
+      ${c.trans&&c.trans.type==='crossfade'?`<span class="tbadge" title="Crossfade ${c.trans.dur}s">⇄</span>`:''}
       <span class="lbl">${c.type==="image"?"🖼 ":""}${c.name||c.sid}</span>
       <div class="hnd2 l"></div><div class="hnd2 r"></div>`;
     lane.appendChild(el);
@@ -1064,6 +1066,11 @@ function asmInspector(){
         <input type="range" class="rng" id="ai-fin" min="0" max="3" step="0.1" value="${it.fadeIn||0}" style="width:100%"></div>
       <div class="asm-insp-row"><label>Desvanecer (fade out) <span>${(it.fadeOut||0).toFixed(1)}s</span></label>
         <input type="range" class="rng" id="ai-fout" min="0" max="3" step="0.1" value="${it.fadeOut||0}" style="width:100%"></div>`;
+    if(ASM.clips.indexOf(it)>0){ const tr=it.trans&&it.trans.type==="crossfade";
+      h+=`<div class="asm-insp-row" style="margin-top:10px"><label>Transición de entrada</label>
+          <div class="seg" id="ai-trans"><button data-v="none" class="${tr?'':'sel'}">Corte</button><button data-v="crossfade" class="${tr?'sel':''}">Crossfade</button></div></div>
+        <div class="asm-insp-row" id="ai-trandur-row" style="${tr?'':'display:none'}"><label>Duración <span>${((it.trans&&it.trans.dur)||0.5).toFixed(1)}s</span></label>
+          <input type="range" class="rng" id="ai-trandur" min="0.2" max="2" step="0.1" value="${(it.trans&&it.trans.dur)||0.5}" style="width:100%"></div>`; }
   }else{
     const cor=v=>`<button data-pos="${v}" class="${it.pos===v?'sel':''}">${v==='center'?'●':'▪'}</button>`;
     h=`<div class="asm-insp-row"><label>Tamaño <span>${Math.round(it.size*100)}%</span></label>
@@ -1080,6 +1087,12 @@ function asmInspector(){
     const fi=$("#ai-fin"),fo=$("#ai-fout");
     if(fi)fi.oninput=ev=>{it.fadeIn=+ev.target.value;lbl(fi,it.fadeIn.toFixed(1)+"s");asmRenderTL();};
     if(fo)fo.oninput=ev=>{it.fadeOut=+ev.target.value;lbl(fo,it.fadeOut.toFixed(1)+"s");asmRenderTL();};
+    const tseg=$("#ai-trans");
+    if(tseg) tseg.querySelectorAll("button").forEach(b=>b.onclick=()=>{ asmPush();
+      tseg.querySelectorAll("button").forEach(x=>x.classList.remove("sel")); b.classList.add("sel");
+      if(b.dataset.v==="crossfade"){ it.trans={type:"crossfade",dur:(it.trans&&it.trans.dur)||0.5}; }
+      else delete it.trans; asmInspector(); asmRenderTL(); });
+    const td=$("#ai-trandur"); if(td)td.oninput=ev=>{ if(!it.trans)it.trans={type:"crossfade"}; it.trans.dur=+ev.target.value; lbl(td,it.trans.dur.toFixed(1)+"s"); };
   }else{
     const sz=$("#ao-size"); sz.oninput=ev=>{it.size=+ev.target.value/100;lbl(sz,Math.round(it.size*100)+"%");asmRenderOverlays(ASM.t);};
     box.querySelectorAll("#ao-pos [data-pos]").forEach(b=>b.onclick=()=>{asmPush();it.pos=b.dataset.pos;delete it.x;delete it.y;asmInspector();asmRenderOverlays(ASM.t);});
@@ -1105,8 +1118,8 @@ async function asmApply(){
   if(!ASM.clips.length){ alert("Agrega al menos un clip a la pista Video."); return; }
   asmPause();
   const body={
-    main:ASM.clips.map(c=>c.type==="image"?{sid:c.sid,type:"image",dur:c.dur,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0}
-       :{sid:c.sid,type:"video",in:c.in,out:c.out,vol:c.vol,mute:c.mute,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0}),
+    main:ASM.clips.map(c=>c.type==="image"?{sid:c.sid,type:"image",dur:c.dur,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}
+       :{sid:c.sid,type:"video",in:c.in,out:c.out,vol:c.vol,mute:c.mute,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}),
     overlays:ASM.overlays.map(o=>({sid:o.sid,type:o.type,start:o.start,dur:o.dur,pos:o.pos,size:o.size})),
     glossary:$("#asmGloss").value||"", highlights:2 };
   show("#s-analyzing"); setBar("#a-fill",2); $("#a-msg").textContent="Montando tu línea de tiempo…";

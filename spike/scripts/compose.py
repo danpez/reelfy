@@ -99,6 +99,33 @@ def _overlay_xy(pos, W, H, mx, my):
     }.get(pos, ("(W-w)/2", "(H-h)/2"))
 
 
+def _concat_xfade(parts, trans, out):
+    """Une los segmentos con TRANSICIONES: crossfade (xfade+acrossfade) en los
+    bordes que lo pidan; los demás bordes usan un xfade de ~1 frame (corte limpio),
+    para mantener un solo grafo uniforme. Re-encoda (necesario para mezclar)."""
+    durs = [probe(p)["dur"] for p in parts]
+    inputs = []
+    for p in parts:
+        inputs += ["-i", str(p)]
+    fc = []
+    vprev, aprev = "[0:v]", "[0:a]"
+    acc = durs[0]
+    for i in range(1, len(parts)):
+        t = trans[i] if i < len(trans) else None
+        cross = bool(t and t.get("type") == "crossfade" and float(t.get("dur", 0)) > 0.05)
+        T = float(t.get("dur")) if cross else 0.04
+        T = max(0.03, min(T, durs[i] - 0.05, acc - 0.05))
+        off = acc - T
+        vo, ao = f"[vx{i}]", f"[ax{i}]"
+        fc.append(f"{vprev}[{i}:v]xfade=transition=fade:duration={T:.3f}:offset={off:.3f}{vo}")
+        fc.append(f"{aprev}[{i}:a]acrossfade=d={T:.3f}{ao}")
+        vprev, aprev = vo, ao
+        acc = acc + durs[i] - T
+    _run([FFMPEG, "-y", *inputs, "-filter_complex", ";".join(fc),
+          "-map", vprev, "-map", aprev, "-c:v", "h264_videotoolbox", "-b:v", "12M",
+          "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)])
+
+
 def compose(spec, out, work, on_step=None):
     """spec: ver módulo. Devuelve la ruta del video compuesto (out)."""
     def step(m):
@@ -135,13 +162,19 @@ def compose(spec, out, work, on_step=None):
             _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout)
         parts.append(seg)
 
-    # 2) concat (demuxer: mismos parámetros -> sin re-encode)
+    # 2) unir: si hay TRANSICIONES (crossfade) usa xfade; si no, concat demuxer (rápido)
     step("Uniendo la línea de tiempo…")
-    listf = work / "concat.txt"
-    listf.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts))
+    trans = [m.get("trans") for m in main]
     main_mp4 = work / "main.mp4"
-    _run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(listf),
-          "-c", "copy", str(main_mp4)])
+    has_trans = any(t and t.get("type") == "crossfade" and float(t.get("dur", 0)) > 0.05
+                    for t in trans[1:])
+    if has_trans and len(parts) > 1:
+        _concat_xfade(parts, trans, main_mp4)
+    else:
+        listf = work / "concat.txt"
+        listf.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts))
+        _run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(listf),
+              "-c", "copy", str(main_mp4)])
 
     # 3) overlays (capas encimadas)
     overlays = [o for o in spec.get("overlays", []) if o.get("path")]
