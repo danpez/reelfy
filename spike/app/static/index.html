@@ -451,10 +451,9 @@
       <div class="hint" id="g-msg" style="margin-top:8px">Se prepara una sola vez: modelo de voz, IA de lenguaje y sincronía (~4 GB). No cierres la app.</div>
     </div>
     <div style="margin-top:20px;display:flex;gap:10px;flex-wrap:wrap">
-      <button class="btn" id="go" disabled><svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Procesar con IA</button>
-      <button class="btn ghost" id="goEdit" disabled><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Editor de línea de tiempo</button>
+      <button class="btn" id="go" disabled><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Continuar al editor →</button>
     </div>
-    <div class="hint" id="setupHint">Procesar con IA: rápido, un video → subtítulos y cortes. Editor de línea de tiempo: monta varios videos e imágenes, recórtalos, reordénalos y encima capas; luego aplicas la IA sobre tu composición.</div>
+    <div class="hint" id="setupHint">Primero montas tu video en el editor de línea de tiempo (recorta, reordena, encima capas). Cuando quede listo, aplicas la IA — subtítulos, cortes y shorts — sobre tu composición.</div>
   </div></section>
 
   <!-- ============ EDITOR DE LÍNEA DE TIEMPO (ensamblaje antes de la IA) ============ -->
@@ -795,8 +794,9 @@ function pick(files){
     fl.innerHTML=files.map(f=>`<div class="f">${ICO("film")} ${f.name}<span class="sz">${(f.size/1048576).toFixed(1)} MB</span></div>`).join("");
     $("#go").innerHTML=ICO("scissors")+`Continuar al editor (${files.length}) →`;
   }
-  $("#go").disabled=!ENGINE_READY;
-  const ge=$("#goEdit"); if(ge) ge.style.display="none";   // el editor es el único camino
+  // Entrar al editor NO requiere el motor de IA (Whisper corre después, al aplicar
+  // la IA). Basta con tener archivo(s) y licencia válida.
+  $("#go").disabled=!(FILES.length&&LICENSED);
 }
 // El editor de línea de tiempo es el PRIMER paso SIEMPRE (para cualquier edición).
 $("#go").onclick=()=>enterAssembly(FILES);
@@ -847,6 +847,9 @@ const asmP=()=>$("#asmPlayer"), asmI=()=>$("#asmImg");
 
 async function enterAssembly(files){
   ASM={sources:[],clips:[],overlays:[],sel:null,t:0,playing:false,px:120,basePx:0,zoom:1,ci:-1,snap:true};
+  // Arrastra al editor lo que el usuario escribió en la pantalla de subida:
+  // nombres propios/marcas y cuántos shorts quiere. Así SÍ se respetan.
+  const g=($("#glossary")?.value||"").trim(); if(g && $("#asmGloss") && !$("#asmGloss").value) $("#asmGloss").value=g;
   show("#s-assembly"); asmRenderSources(); asmRenderTL(); asmInspector();
   asmP().onended=null;
   if(files&&files.length){
@@ -1198,7 +1201,7 @@ async function asmApply(){
     main:ASM.clips.map(c=>c.type==="image"?{sid:c.sid,type:"image",dur:c.dur,start:c.start||0,layer:c.layer||0,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}
        :{sid:c.sid,type:"video",in:c.in,out:c.out,vol:c.vol,mute:c.mute,start:c.start||0,layer:c.layer||0,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,trans:c.trans}),
     overlays:ASM.overlays.map(o=>({sid:o.sid,type:o.type,start:o.start,dur:o.dur,pos:o.pos,size:o.size})),
-    glossary:$("#asmGloss").value||"", highlights:2 };
+    glossary:$("#asmGloss").value||"", highlights:Math.max(1,Math.min(5,parseInt($("#highlights").value,10)||2)) };
   show("#s-analyzing"); setBar("#a-fill",2); $("#a-msg").textContent="Montando tu línea de tiempo…";
   let resp; try{ resp=await fetch("/compose",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); }
   catch(e){ return fail("No se pudo iniciar el procesamiento."); }
@@ -1255,11 +1258,13 @@ async function initSetup(){
   let s; try{ s=await(await fetch("/setup")).json(); }catch(e){ return; }
   LICENSED=s.licensed!==false;
   $("#licGate").style.display=LICENSED?"none":"block";
+  // El botón "Continuar al editor" solo depende de tener archivo + licencia; el
+  // motor de IA puede seguir preparándose en segundo plano (se necesita al aplicar).
+  $("#go").disabled=!(LICENSED&&FILES.length);
   if(s.state==="ready"){ ENGINE_READY=LICENSED; $("#setupGate").style.display="none";
-    $("#go").disabled=!(ENGINE_READY&&FILES.length); $("#goEdit").disabled=!ENGINE_READY;
     if(!LICENSED) setTimeout(initSetup,4000);
     return; }
-  ENGINE_READY=false; $("#go").disabled=true;
+  ENGINE_READY=false;
   $("#setupGate").style.display="block";
   if(s.state==="missing"){ fetch("/setup/start",{method:"POST"}); }
   if(s.state==="error"){ $("#g-msg").textContent=s.msg+" — reintentando…";
