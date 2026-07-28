@@ -52,27 +52,39 @@ def _has_audio(path):
     return bool(r.stdout.strip())
 
 
-def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0):
+def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0, fin=0.0, fout=0.0):
     """Recorta [in,out] y normaliza a WxH/fps con audio 48k estéreo (silencio si
-    no tiene). cover-crop para llenar el lienzo sin deformar. `vol` ajusta el
-    volumen del clip (0 = mudo)."""
-    vf = (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
-          f"crop={w}:{h},fps={fps},setsar=1,format=yuv420p")
+    no tiene). cover-crop para llenar el lienzo. `vol` volumen (0=mudo); `fin`/`fout`
+    desvanecen VIDEO (a/desde negro) y AUDIO al inicio/fin del clip."""
     dur = max(0.1, t_out - t_in)
+    fin = max(0.0, min(float(fin), dur / 2)); fout = max(0.0, min(float(fout), dur / 2))
+    vf = [f"scale={w}:{h}:force_original_aspect_ratio=increase",
+          f"crop={w}:{h}", f"fps={fps}", "setsar=1", "format=yuv420p"]
+    af = [f"volume={max(0.0, float(vol)):.3f}", "aresample=48000"]
+    if fin > 0.01:
+        vf.append(f"fade=t=in:st=0:d={fin:.3f}"); af.append(f"afade=t=in:st=0:d={fin:.3f}")
+    if fout > 0.01:
+        vf.append(f"fade=t=out:st={dur - fout:.3f}:d={fout:.3f}")
+        af.append(f"afade=t=out:st={dur - fout:.3f}:d={fout:.3f}")
     cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src), "-t", f"{dur:.3f}"]
     if not _has_audio(src):
         cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
                 "-map", "0:v:0", "-map", "1:a:0"]
-    af = f"volume={max(0.0, float(vol)):.3f},aresample=48000"
-    cmd += ["-vf", vf, "-af", af, "-c:v", "h264_videotoolbox", "-b:v", "12M",
+    cmd += ["-vf", ",".join(vf), "-af", ",".join(af), "-c:v", "h264_videotoolbox", "-b:v", "12M",
             "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)]
     _run(cmd)
 
 
-def _norm_image(src, dur, out, w, h, fps):
-    """Imagen fija -> clip de `dur` s a WxH/fps con audio en silencio."""
-    vf = (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
-          f"crop={w}:{h},fps={fps},setsar=1,format=yuv420p")
+def _norm_image(src, dur, out, w, h, fps, fin=0.0, fout=0.0):
+    """Imagen fija -> clip de `dur` s a WxH/fps con audio en silencio (+ fade opcional)."""
+    fin = max(0.0, min(float(fin), dur / 2)); fout = max(0.0, min(float(fout), dur / 2))
+    vf = [f"scale={w}:{h}:force_original_aspect_ratio=increase",
+          f"crop={w}:{h}", f"fps={fps}", "setsar=1", "format=yuv420p"]
+    if fin > 0.01:
+        vf.append(f"fade=t=in:st=0:d={fin:.3f}")
+    if fout > 0.01:
+        vf.append(f"fade=t=out:st={dur - fout:.3f}:d={fout:.3f}")
+    vf = ",".join(vf)
     _run([FFMPEG, "-y", "-loop", "1", "-t", f"{dur:.3f}", "-i", str(src),
           "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
           "-vf", vf, "-c:v", "h264_videotoolbox", "-b:v", "12M",
@@ -114,12 +126,13 @@ def compose(spec, out, work, on_step=None):
     for i, s in enumerate(main):
         step(f"Preparando clip {i + 1}/{len(main)}…")
         seg = work / f"seg_{i:03d}.mp4"
+        fin = float(s.get("fadeIn", 0) or 0); fout = float(s.get("fadeOut", 0) or 0)
         if s.get("type") == "image":
-            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps)
+            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout)
         else:
             t_in = float(s.get("in", 0)); t_out = float(s.get("out", t_in + 5))
             vol = 0.0 if s.get("mute") else float(s.get("vol", 1.0))
-            _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol)
+            _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout)
         parts.append(seg)
 
     # 2) concat (demuxer: mismos parámetros -> sin re-encode)

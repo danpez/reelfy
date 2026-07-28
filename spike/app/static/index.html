@@ -230,6 +230,9 @@
   .clip2.dragging{opacity:.5}
   .clip2 .hnd2{position:absolute;top:0;width:9px;height:100%;cursor:ew-resize;z-index:3}
   .clip2 .hnd2.l{left:0}.clip2 .hnd2.r{right:0}
+  .clip2 .fadetri{position:absolute;top:0;height:100%;z-index:2;pointer-events:none}
+  .clip2 .fadetri.l{left:0;background:linear-gradient(90deg,rgba(0,0,0,.75),transparent)}
+  .clip2 .fadetri.r{right:0;background:linear-gradient(270deg,rgba(0,0,0,.75),transparent)}
   .clip2 .hnd2::after{content:"";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:3px;height:40%;
                       background:rgba(255,255,255,.5);border-radius:2px}
   .clip2:hover .hnd2::after{background:var(--brand)}
@@ -830,7 +833,7 @@ function asmRenderSources(){
 }
 function asmAddClip(sid,quiet){
   const s=ASM.sources.find(x=>x.id===sid); if(!s) return; if(!quiet) asmPush();
-  const c={_id:uid(),sid,type:s.type,name:s.name,thumb:s.thumb,srcdur:s.dur||0,vol:1,mute:false};
+  const c={_id:uid(),sid,type:s.type,name:s.name,thumb:s.thumb,srcdur:s.dur||0,vol:1,mute:false,fadeIn:0,fadeOut:0};
   if(s.type==="image") c.dur=3.0; else { c.in=0; c.out=Math.max(0.5,s.dur||5); }
   ASM.clips.push(c); asmFit(); if(!quiet) asmSelect("clip",c._id);
 }
@@ -869,7 +872,9 @@ function asmRenderTL(){
     const st=clipStart(i), w=Math.max(14,clipLen(c)*px);
     const el=document.createElement("div"); el.className="clip2"+(ASM.sel&&ASM.sel.id===c._id?" sel":"");
     el.style.left=(st*px)+"px"; el.style.width=w+"px"; el.dataset.id=c._id; el.dataset.i=i;
+    const fiW=(c.fadeIn||0)*px, foW=(c.fadeOut||0)*px;
     el.innerHTML=`<div class="thumb" style="background-image:url('${c.thumb||''}')"></div>
+      ${fiW>1?`<div class="fadetri l" style="width:${fiW}px"></div>`:''}${foW>1?`<div class="fadetri r" style="width:${foW}px"></div>`:''}
       ${c.type!=="image"?`<span class="vol">${c.mute?'🔇':Math.round(c.vol*100)+'%'}</span>`:''}
       <span class="lbl">${c.type==="image"?"🖼 ":""}${c.name||c.sid}</span>
       <div class="hnd2 l"></div><div class="hnd2 r"></div>`;
@@ -1054,6 +1059,11 @@ function asmInspector(){
         <label class="swlabel"><input type="checkbox" class="toggle" id="ai-mute" ${it.mute?'checked':''}> Silenciar audio de este clip</label>
         <div class="hint" style="margin-top:8px">Recorte: ${it.in.toFixed(1)}s – ${it.out.toFixed(1)}s (arrastra los bordes en el timeline).</div>`;
     }
+    // desvanecidos (fade) de audio+video al inicio/fin — para cualquier clip
+    h+=`<div class="asm-insp-row" style="margin-top:10px"><label>Aparecer (fade in) <span>${(it.fadeIn||0).toFixed(1)}s</span></label>
+        <input type="range" class="rng" id="ai-fin" min="0" max="3" step="0.1" value="${it.fadeIn||0}" style="width:100%"></div>
+      <div class="asm-insp-row"><label>Desvanecer (fade out) <span>${(it.fadeOut||0).toFixed(1)}s</span></label>
+        <input type="range" class="rng" id="ai-fout" min="0" max="3" step="0.1" value="${it.fadeOut||0}" style="width:100%"></div>`;
   }else{
     const cor=v=>`<button data-pos="${v}" class="${it.pos===v?'sel':''}">${v==='center'?'●':'▪'}</button>`;
     h=`<div class="asm-insp-row"><label>Tamaño <span>${Math.round(it.size*100)}%</span></label>
@@ -1067,6 +1077,9 @@ function asmInspector(){
     if(it.type==="image"){ const e=$("#ai-dur"); e.oninput=ev=>{it.dur=+ev.target.value;lbl(e,it.dur.toFixed(1)+"s");asmRenderTL();}; }
     else{ const v=$("#ai-vol"); if(v)v.oninput=ev=>{it.vol=+ev.target.value/100;lbl(v,Math.round(it.vol*100)+"%");asmRenderTL();};
       $("#ai-mute").onchange=ev=>{it.mute=ev.target.checked;asmInspector();asmRenderTL();}; }
+    const fi=$("#ai-fin"),fo=$("#ai-fout");
+    if(fi)fi.oninput=ev=>{it.fadeIn=+ev.target.value;lbl(fi,it.fadeIn.toFixed(1)+"s");asmRenderTL();};
+    if(fo)fo.oninput=ev=>{it.fadeOut=+ev.target.value;lbl(fo,it.fadeOut.toFixed(1)+"s");asmRenderTL();};
   }else{
     const sz=$("#ao-size"); sz.oninput=ev=>{it.size=+ev.target.value/100;lbl(sz,Math.round(it.size*100)+"%");asmRenderOverlays(ASM.t);};
     box.querySelectorAll("#ao-pos [data-pos]").forEach(b=>b.onclick=()=>{asmPush();it.pos=b.dataset.pos;delete it.x;delete it.y;asmInspector();asmRenderOverlays(ASM.t);});
@@ -1075,8 +1088,8 @@ function asmInspector(){
 function asmSplit(){
   const at=asmClipAt(ASM.t); if(!at||at.clip.type==="image"||at.local<0.3||at.local>clipLen(at.clip)-0.3) return; asmPush();
   const c=at.clip, cut=c.in+at.local;
-  const nc={_id:uid(),sid:c.sid,type:"video",name:c.name,thumb:c.thumb,srcdur:c.srcdur,vol:c.vol,mute:c.mute,in:cut,out:c.out};
-  c.out=cut; ASM.clips.splice(at.i+1,0,nc); asmRenderTL();
+  const nc={_id:uid(),sid:c.sid,type:"video",name:c.name,thumb:c.thumb,srcdur:c.srcdur,vol:c.vol,mute:c.mute,in:cut,out:c.out,fadeIn:0,fadeOut:c.fadeOut||0};
+  c.out=cut; c.fadeOut=0; ASM.clips.splice(at.i+1,0,nc); asmRenderTL();
 }
 function asmDelSel(){ const it=asmSel(); if(!it) return; asmPush();
   const arr=ASM.sel.track==="clip"?ASM.clips:ASM.overlays; const k=arr.indexOf(it); if(k>=0)arr.splice(k,1);
@@ -1092,8 +1105,8 @@ async function asmApply(){
   if(!ASM.clips.length){ alert("Agrega al menos un clip a la pista Video."); return; }
   asmPause();
   const body={
-    main:ASM.clips.map(c=>c.type==="image"?{sid:c.sid,type:"image",dur:c.dur}
-       :{sid:c.sid,type:"video",in:c.in,out:c.out,vol:c.vol,mute:c.mute}),
+    main:ASM.clips.map(c=>c.type==="image"?{sid:c.sid,type:"image",dur:c.dur,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0}
+       :{sid:c.sid,type:"video",in:c.in,out:c.out,vol:c.vol,mute:c.mute,fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0}),
     overlays:ASM.overlays.map(o=>({sid:o.sid,type:o.type,start:o.start,dur:o.dur,pos:o.pos,size:o.size})),
     glossary:$("#asmGloss").value||"", highlights:2 };
   show("#s-analyzing"); setBar("#a-fill",2); $("#a-msg").textContent="Montando tu línea de tiempo…";
