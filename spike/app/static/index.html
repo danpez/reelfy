@@ -1311,13 +1311,25 @@ function redo(){ if(!REDO.length)return; UNDO.push(JSON.stringify(PLAN)); restor
 
 /* ============ EDITOR ============ */
 const V=$("#srcVid"), CV=$("#cv"), CTX=CV.getContext("2d");
+// Si el formato es "Original", re-aplica el aspecto real cuando el video cargue.
+V.addEventListener("loadedmetadata",()=>{ if(FMT==="original") setFormat("original"); });
 const OS=document.createElement("canvas");
 const OCTX=OS.getContext("2d");
 const FMTS={"9:16":{cw:540,ch:960,ow:1080,max:338},"1:1":{cw:720,ch:720,ow:1080,max:380},
             "4:5":{cw:648,ch:810,ow:1080,max:360},"16:9":{cw:960,ch:540,ow:1920,max:560}};
 let CW=540,CH=960,OW=1080;
 function setFormat(v){
-  FMT=v; const f=FMTS[v]||FMTS["9:16"];
+  FMT=v;
+  let f;
+  if(v==="original"){
+    // "Original": el previsualizador usa el aspecto REAL del video cargado
+    // (no fuerza 9:16). El export conserva las dimensiones de la fuente.
+    const vw=(V&&V.videoWidth)||1080, vh=(V&&V.videoHeight)||1920;
+    const ar=vw/vh, ch=960, cw=Math.max(2,Math.round(ch*ar/2)*2);
+    f={cw,ch,ow:vw,max:(ar>=1?560:Math.round(601*ar))};
+  }else{
+    f=FMTS[v]||FMTS["9:16"];
+  }
   CW=f.cw; CH=f.ch; OW=f.ow;
   CV.width=CW; CV.height=CH;
   CV.style.aspectRatio=`${CW} / ${CH}`; CV.style.maxWidth=f.max+"px";
