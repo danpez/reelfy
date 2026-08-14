@@ -493,6 +493,42 @@ async def analyze(video: UploadFile, glossary: str = Form(""), highlights: int =
 SOURCES = INPUT / "sources"
 
 
+def _vcodec(path) -> str:
+    """Nombre del códec de video (h264, hevc, av1, prores, ...) o '' si falla."""
+    try:
+        r = subprocess.run(
+            [str(paths.FFPROBE), "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of", "default=nk=1:nw=1", str(path)],
+            capture_output=True, text=True, timeout=20)
+        return (r.stdout or "").strip().lower()
+    except Exception:  # noqa
+        return ""
+
+
+def _make_proxy(src, sid, info):
+    """Proxy web-friendly SOLO para el preview/editor. El WebView (WKWebView) no
+    reproduce videos con un lado > ~4096 px ni códecs exóticos (av1, prores…).
+    Genera un H.264 (≤1600 px de lado, yuv420p, faststart) para que el editor
+    cargue CUALQUIER video. El render SIEMPRE usa el original (sin redimensionar).
+    Devuelve el Path del proxy o None si no hace falta / falla."""
+    w0, h0 = int(info.get("w") or 0), int(info.get("h") or 0)
+    codec = _vcodec(src)
+    web_safe = codec in ("h264", "hevc")  # WKWebView reproduce H.264 y HEVC
+    if max(w0, h0) <= 1920 and web_safe:
+        return None  # ya es reproducible en el editor tal cual
+    pv = SOURCES / f"{sid}_proxy.mp4"
+    try:
+        subprocess.run(
+            [str(paths.FFMPEG), "-y", "-i", str(src), "-vf",
+             "scale='if(gte(iw,ih),min(1600,iw),-2)':'if(gte(iw,ih),-2,min(1600,ih))'",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(pv)],
+            check=True, stderr=subprocess.DEVNULL)
+        return pv
+    except Exception:  # noqa
+        return None
+
+
 @app.post("/sources")
 async def add_sources(files: list[UploadFile]):
     """Sube uno o varios archivos fuente (video o imagen) para el editor de timeline.
@@ -526,6 +562,13 @@ async def add_sources(files: list[UploadFile]):
                                check=True, stderr=subprocess.DEVNULL)
         except Exception:  # noqa
             thumb = None
+        # Proxy web-friendly para el editor si el original no es reproducible en el
+        # WebView (HEVC/AV1, o lado > ~4096 px). No afecta el render (usa el original).
+        if is_vid:
+            try:
+                _make_proxy(dst, sid, info)
+            except Exception:  # noqa
+                pass
         out.append({"id": sid, "name": up.filename, "type": typ, "ext": ext,
                     "dur": info.get("dur", 0), "w": info.get("w", 0), "h": info.get("h", 0),
                     "thumb": f"/tlsource/{sid}/thumb" if thumb else None})
@@ -544,6 +587,11 @@ def source_thumb(sid: str):
 @app.get("/tlsource/{sid}")
 def source_file(sid: str):
     sid = Path(sid).stem
+    # Preferimos el proxy web-friendly para el preview/editor (el original puede
+    # ser HEVC/oversized que el WebView no decodifica). El render usa el original.
+    proxy = SOURCES / f"{sid}_proxy.mp4"
+    if proxy.exists():
+        return FileResponse(proxy, headers={"Accept-Ranges": "bytes"})
     for p in SOURCES.glob(f"{sid}.*"):
         if not p.name.endswith("_t.jpg"):
             return FileResponse(p, headers={"Accept-Ranges": "bytes"})
