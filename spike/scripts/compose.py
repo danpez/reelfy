@@ -21,7 +21,8 @@ FFPROBE = str(paths.FFPROBE)
 
 
 def _run(cmd):
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    # run_ff reintenta con libx264 si videotoolbox falla (p. ej. lado > 4096 px).
+    paths.run_ff(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
 def probe(path):

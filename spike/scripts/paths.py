@@ -12,6 +12,7 @@ dev (Homebrew en Mac). Así el mismo motor corre en Win/Mac/Linux.
 """
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -124,6 +125,37 @@ def _bin(name, mac_dev_default):
 
 FFMPEG = _bin("ffmpeg", "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg")
 FFPROBE = _bin("ffprobe", "/opt/homebrew/opt/ffmpeg-full/bin/ffprobe")
+
+
+def _to_libx264(cmd):
+    """Cambia el encoder de hardware (h264_videotoolbox) por libx264 (software).
+    videotoolbox no soporta un lado > 4096 px; libx264 sí (cualquier tamaño)."""
+    out, i = [], 0
+    while i < len(cmd):
+        if cmd[i] == "-c:v" and i + 1 < len(cmd) and cmd[i + 1] == "h264_videotoolbox":
+            out += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+            i += 2
+            continue
+        if cmd[i] == "-b:v":  # libx264 usa -crf; quitamos -b:v y su valor
+            i += 2
+            continue
+        out.append(cmd[i])
+        i += 1
+    return out
+
+
+def run_ff(cmd, **kw):
+    """Corre un comando ffmpeg. Si falla usando h264_videotoolbox (p. ej. un video
+    con un lado > 4096 px, que el encoder por hardware de Apple rechaza con error
+    187), reintenta automáticamente con libx264 (software). Así el export a la
+    resolución ORIGINAL funciona aunque sea muy grande."""
+    kw.setdefault("check", True)
+    try:
+        return subprocess.run(cmd, **kw)
+    except subprocess.CalledProcessError:
+        if "h264_videotoolbox" in cmd:
+            return subprocess.run(_to_libx264(cmd), **kw)
+        raise
 
 # ollama embebido (binario + lib/ollama/runners). En la app viene en
 # SPIKE/bin/ollama-runtime/ollama[.exe]; en dev cae al del sistema.

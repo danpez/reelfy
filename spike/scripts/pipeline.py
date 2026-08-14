@@ -132,7 +132,8 @@ AUDIO_STUDIO = (
 
 def run(cmd, **kw):
     print(f"$ {' '.join(str(c) for c in cmd)}")
-    return subprocess.run(cmd, check=True, **kw)
+    # run_ff reintenta con libx264 si videotoolbox falla (p. ej. lado > 4096 px).
+    return paths_mod.run_ff(cmd, **kw)
 
 
 def run_ffmpeg_progress(cmd, total_dur, on_pct):
@@ -155,6 +156,9 @@ def run_ffmpeg_progress(cmd, total_dur, on_pct):
         p.wait()
         raise
     if p.returncode != 0:
+        # videotoolbox (hardware) rechaza un lado > 4096 px; reintenta con libx264.
+        if "h264_videotoolbox" in cmd:
+            return run_ffmpeg_progress(paths_mod._to_libx264(cmd), total_dur, on_pct)
         raise RuntimeError("ffmpeg failed")
 
 
