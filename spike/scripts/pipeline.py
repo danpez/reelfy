@@ -801,7 +801,14 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
         if on_step:
             on_step(m)
 
-    ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
+    # "original": modo SOLO SUBTÍTULOS — conserva tamaño y encuadre del video fuente
+    # (sin reencuadrar, sin recortar, sin redimensionar); solo quema los subtítulos.
+    keep_original = (fmt == "original")
+    if keep_original:
+        ow, oh = probe_dims(Path(plan["video"]))
+        ow -= ow % 2; oh -= oh % 2
+    else:
+        ow, oh = FORMATS.get(fmt, FORMATS["9:16"])
     stem = plan["stem"]; video = Path(plan["video"]); camera = plan.get("camera")
     out_dir = Path(out_dir); out_dir.mkdir(exist_ok=True)
     phrases, titles = plan["phrases"], {}
@@ -836,13 +843,13 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     if broll and plan.get("broll"):
         step("Buscando B-roll de stock…")
         broll_clips = broll_mod.resolve(plan["broll"])
-    beats = plan.get("beats") if dynamic else None
+    beats = plan.get("beats") if (dynamic and not keep_original) else None
 
     # ZERO-CASCADE: silence-trim happens INSIDE the main render (one encode total).
     # keeps = complement of the ENABLED cuts from the plan (the user can restore any
     # cut in the editor). Highlight timestamps get remapped onto the trimmed timeline.
     keeps = None
-    if dynamic and trim:      # trim=False (preview proxy): NO recorta silencios ->
+    if dynamic and trim and not keep_original:  # trim=False (preview proxy): NO recorta silencios ->
         src_dur = plan.get("duration") or probe_duration(video)   # sincroniza con el
         #                                     timeline (mismo tiempo original) y mantiene
         #                                     zoom/captions/tracking visibles.
@@ -879,6 +886,7 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
     step("Montando el video…" if not proxy else "Generando vista real…")
     full = Path(proxy_out) if (proxy and proxy_out) else out_dir / f"{stem}_reelfy{pf['suffix']}.mp4"
     reframe_and_burn(video, ass, full, cmds_path=plan["cmds_path"], beats=beats,
+                     track=not keep_original,
                      enhance_audio=enhance_audio, out_w=ow, out_h=oh, camera=camera,
                      keeps=keeps, zoom_amt=float(c.get("zoom_amt", ZOOM_IN)),
                      air=c.get("air"), logo=c.get("logo"), emojis=emojis,
