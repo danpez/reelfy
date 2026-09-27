@@ -1,7 +1,9 @@
 #!/bin/bash
 # Ensambla el motor de Reelfy dentro de src-tauri/engine/ para Linux (x86_64).
-# Requiere que whisper.cpp ya esté clonado+compilado en spike/whisper.cpp/build
-# (lo hace el workflow de CI). El modelo grande de whisper se descarga en runtime.
+# Requiere que whisper.cpp ya esté clonado+compilado en spike/whisper.cpp/build y
+# acestep.cpp (musica IA, CPU/Vulkan con backends dinamicos) en spike/acestep.cpp/build
+# (lo hace el workflow de CI). Los modelos grandes (whisper, LLM, afinador, sujeto y
+# musica) se descargan en el primer arranque.
 set -euo pipefail
 cd "$(dirname "$0")/.."                        # -> reelfy-desktop/
 ROOT="$(cd .. && pwd)"
@@ -14,16 +16,18 @@ OLLAMAURL="https://ollama.com/download/ollama-linux-amd64.tgz"
 
 mkdir -p "$CACHE"
 
-echo "==> [1/5] código + assets"
+echo "==> [1/6] código + assets"
 rm -rf "$ENGINE"
 mkdir -p "$ENGINE"/{scripts,app,assets,models,bin,whisper.cpp/build/bin}
 rsync -a --exclude __pycache__ "$SPIKE/scripts/" "$ENGINE/scripts/"
 rsync -a --exclude __pycache__ "$SPIKE/app/" "$ENGINE/app/"
 rsync -a "$SPIKE/assets/music" "$ENGINE/assets/"
+# Motion Engine: fuentes (OFL), iconos (Tabler, MIT) y SFX propios.
+rsync -a --exclude '*.wav' --exclude '_build.json' "$SPIKE/assets/motion" "$ENGINE/assets/"
 cp "$SPIKE/models/face_detection_yunet_2023mar.onnx" \
    "$SPIKE/models/rnnoise.rnnn" "$ENGINE/models/"
 
-echo "==> [2/5] whisper-cli + libs (rpath \$ORIGIN)"
+echo "==> [2/6] whisper-cli + libs (rpath \$ORIGIN)"
 cp "$SPIKE"/whisper.cpp/build/bin/whisper-cli "$ENGINE/whisper.cpp/build/bin/"
 # libs compartidas del build (pueden estar en build/bin, build/src o build/ggml/src)
 find "$SPIKE/whisper.cpp/build" -name "*.so*" -exec cp -a {} "$ENGINE/whisper.cpp/build/bin/" \; 2>/dev/null || true
@@ -31,7 +35,30 @@ if command -v patchelf >/dev/null; then
   patchelf --set-rpath '$ORIGIN' "$ENGINE/whisper.cpp/build/bin/whisper-cli" 2>/dev/null || true
 fi
 
-echo "==> [3/5] ffmpeg/ffprobe estáticos (con libass)"
+echo "==> [3/6] acestep.cpp (musica IA: ace-synth/ace-server + libggml y backends)"
+ACE="$SPIKE/acestep.cpp/build"
+SYNTH=$(find "$ACE" -type f -name ace-synth -perm -u+x 2>/dev/null | head -1)
+if [ -n "$SYNTH" ]; then
+  mkdir -p "$ENGINE/bin/acestep"
+  cp "$SYNTH" "$(dirname "$SYNTH")/ace-server" "$ENGINE/bin/acestep/"
+  # libggml*.so* y los backends cargables (cpu-<variante>, vulkan) junto al ejecutable
+  find "$ACE" -name "*.so*" -exec cp -a {} "$ENGINE/bin/acestep/" \; 2>/dev/null || true
+  if command -v patchelf >/dev/null; then
+    for b in "$ENGINE"/bin/acestep/ace-synth "$ENGINE"/bin/acestep/ace-server "$ENGINE"/bin/acestep/*.so*; do
+      [ -L "$b" ] || patchelf --set-rpath '$ORIGIN' "$b" 2>/dev/null || true
+    done
+  fi
+  # (sin tuberia a grep -q: con pipefail el SIGPIPE daria un falso negativo)
+  ACE_OUT=$("$ENGINE/bin/acestep/ace-synth" --help 2>&1 || true)
+  case "$ACE_OUT" in
+    *Usage*) echo "    ace-synth OK ($(ls "$ENGINE/bin/acestep" | wc -l | tr -d ' ') archivos)" ;;
+    *) echo "    AVISO: ace-synth no arranca (revisa las .so)"; echo "$ACE_OUT" | head -3 ;;
+  esac
+else
+  echo "    AVISO: sin spike/acestep.cpp/build — la música IA caerá a procedural"
+fi
+
+echo "==> [4/6] ffmpeg/ffprobe estáticos (con libass)"
 if [ ! -f "$CACHE/ff/ffmpeg" ]; then
   curl -sL -o "$CACHE/ff.tar.xz" "$FFURL"
   mkdir -p "$CACHE/ff"
@@ -40,7 +67,7 @@ fi
 cp "$CACHE/ff/ffmpeg" "$CACHE/ff/ffprobe" "$ENGINE/bin/"
 chmod +x "$ENGINE/bin/ffmpeg" "$ENGINE/bin/ffprobe"
 
-echo "==> [4/5] ollama embebido (binario + runners)"
+echo "==> [5/6] ollama embebido (binario + runners; qwen3.5 requiere >= 0.30)"
 # OJO: ollama publica el build de Linux como `ollama-linux-amd64.tar.zst`
 # (antes .tgz). Se resuelve el asset del JSON de la release y se extrae con zstd.
 # No-fatal: si falla, la app compila igual (solo sin LLM embebido), como en macOS.
@@ -69,10 +96,10 @@ if [ -f "$CACHE/ollama/bin/ollama" ]; then
        -exec rm -rf {} + 2>/dev/null || true
   echo "    ollama embebido ($(du -sh "$ENGINE/bin/ollama-runtime" | cut -f1), runners GPU podados)"
 else
-  echo "    ⚠ ollama no se pudo obtener — la IA de lenguaje no vendrá embebida (build continúa)"
+  echo "    AVISO: ollama no se pudo obtener — la IA de lenguaje no vendrá embebida (build continúa)"
 fi
 
-echo "==> [5/5] python-standalone + dependencias"
+echo "==> [6/6] python-standalone + dependencias"
 if [ ! -f "$CACHE/python.tar.gz" ]; then
   curl -sL -o "$CACHE/python.tar.gz" "$PYURL"
 fi
@@ -87,6 +114,14 @@ rm -rf "$ENGINE"/python/lib/python3.12/test \
 # datos de prueba de librerías científicas: peso muerto.
 find "$ENGINE/python/lib/python3.12/site-packages" -type d \( -name tests -o -name test \) \
      -prune -exec rm -rf {} + 2>/dev/null || true
+
+# humo: las dependencias nativas del motor pro cargan en el python ensamblado
+# (skia-python necesita libEGL/libGL/fontconfig: dependencias del .deb)
+# FATAL: render.py importa skia al cargar; sin estas libs /render pro, /frame y /preview mueren.
+if ! "$ENGINE/python/bin/python3" -c "import skia, onnxruntime, cv2, numpy, soundfile, scipy; print('    deps nativas OK: skia', skia.__version__, '| onnxruntime', onnxruntime.__version__, '| cv2', cv2.__version__)"; then
+  echo "ERROR: deps nativas del motor pro no cargan en el python ensamblado (¿faltan libegl1/libgl1/libfontconfig1?)" >&2
+  exit 1
+fi
 
 echo "OK -> $ENGINE ($(du -sh "$ENGINE" | cut -f1))"
 du -sh "$ENGINE"/* 2>/dev/null | sed "s|^|   |"   # desglose por carpeta

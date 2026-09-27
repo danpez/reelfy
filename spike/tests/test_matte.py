@@ -1,6 +1,10 @@
 """Tests de motion/matte.py: descarga del modelo, post-proceso de mascaras, upsample guiado,
 MatteProvider de punta a punta con video real y efectos de sujeto."""
+import atexit
+import os
 import pickle
+import shutil
+import tempfile
 import time
 
 import numpy as np
@@ -8,6 +12,13 @@ import pytest
 
 from conftest import TEST_MEDIA
 from motion import ctx as C, matte
+
+# las formas CoreML que compilan estas pruebas (de juguete) van a un temporal: no llenan ni
+# podan la cache real (DATA/models/matte/coreml) que usan los renders de verdad
+if not os.environ.get("REELFY_MATTE_COREML_DIR"):
+    _COREML_TMP = tempfile.mkdtemp(prefix="reelfy_coreml_test_")
+    os.environ["REELFY_MATTE_COREML_DIR"] = _COREML_TMP
+    atexit.register(shutil.rmtree, _COREML_TMP, True)
 
 
 # ---------------------------------------------------------------- modelo
@@ -437,8 +448,9 @@ def test_effects_perf_single_thread():
                 matte.RENDERERS[name](img, it, 1.0, 2.0, c)
                 best = min(best, time.perf_counter() - t)
             res[name] = best
-        assert res["color_pop"] < 0.012 and res["subject_outline"] < 0.016, res
-        assert res["bg_blur"] < 0.02 and res["bg_replace"] < 0.045, res
+        lf = _load_factor()
+        assert res["color_pop"] < 0.012 * lf and res["subject_outline"] < 0.016 * lf, res
+        assert res["bg_blur"] < 0.02 * lf and res["bg_replace"] < 0.045 * lf, res
     finally:
         cv2.setNumThreads(prev)
 
@@ -487,3 +499,253 @@ def test_without_person_model_falls_back_to_body_prior(tmp_path, monkeypatch):
         assert mp.prepare() and mp.ok and mp.warning
         assert all(mp.get(n).max() > 0.5 for n in range(10))
     assert tries["n"] == 1                                              # un solo intento por proceso
+
+
+# ---------------------------------------------------------------- ola 2: incremental, sesiones
+def _fake_models(monkeypatch, counter):
+    blob = np.zeros((160, 96), np.float32)
+    blob[30:150, 25:70] = 1.0
+    monkeypatch.setattr(matte, "model_ready", lambda p=None, which="modnet": True)
+    monkeypatch.setattr(matte, "detect_faces", lambda rgb: [(0.5, 0.25, 0.2, 0.1, 0.9)])
+
+    def fake_infer(x, threads=3):
+        counter["infer"] += 1
+        return cv2_resize(blob, x.shape[1], x.shape[0])
+    monkeypatch.setattr(matte, "infer", fake_infer)
+    monkeypatch.setattr(matte, "person_prob", lambda rgb, threads=1: np.ones((192, 192), np.float32))
+
+
+def _tiny(tmp_path, d=6):
+    import subprocess
+    import paths
+    v = tmp_path / "t.mp4"
+    if not v.exists():
+        subprocess.run([paths.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                        f"testsrc2=s=90x160:r=10:d={d}", "-pix_fmt", "yuv420p", str(v)], check=True)
+    return v
+
+
+def test_prepare_incremental_solo_calcula_los_huecos(tmp_path, monkeypatch):
+    """Agregar un efecto junto a otro ya calculado no rehace lo que esta en la cache: solo se
+    infieren las claves del hueco (+ contexto) y los cuadros previos no se reescriben."""
+    counter = {"infer": 0}
+    _fake_models(monkeypatch, counter)
+    v = _tiny(tmp_path)
+    mp = matte.MatteProvider(v, 90, 160, 10, [(0, 20)], tmp_path, "final", workers=1)
+    assert mp.prepare() and counter["infer"] >= 10
+    mt = {n: mp._png(n).stat().st_mtime_ns for n in range(20)}
+    counter["infer"] = 0
+    mp2 = matte.MatteProvider(v, 90, 160, 10, [(0, 40)], tmp_path, "final", workers=1)
+    assert mp2.missing_runs() == [(20, 40, 0, 40)]
+    assert mp2.prepare() and mp2.missing_ranges() == []
+    # 20 cuadros nuevos a paso 2 + contexto (6 cuadros) = ~14 claves, no las ~20 del rango entero
+    assert 10 <= counter["infer"] <= 16, counter
+    assert all(mp2._png(n).stat().st_mtime_ns == mt[n] for n in range(20))   # intactos
+    assert min(float(mp2.get(n).mean()) for n in range(20, 40)) > 0.1
+    assert "20-40" in mp2.stats
+
+
+def test_prepare_cancelado_no_escribe_mascaras_vacias(tmp_path, monkeypatch):
+    """Cancelar (excepcion desde on_pct) se propaga tal cual y NO deja PNG vacios en la cache
+    (antes el except del rango escribia ceros: el siguiente render usaba mascaras vacias)."""
+    counter = {"infer": 0}
+    _fake_models(monkeypatch, counter)
+    v = _tiny(tmp_path)
+
+    class Cancel(Exception):
+        pass
+    n = {"k": 0}
+
+    def pct(p):
+        n["k"] += 1
+        if n["k"] > 5:
+            raise Cancel()
+    mp = matte.MatteProvider(v, 90, 160, 10, [(0, 30)], tmp_path, "final", workers=1)
+    with pytest.raises(Cancel):
+        mp.prepare(pct)
+    written = [k for k in range(30) if mp._png(k).exists()]
+    assert all(float(mp.get(k).mean()) > 0.1 for k in written), written
+    assert mp.missing_runs()                                        # quedan huecos por hacer
+    assert matte.MatteProvider(v, 90, 160, 10, [(0, 30)], tmp_path, "final", workers=1).prepare()
+
+
+def test_sesion_onnx_compartida_y_pools_persistentes(monkeypatch):
+    """UNA sesion por proceso y modelo (compartida entre hilos) y executors que sobreviven
+    entre llamadas (antes: sesiones y hilos nuevos en cada rango)."""
+    if not matte.model_ready():
+        pytest.skip("sin modelo")
+    monkeypatch.setenv("REELFY_MATTE_COREML", "0")
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(3) as ex:
+        ss = list(ex.map(lambda _: matte._session(None), range(6)))
+    assert all(s is ss[0] for s in ss)
+    assert matte._pool("t4", 2) is matte._pool("t4", 2)
+    x = (np.random.default_rng(0).integers(0, 255, (64, 32, 3))).astype(np.uint8)
+    m = matte.infer(x)
+    assert m.shape == (64, 32) and m.dtype == np.float32 and 0 <= m.min() <= m.max() <= 1
+
+
+@pytest.mark.skipif(not matte.coreml_enabled(), reason="sin CoreML (no es macOS o no esta el EP)")
+def test_coreml_coincide_con_cpu(monkeypatch):
+    """MODNet por CoreML (Neural Engine) ~ CPU: diferencia de alfa despreciable."""
+    if not matte.model_ready():
+        pytest.skip("sin modelo")
+    rng = np.random.default_rng(3)
+    x = cv2_resize(rng.random((24, 16, 3)).astype(np.float32), 64, 96)
+    x = (np.clip(x, 0, 1) * 255).astype(np.uint8)
+    a = matte.infer(x)
+    monkeypatch.setenv("REELFY_MATTE_COREML", "0")
+    b = matte.infer(x)
+    assert np.abs(a - b).mean() < 5e-3 and np.abs(a - b).max() < 0.2
+    assert matte.engine() == "cpu"
+
+
+def test_background_rgba_grano_en_cualquier_cuadro():
+    """El grano del fondo de bg_replace indexa las texturas por modulo (n alto no rompe)."""
+    c = C.FrameCtx(W=90, H=160, fps=30, n=0)
+    for n in (0, 5, 6, 7, 13, 1001):
+        c.n = n
+        a = matte.background_rgba({"background": "gradient"}, 0.5, c)
+        assert a.shape == (160, 90, 4)
+
+
+def _load_factor() -> float:
+    """Holgura por carga (maquina compartida): con load > nucleos los tiempos suben en
+    proporcion; el limite se escala igual (tope 4x) en vez de fallar en falso."""
+    import os
+    try:
+        return min(4.0, max(1.0, os.getloadavg()[0] / (os.cpu_count() or 8)))
+    except OSError:
+        return 1.0
+
+
+def test_cache_coreml_por_forma_con_limite(tmp_path):
+    """Los modelos CoreML compilados (uno por forma de entrada) no crecen sin limite: LRU."""
+    import os
+    root = tmp_path / "coreml"
+    for i in range(9):
+        d = root / f"modnet_x_{i}"
+        d.mkdir(parents=True)
+        os.utime(d, (1000 + i, 1000 + i))
+    (root / "person_x").mkdir()
+    cur = root / "modnet_x_0"                         # el mas viejo, pero es el que se usa
+    matte._prune_coreml(cur, keep=4)
+    left = sorted(d.name for d in root.iterdir())
+    assert "modnet_x_0" in left and "person_x" in left
+    assert len([n for n in left if n.startswith("modnet_")]) == 4
+    assert "modnet_x_8" in left and "modnet_x_1" not in left
+
+
+def test_cache_coreml_no_poda_formas_recientes(tmp_path):
+    """Una forma usada hace poco (otro proceso la compila o la usa) no se poda aunque pase el
+    limite; la carpeta de la cache se puede mover con REELFY_MATTE_COREML_DIR."""
+    import os as _os
+    root = tmp_path / "coreml"
+    for i in range(6):
+        d = root / f"modnet_x_{i}"
+        d.mkdir(parents=True)
+        if i < 4:
+            _os.utime(d, (1000 + i, 1000 + i))          # viejas
+    cur = root / "modnet_x_0"
+    matte._prune_coreml(cur, keep=2)
+    left = sorted(d.name for d in root.iterdir())
+    assert {"modnet_x_4", "modnet_x_5", "modnet_x_0"} <= set(left)   # recientes + la actual
+    assert "modnet_x_1" not in left and "modnet_x_2" not in left
+    assert str(matte.coreml_dir()) == _os.environ["REELFY_MATTE_COREML_DIR"]
+
+
+def test_coreml_fallo_no_queda_en_cpu_para_siempre(monkeypatch):
+    """Si crear la sesion CoreML falla, no se guarda None para siempre: se reintenta despues de
+    COREML_RETRY_S (hasta 3 intentos)."""
+    import types
+    calls = {"n": 0}
+
+    class FakeOrt(types.SimpleNamespace):
+        pass
+
+    def boom(*a, **kw):
+        calls["n"] += 1
+        raise RuntimeError("compilacion interrumpida")
+    import onnxruntime as ort
+    monkeypatch.setattr(ort, "InferenceSession", boom)
+    shape = (32, 17)                                          # forma que nadie mas usa
+    key = ("modnet-coreml", str(matte.model_path("modnet")), shape)
+    matte._COREML_FAILS.pop(key, None)
+    assert matte._coreml_session(shape) is None and calls["n"] == 1
+    assert matte._coreml_session(shape) is None and calls["n"] == 1   # dentro del respiro
+    assert key not in matte._SESS                                       # no quedo None cacheado
+    n, t = matte._COREML_FAILS[key]
+    matte._COREML_FAILS[key] = (n, t - matte.COREML_RETRY_S - 1)        # paso el respiro
+    assert matte._coreml_session(shape) is None and calls["n"] == 2
+    matte._COREML_FAILS[key] = (3, 0.0)                                 # 3 fallos: ya no
+    assert matte._coreml_session(shape) is None and calls["n"] == 2
+    matte._COREML_FAILS.pop(key, None)
+
+
+def test_incremental_hueco_sin_caras_dentro_de_rango_con_caras(tmp_path, monkeypatch):
+    """La cara solo se detecta en los cuadros < 18 (despues la persona gira la cabeza). Calcular
+    [0,20) y luego extender a [0,40) debe dar lo MISMO en 20-39 que calcular [0,40) de una vez:
+    el gating y el recorte son del rango pedido, no del hueco (antes el hueco quedaba en cero y
+    la persona desaparecia bajo bg_replace/color_pop)."""
+    blob = np.zeros((160, 96), np.float32)
+    blob[30:150, 25:70] = 1.0
+    monkeypatch.setattr(matte, "model_ready", lambda p=None, which="modnet": True)
+    cur = [0]
+    orig = matte._read_range
+
+    def rr(video, a, b, W, H, fps, step=None):
+        for n, rgb in orig(video, a, b, W, H, fps, step):
+            cur[0] = n
+            yield n, rgb
+    monkeypatch.setattr(matte, "_read_range", rr)
+    det = {"n": 0}
+
+    def faces(rgb):
+        det["n"] += 1
+        f32 = np.float32                                 # como YuNet: escalares de numpy
+        return [(f32(0.5), f32(0.25), f32(0.2), f32(0.1), 0.9)] if cur[0] < 18 else []
+    monkeypatch.setattr(matte, "detect_faces", faces)
+    monkeypatch.setattr(matte, "infer", lambda x, threads=3: cv2_resize(blob, x.shape[1], x.shape[0]))
+    monkeypatch.setattr(matte, "person_prob", lambda rgb, threads=1: np.ones((192, 192), np.float32))
+    v = _tiny(tmp_path)
+    full = matte.MatteProvider(v, 90, 160, 10, [(0, 40)], tmp_path / "a", "final", workers=1)
+    assert full.prepare()
+    ref = [float(full.get(n).mean()) for n in range(20, 40)]
+    assert min(ref) > 0.1
+    m1 = matte.MatteProvider(v, 90, 160, 10, [(0, 20)], tmp_path / "b", "final", workers=1)
+    assert m1.prepare()
+    det["n"] = 0
+    m2 = matte.MatteProvider(v, 90, 160, 10, [(0, 40)], tmp_path / "b", "final", workers=1)
+    assert m2.missing_runs() == [(20, 40, 0, 40)]
+    assert m2.prepare()
+    inc = [float(m2.get(n).mean()) for n in range(20, 40)]
+    assert inc == pytest.approx(ref, abs=0.01), (inc, ref)
+    assert det["n"] <= 11                              # solo las claves nuevas (20..38, 39)
+    st = m2.stats["20-40"]
+    assert st["person"] is True and st["crop"] == full.stats["0-40"]["crop"]
+    assert st["range"] == [0, 40] and st["face_keys"] >= 9
+    assert (m2.dir / "faces.json").exists()
+    import json
+    fj = json.loads((m2.dir / "faces.json").read_text())["faces"]
+    assert len(fj) >= 20 and fj["0"] and fj["20"] == []
+
+
+def test_save_meta_concurrente_no_lanza(tmp_path):
+    """Dos prepare sobre la misma cache en hilos (ensure_analysis + export): _save_meta usa un
+    temporal por proceso e hilo y nunca lanza; las calidades de ambos quedan."""
+    from concurrent.futures import ThreadPoolExecutor
+    mps = [matte.MatteProvider(tmp_path / "x.mp4", 40, 60, 10, [(0, 5)], tmp_path, "final")
+           for _ in range(8)]
+    mps[0].dir.mkdir(parents=True, exist_ok=True)
+
+    def save(i):
+        mp = mps[i]
+        for k in range(20):
+            mp.stats[f"{i * 100 + k}-{i * 100 + k + 1}"] = {"quality": 0.9}
+            mp._save_meta()
+        return True
+    with ThreadPoolExecutor(8) as ex:
+        assert all(ex.map(save, range(8)))
+    import json
+    d = json.loads((mps[0].dir / "meta.json").read_text())["ranges"]
+    assert len(d) == 160 and not list(mps[0].dir.glob("*.tmp*"))

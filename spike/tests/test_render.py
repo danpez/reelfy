@@ -659,3 +659,404 @@ def test_matte_del_frente_en_inset(tmp_path):
     m = comp.matte_out(3, None)
     assert m.shape == (540, 960) and m[:, 328:632].min() == 1.0
     assert m[:, :328].max() == 0.0 and m[:, 632:].max() == 0.0
+
+
+# ------------------------------------------------------------------ ola 2: motor
+def test_ventana_de_transicion_usa_effective_frac_y_dur_robusto():
+    """Mezclas (slide/circle/film_burn/torn_paper): la ventana SIEMPRE empieza en la union, sin
+    importar `align` (antes align center/end hacia que A empujara a A hasta la union y luego
+    saltara). Centradas: respetan align. dur basura, 0 o negativa -> default del kind (el corte
+    seco es el kind 'cut'; normalize acota dur al rango del kind)."""
+    from motion import transitions as TR
+    mods = R.load_modules(dict(STUBS, transitions="motion.transitions"), quiet=True)
+    cuts = [{"start": 1.0, "end": 1.4, "enabled": True}]
+    fx = dict(NOCAP, transitions=[
+        {"id": "a", "kind": "slide", "at": 1.1, "dur": 0.4, "align": "center"},
+        {"id": "b", "kind": "circle", "at": 1.1, "dur": 0.4, "align": "end"},
+        {"id": "c", "kind": "flash", "at": 1.1, "dur": 0.4, "align": "end"},
+        {"id": "d", "kind": "flash", "at": 1.1, "dur": 0.4},
+        {"id": "e", "kind": "whip", "at": 1.1, "dur": 0.4, "align": "start"}])
+    job, _, _, _ = _job(fx, cuts=cuts, mods=mods)
+    tr = {t["id"]: t for t in job["transitions"]}
+    J, L = 30, 12
+    assert tr["a"]["_F0"] == J and tr["b"]["_F0"] == J           # mezclas: desde la union
+    assert tr["c"]["_F0"] == J - L and tr["c"]["_F1"] == J       # centrada + end: termina en J
+    assert tr["d"]["_F0"] == J - L // 2                          # centrada: mitad antes
+    assert tr["e"]["_F0"] == J                                   # start: empieza en la union
+    assert R.transition_frac({"kind": "slide", "align": "center"}, mods) == 0.0
+    # dur robusto (build_job recibe el plan ya normalizado, pero no debe romperse sin el)
+    assert R.transition_dur({"kind": "film_burn", "dur": "abc"}, mods) == \
+        pytest.approx(TR.DEFAULTS["film_burn"]["dur"])
+    assert R.transition_dur({"kind": "flash", "dur": float("nan")}, mods) == pytest.approx(0.30)
+    assert R.transition_dur({"kind": "slide", "dur": 0}, mods) == \
+        pytest.approx(TR.DEFAULTS["slide"]["dur"])
+    assert R.transition_dur({"kind": "whip", "dur": -1}, mods) == pytest.approx(TR.DEFAULTS["whip"]["dur"])
+    assert R.transition_dur({"kind": "glitch", "dur": 9}, mods) == 4.0
+    tl = Timeline.from_plan(S.normalize({"video": "x.mp4", "duration": 4.0, "cuts": cuts,
+                                         "version": 2, "fx": NOCAP}), fps=FPS)
+    raw = {"fx": dict(NOCAP, transitions=[{"id": "z", "kind": "slide", "at": 1.1, "dur": "abc"},
+                                          {"id": "y", "kind": "flash", "at": 1.1, "dur": 0}]),
+           "phrases": [], "shots": []}
+    o = R._resolve_opts({"W": W, "H": H, "fps": FPS, "modules": STUBS, "dither": 0.0})
+    job2, _ = R.build_job(raw, tl, o, mods)
+    z = next(t for t in job2["transitions"] if t["id"] == "z")
+    assert z["_F1"] - z["_F0"] == round(TR.DEFAULTS["slide"]["dur"] * FPS)
+    y = next(t for t in job2["transitions"] if t["id"] == "y")    # dur 0 -> default del kind
+    assert y["_F1"] - y["_F0"] == round(TR.DEFAULTS["flash"]["dur"] * FPS)
+    # en el pipeline real normalize acota dur al rango del kind (0 nunca llega a build_job)
+    pn = S.normalize({"video": "x.mp4", "duration": 4.0, "version": 2,
+                      "fx": dict(NOCAP, transitions=[{"kind": "slide", "at": 1.1, "dur": 0}])})
+    assert pn["fx"]["transitions"][0]["dur"] > 0
+
+
+def test_face0_para_graficos_anclados_a_la_cara():
+    fx = dict(NOCAP, graphics=[
+        {"id": "g1", "kind": "doodle", "start": 1.0, "end": 2.0, "anchor": "face_left",
+         "x": None, "y": None},
+        {"id": "g2", "kind": "doodle", "start": 1.0, "end": 2.0, "x": 0.3, "y": 0.3},
+        {"id": "g3", "kind": "doodle", "start": 2.5, "end": 3.5, "anchor": "face"}])
+    job, _, mods, _ = _job(fx)
+    face = np.full((job["n_frames"], 4), np.nan)
+    face[36:40] = [0.4, 0.3, 0.2, 0.1]                   # primera cara valida dentro de g1
+    R.set_anchors(job, face, mods)
+    g = {it["id"]: it for it in job["graphics"]}
+    assert g["g1"]["_face0"] == pytest.approx([0.4, 0.3, 0.2, 0.1])
+    assert "_face0" not in g["g2"]                       # tiene x/y: no se ancla
+    assert "_face0" not in g["g3"]                       # sin cara en su rango
+    # fuera de 9:16: la cara se expresa en la caja de layout
+    job2, _, mods2, _ = _job(fx, W=384, H=216)
+    face2 = np.full((job2["n_frames"], 4), np.nan)
+    face2[30:] = [0.5, 0.5, 0.1, 0.2]
+    R.set_anchors(job2, face2, mods2)
+    bx, by, bw, bh = job2["layout"]
+    f0 = next(it for it in job2["graphics"] if it["id"] == "g1")["_face0"]
+    assert f0[0] == pytest.approx((0.5 * 384 - bx) / bw, abs=1e-4)
+    assert f0[2] == pytest.approx(0.1 * 384 / bw, abs=1e-4)
+
+
+class _SpyAudio:
+    """audio.mix de mentira: guarda lo que recibe y escribe silencio."""
+    def __init__(self):
+        self.calls = []
+
+    def mix(self, voice, duration, events, music_cfg, out_wav, *, seed=7, stems_dir=None):
+        import soundfile as sf
+        self.calls.append({"events": events, "music": dict(music_cfg), "seed": seed})
+        sf.write(out_wav, np.zeros((int(duration * 48000), 2), np.float32), 48000)
+        return {"lufs": -14.0, "music": {"fade_in": 0.006, "fade_out": 0.03}, "sfx": list(events)}
+
+
+class _SpyMusic:
+    def __init__(self, wav):
+        self.wav, self.calls, self.pref = wav, [], []
+
+    def get_music(self, cfg, duration, style, seed, on_pct=None, cache_dir=None):
+        self.calls.append((dict(cfg), duration, style, seed, cache_dir))
+        return {"wav": self.wav, "bpm": 112.0, "beats": [0.5], "downbeats": [0.5],
+                "sections": [{"start": 0, "end": 4, "label": "drop"}], "drop": 1.0,
+                "hook_end": 1.0, "ending": {"mode": "hit", "hit": 3.8}, "keyscale": "A minor",
+                "lufs": -14.0, "src_offset": 12.5, "warnings": ["bpm corregido"],
+                "source": "procedural", "cached": True}
+
+    def prefetch(self, cfg, duration, style="dinamico", seed=7, cache_dir=None):
+        self.pref.append((dict(cfg), duration, style, seed, cache_dir))
+        return object()
+
+
+def test_audio_plomeria_sfx_musica_y_seed(tmp_path):
+    """Paso de audio: seed del plan, variant/pitch/dur/id por evento (dur remapeado a tiempo
+    final), claves de get_music copiadas (ending, keyscale, downbeats...) SIN src_offset, y la
+    MISMA cfg para el precalentamiento que para el paso de audio."""
+    import soundfile as sf
+    plan = S.normalize({"video": "x.mp4", "duration": 6.0, "version": 2,
+                        "cuts": [{"start": 2.0, "end": 3.0, "enabled": True}],
+                        "director": {"seed": 21, "style": "energetico"},
+                        "fx": {"music": {"source": "procedural", "stops": [{"at": 3.5, "dur": 0.5}],
+                                         "drop_at": 4.0},
+                               "sfx": [{"id": "s1", "name": "typing", "at": 1.5, "dur": 1.0,
+                                        "variant": 1, "pitch": -2},
+                                       {"id": "s2", "name": "riser_short", "at": 3.5, "dur": 2.0},
+                                       {"id": "s3", "name": "pop", "at": 4.5}]}})
+    tl = Timeline.from_plan(plan, fps=FPS)
+    job = {"final_duration": tl.final_duration, "style": "energetico", "seed": 21}
+    voice, mwav = tmp_path / "v.wav", tmp_path / "m.wav"
+    sf.write(str(voice), np.zeros((5 * 48000, 2), np.float32), 48000)
+    sf.write(str(mwav), np.zeros((5 * 48000, 2), np.float32), 48000)
+    aud, mus = _SpyAudio(), _SpyMusic(str(mwav))
+    mods = {"audio": aud, "music": mus}
+    th = R.prefetch_music(plan, job, tl, mods, {"music_cache_dir": str(tmp_path / "mc")})
+    assert th is not None and len(mus.pref) == 1
+    st = {"skipped": []}
+    R._audio(plan, job, tl, mods, str(voice), tmp_path / "mix.wav", R._Progress({}), st,
+             {"music_cache_dir": str(tmp_path / "mc")})
+    cfg_pref, cfg_get = mus.pref[0][0], mus.calls[0][0]
+    assert cfg_pref == cfg_get and mus.pref[0][1:] == mus.calls[0][1:]
+    assert cfg_get["stops"][0]["at"] == pytest.approx(2.5) and cfg_get["drop_at"] == pytest.approx(3.0)
+    call = aud.calls[0]
+    assert call["seed"] == 21
+    ev = {e["id"]: e for e in call["events"]}
+    assert ev["s1"]["variant"] == 1 and ev["s1"]["pitch"] == -2.0
+    assert ev["s1"]["dur"] == pytest.approx(0.5, abs=0.04)       # [1.5, 2.5] cruza el corte
+    assert ev["s2"]["dur"] == pytest.approx(1.0, abs=0.04)       # anticipacion [1.5, 3.5]
+    assert "dur" not in ev["s3"] and "variant" not in ev["s3"]
+    mc = call["music"]
+    for k in R.MUSIC_KEYS:
+        assert k in mc, k
+    assert mc["ending"] == {"mode": "hit", "hit": 3.8} and mc["keyscale"] == "A minor"
+    assert "src_offset" not in mc and "offset" not in mc
+    assert st["music"]["warnings"] == ["bpm corregido"] and st["audio"]["lufs"] == -14.0
+
+
+@pytest.mark.skipif(not (SCRIPTS / "motion" / "music.py").exists(), reason="sin modulo de musica")
+def test_render_con_musica_y_sfx_sin_doble_fundido(tmp_path):
+    """Render real (audio + musica procedural + SFX reales, video con stubs): la mezcla no
+    aplica un fundido de mas de 30 ms encima del final horneado por music.py, hay musica y
+    SFX, y el mp4 entregado esta en -14 LUFS +-0.5."""
+    from motion import audio as A
+    src = tmp_path / "src.mp4"
+    subprocess.run([V.FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=360x640:r=30:d=8",
+                    "-f", "lavfi", "-i", "sine=f=220:r=48000:d=8,volume=0.3", "-c:v", "libx264",
+                    "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+                    str(src)], check=True)
+    plan = {"video": str(src), "duration": 8.0, "version": 2,
+            "fx": {"captions": {"enabled": False}, "grade": {"enabled": False},
+                   "music": {"enabled": True, "source": "procedural", "ending": "auto"},
+                   "sfx": [{"id": "s1", "name": "pop", "at": 1.0, "gain_db": -4},
+                           {"id": "s2", "name": "whoosh_fast", "at": 3.0, "gain_db": -4},
+                           {"id": "s3", "name": "ding", "at": 6.0, "gain_db": -4, "variant": 1}]}}
+    out = tmp_path / "musica.mp4"
+    stems = tmp_path / "stems"
+    st = R.render_pro(plan, out, {"W": 216, "H": 384, "workers": 1, "enhance_audio": False,
+                                  "modules": dict(STUBS, audio="motion.audio", music="motion.music"),
+                                  "sys_path": [TESTS], "cache_dir": str(tmp_path / "c"),
+                                  "music_cache_dir": str(tmp_path / "mc"), "stems_dir": str(stems)})
+    assert st["music_prefetch"] is True and st["music"]["source"] == "procedural"
+    au = st["audio"]
+    assert au["music"]["ending"] in ("natural", "hit", "fade")
+    assert au["music"]["fade_in"] <= 0.03 + 1e-9 and au["music"]["fade_out"] <= 0.03 + 1e-9
+    assert len(au["sfx"]) == 3 and not au.get("sfx_skipped")
+    assert abs(au["lufs"] + 14.0) <= 0.5
+    import soundfile as sf
+    mus, _ = sf.read(str(stems / "music.wav"), always_2d=True)
+    sfx, _ = sf.read(str(stems / "sfx.wav"), always_2d=True)
+    assert np.sqrt((mus ** 2).mean()) > 1e-3 and np.abs(sfx).max() > 1e-2
+    # sin doble fundido: la cama mezclada sigue a la musica de get_music (con su final ya
+    # horneado) hasta el ultimo cuadro; un fade_out de 1.5 s encima la hundiria >10 dB al final
+    src_m, _ = sf.read(st["music"]["wav"], always_2d=True)
+    sr = 48000
+
+    def gain(a, b):
+        num = np.sqrt((mus[-int(a * sr):-int(b * sr)] ** 2).mean()) + 1e-9
+        den = np.sqrt((src_m[-int(a * sr):-int(b * sr)] ** 2).mean()) + 1e-9
+        return 20 * np.log10(num / den)
+    assert abs(gain(0.5, 0.03) - gain(2.5, 1.5)) < 4.0, (gain(0.5, 0.03), gain(2.5, 1.5))
+    assert abs(gain(7.9, 7.0) - gain(6.0, 5.0)) < 4.0            # ni fade_in de 0.2 s al inicio
+    # loudness del mp4 entregado (AAC)
+    x = V.read_audio(out, 48000, 2)
+    lu = A.integrated_lufs(x)
+    assert abs(lu + 14.0) <= 0.5, lu
+
+
+def test_matte_stats_y_draft_reutiliza_mascaras_finales(tmp_path):
+    """stats.matte expone quality_of por rango y avisos; en draft se reutilizan las mascaras
+    FINALES completas de la cache (ensure_analysis / export) en vez de recalcular."""
+    class FakeMP:
+        made = []
+
+        def __init__(self, video, W, H, fps, ranges, cache_dir, quality="final", **kw):
+            self.W, self.H, self.quality, self.ranges = W, H, quality, ranges
+            self.warning, self.error, self.step = None, None, 2
+            FakeMP.made.append(self)
+
+        def missing_runs(self):
+            return [] if self.quality == "final" else [(0, 5, 0, 5)]
+
+        def quality_of(self, a, b):
+            return 0.8 if a == 0 else 0.99
+
+    class FakeMod:
+        MatteProvider = FakeMP
+    job = {"quality": "draft", "matte_box": None, "base_size": [1080, 1920], "fps": 30,
+           "matte_ranges": [(0, 10), (20, 30)]}
+    mp = R._final_matte_for_draft(job, {"matte": FakeMod}, "base.mp4", tmp_path)
+    assert mp is not None and mp.quality == "final" and (mp.W, mp.H) == (1080, 1920)
+    assert R._final_matte_for_draft(dict(job, quality="final"), {"matte": FakeMod}, "b", tmp_path) is None
+    st = {"warnings": []}
+    mp.warning = "sin compuerta"
+    R._matte_stats(mp, job, st)
+    assert st["matte"]["ranges"][0] == {"start": 0, "end": 10, "quality": 0.8}
+    assert "matte:0-10:calidad_baja" in st["warnings"]
+    assert "matte:sin_compuerta_de_persona" in st["warnings"]
+
+
+# ------------------------------------------------------------------ ola 2: arreglos del critico
+def _tiny_src(tmp_path, d=4):
+    src = tmp_path / "src.mp4"
+    if not src.exists():
+        subprocess.run([V.FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", f"testsrc2=s=360x640:r=30:d={d}",
+                        "-f", "lavfi", "-i", f"sine=f=220:r=48000:d={d},volume=0.3", "-c:v", "libx264",
+                        "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+                        str(src)], check=True)
+    return src
+
+
+def _fake_module(tmp_path, code: str) -> str:
+    """Modulo de musica de mentira importable por nombre (render lo carga con importlib)."""
+    import uuid
+    name = f"fakemusic_{uuid.uuid4().hex[:8]}"
+    (tmp_path / f"{name}.py").write_text(code)
+    return name
+
+
+FAKE_MUSIC = '''
+import threading, time
+import numpy as np, soundfile as sf
+EV = threading.Event()
+CALLS = []
+PENDING = [False]
+BLOCK = [False]
+WAV = [None]
+
+
+def pending(cfg, duration, style="dinamico", seed=7, cache_dir=None):
+    return PENDING[0]
+
+
+def prefetch(cfg, duration, style="dinamico", seed=7, cache_dir=None):
+    return None
+
+
+def get_music(cfg, duration, style, seed, on_pct=None, cache_dir=None):
+    CALLS.append(dict(cfg))
+    if BLOCK[0]:
+        EV.wait(30)          # como el flock viejo: sorda a la cancelacion
+        return {}
+    n = int(round(duration * 48000))
+    t = np.arange(n) / 48000.0
+    x = (0.2 * np.sin(2 * np.pi * 330 * t)).astype(np.float32)
+    sf.write(WAV[0], np.stack([x, x], 1), 48000)
+    return {"wav": WAV[0], "bpm": 120.0, "beats": [], "downbeats": [], "sections": [],
+            "drop": None, "hook_end": None, "ending": {"mode": "hit", "hit": duration - 0.5},
+            "keyscale": "A minor", "lufs": -14.0, "source": cfg.get("source"), "cached": True}
+'''
+
+
+def _music_plan(src, d=4.0):
+    return {"video": str(src), "duration": d, "version": 2,
+            "fx": {"captions": {"enabled": False}, "grade": {"enabled": False},
+                   "music": {"enabled": True, "source": "ai"}}}
+
+
+def test_cancelar_mientras_espera_la_musica_suelta_rapido(tmp_path):
+    """Cancelar mientras el hilo de audio espera una musica que no atiende la cancelacion: el
+    render suelta en < 2 s (antes join(10 s): la vista previa retenia el lock del job). La etiqueta
+    del paso es la del hilo principal ('Generando la musica' al esperar), nunca 'Mezclando...'
+    emitido desde el hilo de audio a media composicion. El hilo abandonado limpia su carpeta."""
+    import sys
+    src = _tiny_src(tmp_path)
+    name = _fake_module(tmp_path, FAKE_MUSIC)
+    state = {"cancel": False, "t": None, "steps": []}
+
+    def on_step(m):
+        state["steps"].append(m)
+        if m.startswith("Generando la m"):
+            state["cancel"], state["t"] = True, time.time()
+    cache = tmp_path / "c"
+    opts = {"W": 216, "H": 384, "workers": 1, "enhance_audio": False, "cache_dir": str(cache),
+            "modules": dict(STUBS, audio=None, music=name), "sys_path": [TESTS, str(tmp_path)],
+            "on_step": on_step, "cancel": lambda: state["cancel"]}
+    R.prepare(_music_plan(src), opts)                      # importa el modulo de mentira
+    fm = sys.modules[name]
+    fm.BLOCK[0] = True
+    with pytest.raises(V.Canceled):
+        R.render_pro(_music_plan(src), tmp_path / "o.mp4", opts)
+    waited = time.time() - state["t"]
+    assert waited < 2.0, waited
+    steps = state["steps"]
+    ic = next(i for i, m in enumerate(steps) if m.startswith("Componiendo"))
+    assert not any(m.startswith(("Mezclando", "Preparando la m")) for m in steps[:ic + 1]), steps
+    assert steps[ic + 1].startswith("Generando la m"), steps
+    fm.EV.set()                                            # la "musica" termina: el hilo limpia
+    t0 = time.time()
+    while list(cache.glob("job_*")) and time.time() - t0 < 5:
+        time.sleep(0.1)
+    assert not list(cache.glob("job_*"))
+    assert not (tmp_path / "o.mp4").exists()
+
+
+def test_draft_no_espera_la_musica_ia_en_generacion(tmp_path):
+    """Vista previa (draft) con la musica IA aun generandose (music.pending): mezcla con la
+    procedural y marca stats.music_pending; el export final si usa (espera) la IA."""
+    import sys
+    src = _tiny_src(tmp_path)
+    name = _fake_module(tmp_path, FAKE_MUSIC)
+    base = {"W": 216, "H": 384, "workers": 1, "enhance_audio": False, "cache_dir": str(tmp_path / "c"),
+            "modules": dict(STUBS, audio="motion.audio", music=name), "sys_path": [TESTS, str(tmp_path)]}
+    R.prepare(_music_plan(src), base)
+    fm = sys.modules[name]
+    fm.WAV[0] = str(tmp_path / "m.wav")
+    fm.PENDING[0] = True
+    st = R.render_pro(_music_plan(src), tmp_path / "d.mp4", dict(base, quality="draft"))
+    assert st["music_pending"] is True and fm.CALLS[-1]["source"] == "procedural"
+    assert st["music"]["pending_source"] == "ai" and st["audio"]["music"]["file"] == fm.WAV[0]
+    st2 = R.render_pro(_music_plan(src), tmp_path / "f.mp4", base)
+    assert st2["music_pending"] is False and fm.CALLS[-1]["source"] == "ai"
+    fm.PENDING[0] = False                                  # ya en cache: el draft usa la IA
+    st3 = R.render_pro(_music_plan(src), tmp_path / "d2.mp4", dict(base, quality="draft"))
+    assert st3["music_pending"] is False and fm.CALLS[-1]["source"] == "ai"
+
+
+def test_progreso_del_analisis_sin_matte(tmp_path):
+    """Sin rangos de matte la barra avanza durante face_track + grade (antes quedaba quieta
+    10-17 s y saltaba al final del analisis)."""
+    src = _tiny_src(tmp_path, d=4)
+    seen = []
+    opts = {"W": 216, "H": 384, "workers": 1, "enhance_audio": False, "cache_dir": str(tmp_path / "c"),
+            "modules": dict(STUBS, camera="motion.camera"), "sys_path": [TESTS],
+            "on_pct": lambda stage, v: seen.append((stage, v))}
+    plan = {"video": str(src), "duration": 4.0, "version": 2,
+            "fx": {"captions": {"enabled": False}, "grade": {"enabled": False}}}
+    R.render_pro(plan, tmp_path / "o.mp4", opts)
+    an = [v for s, v in seen if s == "analysis"]
+    assert len(an) >= 4, seen                           # face_track reporta cada 16 cuadros
+    assert an == sorted(an)
+
+
+def test_face_track_on_pct_y_cancelacion(tmp_path):
+    from motion import camera as CAM
+    src = _tiny_src(tmp_path, d=4)
+    ps = []
+    CAM.face_track(str(src), 360, 640, 30, 120, on_pct=ps.append)
+    assert len(ps) >= 5 and ps == sorted(ps) and ps[-1] < 100
+    with pytest.raises(InterruptedError):
+        CAM.face_track(str(src), 360, 640, 30, 120, cancel=lambda: True)
+
+
+def test_stops_de_musica_dur_remapeado_a_tiempo_final():
+    """Un stop que cruza un corte dura lo que queda en el video (antes quedaba en tiempo
+    original: el silencio se comia la frase siguiente y movia el drop automatico)."""
+    plan = S.normalize({"video": "x.mp4", "duration": 10.0, "version": 2,
+                        "cuts": [{"start": 4.0, "end": 6.0, "enabled": True}],
+                        "fx": {"music": {"stops": [{"at": 3.5, "dur": 1.5},
+                                                   {"at": 7.0, "dur": 0.5},
+                                                   {"at": 1.0}]}}})
+    tl = Timeline.from_plan(plan, fps=FPS)
+    job = {"final_duration": tl.final_duration}
+    mc, on = R.music_cfg(plan, job, tl)
+    s3, s1, s2 = mc["stops"]                            # normalize los ordena por `at`
+    assert s1["at"] == pytest.approx(3.5) and s1["dur"] == pytest.approx(0.5, abs=0.04)
+    assert s2["at"] == pytest.approx(5.0, abs=0.04) and s2["dur"] == pytest.approx(0.5, abs=0.04)
+    assert "dur" not in s3 or s3["dur"] is None
+
+
+def test_sfx_con_nombre_desconocido_se_reporta(tmp_path):
+    src = _tiny_src(tmp_path)
+    plan = {"video": str(src), "duration": 4.0, "version": 2,
+            "fx": {"sfx": [{"id": "s1", "name": "riser_short_2", "at": 1.0},
+                           {"id": "s2", "name": "sonido_que_no_existe", "at": 2.0},
+                           {"id": "s3", "name": "pop", "at": "abc"}]}}
+    pr = R.prepare(plan, {"W": W, "H": H, "modules": STUBS, "sys_path": [TESTS]})
+    assert "sfx:s2:nombre_desconocido" in pr["skipped"]
+    assert "sfx:s3:dato_invalido" in pr["skipped"]
+    assert not any(s.startswith("sfx:s1") for s in pr["skipped"])
+    assert [it["name"] for it in pr["plan"]["fx"]["sfx"]] == ["riser_short"]

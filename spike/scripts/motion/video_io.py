@@ -44,9 +44,10 @@ FFPROBE = str(paths.FFPROBE)
 IS_MAC = paths.IS_MAC
 
 BASE_VERSION = "b4"          # cambia si cambia el algoritmo del base pass (invalida cache)
-VOICE_VERSION = "v3"
+VOICE_VERSION = "v4"         # v4: fundido de salida si el ultimo keep corta la fuente
 SR = 48000                   # voz / mezcla
 XFADE_MS = 8.0               # microfundido en cada union de la voz (5-10 ms)
+END_FADE_MS = 25.0           # fundido de salida de la voz si el ultimo keep corta la fuente
 TONEMAP = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
            "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv")
 COLOR_TAGS = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
@@ -839,6 +840,14 @@ def cut_audio(audio: np.ndarray, timeline, fps: float, sr: int = SR,
     if ranges and ranges[0][0] > 0:           # arranque recortado: micro fade-in
         k = min(h * 2, total)
         out[:k] *= np.linspace(0.0, 1.0, k, dtype=np.float32)[:, None]
+    if ranges and ranges[-1][1] < len(a) and pos > 0:
+        # final recortado (la fuente sigue): fundido de salida en coseno elevado, espejo del
+        # de entrada pero mas largo (END_FADE_MS): la voz no termina a media onda (clic/pop al
+        # final del export) y el pedazo de silaba que la cuantizacion a cuadro deja entrar se
+        # apaga en vez de cortarse en seco
+        k = min(max(h * 2, int(round(END_FADE_MS / 1000.0 * sr))), pos)
+        r = (0.5 + 0.5 * np.cos(np.linspace(0.0, np.pi, k, dtype=np.float64))).astype(np.float32)
+        out[pos - k:pos] *= r[:, None]
     return out
 
 

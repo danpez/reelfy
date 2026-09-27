@@ -8,9 +8,18 @@ usuario + los cambios de la IA encima.
 Enfoque robusto en 2 pasos (evita los problemas de un filter_complex gigante):
   1) Normalizar cada segmento de la pista principal a un archivo temporal con los
      MISMOS parámetros (resolución/fps/audio) -> concat demuxer los une sin re-encode.
+     Los segmentos se normalizan de a COMPOSE_JOBS en paralelo (el Mac tiene 2 motores de
+     codificacion; ffmpeg ya usa varios hilos para el tonemap).
   2) Componer las capas overlay sobre el video principal (pocas, manejable).
+
+Lienzo: dims de display del primer video. Un lienzo VERTICAL se limita a 1.5x la salida
+9:16 (1620x2880): el base del render es de 1080x1920 (la camara hace zoom sobre el base, no
+sobre la fuente), asi que un 4K vertical (2160x3840) solo cuesta ~33 % mas CPU y disco sin
+mejorar la salida. Horizontal/cuadrado no se limitan: el recorte 9:16 necesita su altura.
 """
+import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import paths
@@ -19,6 +28,21 @@ from motion import video_io
 FFMPEG = str(paths.FFMPEG)
 FFPROBE = str(paths.FFPROBE)
 FPS_DEFAULT = 30
+# lienzo vertical maximo (1.5x la salida 9:16) y segmentos normalizados a la vez
+MAX_VERTICAL = (int(os.environ.get("REELFY_COMPOSE_MAX_W", "1620")),
+                int(os.environ.get("REELFY_COMPOSE_MAX_H", "2880")))
+COMPOSE_JOBS = max(1, int(os.environ.get("REELFY_COMPOSE_JOBS", "2")))
+
+
+def canvas_size(w, h):
+    """Lienzo del montaje a partir de las dims de display del primer video (pares). Vertical
+    (h > w): se escala para caber en MAX_VERTICAL conservando el aspecto; si no, tal cual."""
+    w, h = int(w or 0), int(h or 0)
+    if w > 0 and h > w:
+        mw, mh = MAX_VERTICAL
+        k = min(1.0, mw / w, mh / h)
+        w, h = int(round(w * k)), int(round(h * k))
+    return w - w % 2, h - h % 2
 
 
 def _vbitrate(w, h, fps=FPS_DEFAULT):
@@ -155,8 +179,45 @@ def _concat_xfade(parts, trans, out, w=1080, h=1920, fps=FPS_DEFAULT):
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)])
 
 
-def compose(spec, out, work, on_step=None):
-    """spec: ver módulo. Devuelve la ruta del video compuesto (out)."""
+def _shots(seq, parts, trans):
+    """Limites reales de cada segmento de la pista principal en el video compuesto.
+
+    Replica la aritmetica del montaje: con concat demuxer (sin transiciones) cada segmento
+    empieza donde acaba el anterior (duracion del contenedor); con xfade (hay algun
+    crossfade) CADA union se superpone T s (el crossfade pedido o 0.04 s) y el limite queda
+    a la MITAD de la superposicion. Devuelve [{start, end, src, index, kind}] (kind "clip" o
+    "black"), en segundos del video compuesto."""
+    durs = [float(probe(p)["dur"] or 0.0) for p in parts]
+    has_trans = len(parts) > 1 and any(
+        t and t.get("type") == "crossfade" and float(t.get("dur", 0)) > 0.05 for t in trans[1:])
+    out, acc = [], 0.0
+    for i, (kind, data, _tr) in enumerate(seq):
+        d = durs[i]
+        if i == 0:
+            start, acc = 0.0, d
+        elif has_trans:
+            t = trans[i] if i < len(trans) else None
+            cross = bool(t and t.get("type") == "crossfade" and float(t.get("dur", 0)) > 0.05)
+            T = float(t.get("dur")) if cross else 0.04
+            T = max(0.03, min(T, d - 0.05, acc - 0.05))
+            start = acc - T / 2
+            acc = acc + d - T
+        else:
+            start, acc = acc, acc + d
+        if out:
+            out[-1]["end"] = round(start, 3)
+        src = "" if kind == "black" else Path(str(data.get("name") or data.get("path") or "")).name
+        out.append({"start": round(start, 3), "end": round(acc, 3), "src": src, "index": i,
+                    "kind": kind})
+    return out
+
+
+def compose(spec, out, work, on_step=None, info=None):
+    """spec: ver módulo. Devuelve la ruta del video compuesto (out).
+
+    Si `info` es un dict, se llena con info["shots"] = limites REALES de cada clip de la
+    pista principal en el video compuesto ([{start, end, src, index, kind}], segundos):
+    el servidor los pone en plan.shots para el director y el render (uniones exactas)."""
     def step(m):
         if on_step:
             on_step(m)
@@ -176,7 +237,9 @@ def compose(spec, out, work, on_step=None):
             p = probe(s["path"]); W, H = p["w"], p["h"]; break
     if not W:
         p = probe(main[0]["path"]); W, H = (p["w"] or 1080), (p["h"] or 1920)
-    W -= W % 2; H -= H % 2
+    W, H = canvas_size(W, H)
+    if info is not None:
+        info["W"], info["H"] = W, H
 
     def _len(s):
         return float(s.get("dur", 3.0)) if s.get("type") == "image" else \
@@ -198,24 +261,51 @@ def compose(spec, out, work, on_step=None):
         seq.append(("clip", s, s.get("trans")))
         cursor = max(cursor, st) + _len(s)
 
-    # 1) normalizar cada segmento
-    parts, trans = [], []
-    for i, (kind, data, tr) in enumerate(seq):
-        step(f"Preparando {i + 1}/{len(seq)}…")
-        seg = work / f"seg_{i:03d}.mp4"
+    # 1) normalizar cada segmento (COMPOSE_JOBS a la vez; el orden de `parts` es el de seq)
+    parts = [work / f"seg_{i:03d}.mp4" for i in range(len(seq))]
+    trans = [None if kind == "black" else tr for kind, _d, tr in seq]
+
+    def norm(i):
+        kind, data, _tr = seq[i]
+        seg = parts[i]
         if kind == "black":
-            _norm_black(float(data), seg, W, H, fps); trans.append(None)
+            _norm_black(float(data), seg, W, H, fps)
+            return
+        s = data
+        fin = float(s.get("fadeIn", 0) or 0); fout = float(s.get("fadeOut", 0) or 0)
+        if s.get("type") == "image":
+            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout)
         else:
-            s = data
-            fin = float(s.get("fadeIn", 0) or 0); fout = float(s.get("fadeOut", 0) or 0)
-            if s.get("type") == "image":
-                _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout)
-            else:
-                t_in = float(s.get("in", 0)); t_out = float(s.get("out", t_in + 5))
-                vol = 0.0 if s.get("mute") else float(s.get("vol", 1.0))
-                _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout)
-            trans.append(tr)
-        parts.append(seg)
+            t_in = float(s.get("in", 0)); t_out = float(s.get("out", t_in + 5))
+            vol = 0.0 if s.get("mute") else float(s.get("vol", 1.0))
+            _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout)
+
+    n = len(seq)
+    step(f"Preparando 0/{n}…")
+    if COMPOSE_JOBS <= 1 or n <= 1:
+        for i in range(n):
+            norm(i)
+            step(f"Preparando {i + 1}/{n}…")
+    else:
+        ex = ThreadPoolExecutor(max_workers=min(COMPOSE_JOBS, n), thread_name_prefix="compose")
+        try:
+            futs = [ex.submit(norm, i) for i in range(n)]
+            for k, f in enumerate(as_completed(futs), 1):
+                f.result()                       # propaga el error del ffmpeg
+                step(f"Preparando {k}/{n}…")     # on_step puede lanzar (cancelacion)
+        except BaseException:
+            for f in futs:
+                f.cancel()                       # los que no empezaron ya no corren
+            raise
+        finally:
+            ex.shutdown(wait=True)
+
+    if info is not None:
+        try:
+            info["shots"] = _shots(seq, parts, trans)
+        except Exception as e:  # noqa: los limites son una ayuda, nunca tumban el montaje
+            print(f"   compose: limites de tomas no disponibles ({e})")
+            info["shots"] = []
 
     # 2) unir: si hay TRANSICIONES (crossfade) usa xfade; si no, concat demuxer (rápido)
     step("Uniendo la línea de tiempo…")

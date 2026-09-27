@@ -22,7 +22,7 @@ CHUNK = 16                      # lines per LLM call: keeps prompts well inside 
 def _chat(system, user):
     """Ollama chat with a LARGE context window. The default num_ctx (2048) silently
     truncates long transcripts -> garbled/partial JSON. Root cause of the EN bug."""
-    body = {"model": hl.MODEL, "stream": False, "format": "json",
+    body = {"model": hl.MODEL, "stream": False, "format": "json", "think": False,
             "options": {"temperature": 0.2, "num_ctx": 8192},
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}]}

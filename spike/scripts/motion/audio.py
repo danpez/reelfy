@@ -33,8 +33,14 @@ Semantica de music_cfg (ganancias relativas a la voz, en LU):
             |duck|. Asi el default (-17, -9, -3) da huecos a -8 LU bajo la voz, graves de la cama
             a -11 LU y banda media a -17 LU.
   fade_in, fade_out (s); ending ({mode, hit} de music.get_music, o el modo como texto): si el
-            modo es natural, hit o fade, music.py ya hizo el final y aqui solo quedan fundidos de
-            seguridad (6 ms / 30 ms) para no apagar el golpe final.
+            modo es natural, hit o fade, music.py ya hizo el final y el arranque (el primer
+            downbeat no se suaviza): aqui solo quedan fundidos de seguridad (6 ms / 30 ms) para
+            no apagar el golpe final; la cola la decide fade_out DENTRO de music.py.
+  intro_fade (s, default 0): entrada suave EXPLICITA de la musica ("Entrada suave" del
+            inspector); se respeta siempre, tambien con el arranque horneado (fade_in no, por
+            compatibilidad: los planes traen fade_in 0.2 que nunca debio suavizar el golpe).
+  Al final de la mezcla completa (voz + SFX + musica) siempre hay un fundido de seguridad de
+  END_FADE_S (12 ms): un keep que termina a media palabra nunca deja un clic al final.
   stops [{at, dur, mode?, fade?, fade_back?}]: hueco dramatico. mode "tape" (default): la pista se
             frena en [at-fade, at] (fade default 0.5 s) y queda en silencio hasta at+dur. mode
             "cut": corte seco con fundido `fade` (default 25 ms). fade_back (default 60 ms).
@@ -650,6 +656,10 @@ def music_gain_curve(duration: float, cfg: dict, act: np.ndarray, music_lufs: fl
     if emode:
         fo = min(fo, 0.03)
         fi = min(fi, 0.006)
+    # entrada suave pedida (inspector/director): se respeta TAMBIEN con arranque horneado
+    intro = max(0.0, _num(cfg.get("intro_fade"), 0.0))
+    if intro > fi:
+        fi = intro
     if fi > 0:
         g = g * _rc(tc / fi)
     if fo > 0:
@@ -662,7 +672,8 @@ def music_gain_curve(duration: float, cfg: dict, act: np.ndarray, music_lufs: fl
         back = _rc((tc - (at + dur)) / fup)
         g = g * np.maximum(down, back)
     info = {"under_lufs": under, "open_lufs": open_, "duck_db": -total, "broadband_duck_db": -broad,
-            "voice_carve_db": -carve, "base_gain_db": base, "fade_in": fi, "fade_out": fo}
+            "voice_carve_db": -carve, "base_gain_db": base, "fade_in": fi, "fade_out": fo,
+            "intro_fade": intro}
     return g, info
 
 
@@ -1234,6 +1245,7 @@ def mix(voice_wav: str | Path | None, duration: float, sfx_events: list[dict] | 
     del bus, sm
     hard = np.float32(undb(true_peak - 0.05))
     np.clip(y, -hard, hard, out=y)
+    _edge_fades(y)
     write_wav(out_wav, y)
     meas = loudness(y)
     info.update({
@@ -1255,6 +1267,26 @@ def mix(voice_wav: str | Path | None, duration: float, sfx_events: list[dict] | 
         info["stems"] = {k: str(sd / f"{k}.wav") for k in ("voice", "music", "sfx")}
     info["ms"] = round((time.perf_counter() - t0) * 1000, 1)
     return info
+
+
+END_FADE_S = 0.012      # fundido de seguridad al final de la mezcla completa
+START_FADE_S = 0.002    # y al inicio (inaudible; evita un escalon si la voz arranca en alto)
+
+
+def _edge_fades(y: np.ndarray) -> None:
+    """Fundidos de seguridad en sitio (coseno elevado) al inicio y al final de la mezcla: la
+    ultima muestra siempre es ~0 aunque la voz o un SFX terminen a media onda (clic/pop al
+    final del export). No toca el final horneado de la musica (ya termina en 0)."""
+    n = y.shape[0]
+    for k, at_end in ((int(round(START_FADE_S * SR)), False), (int(round(END_FADE_S * SR)), True)):
+        k = min(k, n // 2)
+        if k <= 1:
+            continue
+        r = (0.5 - 0.5 * np.cos(np.linspace(0.0, np.pi, k, dtype=np.float64))).astype(np.float32)
+        if at_end:
+            y[n - k:] *= r[::-1, None]
+        else:
+            y[:k] *= r[:, None]
 
 
 def ffmpeg_ebur128(path: str | Path) -> dict:

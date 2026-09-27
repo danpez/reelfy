@@ -174,6 +174,23 @@ def test_cut_audio_fuente_corta_rellena_con_silencio():
     assert len(out) == 3 * V.SR and np.all(out[int(2.5 * V.SR):] == 0)
 
 
+def test_cut_audio_final_recortado_termina_en_silencio():
+    """El ultimo keep termina en medio de un tono (la fuente sigue): la voz se apaga con un
+    fundido (antes terminaba a media onda: clic/pop al final del export). Si el keep llega al
+    final de la fuente no se toca."""
+    sr, fps = V.SR, 30
+    t = np.arange(int(6 * sr)) / sr
+    src = (0.8 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)[:, None].repeat(2, 1)
+    tl = Timeline([(0.0, 2.0), (3.0, 4.51)], 6.0, fps=fps)
+    out = V.cut_audio(src, tl, fps)
+    assert np.abs(out[-1]).max() < 1e-3 and np.abs(out[-3:]).max() < 5e-3
+    k = int(V.END_FADE_MS / 1000 * sr)
+    assert np.abs(out[-k - 2000:-k - 200]).max() > 0.7          # antes del fundido: intacto
+    full = V.cut_audio(src, Timeline([(0.0, 6.0)], 6.0, fps=fps), fps)
+    np.testing.assert_allclose(full[-200:], src[len(src) - 200:], atol=1e-6)
+    assert V.VOICE_VERSION != "v3"                                # la voz cacheada se rehace
+
+
 # ------------------------------------------------------------------ base pass
 def _synthetic_source(path: Path, dur=6.0):
     if path.exists():

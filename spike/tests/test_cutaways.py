@@ -1,5 +1,6 @@
 """Tests de motion/cutaways.py: fondos animados, escenas a pantalla completa, entradas/salidas,
 items embebidos, fallback de texto, determinismo y presupuesto de tiempo."""
+import os
 import time
 
 import numpy as np
@@ -9,6 +10,16 @@ from motion import ctx as C
 from motion import cutaways as CU
 
 W, H = 540, 960
+
+def _load_factor() -> float:
+    """Holgura de los umbrales de rendimiento cuando la maquina esta cargada por otros procesos
+    (la Mac se comparte con otros renders): carga/nucleos, entre 1 y 3."""
+    try:
+        la = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return 1.0
+    return min(3.0, max(1.0, la / (os.cpu_count() or 8)))
+
 
 
 def _base_img(w=W, h=H):
@@ -216,7 +227,7 @@ def test_background_performance_final(kind, budget):
         CU.draw_background(cv, kind, None, t, ctx)
         ts.append((time.perf_counter() - t0) * 1000)
     # percentil 25: costo propio (la maquina puede estar cargada por otros procesos)
-    assert float(np.percentile(ts, 25)) < budget, f"{kind}: {np.percentile(ts, 25):.2f} ms"
+    assert float(np.percentile(ts, 25)) < budget * _load_factor(), f"{kind}: {np.percentile(ts, 25):.2f} ms"
 
 
 def test_garbage_scene_inputs_never_crash():
@@ -406,3 +417,14 @@ def test_scene_text_defaults_to_safe_center():
     assert abs(ti["x"] - G.XC) < 1e-9
     assert CU._text_item({"text": {"preset": "title_pop", "text": "  "}}, True, _ctx()) is None
     assert CU._text_item({"text": {"preset": "counter", "to": 1000}}, True, _ctx()) is not None
+
+
+# -------------------------------------------------------------- ola 2
+def test_scene_text_measures_scene_background():
+    """El texto de una escena mide el fondo de la ESCENA (no el video tapado): _bg_lum."""
+    dark = CU._text_item({"id": "s", "text": "Hola"}, True, _ctx())
+    light = CU._text_item({"id": "s", "text": "Hola"}, False, _ctx())
+    assert dark["_bg_lum"] < 0.3 and light["_bg_lum"] > 0.7
+    import inspect
+    src = inspect.getsource(CU)
+    assert src.count("setShader(skia.GradientShader") == src.count("setDither(True)")

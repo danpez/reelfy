@@ -694,11 +694,28 @@ def _bg_lum(ctx, rect: skia.Rect) -> float | None:
                              C.SAMPLING_FAST, None, skia.Canvas.kFast_SrcRectConstraint)
             a = surf.makeImageSnapshot().toarray(colorType=skia.kRGBA_8888_ColorType)[..., :3]
             a = a.astype("float32")
-            v = float((0.2126 * a[..., 0] + 0.7152 * a[..., 1] + 0.0722 * a[..., 2]).mean() / 255.0)
+            lum = (0.2126 * a[..., 0] + 0.7152 * a[..., 1] + 0.0722 * a[..., 2]) / 255.0
+            v = float(lum.mean())
+            cache.setdefault("s", {})[key] = float(lum.std())
         except Exception:
             v = -1.0
         cache["v"][key] = v
     return None if v < 0 else v
+
+
+def _bg_busy(ctx, rect: skia.Rect) -> float:
+    """Desviacion de luminancia (0..0.5) del fondo bajo `rect`: alta = fondo cargado (muebles,
+    reflejos) donde un trazo fino (serif/manuscrita) se pierde aunque el promedio sea medio."""
+    if _bg_lum(ctx, rect) is None:
+        return 0.0
+    cache = ctx._cache.get("text_bg") or {}
+    L = max(0.0, rect.left())
+    T = max(0.0, rect.top())
+    img = cache.get("img")
+    R = min(float(img.width()), rect.right()) if img is not None else rect.right()
+    B = min(float(img.height()), rect.bottom()) if img is not None else rect.bottom()
+    key = (int(L) >> 3, int(T) >> 3, int(R) >> 3, int(B) >> 3)
+    return float((cache.get("s") or {}).get(key, 0.0))
 
 
 def _bg_boost(ctx, rect: skia.Rect, color, item: dict | None = None) -> float:
@@ -718,6 +735,25 @@ def _bg_boost(ctx, rect: skia.Rect, color, item: dict | None = None) -> float:
     if lum is None:
         return 1.0
     return 1.0 + 0.7 * ease.clamp((lum - 0.45) / 0.4)
+
+
+def _accent_plate(ctx, ln) -> float:
+    """Placa (alpha) para una linea cuya palabra de ACENTO no contrasta con el fondo LOCAL
+    (amarillo/dorado sobre pared o lavabo blancos, salvia sobre gris): el contraste se mide por
+    palabra, no por bloque. 0 si todas las palabras de acento se leen (>= 3:1)."""
+    worst = 99.0
+    for w in ln.words:
+        if not w.accent or not w.color:
+            continue
+        r = skia.Rect.MakeLTRB(w.ox + w.run.ink[0], w.oy + w.run.ink[1], w.ox + w.run.ink[2], w.oy + w.run.ink[3])
+        lum = _bg_lum(ctx, r)
+        if lum is None:
+            continue
+        g = int(round(max(0.0, min(1.0, lum)) * 255))
+        worst = min(worst, _wcag(w.color, (g, g, g)))
+    if worst >= 3.0:
+        return 0.0
+    return 0.24 + 0.16 * ease.clamp((3.0 - worst) / 1.5)
 
 
 def _plate(canvas, rect: skia.Rect, size: float, alpha: float) -> None:
@@ -1493,6 +1529,20 @@ def _contrast(c) -> str:
     return "#141414" if C.luminance(c) > 0.55 else "#FFFFFF"
 
 
+def _rel_lum(c) -> float:
+    """Luminancia relativa WCAG 2.x (sRGB linealizado)."""
+    def lin(v):
+        v /= 255.0
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = C.rgb(c)
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+
+
+def _wcag(a, b) -> float:
+    la, lb = _rel_lum(a), _rel_lum(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
 def _render_block(canvas, item: dict, lt: float, dur: float, ctx, preset: str,
                   hooks: dict | None = None) -> None:
     """Render generico de un bloque de lineas.
@@ -1523,10 +1573,14 @@ def _render_block(canvas, item: dict, lt: float, dur: float, ctx, preset: str,
     color = P["color"]
     box = None if hooks.get("no_line_box") else P.get("box")
     look = _look(P, ctx, B.fs, color if not box else "#000000")
+    box_ink = None
     if box:
         look.shadow = 0.0
-        if not item.get("color"):
-            color = "#111111" if C.luminance(box) > 0.6 else "#FFFFFF"
+        # tinta sobre la caja con contraste WCAG >= 4.5 (un color pedido que no contrasta, p. ej.
+        # blanco sobre la caja amarilla, se sustituye)
+        box_ink = "#111111" if C.luminance(box) > 0.6 else "#FFFFFF"
+        if not item.get("color") or _wcag(color, box) < 4.5:
+            color = box_ink
     look.boost = _bg_boost(ctx, B.rect, color, item)
     osc = _out_state(P["anim_out"], pout, B.fs)[2] if P["anim_out"] == "pop_out" else 1.0
     letters = anim in ("type", "letter_stagger")
@@ -1536,6 +1590,10 @@ def _render_block(canvas, item: dict, lt: float, dur: float, ctx, preset: str,
     plate_k = 0.0
     if not box and not hooks.get("no_plate") and C.luminance(color) >= 0.4 and look.boost > 1.4:
         plate_k = 0.22 * ease.clamp((look.boost - 1.4) / 0.25)
+    if not box and not hooks.get("no_plate") and C.luminance(color) >= 0.4 and \
+            P.get("role") in ("serif", "script") and item.get("_bg_lum") is None:
+        # trazo fino sobre fondo cargado: placa difusa aunque el promedio sea medio
+        plate_k = max(plate_k, 0.2 * ease.clamp((_bg_busy(ctx, B.rect) - 0.1) / 0.1))
     n_lines = len(B.lines)
     canvas.save()
     _block_transform(canvas, B, P, lt, dur, osc)
@@ -1599,10 +1657,13 @@ def _render_block(canvas, item: dict, lt: float, dur: float, ctx, preset: str,
             clip = skia.Rect.MakeLTRB(ln.ink[0] - pad, ln.ink[1] - pad * 2 + ody,
                                       ln.ink[2] + pad, ln.ink[3] + 0.04 * ln.size + ody)
         n0 = len(units)
+        pk = plate_k
+        if not box and not hooks.get("no_plate") and item.get("_bg_lum") is None:
+            pk = max(pk, _accent_plate(ctx, ln))
         for w in ln.words:
             ta = times[w.idx]
             col = w.color
-            if box and not item.get("color") and not w.accent:
+            if box and ((not item.get("color") and not w.accent) or _wcag(col, box) < (3.0 if w.accent else 4.5)):
                 col = color
             if "word_color" in hooks:
                 col = hooks["word_color"](w, lt, times, P) or col
@@ -1631,12 +1692,12 @@ def _render_block(canvas, item: dict, lt: float, dur: float, ctx, preset: str,
                 continue
             units.append(dict(run=w.run, ox=w.ox, oy=w.oy, look=look, color=col, alpha=a * oa, dx=dx,
                               dy=dy + ody, sc=sc, blur=bl, pivot=pivot, origin=origin, clip=clip, word=w))
-        if plate_k > 0 and len(units) > n0:
+        if pk > 0 and len(units) > n0:
             vis = max(u["alpha"] for u in units[n0:])
             canvas.save()
             if clip is not None:
                 canvas.clipRect(clip, True)
-            _plate(canvas, skia.Rect.MakeLTRB(*ln.ink).makeOffset(0, ody + mask_dy), ln.size, plate_k * vis)
+            _plate(canvas, skia.Rect.MakeLTRB(*ln.ink).makeOffset(0, ody + mask_dy), ln.size, pk * vis)
             canvas.restore()
     if excl:
         canvas.save()
@@ -2357,6 +2418,23 @@ def measure(item: dict, ctx) -> skia.Rect:
                               max(l.ink[2] for l in B.lines), max(l.ink[3] for l in B.lines))
 
 
+def measure_lines(item: dict, ctx, with_text: bool = False) -> list:
+    """Tinta de cada linea en reposo (px de salida, sin rotacion ni empuje): [(l, t, r, b)]
+    (con `with_text`: [((l, t, r, b), texto de la linea)], tal como la partio el layout).
+    El director la usa para subrayar / encerrar en circulo la linea protagonista."""
+    preset = item.get("preset") or "title_pop"
+    if preset == "counter":
+        r = measure(item, ctx)
+        box = (r.left(), r.top(), r.right(), r.bottom())
+        return [(box, "")] if with_text else [box]
+    _P, B = _get_block(item, preset, ctx)
+    out = []
+    for ln in B.lines:
+        box = tuple(float(v) for v in ln.ink)
+        out.append((box, " ".join(w.run.text for w in ln.words)) if with_text else box)
+    return out
+
+
 # ================================================================ SUBTITULOS
 CAPTION_PRESETS: dict[str, dict] = {
     # active_color: la palabra que se pronuncia pasa al acento (transicion ~80 ms);
@@ -2620,6 +2698,16 @@ def _layout_group(g: _Group, D: dict, ctx, key: str) -> None:
     g.rooms = _rooms([ln.words for ln in lines])
 
 
+def _in_ranges(t: float, ranges) -> bool:
+    for r in ranges or []:
+        try:
+            if float(r[0]) <= t <= float(r[1]):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _hide_alpha(t: float, ranges, fade: float = 0.12) -> float:
     a = 1.0
     for r in ranges or []:
@@ -2671,16 +2759,46 @@ def draw_captions(canvas, phrases_final, cfg, t, ctx) -> None:
     if gi < 0:
         return
     g = groups[gi]
+    # un grupo que ya estaba oculto al empezar (lo cubria un titulo) no reaparece al terminar el
+    # titulo: repetiria como subtitulo lo que el titulo ya mostro (el precio justo despues del contador)
+    hide = cfg.get("_hide")
+    if hide and t > g.start + 0.13 and _in_ranges(g.start + 0.13, hide) \
+            and _in_ranges(max(g.start, g.words[-1]["start"]), hide):
+        return
     D = _cap_cfg(cfg, ctx)
+    dy = _cap_dy(cfg, D, ctx)
+    if dy:
+        canvas.save()
+        canvas.translate(0, dy)
     # relevo entre grupos sin pausa (presets de grupo completo): el anterior sale hacia arriba
     if D["reveal"] == "group" and gi > 0:
         pg = groups[gi - 1]
         pe = ease.clamp((t - g.start) / 0.13)
         if not pg.fade_out and pe < 1.0 and abs(pg.end - g.start) < 1e-6:
             _draw_group(canvas, pg, D, t, ctx, ha, gi - 1, exit_p=pe)
-    if t >= g.end:
-        return
-    _draw_group(canvas, g, D, t, ctx, ha, gi)
+    if t < g.end:
+        _draw_group(canvas, g, D, t, ctx, ha, gi)
+    if dy:
+        canvas.restore()
+
+
+def _cap_dy(cfg: dict, D: dict, ctx) -> float:
+    """Desplazamiento vertical (px) de los subtitulos por tramo: `y_ranges` = [{start, end, y}]
+    en tiempo ORIGINAL (como todo el plan; se compara con ctx.t_orig). Sirve para subirlos al
+    pecho en tomas de cuerpo completo (a la altura por defecto caerian sobre la cadera)."""
+    yr = cfg.get("y_ranges")
+    if not yr:
+        return 0.0
+    t = getattr(ctx, "t_orig", None)
+    if t is None:
+        return 0.0
+    for r in yr:
+        try:
+            if float(r["start"]) <= float(t) < float(r["end"]):
+                return (float(r["y"]) - D["y"]) * ctx.H
+        except (KeyError, TypeError, ValueError):
+            continue
+    return 0.0
 
 
 def _recenter_dx(g: _Group, t: float) -> dict:

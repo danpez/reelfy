@@ -1230,6 +1230,7 @@ def draw_badge(canvas, shape: str, cx: float, cy: float, d: float, col, ctx, alp
     p = C.fill(col, alpha)
     canvas.drawRRect(rr, p)
     hl = skia.Paint(AntiAlias=True)
+    hl.setDither(True)  # degradados sin anillos (8 bits)
     hl.setShader(skia.GradientShader.MakeLinear(
         [skia.Point(cx, cy - d / 2), skia.Point(cx, cy + d / 2)],
         [C.color("#FFFFFF", 0.22 * alpha), C.color("#FFFFFF", 0.0), C.color("#000000", 0.08 * alpha)],
@@ -1804,6 +1805,7 @@ def _pin(cv, x, y, h, col):
     cv.restore()
     cv.drawPath(p, C.fill(col))
     hl = skia.Paint(AntiAlias=True)
+    hl.setDither(True)  # degradados sin anillos (8 bits)
     hl.setShader(skia.GradientShader.MakeLinear([skia.Point(x - r, cyc - r), skia.Point(x + r, y)],
                                                 [C.color("#FFFFFF", 0.28), C.color("#FFFFFF", 0.0)]))
     cv.drawPath(p, hl)
@@ -1913,6 +1915,7 @@ def _row_button(item, th, F, u, inner_w, ctx, label: str, icon: str = "arrow-rig
             cv.clipRRect(skia.RRect.MakeRectXY(r, bh / 2, bh / 2), skia.ClipOp.kIntersect, True)
             sx = r.left() - w * 0.3 + (w * 1.6) * ease.in_out_quad(sh)
             gp = skia.Paint(AntiAlias=True)
+            gp.setDither(True)  # degradados sin anillos (8 bits)
             gp.setShader(skia.GradientShader.MakeLinear(
                 [skia.Point(sx - w * 0.12, 0), skia.Point(sx + w * 0.12, 0)],
                 [C.color("#FFFFFF", 0.0), C.color("#FFFFFF", 0.45 * a), C.color("#FFFFFF", 0.0)]))
@@ -2038,7 +2041,10 @@ def _card_rows(item, th, F, u, inner_w, ctx) -> list[_Row]:
             rows.append(_row_divider(th, u))
             rows.append(_row_items(item, th, F, u, inner_w, ctx, items))
     elif v == "location":
-        rows.append(_row_map(item, th, F, u, inner_w, ctx))
+        # `map: false` = tarjeta compacta (encabezado con pin, sin mapa): cuando no hay b-roll que
+        # la hospede y la completa no cabe sobre la toma
+        if item.get("map") is not False and str(item.get("map", "")).lower() not in ("false", "0", "no"):
+            rows.append(_row_map(item, th, F, u, inner_w, ctx))
         rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or str(value or ""), sub))
     elif v == "schedule":
         rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or "Horarios disponibles", sub,
@@ -2195,6 +2201,7 @@ def draw_card(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> No
         if th["name"] == "light":
             # luz superior sutil (volumen)
             hl = skia.Paint(AntiAlias=True)
+            hl.setDither(True)  # degradados sin anillos (8 bits)
             hl.setShader(skia.GradientShader.MakeLinear(
                 [skia.Point(0, -Hc / 2), skia.Point(0, Hc / 2)],
                 [C.color("#FFFFFF", 0.0), C.color("#F3F1EC", a)]))
@@ -2342,6 +2349,7 @@ def draw_background(canvas, kind: str, colors, lt: float, ctx) -> None:
 
 def _avatar(canvas, cx, cy, d, initial: str, pal, a, ctx, face_img=None):
     ring = skia.Paint(AntiAlias=True, Style=skia.Paint.kStroke_Style, StrokeWidth=d * 0.07)
+    ring.setDither(True)  # degradados sin anillos (8 bits)
     ring.setShader(skia.GradientShader.MakeSweep(cx, cy, [C.color(pal["accent"]), C.color(pal["warm"]),
                                                           C.color("#FF3B7F"), C.color(pal["accent"])]))
     ring.setAlphaf(a)
@@ -2361,6 +2369,7 @@ def _avatar(canvas, cx, cy, d, initial: str, pal, a, ctx, face_img=None):
         canvas.restore()
         return
     g = skia.Paint(AntiAlias=True)
+    g.setDither(True)  # degradados sin anillos (8 bits)
     g.setShader(skia.GradientShader.MakeLinear([skia.Point(cx - inner / 2, cy - inner / 2),
                                                 skia.Point(cx + inner / 2, cy + inner / 2)],
                                                [C.color(pal["accent2"]), C.color(C.mix(pal["accent2"], "#000000", 0.35))]))
@@ -2473,9 +2482,9 @@ def _cta_follow(canvas, item, lt, dur, ctx, a):
     tx = ax + d / 2 + h * 0.22
     # el texto se ajusta al boton en su ancho maximo ('Siguiendo'): no cambia al presionar
     maxw = (W_ / 2 - h * 0.2 - max(bw_a, bw_b)) - tx - h * 0.15
-    fn_ = fit_font(F["title"], name, h * 0.28, maxw, min_px=h * 0.2)
+    fn_ = fit_font(F["title"], name, h * 0.31, maxw, min_px=h * 0.2)
     name = ellipsize(fn_, name, maxw)
-    fs_ = fit_font(F["body"], sub, h * 0.2, maxw, min_px=h * 0.15) if sub else None
+    fs_ = fit_font(F["body"], sub, h * 0.22, maxw, min_px=h * 0.15) if sub else None
     if sub:
         sub = ellipsize(fs_, sub, maxw)
     te = ease.out_cubic(_clamp((lt - 0.08) / 0.35))
@@ -2534,6 +2543,7 @@ def _cta_link_below(canvas, item, lt, dur, ctx, a):
         canvas.clipRRect(rr, skia.ClipOp.kIntersect, True)
         sx = br.left() - bw * 0.3 + bw * 1.6 * ease.in_out_quad(sh)
         gp = skia.Paint(AntiAlias=True)
+        gp.setDither(True)  # degradados sin anillos (8 bits)
         gp.setShader(skia.GradientShader.MakeLinear([skia.Point(sx - h, 0), skia.Point(sx + h, 0)],
                                                     [C.color("#FFFFFF", 0), C.color("#FFFFFF", 0.5 * a),
                                                      C.color("#FFFFFF", 0)]))
@@ -2545,12 +2555,14 @@ def _cta_link_below(canvas, item, lt, dur, ctx, a):
     draw_text(canvas, label, x1 + ib + h * 0.2, fb.getSize() * 0.36, fb, on, a)
     # flecha dibujada a mano que rebota hacia abajo; hereda el alpha del CTA (fade de salida)
     ap = _clamp((lt - 0.25) / 0.4)
-    if ap > 0 and a > 0.004:
-        sub = {"id": f"{item.get('id', 'cta')}:arrow", "name": "arrow_down", "size": h * 1.7 / ctx.W,
+    # `arrow_scale` (0.4..1): flecha mas corta cuando abajo hay subtitulos; 0 = sin flecha
+    asc = _clamp(_num(item, "arrow_scale", 1.0), 0.0, 1.0)
+    if ap > 0 and a > 0.004 and asc >= 0.35:
+        sub = {"id": f"{item.get('id', 'cta')}:arrow", "name": "arrow_down", "size": h * 1.7 * asc / ctx.W,
                "x": 0, "y": 0, "color": item.get("arrow_color") or "#FFFFFF", "stroke": 17, "wiggle": 0.45,
                "anim_out": "none", "shadow": 0.8}
         canvas.save()
-        canvas.translate(0, h / 2 + h * 1.15)
+        canvas.translate(0, h / 2 + h * 0.3 + h * 0.85 * asc)
         if a < 0.999:
             with C.layer(canvas, a):
                 draw_doodle(canvas, sub, lt - 0.25, max(0.1, dur - 0.25), ctx)

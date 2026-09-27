@@ -667,23 +667,105 @@ def detail(arr: np.ndarray, sharpen: float, clarity: float, W: int, ctx) -> np.n
     return out
 
 
+def detail_luma(arr: np.ndarray, sharpen: float, clarity: float, grain: float, W: int, ctx,
+                n: int = 0, seed: int = 0) -> np.ndarray | None:
+    """Capa de detalle de LUMA en UN canal (uint8 centrada en 128): nitidez 3x3 + claridad
+    (contraste local de radio grande a 1/4 de resolucion) + grano, las tres sumadas:
+
+        D = A*(Y - blur3(Y)) + c*(Y - low(Y)) + kg*(grano - 128) + 128
+
+    con A = 2.4*sharpen*(1 + c) y c = 0.9*clarity: la misma formula que la cadena RGB de
+    detail() + add_grain() (nitidez escalada por la claridad), pero sobre la luma. Cuesta ~1/3
+    (todo en 1 canal) y es lo que se ve: el encoder guarda el color a media resolucion (4:2:0)
+    y la nitidez de croma solo agrega bordes de color. El grano ya era monocromo. None si no hay
+    detalle que sumar."""
+    a = sharpen * 2.4 if sharpen > 0.005 else 0.0
+    c = clarity * 0.9 if clarity > 0.005 else 0.0
+    A = a * (1.0 + c)
+    if A <= 0 and c <= 0 and grain <= 0:
+        return None
+    H = arr.shape[0]
+    code = cv2.COLOR_RGBA2GRAY if arr.shape[2] == 4 else cv2.COLOR_RGB2GRAY
+    Y = cv2.cvtColor(arr, code)
+    s = A + c
+    if s > 0:
+        parts = []
+        if A > 0:
+            parts.append((cv2.GaussianBlur(Y, (3, 3), 0), A))
+        if c > 0:
+            ds = 4
+            small = cv2.resize(Y, (max(8, W // ds), max(8, H // ds)), interpolation=cv2.INTER_AREA)
+            sg = (ctx.px(26.0) if ctx is not None else 26.0 * W / 1080.0) / ds
+            k = max(3, int(round(sg * 4)) | 1)          # stackBlur ~ gaussiana de sigma sg
+            small = cv2.stackBlur(small, (k, k))
+            parts.append((cv2.resize(small, (W, H), interpolation=cv2.INTER_LINEAR), c))
+        bc = parts[0][0] if len(parts) == 1 else \
+            cv2.addWeighted(parts[0][0], parts[0][1] / s, parts[1][0], parts[1][1] / s, 0.0)
+        D = cv2.addWeighted(Y, s, bc, -s, 128.0)
+    else:
+        D = np.full_like(Y, 128)
+    if grain > 0:
+        gp, gn = grain_signed(W, H, n, seed, grain * 255.0 * 0.62 / 32.0)
+        cv2.add(D, gp, dst=D)
+        cv2.subtract(D, gn, dst=D)
+    return D
+
+
+_GSIGNED: dict = {}
+
+
+def grain_signed(W: int, H: int, n: int, seed: int, kg: float) -> tuple[np.ndarray, np.ndarray]:
+    """Grano ya escalado del cuadro n como dos planos uint8 (parte positiva y negativa de
+    kg*(textura - 128)), recortes de texturas precalculadas: sumarlo cuesta dos pasadas enteras
+    de 1 canal. Mismo grano que grain_frame (misma textura y desplazamiento por cuadro)."""
+    kgr = round(float(kg), 4)
+    key = (int(W), int(H), kgr)
+    pair = _GSIGNED.get(key)
+    if pair is None:
+        if len(_GSIGNED) > 3:
+            _GSIGNED.clear()
+        pos, neg = [], []
+        for t in grain_textures(int(W), int(H)):
+            v = (t.astype(np.float32) - 128.0) * kgr
+            pos.append(np.clip(np.round(v), 0, 255).astype(np.uint8))
+            neg.append(np.clip(np.round(-v), 0, 255).astype(np.uint8))
+        pair = _GSIGNED[key] = (tuple(pos), tuple(neg))
+    h = zlib.crc32(f"grain:{int(seed)}:{int(n)}".encode()) & 0xFFFFFFFF
+    dx, dy = h % GRAIN_PAD, (h >> 8) % GRAIN_PAD
+    i = int(n) % len(pair[0])
+    return pair[0][i][dy:dy + H, dx:dx + W], pair[1][i][dy:dy + H, dx:dx + W]
+
+
 def grade_array(arr: np.ndarray, cfg: dict, lut: np.ndarray, ctx, vig_cache: dict | None = None) -> np.ndarray:
-    """Pipeline por cuadro sobre RGBA uint8 (alfa 255): nitidez + claridad -> grano -> LUT ->
-    saturacion (vibrance) -> vinieta. El grano entra ANTES de la curva, asi la curva lo atenua
-    en negros y altas luces (como el grano de pelicula) y queda en los medios tonos.
-    Internamente trabaja en RGB de 3 canales (25% menos memoria por pasada que RGBA)."""
+    """Pipeline por cuadro sobre RGBA uint8 (alfa 255): detalle de luma (nitidez + claridad +
+    grano, ver detail_luma) -> LUT -> saturacion (vibrance) -> vinieta. El grano entra ANTES de
+    la curva, asi la curva lo atenua en negros y altas luces (como el grano de pelicula) y queda
+    en los medios tonos. Internamente trabaja en RGB de 3 canales; el detalle en 1 canal.
+    ~8 ms por cuadro 1080x1920 con cv2 a 1 hilo (antes ~12.6 ms)."""
     H, W = arr.shape[:2]
     draft = bool(getattr(ctx, "draft", False))
     _, look = _look(cfg)
     st = num(cfg, "strength", 1.0, 0.0, 1.5)
-    out = cv2.cvtColor(arr, cv2.COLOR_RGBA2RGB) if arr.shape[2] == 4 else arr
     sharpen = 0.0 if draft else num(cfg, "sharpen", 0.0, 0.0, 1.0)
     clarity = num(cfg, "clarity", look.get("clarity", 0.0) * st, 0.0, 1.0)
-    out = detail(out, sharpen, clarity, W, ctx)
     grain = num(cfg, "grain", 0.0, 0.0, 0.3)
-    if grain > 0:
-        out = add_grain(out, grain, int(getattr(ctx, "n", 0) or 0), int(getattr(ctx, "seed", 0) or 0))
-    out = cv2.LUT(out, _lut3(lut))
+    D = detail_luma(arr, sharpen, clarity, grain, W, ctx, int(getattr(ctx, "n", 0) or 0),
+                    int(getattr(ctx, "seed", 0) or 0))
+    # por PLANOS: la LUT de una tabla por plano es ~40% mas barata que la LUT de 3 tablas sobre
+    # RGB entrelazado, y el detalle (con signo) se suma con dos pasadas enteras saturadas
+    planes = cv2.split(arr)[:3]
+    if D is not None:
+        c128 = _const(D.shape, 128)
+        dp, dn = cv2.subtract(D, c128), cv2.subtract(c128, D)
+    luts = _lut_planes(lut)
+    outp = []
+    for c in range(3):
+        x = planes[c]
+        if D is not None:
+            x = cv2.add(x, dp)
+            cv2.subtract(x, dn, dst=x)
+        outp.append(cv2.LUT(x, luts[c]))
+    out = cv2.merge(outp)
     vig = num(cfg, "vignette", 0.0, 0.0, 1.0) + look.get("vig", 0.0) * st
     if look.get("mono"):
         c = 1.0 + (look.get("contrast", 0.5) * st + num(cfg, "contrast", 0.0, -0.5, 0.5)) * 0.9
@@ -707,6 +789,33 @@ def grade_array(arr: np.ndarray, cfg: dict, lut: np.ndarray, ctx, vig_cache: dic
 
 
 _LUT3: dict = {}
+_LUTP: dict = {}
+_CONST: dict = {}
+
+
+def _const(shape: tuple, v: int) -> np.ndarray:
+    """Plano uint8 constante (cacheado, solo lectura)."""
+    k = (tuple(shape), int(v))
+    a = _CONST.get(k)
+    if a is None:
+        if len(_CONST) > 8:
+            _CONST.clear()
+        a = np.full(shape, int(v), np.uint8)
+        a.setflags(write=False)
+        _CONST[k] = a
+    return a
+
+
+def _lut_planes(lut: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """LUT RGBA (256,1,4) -> 3 tablas contiguas (256,1) de un canal (cacheadas por identidad)."""
+    k = id(lut)
+    v = _LUTP.get(k)
+    if v is None or v[0] is not lut:
+        if len(_LUTP) > 64:
+            _LUTP.clear()
+        v = _LUTP[k] = (lut, tuple(np.ascontiguousarray(lut[:, 0, c]).reshape(256, 1)
+                                   for c in range(3)))
+    return v[1]
 
 
 def _lut3(lut: np.ndarray) -> np.ndarray:

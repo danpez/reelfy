@@ -176,7 +176,7 @@ def test_perf_final_frame():
         t = time.perf_counter()
         g.apply(img, cfg, None, ctx)
         best = min(best, time.perf_counter() - t)
-    assert best < 0.03
+    assert best < 0.03 * _load_factor()
 
 
 # ---------------------------------------------------------------- look con impacto (cuadros reales)
@@ -357,12 +357,31 @@ def test_perf_single_thread_worker():
         cfg = {"look": "warm_clean", "vignette": 0.15, "grain": 0.025, "sharpen": 0.15}
         ctx = C.demo_ctx(1080, 1920)
         g.apply(img, cfg, None, ctx)
-        best = 1e9
-        for k in range(6):
+        arr = _img(1080, 1920)
+        lut = g.lut(cfg, None)
+        best = best_arr = 1e9
+        for k in range(8):
             ctx.n = k
             t = time.perf_counter()
             g.apply(img, cfg, None, ctx)
             best = min(best, time.perf_counter() - t)
-        assert best < 0.02, best
+            t = time.perf_counter()
+            grade.grade_array(arr, cfg, lut, ctx, g._vig)
+            best_arr = min(best_arr, time.perf_counter() - t)
+        # meta de la ola 2: el grade por cuadro <= 8 ms a 1 hilo (antes ~12.6-13.5 ms); con
+        # las conversiones skia <-> numpy de apply, <= 9 ms
+        lf = _load_factor()
+        assert best_arr < 0.008 * lf, best_arr
+        assert best < 0.009 * lf, best
     finally:
         cv2.setNumThreads(prev_threads)
+
+
+def _load_factor() -> float:
+    """Holgura por carga (maquina compartida): con load > nucleos los tiempos suben en
+    proporcion; el limite se escala igual (tope 4x) en vez de fallar en falso."""
+    import os
+    try:
+        return min(4.0, max(1.0, os.getloadavg()[0] / (os.cpu_count() or 8)))
+    except OSError:
+        return 1.0

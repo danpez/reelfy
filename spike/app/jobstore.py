@@ -13,7 +13,19 @@ Sustituye el dict JOBS en memoria por SQLite (DATA/jobs.db):
 Estados: queued -> running -> review|done | error | canceled
 `phase` conserva el vocabulario que ya entiende la UI
 (analyzing/review/rendering/done/error).
+
+Motor pro (v0.5):
+  - `stage` (etapa fina: compose/analyze/director/timeline/base/analysis/audio/render/mux)
+    y `warnings` (lista) por trabajo.
+  - `plan_rev`: sube SOLO cuando el plan guardado cambia de contenido (`plan_hash` = sha1 del
+    JSON canonico); /status manda el plan completo solo cuando hace falta (el plan v2 pesa).
+    `update_plan(..., base_rev)` = escritura con concurrencia optimista (409 en el servidor).
+  - Un export cancelado (o interrumpido por un cierre) con plan vuelve a `review`: el plan
+    sigue siendo valido y el proyecto no aparece como error.
+  - `side`: tareas laterales del mismo trabajo que NO mueven su fase (vista previa real,
+    analisis en segundo plano, musica): {nombre: {state, pct, stage, file, error, ...}}.
 """
+import hashlib
 import json
 import os
 import sqlite3
@@ -29,10 +41,29 @@ KEEP_LAST = 50          # housekeeping: conservar los N trabajos más recientes
 _local = threading.local()
 _handlers: dict = {}
 _wake = threading.Event()
+_side_lock = threading.Lock()   # lectura-modificacion-escritura atomica de `side`
 
-_JSON_COLS = ("params", "plan", "clips")
+_JSON_COLS = ("params", "plan", "clips", "warnings", "side")
 _COLS = ("id", "kind", "state", "phase", "pct", "message", "eta", "elapsed",
-         "ext", "params", "plan", "clips", "error", "created", "updated")
+         "ext", "params", "plan", "clips", "error", "created", "updated",
+         "stage", "warnings", "plan_rev", "side", "plan_hash")
+# columnas agregadas despues de v0.4 (migracion en caliente de un jobs.db existente)
+_NEW_COLS = {"stage": "TEXT", "warnings": "TEXT", "plan_rev": "INTEGER DEFAULT 0",
+             "side": "TEXT", "plan_hash": "TEXT"}
+CANCELED_EXPORT_MSG = "Export cancelado. Tu edición sigue aquí."
+
+
+def plan_hash(plan):
+    """Huella del CONTENIDO del plan (independiente del orden de las claves)."""
+    if plan is None:
+        return None
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except Exception:  # noqa
+            return hashlib.sha1(plan.encode()).hexdigest()
+    raw = json.dumps(plan, sort_keys=True, ensure_ascii=False, default=str, separators=(",", ":"))
+    return hashlib.sha1(raw.encode()).hexdigest()
 
 
 class JobCanceled(Exception):
@@ -57,26 +88,76 @@ def init():
         pct REAL DEFAULT 0, message TEXT DEFAULT '', eta INTEGER, elapsed INTEGER,
         ext TEXT, params TEXT, plan TEXT, clips TEXT, error TEXT,
         cancel INTEGER DEFAULT 0, created REAL, updated REAL)""")
+    have = {r["name"] for r in cx.execute("PRAGMA table_info(jobs)").fetchall()}
+    for col, typ in _NEW_COLS.items():
+        if col not in have:
+            cx.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typ}")
     cx.commit()
     recover()
-    _housekeep()
+    return _housekeep()
 
 
 def recover():
-    """Al arrancar: lo que estaba corriendo murió con el proceso -> error claro.
-    Lo encolado se queda encolado (el worker lo tomará)."""
+    """Al arrancar: lo que estaba corriendo murió con el proceso. Un export con plan vuelve a
+    `review` (la edicion sigue valida); lo demas -> error claro. Lo encolado se queda encolado
+    (el worker lo tomará). Las tareas laterales en curso (vista previa, analisis, musica)
+    tambien murieron."""
     cx = _cx()
+    now = time.time()
+    cx.execute("""UPDATE jobs SET state='review', phase='review', pct=100, stage='review',
+                  message='El export se interrumpió (la app se cerró). Vuelve a exportar.',
+                  error=NULL, cancel=0, eta=NULL, updated=?
+                  WHERE state='running' AND kind='render' AND plan IS NOT NULL""", (now,))
     cx.execute("""UPDATE jobs SET state='error', phase='error',
                   error='El proceso se interrumpió (la app se cerró a media tarea). Vuelve a intentarlo.',
-                  updated=? WHERE state='running'""", (time.time(),))
+                  updated=? WHERE state='running'""", (now,))
+    for row in cx.execute("SELECT id, side FROM jobs WHERE side IS NOT NULL").fetchall():
+        try:
+            side = json.loads(row["side"]) or {}
+        except Exception:  # noqa
+            continue
+        changed = False
+        for t in side.values():
+            if isinstance(t, dict) and t.get("state") in ("queued", "running"):
+                t.update(state="error", error="Interrumpido (la app se cerró).")
+                changed = True
+        if changed:
+            cx.execute("UPDATE jobs SET side=? WHERE id=?", (json.dumps(side), row["id"]))
     cx.commit()
 
 
-def _housekeep():
+def _housekeep(keep=None):
+    """Borra las filas de los trabajos mas viejos (conserva los `keep` mas recientes que no
+    esten en proceso). Devuelve los ids purgados: el servidor borra sus ARCHIVOS (entrada,
+    exports, vistas previas, musica)."""
+    keep = KEEP_LAST if keep is None else int(keep)
     cx = _cx()
-    cx.execute("""DELETE FROM jobs WHERE id NOT IN
-                  (SELECT id FROM jobs ORDER BY created DESC LIMIT ?)""", (KEEP_LAST,))
-    cx.commit()
+    ids = [r["id"] for r in cx.execute(
+        """SELECT id FROM jobs WHERE state NOT IN ('queued', 'running') AND id NOT IN
+           (SELECT id FROM jobs ORDER BY created DESC LIMIT ?)""", (keep,)).fetchall()]
+    if ids:
+        cx.executemany("DELETE FROM jobs WHERE id=?", [(i,) for i in ids])
+        cx.commit()
+    return ids
+
+
+def housekeep(keep=None):
+    return _housekeep(keep)
+
+
+def all_ids():
+    return [r["id"] for r in _cx().execute("SELECT id FROM jobs").fetchall()]
+
+
+def all_params():
+    """{id: params} de todos los trabajos (para saber que fuentes siguen referenciadas)."""
+    out = {}
+    for r in _cx().execute("SELECT id, params FROM jobs").fetchall():
+        try:
+            out[r["id"]] = json.loads(r["params"]) if r["params"] else {}
+        except Exception:  # noqa
+            out[r["id"]] = {}
+    return out
 
 
 def _dump(kw):
@@ -91,36 +172,74 @@ def create(job_id, kind, ext, params=None, plan=None, phase="analyzing",
     now = time.time()
     cx = _cx()
     cx.execute("""INSERT INTO jobs (id, kind, state, phase, pct, message, ext,
-                  params, plan, created, updated)
-                  VALUES (?,?, 'queued', ?, 0, ?, ?, ?, ?, ?, ?)""",
+                  params, plan, created, updated, plan_rev, plan_hash)
+                  VALUES (?,?, 'queued', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
                (job_id, kind, phase, message, ext,
                 json.dumps(params or {}),
-                json.dumps(plan) if plan is not None else None, now, now))
+                json.dumps(plan) if plan is not None else None, now, now,
+                1 if plan is not None else 0, plan_hash(plan)))
     cx.commit()
     _wake.set()
 
 
 def requeue(job_id, kind, params=None, plan=None, phase="rendering",
             message="En cola…"):
-    """Reusar el MISMO job (la UI sigue el mismo id) para la siguiente etapa."""
+    """Reusar el MISMO job (la UI sigue el mismo id) para la siguiente etapa. `plan_rev` sube
+    solo si el plan cambia de contenido (un export del plan identico no obliga a la UI a
+    bajarlo de nuevo)."""
+    h = plan_hash(plan)
     kw = _dump(dict(params=params or {}, plan=plan))
     cx = _cx()
     cx.execute("""UPDATE jobs SET kind=?, state='queued', phase=?, pct=0, message=?,
-                  eta=NULL, elapsed=NULL, error=NULL, cancel=0, params=?,
-                  plan=COALESCE(?, plan), updated=? WHERE id=?""",
-               (kind, phase, message, kw["params"], kw.get("plan"),
+                  eta=NULL, elapsed=NULL, error=NULL, cancel=0, params=?, stage=NULL,
+                  warnings=NULL, plan=COALESCE(?, plan),
+                  plan_rev=COALESCE(plan_rev, 0) + (CASE WHEN ? IS NULL OR
+                      plan_hash IS ? THEN 0 ELSE 1 END),
+                  plan_hash=COALESCE(?, plan_hash),
+                  updated=? WHERE id=?""",
+               (kind, phase, message, kw["params"], kw.get("plan"), h, h, h,
                 time.time(), job_id))
     cx.commit()
     _wake.set()
 
 
 def update(job_id, **kw):
+    """Actualiza columnas. Si trae `plan` y su contenido cambio, sube `plan_rev` (la UI sabe
+    que cambio)."""
+    h = plan_hash(kw["plan"]) if kw.get("plan") is not None else None
     kw = _dump(kw)
     sets = ", ".join(f"{k}=?" for k in kw)
+    vals = list(kw.values())
+    if h is not None:
+        sets += (", plan_rev=COALESCE(plan_rev, 0) + (CASE WHEN plan_hash IS ? THEN 0 ELSE 1 END)"
+                 ", plan_hash=?")
+        vals += [h, h]
     cx = _cx()
     cx.execute(f"UPDATE jobs SET {sets}, updated=? WHERE id=?",
-               (*kw.values(), time.time(), job_id))
+               (*vals, time.time(), job_id))
     cx.commit()
+
+
+def update_plan(job_id, plan, base_rev=None):
+    """Guarda el plan con concurrencia OPTIMISTA: con `base_rev`, solo si el plan guardado
+    sigue en esa revision (si no, otro escritor -re-dirigir, otra pestaña- gano: no se pisa).
+    -> (ok, plan_rev actual)."""
+    h = plan_hash(plan)
+    raw = json.dumps(plan)
+    cx = _cx()
+    with cx:                     # BEGIN IMMEDIATE: leer y escribir la revision es atomico
+        cx.execute("BEGIN IMMEDIATE")
+        row = cx.execute("SELECT plan_rev, plan_hash FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return False, 0
+        rev = int(row["plan_rev"] or 0)
+        if base_rev is not None and int(base_rev) != rev:
+            return False, rev
+        if row["plan_hash"] == h:
+            return True, rev
+        cx.execute("UPDATE jobs SET plan=?, plan_hash=?, plan_rev=?, updated=? WHERE id=?",
+                   (raw, h, rev + 1, time.time(), job_id))
+    return True, rev + 1
 
 
 def get(job_id):
@@ -129,14 +248,41 @@ def get(job_id):
         return None
     d = dict(row)
     for k in _JSON_COLS:
-        d[k] = json.loads(d[k]) if d[k] else None
+        d[k] = json.loads(d[k]) if d.get(k) else None
     return d
 
 
-def status(job_id):
-    """Shape que la UI ya conoce (phase/pct/message/eta/elapsed/plan/clips/error/ext).
-    Si está en cola, el mensaje muestra la posición."""
-    d = get(job_id)
+def get_light(job_id):
+    """Como get() pero SIN deserializar el plan (el plan v2 pesa: /status no lo necesita
+    en cada sondeo). `plan_len` indica si hay plan."""
+    row = _cx().execute(
+        "SELECT id, kind, state, phase, pct, message, eta, elapsed, ext, params, clips, error, "
+        "created, updated, stage, warnings, plan_rev, side, cancel, "
+        "LENGTH(plan) AS plan_len FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    for k in ("params", "clips", "warnings", "side"):
+        d[k] = json.loads(d[k]) if d.get(k) else None
+    return d
+
+
+def get_plan(job_id):
+    row = _cx().execute("SELECT plan, plan_rev FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not row:
+        return None, 0
+    return (json.loads(row["plan"]) if row["plan"] else None), int(row["plan_rev"] or 0)
+
+
+STATUS_KEYS = ("phase", "pct", "message", "eta", "elapsed", "clips", "error", "ext",
+               "stage", "warnings", "plan_rev", "state", "kind")
+
+
+def status(job_id, with_plan=False):
+    """Shape que la UI ya conoce (phase/pct/message/eta/elapsed/clips/error/ext) + las claves
+    del motor pro (stage, warnings, plan_rev, tareas laterales aplanadas). El plan completo
+    solo va con with_plan=True. Si está en cola, el mensaje muestra la posición."""
+    d = get_light(job_id)
     if not d:
         return None
     if d["state"] == "queued":
@@ -144,8 +290,50 @@ def status(job_id):
             "SELECT COUNT(*) FROM jobs WHERE state='queued' AND created <= ?",
             (d["created"],)).fetchone()[0]
         d["message"] = "En cola…" if pos <= 1 else f"En cola ({pos}º)…"
-    return {k: d[k] for k in ("phase", "pct", "message", "eta", "elapsed",
-                              "plan", "clips", "error", "ext")}
+    out = {k: d.get(k) for k in STATUS_KEYS}
+    out["plan_rev"] = int(out["plan_rev"] or 0)
+    out["warnings"] = out["warnings"] or []
+    out["has_plan"] = bool(d.get("plan_len"))
+    side = d.get("side") or {}
+    for name, t in side.items():
+        if not isinstance(t, dict):
+            continue
+        out[name] = t
+        # aplanado para la UI (contrato 6.1: preview_pct, preview_file)
+        for k in ("state", "pct", "file", "stage", "error", "done", "t", "message"):
+            if k in t:
+                out[f"{name}_{k}"] = t[k]
+    if with_plan:
+        out["plan"], out["plan_rev"] = get_plan(job_id)
+    return out
+
+
+def side_update(job_id, name, replace=False, match=None, **kw):
+    """Actualiza la tarea lateral `name` del trabajo (merge; replace=True la reinicia).
+    `match`: solo si la tarea guardada tiene ese `tok` (una ejecucion vieja, ya reemplazada
+    por otra, no pisa el estado de la nueva)."""
+    with _side_lock:
+        cx = _cx()
+        row = cx.execute("SELECT side FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return None
+        side = json.loads(row["side"]) if row["side"] else {}
+        if match is not None and (side.get(name) or {}).get("tok") != match:
+            return None
+        t = {} if replace else dict(side.get(name) or {})
+        t.update(kw)
+        t["updated"] = round(time.time(), 3)
+        side[name] = t
+        cx.execute("UPDATE jobs SET side=? WHERE id=?", (json.dumps(side), job_id))
+        cx.commit()
+        return t
+
+
+def side_get(job_id, name):
+    row = _cx().execute("SELECT side FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not row or not row["side"]:
+        return None
+    return (json.loads(row["side"]) or {}).get(name)
 
 
 def recent(limit=20):
@@ -157,17 +345,35 @@ def recent(limit=20):
 
 # ---- cancelación cooperativa ----
 
+def canceled_export(job_id):
+    """Un export cancelado con plan vuelve a `review` (no es un error: la edicion sigue)."""
+    update(job_id, state="review", phase="review", pct=100, stage="review", eta=None,
+           message=CANCELED_EXPORT_MSG, error=None, cancel=0)
+
+
 def request_cancel(job_id):
-    """Marca cancel. Si aún está en cola, se cancela de inmediato."""
+    """Marca cancel. Si aún está en cola, se cancela de inmediato (un export en cola con
+    plan vuelve a `review`)."""
     cx = _cx()
-    cur = cx.execute("""UPDATE jobs SET state='canceled', phase='error',
-                        error='Cancelado.', updated=? WHERE id=? AND state='queued'""",
-                     (time.time(), job_id))
+    now = time.time()
+    cur = cx.execute("""UPDATE jobs SET state='review', phase='review', pct=100, stage='review',
+                        message=?, error=NULL, cancel=0, updated=?
+                        WHERE id=? AND state='queued' AND kind='render' AND plan IS NOT NULL""",
+                     (CANCELED_EXPORT_MSG, now, job_id))
     if cur.rowcount == 0:
-        cx.execute("UPDATE jobs SET cancel=1, updated=? WHERE id=?",
+        cur = cx.execute("""UPDATE jobs SET state='canceled', phase='error',
+                            error='Cancelado.', updated=? WHERE id=? AND state='queued'""",
+                         (now, job_id))
+    if cur.rowcount == 0:
+        cx.execute("UPDATE jobs SET cancel=1, updated=? WHERE id=? AND state='running'",
                    (time.time(), job_id))
     cx.commit()
     return True
+
+
+def is_canceled(job_id):
+    row = _cx().execute("SELECT cancel FROM jobs WHERE id=?", (job_id,)).fetchone()
+    return bool(row and row["cancel"])
 
 
 class CancelChecker:
@@ -176,15 +382,21 @@ class CancelChecker:
     def __init__(self, job_id):
         self.job_id = job_id
         self._last = 0.0
+        self._hit = False
 
-    def check(self):
+    def canceled(self):
+        """Como check() pero devuelve bool (para callbacks cancel() del motor pro)."""
+        if self._hit:
+            return True
         now = time.monotonic()
         if now - self._last < 0.5:
-            return
+            return False
         self._last = now
-        row = _cx().execute("SELECT cancel FROM jobs WHERE id=?",
-                            (self.job_id,)).fetchone()
-        if row and row["cancel"]:
+        self._hit = is_canceled(self.job_id)
+        return self._hit
+
+    def check(self):
+        if self.canceled():
             raise JobCanceled()
 
 
@@ -220,6 +432,10 @@ def _claim_next():
     return row["id"], row["kind"]
 
 
+def _error_label(kind):
+    return "Análisis" if kind in ("analyze", "compose") else "Render"
+
+
 def _worker_loop(idx):
     while True:
         claimed = None
@@ -238,12 +454,16 @@ def _worker_loop(idx):
                 raise RuntimeError(f"sin handler para '{kind}'")
             fn(job_id, get(job_id))
         except JobCanceled:
-            update(job_id, state="canceled", phase="error", error="Cancelado.")
+            job = get_light(job_id) or {}
+            if kind == "render" and job.get("plan_len"):
+                canceled_export(job_id)          # el plan sigue valido: vuelve a review
+            else:
+                update(job_id, state="canceled", phase="error", error="Cancelado.")
             print(f"[worker{idx}] {job_id} cancelado")
         except Exception as e:  # noqa
             traceback.print_exc()
             update(job_id, state="error", phase="error",
-                   error=f"{'Análisis' if kind == 'analyze' else 'Render'} falló: {e}")
+                   error=f"{_error_label(kind)} falló: {e}")
 
 
 def start_workers(handlers, n=None):

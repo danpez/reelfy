@@ -14,8 +14,13 @@ Escribe en spike/work/demos/director/ (ignorado por git):
 
 Medios de prueba: REELFY_TEST_MEDIA (carpeta con crudo_completo.mp4) o conftest.TEST_MEDIA.
 
+Flujo real del usuario (clips en orden de subida, como los arma el servidor): `--plan` con un
+plan v1, o `--from-e2e` con el plan_v2.json que deja tests/e2e_pro.sh (se le quitan la edicion y
+los recortes de la IA y se re-dirige desde cero). En ese flujo la fachada llega AL FINAL.
+
 Uso (desde spike/):
   .venv/bin/python tests/demos/demo_director.py [--styles dinamico,elegante] [--no-llm] [--mp4]
+  .venv/bin/python tests/demos/demo_director.py --final --from-e2e work/e2e/plan_v2.json
 """
 from __future__ import annotations
 
@@ -259,6 +264,96 @@ def anim_sheets(plan: dict, style: str, per_item: int = 4) -> list[Path]:
     return out
 
 
+# Guiones FICTICIOS de otros negocios (para no sobreajustar el director al caso real): se montan
+# sobre los tiempos por palabra del caso de prueba (mismo numero de palabras por oracion), asi se
+# prueba el director completo (entidades, enumeraciones, precio, ubicacion, CTA) sobre un video
+# real. El audio sigue siendo el del video: sirve para revisar la edicion visual, no la voz.
+SYNTH = {
+    "barberia": [
+        "Si tu corte de siempre ya no queda, ¿ya pensaste cambiarlo?",
+        "Escuchame bien.",
+        "Un buen fade cambia totalmente tu estilo con cortes, barba y cejas bien definidas.",
+        "Todo por solo doscientos cincuenta pesos.",
+        "Y ya estamos en Calle Morelos 210, justo frente al Parque Azul del centro.",
+        "Agenda tu cita en el link de mi perfil",
+        "y tranquilo, no te vamos a preguntar quien te corto la ultima vez, bro.",
+    ],
+    "nutriologa": [
+        "Si comes sano y aun asi no bajas, ¿revisaste tus porciones?",
+        "Escucha esto.",
+        "Un plan real mejora tu energia con dieta, ejercicio, agua y sueño cada dia.",
+        "La primera consulta cuesta seiscientos pesos.",
+        "Estoy en Calle Juarez 45, a tres cuadras del Parque Hidalgo de la ciudad.",
+        "Agenda tu cita en el link de mi perfil",
+        "y no te preocupes, no vamos a contar las tortillas de la semana, prometido.",
+    ],
+}
+
+
+def synth_plan(base: dict, kind: str) -> dict:
+    """Plan v1 con el guion ficticio `kind` sobre los tiempos por palabra de `base`."""
+    p = json.loads(json.dumps(base))
+    words = D._flatten_words(p)
+    sents = D._sentences(words)
+    toks = []
+    for s, line in zip(sents, SYNTH[kind]):
+        lw = line.split()
+        n = s["w1"] - s["w0"] + 1
+        lw = (lw + [lw[-1]] * n)[:n] if len(lw) < n else lw[:n]
+        toks += lw
+    k = 0
+    for ph in p["phrases"]:
+        for w in ph:
+            w["text"] = toks[k] if k < len(toks) else w["text"]
+            w["kw"] = False
+            k += 1
+    p["stem"] = kind
+    p["shots"] = []
+    return p
+
+
+def plan_v1_from_v2(p2: dict) -> dict:
+    """Plan v2 (del servidor) -> v1 para re-dirigir desde cero: transcripcion, recortes del
+    usuario/compose y limites de los clips (sin la edicion ni los recortes de la IA)."""
+    keys = ("stem", "video", "wav", "dims", "duration", "cmds_path", "camera", "phrases", "highlights",
+            "beats", "broll")
+    v1 = {k: p2[k] for k in keys if k in p2}
+    v1["cuts"] = [c for c in p2.get("cuts") or [] if c.get("src") != "ai"]
+    v1["shots"] = [{"start": s["start"], "end": s["end"], "src": s.get("src", "")} for s in p2.get("shots") or []]
+    return v1
+
+
+def sheets_2fps(mp4: Path, name: str, fps_s: float = 2.0, per: int = 16, cols: int = 8,
+                tw: int = 250) -> list[Path]:
+    """Hojas de contacto del MP4 final a `fps_s` cuadros por segundo (tiempo anotado)."""
+    import subprocess
+    from PIL import Image, ImageDraw, ImageFont
+    th = int(tw * 16 / 9)
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(mp4), "-vf", f"fps={fps_s},scale={tw}:{th}",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"], capture_output=True).stdout
+    k = len(raw) // (tw * th * 3)
+    frames = np.frombuffer(raw[:k * tw * th * 3], np.uint8).reshape(k, th, tw, 3)
+    try:
+        f = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 16)
+    except Exception:
+        f = ImageFont.load_default()
+    outs = []
+    for si in range(0, k, per):
+        ch = frames[si:si + per]
+        rows = (len(ch) + cols - 1) // cols
+        img = Image.new("RGB", (cols * tw, rows * th), (0, 0, 0))
+        d = ImageDraw.Draw(img)
+        for i, fr in enumerate(ch):
+            x, y = (i % cols) * tw, (i // cols) * th
+            img.paste(Image.fromarray(fr), (x, y))
+            d.rectangle([x, y, x + 88, y + 20], fill=(0, 0, 0))
+            d.text((x + 4, y + 2), f"{(si + i) / fps_s:05.2f}s", font=f, fill=(255, 230, 60))
+        pth = OUT / f"{name}_hoja_{si // per + 1:02d}.jpg"
+        img.save(pth, quality=85)
+        outs.append(pth)
+    return outs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--styles", default="dinamico")
@@ -266,18 +361,53 @@ def main():
     ap.add_argument("--no-llm", action="store_true")
     ap.add_argument("--no-frames", action="store_true")
     ap.add_argument("--mp4", action="store_true")
+    ap.add_argument("--final", action="store_true",
+                    help="render final 1080x1920 (render_pro) + hojas a 2 fps + tabla de la edicion")
+    ap.add_argument("--synth", default="", help="guion ficticio de otro negocio: " + ",".join(SYNTH))
     ap.add_argument("--anim", action="store_true", help="hojas de contacto por animacion")
+    ap.add_argument("--plan", default="", help="plan v1 propio (p. ej. el del flujo del servidor)")
+    ap.add_argument("--from-e2e", default="", help="plan_v2.json de tests/e2e_pro.sh (orden de subida)")
+    ap.add_argument("--name", default="", help="prefijo de las salidas (default: dentista)")
     a = ap.parse_args()
-    if not (FIXTURE.exists() and VIDEO.exists()):
-        print("falta el fixture o el video de prueba")
-        return 1
     OUT.mkdir(parents=True, exist_ok=True)
-    plan = json.load(open(FIXTURE))
-    plan["video"] = str(VIDEO)
+    if a.plan or a.from_e2e:
+        plan = json.load(open(a.plan or a.from_e2e))
+        if a.from_e2e:
+            plan = plan_v1_from_v2(plan)
+        if not Path(str(plan.get("video") or "")).exists():
+            print("el video del plan no existe")
+            return 1
+    else:
+        if not (FIXTURE.exists() and VIDEO.exists()):
+            print("falta el fixture o el video de prueba")
+            return 1
+        plan = json.load(open(FIXTURE))
+        plan["video"] = str(VIDEO)
+    base_name = a.name or "dentista"
+    if a.synth:
+        plan = synth_plan(plan, a.synth)
+        base_name = a.synth
     for style in a.styles.split(","):
         t0 = time.time()
-        p2 = D.direct(plan, style=style, intensity=a.intensity, use_llm=not a.no_llm)
+        # guion ficticio: sin VLM/LLM (los lugares del video real no son de ese negocio)
+        p2 = D.direct(plan, style=style, intensity=a.intensity, use_llm=not (a.no_llm or a.synth))
         took = time.time() - t0
+        if a.final:
+            from motion import render as R
+            name = f"{base_name}_final" if style == "dinamico" else f"{base_name}_{style}"
+            (OUT / f"{name}_plan_v2.json").write_text(json.dumps(p2, ensure_ascii=False, indent=1))
+            st = D.stats(p2)
+            txt = [f"{name}: estilo {style}  llm={p2['director']['llm']}  vlm={p2['director'].get('vlm')}  "
+                   f"director={took:.1f}s", f"entidades: {json.dumps(p2['entities'], ensure_ascii=False)}",
+                   f"metricas: {json.dumps(st)}", f"notas: {p2['director'].get('notes')}", "",
+                   D.edit_table(p2)]
+            (OUT / f"{name}_edicion.txt").write_text("\n".join(txt))
+            t1 = time.time()
+            res = R.render_pro(p2, OUT / f"{name}.mp4", {"quality": "final"})
+            print(f"[{name}] render {time.time() - t1:.1f}s carga={os.getloadavg()} errores={res.get('errors')}")
+            for pth in sheets_2fps(OUT / f"{name}.mp4", name):
+                print("  ", pth)
+            continue
         st = D.stats(p2)
         (OUT / f"plan_v2_{style}.json").write_text(json.dumps(p2, ensure_ascii=False, indent=1))
         txt = [f"Estilo {style}  intensidad {a.intensity}  llm={p2['director']['llm']}  "

@@ -76,7 +76,7 @@ def face_of(t: str):
 # git; datos del cliente) y si no existe se usan placeholders neutros.
 ENT = {"name": "Dra. Ana Ruiz", "role": "Dentista", "price": "$1,000 MXN",
        "address": "Av. Central 123", "landmark": "a 2 cuadras de la Glorieta Norte",
-       "cta": "Checa mis horarios en el link", "link_label": "Agenda tu cita", "handle": ""}
+       "cta": "Revisa mis horarios en el link", "link_label": "Agenda tu cita", "handle": ""}
 _EF = SPIKE / "work" / "fixtures" / "demo_entities.json"
 if _EF.exists():
     try:
@@ -383,7 +383,7 @@ def run_cutaways():
                                                   "y": 0.72}}, "25", 3.0),
         ("title halftone", R["title_card"], {"id": "tc3", "background": "halftone", "anim_in": "slide_up",
                                              "anim_out": "slide_down",
-                                             "text": {"preset": "title_pop", "text": "Checa mis horarios",
+                                             "text": {"preset": "title_pop", "text": "Revisa mis horarios",
                                                       "size": 0.1}}, "31", 3.0),
         ("title rays", R["title_card"], {"id": "tc4", "background": "rays", "anim_in": "zoom",
                                          "text": {"preset": "title_pop", "text": "$1,000", "size": 0.2,
@@ -619,7 +619,7 @@ def _montage_spec():
         (24.6, 1.8, [
             (R["photo"], {"id": "m_ph", "background": "paper", "caption": ADDR}, 0.0, 1.8),
         ]),
-        # "Checa mis horarios disponibles en el link aqui abajo"
+        # "Revisa mis horarios disponibles en el link de mi perfil"
         (29.9, 3.4, [
             (G["card"], {"id": "m_sch", "variant": "schedule", "title": "Horarios disponibles",
                          "subtitle": "Checa el link aqui abajo", "y": 0.5}, 0.1, 1.9),

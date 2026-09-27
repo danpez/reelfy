@@ -1,7 +1,8 @@
 # Ensambla el motor de Reelfy dentro de src-tauri/engine/ para Windows (x64).
 # Requiere que whisper.cpp ya esté clonado+compilado en spike/whisper.cpp/build
-# (lo hace el workflow de CI, generador MSVC -> build/bin/Release). El modelo
-# grande de whisper se descarga en runtime.
+# (lo hace el workflow de CI, generador MSVC -> build/bin/Release) y acestep.cpp (musica
+# IA, CPU/Vulkan con backends dinamicos) en spike/acestep.cpp/build. Los modelos grandes
+# (whisper, LLM, afinador, sujeto y musica) se descargan en el primer arranque.
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)      # -> reelfy-desktop/
 $ROOT   = (Resolve-Path "..").Path
@@ -13,7 +14,7 @@ $FFURL  = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg
 
 New-Item -ItemType Directory -Force $CACHE | Out-Null
 
-Write-Host "==> [1/5] codigo + assets"
+Write-Host "==> [1/6] codigo + assets"
 if (Test-Path $ENGINE) { Remove-Item -Recurse -Force $ENGINE }
 foreach ($d in @("scripts","app","assets","models","bin","whisper.cpp/build/bin")) {
   New-Item -ItemType Directory -Force (Join-Path $ENGINE $d) | Out-Null
@@ -22,16 +23,42 @@ Copy-Item -Recurse -Force "$SPIKE/scripts/*" "$ENGINE/scripts/"
 Copy-Item -Recurse -Force "$SPIKE/app/*"     "$ENGINE/app/"
 Get-ChildItem -Recurse "$ENGINE" -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
 Copy-Item -Recurse -Force "$SPIKE/assets/music" "$ENGINE/assets/"
+# Motion Engine: fuentes (OFL), iconos (Tabler, MIT) y SFX propios.
+Copy-Item -Recurse -Force "$SPIKE/assets/motion" "$ENGINE/assets/"
+Get-ChildItem -Recurse "$ENGINE/assets/motion" -Include *.wav,_build.json -ErrorAction SilentlyContinue | Remove-Item -Force
 Copy-Item -Force "$SPIKE/models/face_detection_yunet_2023mar.onnx" "$ENGINE/models/"
 Copy-Item -Force "$SPIKE/models/rnnoise.rnnn" "$ENGINE/models/"
 
-Write-Host "==> [2/5] whisper-cli.exe + DLLs"
+Write-Host "==> [2/6] whisper-cli.exe + DLLs"
 $wbin = "$SPIKE/whisper.cpp/build/bin/Release"
 if (-not (Test-Path "$wbin/whisper-cli.exe")) { $wbin = "$SPIKE/whisper.cpp/build/bin" }
 Copy-Item -Force "$wbin/whisper-cli.exe" "$ENGINE/whisper.cpp/build/bin/"
 Get-ChildItem "$wbin/*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "$ENGINE/whisper.cpp/build/bin/" -Force
 
-Write-Host "==> [3/5] ffmpeg/ffprobe (win64 con libass)"
+Write-Host "==> [3/6] acestep.cpp (musica IA: ace-synth/ace-server + ggml y backends)"
+$ace = "$SPIKE/acestep.cpp/build"
+$synth = Get-ChildItem -Recurse $ace -Filter "ace-synth.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($synth) {
+  $dst = "$ENGINE/bin/acestep"
+  New-Item -ItemType Directory -Force $dst | Out-Null
+  Copy-Item -Force $synth.FullName $dst
+  $server = Join-Path $synth.DirectoryName "ace-server.exe"
+  if (Test-Path $server) { Copy-Item -Force $server $dst }
+  # ggml*.dll y los backends cargables (ggml-cpu-<variante>.dll, ggml-vulkan.dll) junto al exe
+  Get-ChildItem -Recurse $ace -Filter "*.dll" -ErrorAction SilentlyContinue |
+    ForEach-Object { Copy-Item -Force $_.FullName $dst }
+  $n = (Get-ChildItem $dst).Count
+  Write-Host "    ace-synth copiado ($n archivos)"
+  # humo NO fatal (la musica IA es opcional: sin ella se usa la procedural)
+  $aceOut = ""
+  try { $aceOut = (& "$dst/ace-synth.exe" --help 2>&1 | Out-String) } catch { $aceOut = "$_" }
+  if ($aceOut -match "Usage") { Write-Host "    ace-synth OK" }
+  else { Write-Host "    AVISO: ace-synth no arranca (revisa las dll de ggml)"; Write-Host ($aceOut -split "`n" | Select-Object -First 3) }
+} else {
+  Write-Host "    AVISO: sin spike/acestep.cpp/build - la musica IA caera a procedural"
+}
+
+Write-Host "==> [4/6] ffmpeg/ffprobe (win64 con libass)"
 if (-not (Test-Path "$CACHE/ff/ffmpeg.exe")) {
   Invoke-WebRequest -Uri $FFURL -OutFile "$CACHE/ff.zip"
   Expand-Archive -Path "$CACHE/ff.zip" -DestinationPath "$CACHE/ffx" -Force
@@ -41,7 +68,7 @@ if (-not (Test-Path "$CACHE/ff/ffmpeg.exe")) {
 }
 Copy-Item -Force "$CACHE/ff/ffmpeg.exe","$CACHE/ff/ffprobe.exe" "$ENGINE/bin/"
 
-Write-Host "==> [4/5] ollama embebido (no-fatal)"
+Write-Host "==> [5/6] ollama embebido (no-fatal; qwen3.5 requiere >= 0.30)"
 try {
   $rel = Invoke-RestMethod "https://api.github.com/repos/ollama/ollama/releases/latest"
   $asset = $rel.assets | Where-Object { $_.name -eq "ollama-windows-amd64.zip" } | Select-Object -First 1
@@ -57,7 +84,7 @@ try {
   } else { Write-Host "    (asset de ollama no encontrado; sin LLM embebido)" }
 } catch { Write-Host "    ollama no se pudo obtener; el build continua sin LLM embebido" }
 
-Write-Host "==> [5/5] python-standalone + dependencias"
+Write-Host "==> [6/6] python-standalone + dependencias"
 if (-not (Test-Path "$CACHE/python.tar.gz")) {
   Invoke-WebRequest -Uri $PYURL -OutFile "$CACHE/python.tar.gz"
 }
@@ -68,6 +95,12 @@ Get-ChildItem -Recurse "$ENGINE/python" -Directory -Filter "__pycache__" | Remov
 # datos de prueba de librerias cientificas: peso muerto (ayuda al limite de NSIS)
 Get-ChildItem -Recurse "$ENGINE/python/Lib/site-packages" -Directory -ErrorAction SilentlyContinue |
   Where-Object { $_.Name -in @('tests','test') } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+# humo: las dependencias nativas del motor pro cargan en el python ensamblado
+# FATAL: render.py importa skia al cargar; sin estas libs (p. ej. falta msvcp140) /render pro,
+# /frame y /preview mueren, asi que el build no debe salir en verde.
+& "$ENGINE/python/python.exe" -c "import skia, onnxruntime, cv2, numpy, soundfile, scipy; print('    deps nativas OK: skia', skia.__version__, '| onnxruntime', onnxruntime.__version__, '| cv2', cv2.__version__)"
+if ($LASTEXITCODE -ne 0) { throw "deps nativas del motor pro no cargan en el python ensamblado (skia/onnxruntime/cv2)" }
 
 $sz = (Get-ChildItem -Recurse $ENGINE -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1MB
 Write-Host ("OK -> $ENGINE ({0:N0} MB)" -f $sz)

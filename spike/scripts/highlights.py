@@ -15,7 +15,7 @@ from pathlib import Path
 
 # apuntan al ollama EMBEBIDO cuando la app define REELFY_OLLAMA_URL; en dev, al del sistema
 OLLAMA_URL = os.environ.get("REELFY_OLLAMA_URL", "http://localhost:11434") + "/api/chat"
-MODEL = os.environ.get("REELFY_LLM_MODEL", "qwen2.5:7b")
+MODEL = os.environ.get("REELFY_LLM_MODEL", "qwen3.5:4b")
 
 # target short length window (seconds)
 MIN_SEC, MAX_SEC = 18, 60
@@ -47,7 +47,8 @@ def build_sentences(words, max_sec=12):
 
 
 def _ollama_chat(system, user, fmt="json"):
-    body = {"model": MODEL, "stream": False, "format": fmt,
+    # think False: con qwen3.5 (razonamiento) la respuesta llega vacia si no se apaga
+    body = {"model": MODEL, "stream": False, "format": fmt, "think": False,
             "options": {"temperature": 0.2},
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}]}

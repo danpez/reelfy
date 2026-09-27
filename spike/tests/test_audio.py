@@ -297,7 +297,7 @@ def test_rendimiento_mezcla_40s(tmp_path):
     t0 = time.perf_counter()
     info = A.mix(v, dur, evs, {"wav": str(mu), "stops": [{"at": 10, "dur": 0.8}]}, tmp_path / "o.wav")
     dt = time.perf_counter() - t0
-    assert dt < 6.0, dt
+    assert dt < 6.0 * _load_factor(), dt
     assert abs(info["lufs"] + 14.0) <= 0.5
     assert math.isfinite(info["true_peak_dbtp"]) and info["true_peak_dbtp"] <= -1.45
 
@@ -408,17 +408,17 @@ def test_musica_vacia_o_corta_no_cuelga(tmp_path):
     for k in (0, 1, 200):
         p = tmp_path / f"m{k}.wav"
         sf.write(str(p), np.zeros((k, 2), np.float32) + 0.1, SR, subtype="FLOAT")
-        with _limite(10):
+        with _limite(30):
             t0 = time.perf_counter()
             info = A.mix(None, 20.0, [], {"wav": str(p)}, out)
-            assert time.perf_counter() - t0 < 5.0
+            assert time.perf_counter() - t0 < 5.0 * _load_factor()
         assert info.get("music_skipped") == "muy corta" and "music" not in info
     rng = np.random.default_rng(15)
     p = _write(tmp_path / "corta.wav", _music(0.6, rng))
-    with _limite(10):
+    with _limite(30):
         t0 = time.perf_counter()
         info = A.mix(None, 60.0, [], {"wav": str(p), "offset": 0.05}, out, stems_dir=tmp_path / "st")
-        assert time.perf_counter() - t0 < 5.0
+        assert time.perf_counter() - t0 < 5.0 * _load_factor()
     mus, _ = sf.read(info["stems"]["music"], always_2d=True)
     for a in (5.0, 30.0, 55.0):
         assert np.sqrt((mus[int(a * SR):int((a + 0.3) * SR)] ** 2).mean()) > 1e-3
@@ -430,7 +430,7 @@ def test_musica_vacia_o_corta_no_cuelga(tmp_path):
 def test_loop_fit_lineal_y_continuo():
     rng = np.random.default_rng(16)
     m = _music(1.0, rng)
-    with _limite(10):
+    with _limite(30):
         y = A._loop_fit(m, int(120 * SR))
     assert y.shape == (int(120 * SR), 2) and y.dtype == np.float32
     # union con fundido de igual potencia: sin huecos de nivel
@@ -656,3 +656,48 @@ def test_memoria_acotada_en_mezclas_largas(tmp_path):
         tracemalloc.stop()
     assert peak < 450e6, peak / 1e6
     assert abs(info["lufs"] + 14.0) <= 0.5
+
+
+
+# ---------------------------------------------------------------- ola 2: fundidos de seguridad
+def test_mezcla_termina_en_silencio_aunque_la_voz_no(tmp_path):
+    """La voz (o un SFX) termina a media onda en la ultima muestra: la mezcla completa lleva un
+    fundido de seguridad de END_FADE_S y la ultima muestra queda en ~0 (sin clic al final)."""
+    dur = 4.0
+    t = np.arange(int(dur * SR)) / SR
+    v = (0.5 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+    vp = tmp_path / "v.wav"
+    sf.write(str(vp), np.stack([v, v], 1), SR)
+    info = A.mix(str(vp), dur, [], {"enabled": False}, tmp_path / "o.wav")
+    y, _ = sf.read(str(tmp_path / "o.wav"), always_2d=True)
+    assert np.abs(y[-1]).max() < 1e-3 and np.abs(y[0]).max() < 1e-3
+    k = int(A.END_FADE_S * SR)
+    mid = np.abs(y[SR:2 * SR]).max()
+    assert np.abs(y[-k - 4000:-k - 100]).max() > 0.9 * mid        # antes del fundido: intacta
+    assert abs(info["lufs"] + 14.0) < 0.5
+
+
+def test_intro_fade_explicito_se_respeta_con_arranque_horneado(tmp_path):
+    """fade_in (0.2 de los planes viejos) NO suaviza el arranque horneado por music.py; la
+    entrada suave explicita (intro_fade) si se respeta."""
+    rng = np.random.default_rng(3)
+    mu = _write(tmp_path / "m.wav", _music(10.0, rng))
+    lv = {}
+    for k, extra in {"legacy": {"fade_in": 0.2}, "suave": {"intro_fade": 1.0}}.items():
+        cfg = dict({"ending": {"mode": "hit", "hit": 9.5}, "wav": str(mu), "fade_out": 1.5}, **extra)
+        info = A.mix(None, 10.0, [], cfg, tmp_path / "o.wav", target_lufs=None, stems_dir=tmp_path / k)
+        m, _ = sf.read(info["stems"]["music"], always_2d=True)
+        r = lambda a, b: 10 * np.log10((m[int(a * SR):int(b * SR)] ** 2).mean() + 1e-20)  # noqa: E731
+        lv[k] = (r(0.0, 0.1) - r(5.0, 6.0), info["music"]["fade_in"])
+    assert lv["legacy"][1] <= 0.01 and lv["suave"][1] == pytest.approx(1.0)      # info redondea a 0.01
+    assert lv["suave"][0] < lv["legacy"][0] - 10, lv
+
+
+def _load_factor() -> float:
+    """Holgura por carga (maquina compartida con otros renders): con load > nucleos los
+    tiempos suben en proporcion; el limite se escala igual (tope 4x) en vez de fallar en falso."""
+    import os
+    try:
+        return min(4.0, max(1.0, os.getloadavg()[0] / (os.cpu_count() or 8)))
+    except OSError:
+        return 1.0

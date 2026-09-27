@@ -50,9 +50,10 @@ def set_key(key):
 
 def _llm(prompt, timeout=60):
     url = os.environ.get("REELFY_OLLAMA_URL", "http://localhost:11434") + "/api/generate"
-    model = os.environ.get("REELFY_LLM_MODEL", "qwen2.5:7b")
+    model = os.environ.get("REELFY_LLM_MODEL", "qwen3.5:4b")
     body = json.dumps({"model": model, "prompt": prompt, "stream": False,
-                       "options": {"temperature": 0.3}, "format": "json"}).encode()
+                       "options": {"temperature": 0.3}, "format": "json",
+                       "think": False}).encode()   # qwen3.5: sin "think" la respuesta llega vacia
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())["response"]

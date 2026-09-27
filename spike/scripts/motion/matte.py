@@ -14,11 +14,17 @@ Modelos (descargados en el setup; revision fija + SHA-256):
     persona. Se usa como compuerta: m = modnet * dilatar(persona). Quita los muebles. Si no
     esta disponible, la compuerta es un prior geometrico del cuerpo desde la cara.
 
-Pipeline de prepare(), rango por rango (memoria acotada; lectura con busqueda por tiempo):
-  A) caras (YuNet, 360 px) en los cuadros clave (cada `step` cuadros).
-  B) gating por RANGO: si al menos ~25% de las claves tienen cara, se infieren TODAS (la cara
-     de cada clave es la detectada mas cercana en el tiempo: perfiles y cabeza agachada no
-     apagan la mascara); si no (fachada, b-roll), el rango queda vacio.
+Pipeline de prepare(): INCREMENTAL (solo se infieren y escriben los huecos sin mascara de los
+rangos pedidos, con unos cuadros de contexto), hueco por hueco (memoria acotada; lectura con
+busqueda por tiempo). Una sola sesion ONNX por proceso y modelo (compartida entre hilos, sin
+spinning) y executors persistentes (los hilos y las sesiones viven entre rangos y llamadas):
+  A) caras (YuNet, 360 px) en los cuadros clave (cada `step` cuadros) de TODO el rango pedido,
+     cacheadas por cuadro en faces.json (un hueco nuevo solo detecta sus claves).
+  B) gating y recorte por RANGO PEDIDO (no por hueco): si al menos ~25% de las claves del rango
+     tienen cara, se infieren TODAS (la cara de cada clave es la detectada mas cercana en el
+     tiempo, aunque este fuera del hueco: perfiles y cabeza agachada no apagan la mascara); si
+     no (fachada, b-roll), el rango queda vacio. El recorte y las dims de inferencia salen de
+     las caras de todo el rango: calcular por huecos da lo mismo que calcular de una vez.
   C) MODNet sobre un recorte fijo alrededor del cuerpo + compuerta de persona + componentes
      que tocan el cuerpo; suavizado temporal simetrico sensible a bordes; histeresis de area
      (la mascara no se desploma de un cuadro clave al siguiente: se funde en ~0.25 s).
@@ -66,7 +72,8 @@ MODELS = {
                "sha256": "552d8a984054e59b5d773d24b9b12022b22046ceb2bbc4c9aaeaceb36a9ddf24",
                "env": "REELFY_PERSONSEG_URL", "license": "Apache-2.0"},
 }
-_ALGO = 6                        # version del pipeline (invalida la cache)
+_ALGO = 7                        # version del pipeline (invalida la cache)
+# 7: gating/recorte por rango pedido en el incremental (el 6 podia dejar huecos en cero)
 
 
 def _log(msg: str) -> None:
@@ -204,23 +211,198 @@ def ensure_models(on_pct=None) -> dict:
     return out
 
 
-_SESS_LOCAL = threading.local()
+_SESS_LOCAL = threading.local()  # solo el detector de caras (cv2.FaceDetectorYN no es thread-safe)
 _PERSON_FAILED: list[str] = []   # la descarga de la compuerta ya fallo en este proceso
+# UNA sesion ONNX por proceso y modelo: InferenceSession.run es seguro entre hilos, asi que los
+# hilos de inferencia la comparten (antes: una por hilo y un executor nuevo en cada prepare ->
+# sesiones recreadas en cada rango). Sin "spinning": con varios procesos/hilos compitiendo por
+# la CPU, los hilos ociosos de ORT no queman nucleos esperando trabajo.
+_SESS: dict[tuple, object] = {}
+_SESS_LOCK = threading.Lock()
+_POOLS: dict[str, ThreadPoolExecutor] = {}
+_POOL_LOCK = threading.Lock()
+_META_LOCK = threading.Lock()    # meta.json / faces.json: leer-mezclar-escribir sin carreras
 
 
-def _session(threads: int, which: str = "modnet"):
-    attr = f"sess_{which}"
-    s = getattr(_SESS_LOCAL, attr, None)
-    if s is None:
-        import onnxruntime as ort
-        so = ort.SessionOptions()
-        so.intra_op_num_threads = max(1, threads)
-        so.inter_op_num_threads = 1
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        so.log_severity_level = 3
-        s = ort.InferenceSession(str(model_path(which)), so, providers=["CPUExecutionProvider"])
-        setattr(_SESS_LOCAL, attr, s)
+def session_threads() -> int:
+    """Hilos intra-op de la sesion compartida (REELFY_MATTE_THREADS para forzar)."""
+    try:
+        v = int(os.environ.get("REELFY_MATTE_THREADS") or 0)
+    except ValueError:
+        v = 0
+    return v if v > 0 else max(2, (os.cpu_count() or 4) // 3)
+
+
+def _session(threads: int | None = None, which: str = "modnet"):
+    """Sesion compartida del modelo `which` en CPU (se crea una sola vez por proceso).
+    `threads` se conserva por compatibilidad: el numero de hilos lo fija session_threads()."""
+    path = str(model_path(which))
+    key = (which, path)
+    s = _SESS.get(key)
+    if s is not None:
+        return s
+    with _SESS_LOCK:
+        s = _SESS.get(key)
+        if s is None:
+            import onnxruntime as ort
+            so = ort.SessionOptions()
+            so.intra_op_num_threads = session_threads()
+            so.inter_op_num_threads = 1
+            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            so.log_severity_level = 3
+            so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            s = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
+            _SESS[key] = s
     return s
+
+
+# ---- MODNet en el Neural Engine (macOS): ONNX Runtime + CoreML EP con forma fija ----------
+# Medido (M2 Max, 512x928): CPU ~860 ms de CPU por cuadro (~150-250 ms de pared compitiendo);
+# CoreML/ANE ~100 ms de CPU y ~45 ms de pared con 3 llamadas simultaneas. Diferencia del alfa
+# crudo: media 2e-4 (fp16), invisible tras el suavizado y el upsample guiado. La forma de
+# entrada es fija por sesion (el recorte varia por rango): una sesion por forma, con el modelo
+# compilado en disco por forma (1.5 s la primera vez en la maquina, 0.2 s despues).
+# REELFY_MATTE_COREML=0 lo desactiva; si CoreML falla se cae a CPU sin romper nada.
+_COREML_OFF: list[str] = []
+
+
+def coreml_enabled() -> bool:
+    if _COREML_OFF or os.environ.get("REELFY_MATTE_COREML", "1") == "0" or sys.platform != "darwin":
+        return False
+    try:
+        import onnxruntime as ort
+        return "CoreMLExecutionProvider" in ort.get_available_providers()
+    except Exception:
+        return False
+
+
+def coreml_dir() -> Path:
+    """Carpeta de los modelos CoreML compilados (una subcarpeta por forma). Default
+    DATA/models/matte/coreml; REELFY_MATTE_COREML_DIR la cambia (las pruebas usan un temporal
+    para no llenar ni podar la cache real con formas de juguete)."""
+    env = os.environ.get("REELFY_MATTE_COREML_DIR")
+    if env:
+        return Path(env)
+    return model_path("modnet").parent / "matte" / "coreml"
+
+
+# fallos al crear una sesion CoreML: {clave: (intentos, momento)}. No se guardan como None para
+# siempre (un fallo transitorio, p. ej. la carpeta podada por otro proceso a media compilacion,
+# dejaba esa forma en CPU todo el proceso): se reintenta tras COREML_RETRY_S, hasta 3 veces.
+_COREML_FAILS: dict[tuple, tuple[int, float]] = {}
+COREML_RETRY_S = 60.0
+
+
+def _coreml_session(shape: tuple[int, int] | None, which: str = "modnet"):
+    """Sesion CoreML del modelo `which` (MODNet: para la forma (alto, ancho) de entrada; la
+    compuerta de persona ya es de forma fija), o None (se usa CPU)."""
+    path = str(model_path(which))
+    key = (f"{which}-coreml", path, tuple(shape or ()))
+    s = _SESS.get(key)
+    if s is not None:
+        return s
+    fails = _COREML_FAILS.get(key)
+    if fails and (fails[0] >= 3 or time.time() - fails[1] < COREML_RETRY_S):
+        return None
+    with _SESS_LOCK:
+        s = _SESS.get(key)
+        if s is not None:
+            return s
+        fails = _COREML_FAILS.get(key)
+        if fails and (fails[0] >= 3 or time.time() - fails[1] < COREML_RETRY_S):
+            return None
+        s = None
+        try:
+            import onnxruntime as ort
+            so = ort.SessionOptions()
+            so.intra_op_num_threads = 2
+            so.inter_op_num_threads = 1
+            so.log_severity_level = 3
+            so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            tag = f"{which}_{str(MODELS[which]['sha256'])[:8]}"
+            if shape:
+                h, w = int(shape[0]), int(shape[1])
+                for k, v in (("batch_size", 1), ("height", h), ("width", w)):
+                    so.add_free_dimension_override_by_name(k, v)
+                tag += f"_{h}x{w}"
+            # una carpeta por forma: la cache de ORT no distingue formas fijadas por override
+            cdir = coreml_dir() / tag
+            cdir.mkdir(parents=True, exist_ok=True)
+            _prune_coreml(cdir)
+            opts = {"MLComputeUnits": "CPUAndNeuralEngine", "ModelFormat": "NeuralNetwork",
+                    "RequireStaticInputShapes": "1", "ModelCacheDirectory": str(cdir)}
+            s = ort.InferenceSession(path, so, providers=[("CoreMLExecutionProvider", opts),
+                                                          "CPUExecutionProvider"])
+        except Exception as e:  # noqa: sin CoreML para esta forma -> CPU (se reintenta luego)
+            _log(f"CoreML no disponible para {which} {shape}: {type(e).__name__}: {str(e)[:160]}")
+            n_fail = (_COREML_FAILS.get(key) or (0, 0.0))[0] + 1
+            _COREML_FAILS[key] = (n_fail, time.time())
+            return None
+        _COREML_FAILS.pop(key, None)
+        same = [k for k in _SESS if k[0] == key[0]]
+        if len(same) >= 8:
+            for k in same[:4]:
+                _SESS.pop(k, None)
+        _SESS[key] = s
+        return s
+
+
+COREML_KEEP = 8          # formas compiladas que se conservan en disco (~50 MB cada una)
+COREML_FRESH_S = 300.0   # una carpeta usada hace menos de esto no se poda (otro proceso la usa)
+
+
+def _prune_coreml(current: Path, keep: int = COREML_KEEP, fresh_s: float = COREML_FRESH_S) -> None:
+    """LRU de los modelos CoreML compilados por forma: marca `current` como recien usado y
+    borra los mas viejos por encima de `keep` (la cache no crece sin limite). Nunca borra una
+    carpeta tocada hace menos de `fresh_s` s: puede estar compilandose o en uso en otro
+    proceso (render en paralelo, ensure_analysis del Studio)."""
+    try:
+        os.utime(current, None)
+        now = time.time()
+        dirs = [d for d in current.parent.iterdir() if d.is_dir() and d.name.startswith("modnet_")]
+        dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+        for d in dirs[keep:]:
+            try:
+                if d == current or now - d.stat().st_mtime < fresh_s:
+                    continue
+            except OSError:
+                continue
+            shutil.rmtree(d, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def _run(which: str, feed: dict, shape: tuple | None, threads: int | None = None):
+    """Inferencia con CoreML si esta disponible (y no fallo en este proceso); si no, CPU."""
+    if coreml_enabled():
+        s = _coreml_session(shape, which)
+        if s is not None:
+            try:
+                return s.run(None, feed)[0]
+            except Exception as e:  # noqa: un fallo de CoreML desactiva el EP en el proceso
+                if not _COREML_OFF:
+                    _COREML_OFF.append(str(e)[:200])
+                    _log(f"CoreML fallo al inferir ({type(e).__name__}); se usa CPU")
+    return _session(threads, which).run(None, feed)[0]
+
+
+def engine() -> str:
+    """Motor de inferencia de MODNet en este proceso: 'coreml' o 'cpu'."""
+    return "coreml" if coreml_enabled() else "cpu"
+
+
+def _pool(kind: str, n: int) -> ThreadPoolExecutor:
+    """Executor PERSISTENTE por tipo de trabajo (inferencia / terminado): los hilos viven entre
+    rangos y entre llamadas a prepare (antes se creaba y destruia uno por rango)."""
+    n = max(1, int(n))
+    with _POOL_LOCK:
+        ex = _POOLS.get(kind)
+        if ex is None or getattr(ex, "_max_workers", 0) < n or getattr(ex, "_shutdown", False):
+            if ex is not None:
+                ex.shutdown(wait=False)
+            ex = ThreadPoolExecutor(n, thread_name_prefix=f"matte-{kind}")
+            _POOLS[kind] = ex
+        return ex
 
 
 def _face_det(w: int, h: int):
@@ -238,7 +420,7 @@ def infer(rgb: np.ndarray, threads: int = 3) -> np.ndarray:
     Devuelve float32 HxW en [0,1]."""
     x = rgb.astype(np.float32) * (2.0 / 255.0) - 1.0
     x = np.ascontiguousarray(x.transpose(2, 0, 1)[None])
-    out = _session(threads).run(None, {"input": x})[0]
+    out = _run("modnet", {"input": x}, rgb.shape[:2], threads)
     return np.clip(out[0, 0], 0.0, 1.0).astype(np.float32)
 
 
@@ -247,7 +429,7 @@ def person_prob(rgb: np.ndarray, threads: int = 1) -> np.ndarray:
     float32 192x192 (hay que reescalarla al tamano que se necesite)."""
     x = cv2.resize(rgb[..., :3], (192, 192), interpolation=cv2.INTER_AREA).astype(np.float32)
     x = (x * (2.0 / 255.0) - 1.0).transpose(2, 0, 1)[None]
-    out = _session(threads, "person").run(None, {"x": np.ascontiguousarray(x)})[0]
+    out = _run("person", {"x": np.ascontiguousarray(x)}, None, threads)
     return np.clip(out[0, 1], 0.0, 1.0).astype(np.float32)
 
 
@@ -517,9 +699,10 @@ class MatteProvider:
 
     CHUNK = 240          # cuadros por bloque de inferencia (memoria acotada)
     FACE_SHARE = 0.25    # fraccion minima de claves con cara para inferir el rango
+    CONTEXT = 6          # cuadros de contexto a cada lado al completar un hueco (incremental)
 
     def __init__(self, base_video, W: int, H: int, fps: float, frame_ranges, cache_dir,
-                 quality: str = "final", workers: int | None = None):
+                 quality: str = "final", workers: int | None = None, step: int | None = None):
         self.base_video = str(base_video)
         self.W, self.H, self.fps = int(W), int(H), float(fps)
         self.ranges = _merge_ranges(frame_ranges)
@@ -528,15 +711,18 @@ class MatteProvider:
         iw = 384 if self.draft else 512
         ih = int(max(32, round(iw * self.H / self.W / 32.0) * 32))
         self.inf_size = (iw, ih)
-        self.step = 3 if self.draft else 2
+        self.step = int(step) if step else (3 if self.draft else 2)
         cpu = os.cpu_count() or 4
-        self.workers = workers or max(1, min(4, cpu // 3))
-        self.threads = max(1, cpu // self.workers)
+        # llamadas de inferencia simultaneas sobre la sesion compartida (cada una usa
+        # session_threads() hilos): entre las dos cubren la CPU sin sobresuscribirla
+        self.workers = workers or max(1, min(4, cpu // session_threads()))
+        self.threads = session_threads()
         self.error: str | None = None
         self.warning: str | None = None
         self.stats: dict[str, dict] = {}
         self._lru: dict[int, np.ndarray] = {}
         self._zero: np.ndarray | None = None
+        self._faces: dict[int, list | None] | None = None
         key = self._key()
         if not cache_dir:
             import paths
@@ -548,6 +734,7 @@ class MatteProvider:
         d = dict(self.__dict__)
         d["_lru"] = {}
         d["_zero"] = None
+        d["_faces"] = None
         return d
 
     def _key(self) -> str:
@@ -557,6 +744,8 @@ class MatteProvider:
         except OSError:
             vid = self.base_video
         raw = f"{vid}|{self.W}x{self.H}|{self.quality}|{MODEL_SIZE}|{_ALGO}"
+        if self.step != (3 if self.draft else 2):          # paso no estandar: su propia cache
+            raw += f"|s{self.step}"
         return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
     @property
@@ -570,10 +759,30 @@ class MatteProvider:
         return any(a <= n < b for a, b in self.ranges)
 
     def missing_ranges(self) -> list[tuple[int, int]]:
+        """Rangos pedidos a los que les falta al menos un cuadro."""
         out = []
         for a, b in self.ranges:
             if any(not self._png(n).exists() for n in range(a, b)):
                 out.append((a, b))
+        return out
+
+    def missing_runs(self) -> list[tuple[int, int, int, int]]:
+        """Huecos contiguos SIN mascara dentro de los rangos pedidos: [(a, b, ra, rb)] con
+        (ra, rb) el rango pedido que los contiene. prepare() solo calcula estos huecos (con un
+        poco de contexto a cada lado): agregar un efecto que pide al sujeto junto a otro ya
+        calculado no rehace lo que ya esta en la cache."""
+        out = []
+        for ra, rb in self.ranges:
+            a = None
+            for n in range(ra, rb):
+                miss = not self._png(n).exists()
+                if miss and a is None:
+                    a = n
+                elif not miss and a is not None:
+                    out.append((a, n, ra, rb))
+                    a = None
+            if a is not None:
+                out.append((a, rb, ra, rb))
         return out
 
     # -------------------------------------------------- meta / calidad
@@ -587,15 +796,106 @@ class MatteProvider:
             self.stats = {}
 
     def _save_meta(self) -> None:
+        """Mezcla self.stats con lo que haya en disco y lo escribe de forma atomica. Temporal
+        unico por proceso e hilo (dos prepare sobre la misma cache, p. ej. ensure_analysis en
+        segundo plano y un export, no se pisan) y nunca lanza: perder la meta solo pierde la
+        calidad por rango, no las mascaras."""
+        with _META_LOCK:
+            try:
+                cur = json.loads(self._meta_file().read_text()).get("ranges", {})
+            except Exception:
+                cur = {}
+            cur.update(self.stats)
+            self.stats = cur
+            self._atomic_json(self._meta_file(), {"ranges": cur, "algo": _ALGO})
+
+    @staticmethod
+    def _atomic_json(path: Path, obj: dict) -> None:
+        tmp = path.with_name(f"{path.name}.tmp{os.getpid()}_{threading.get_ident() % 100000}")
         try:
-            cur = json.loads(self._meta_file().read_text()).get("ranges", {})
-        except Exception:
+            tmp.write_text(json.dumps(obj))
+            os.replace(tmp, path)
+        except (OSError, TypeError, ValueError) as e:
+            _log(f"no se pudo escribir {path.name}: {e}")
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    # -------------------------------------------------- caras por cuadro (cache)
+    def _faces_file(self) -> Path:
+        return self.dir / "faces.json"
+
+    def _load_faces(self) -> dict[int, list | None]:
+        """Caras (cx, cy, w, h, score) por cuadro detectadas a 360 px; None = cuadro fuera del
+        video. Se guardan por cuadro ABSOLUTO del base: sirven para cualquier rango."""
+        if self._faces is None:
+            self._faces = {}
+            try:
+                d = json.loads(self._faces_file().read_text())
+                if d.get("algo") == _ALGO:
+                    self._faces = {int(k): (None if v is None else [tuple(f) for f in v])
+                                   for k, v in (d.get("faces") or {}).items()}
+            except Exception:
+                pass
+        return self._faces
+
+    def _save_faces(self) -> None:
+        with _META_LOCK:
             cur = {}
-        cur.update(self.stats)
-        self.stats = cur
-        tmp = self._meta_file().with_name("meta.json.tmp")
-        tmp.write_text(json.dumps({"ranges": cur, "algo": _ALGO}))
-        tmp.replace(self._meta_file())
+            try:
+                d = json.loads(self._faces_file().read_text())
+                if d.get("algo") == _ALGO:
+                    cur = d.get("faces") or {}
+            except Exception:
+                pass
+            cur.update({str(k): (None if v is None else [list(f) for f in v])
+                        for k, v in (self._faces or {}).items()})
+            self._atomic_json(self._faces_file(), {"algo": _ALGO, "faces": cur})
+
+    def _keys_of(self, ra: int, rb: int) -> list[int]:
+        """Cuadros clave de un rango pedido: ra, ra+step, ... y el ultimo (rb-1)."""
+        ks = list(range(ra, rb, self.step))
+        if ks and ks[-1] != rb - 1:
+            ks.append(rb - 1)
+        return ks
+
+    def _range_faces(self, ra: int, rb: int) -> dict[int, list]:
+        """Caras en las claves del rango pedido [ra, rb): solo se decodifican y detectan las
+        claves que falten en la cache (un hueco nuevo no repite la deteccion del resto)."""
+        W, H, fps = self.W, self.H, self.fps
+        ks = self._keys_of(ra, rb)
+        cache = self._load_faces()
+        miss = [k for k in ks if k not in cache]
+        if miss:
+            dw = 360
+            dh = int(round(dw * H / W / 2) * 2)
+            a0, b0 = miss[0], miss[-1] + 1       # a0 esta en la reticula del rango
+            got = set()
+            for n, rgb in _read_range(self.base_video, a0, b0, dw, dh, fps, self.step):
+                got.add(n)
+                if n in cache:
+                    continue
+                fs = [tuple(float(v) for v in f) for f in detect_faces(rgb) if f[2] >= 0.025]
+                cache[n] = sorted(fs, key=lambda f: -f[2] * f[3])[:2]
+            last = max(got) if got else None
+            for k in miss:
+                if k not in cache and last is not None and k > last:
+                    cache[k] = None                # mas alla del final del video
+            self._save_faces()
+        return {k: cache[k] for k in ks if cache.get(k) is not None}
+
+    def _range_plan(self, faces: dict[int, list]) -> dict:
+        """Gating y recorte de un rango pedido a partir de las caras de sus claves."""
+        ks = sorted(faces)
+        with_face = [k for k in ks if faces[k]]
+        plan = {"faces": faces, "keys": len(ks), "with_face": with_face, "person": False,
+                "crop": None, "dims": None}
+        if not ks or len(with_face) < max(1, self.FACE_SHARE * len(ks)):
+            return plan
+        crop = self._crop_for([faces[k][0] for k in with_face])
+        plan.update(person=True, crop=crop, dims=self._inf_dims(crop))
+        return plan
 
     def quality_of(self, a: int, b: int) -> float | None:
         """Calidad media (1 = limpia) de la mascara en [a, b), ponderada por cuadros. None si
@@ -641,13 +941,19 @@ class MatteProvider:
     def _write(self, n: int, u8: np.ndarray) -> None:
         """Escritura atomica (tmp + replace): un render cancelado nunca deja PNG truncados."""
         p = self._png(n)
-        tmp = p.with_name(p.name + f".tmp{threading.get_ident() % 100000}.png")
+        tmp = p.with_name(p.name + f".tmp{os.getpid()}_{threading.get_ident() % 100000}.png")
         cv2.imwrite(str(tmp), u8, [cv2.IMWRITE_PNG_COMPRESSION, 1])
         os.replace(tmp, p)
 
     def prepare(self, on_pct=None) -> bool:
-        """Calcula las mascaras que falten. Devuelve True si quedaron listas."""
-        todo = self.missing_ranges()
+        """Calcula las mascaras que falten. Incremental: solo se infieren y ESCRIBEN los huecos
+        sin mascara dentro de los rangos pedidos (missing_runs), cada uno con CONTEXT cuadros de
+        contexto a cada lado para el suavizado temporal (no se reescriben). Las caras, el
+        gating y el recorte se deciden sobre el RANGO PEDIDO completo (no sobre el hueco): un
+        hueco sin caras detectadas dentro de un rango con caras se infiere igual (antes quedaba
+        en cero y la persona desaparecia), y el recorte es el mismo que al calcular de una vez.
+        Devuelve True si quedaron listas."""
+        todo = self.missing_runs()
         if not todo:
             if on_pct:
                 on_pct(100.0)
@@ -675,54 +981,74 @@ class MatteProvider:
             _log(self.warning)
         self.dir.mkdir(parents=True, exist_ok=True)
         pct = on_pct or (lambda p: None)
-        total = sum(b - a for a, b in todo)
+        total = sum(b - a for a, b, _, _ in todo)
         done = [0]
         lock = threading.Lock()
+        stop: list[BaseException] = []            # excepcion de on_pct (cancelacion)
 
         def tick(k=1):
             with lock:
                 done[0] += k
-                pct(min(99.5, 100.0 * done[0] / max(1, total)))
+                try:
+                    pct(min(99.5, 100.0 * done[0] / max(1, total)))
+                except BaseException as e:
+                    stop.append(e)
+                    raise
 
-        for (a, b) in todo:
+        by_range: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for (a, b, ra, rb) in todo:
+            by_range.setdefault((ra, rb), []).append((a, b))
+        for (ra, rb), gaps in by_range.items():
             try:
-                st = self._prepare_range(a, b, use_person, tick)
-            except Exception as e:  # un rango que falla no tumba el render: queda vacio
-                _log(f"rango {a}-{b} fallo: {type(e).__name__}: {e}")
-                z = np.zeros((self.H, self.W), np.uint8)
-                for n in range(a, b):
-                    if not self._png(n).exists():
-                        self._write(n, z)
-                st = {"quality": None, "error": str(e)}
-            self.stats[f"{a}-{b}"] = st
+                plan = self._range_plan(self._range_faces(ra, rb))
+            except Exception as e:  # noqa: sin caras legibles -> cada hueco decide solo
+                _log(f"caras del rango {ra}-{rb} fallaron: {type(e).__name__}: {e}")
+                plan = None
+            for (a, b) in gaps:
+                ea, eb = max(ra, a - self.CONTEXT), min(rb, b + self.CONTEXT)
+                try:
+                    st = self._prepare_range(ea, eb, use_person, tick, write=(a, b), plan=plan)
+                except Exception as e:  # un hueco que falla no tumba el render: queda vacio
+                    if stop:           # cancelado desde on_pct: se propaga SIN escribir vacios
+                        self._save_meta()
+                        raise stop[0]
+                    _log(f"rango {a}-{b} fallo: {type(e).__name__}: {e}")
+                    z = np.zeros((self.H, self.W), np.uint8)
+                    for n in range(a, b):
+                        if not self._png(n).exists():
+                            self._write(n, z)
+                    st = {"quality": None, "error": str(e)}
+                if (a, b) != (ra, rb):
+                    st["range"] = [ra, rb]
+                self.stats[f"{a}-{b}"] = st
         self._save_meta()
         pct(100.0)
         return True
 
-    def _prepare_range(self, a: int, b: int, use_person: bool, tick) -> dict:
+    def _prepare_range(self, a: int, b: int, use_person: bool, tick,
+                       write: tuple[int, int] | None = None, plan: dict | None = None) -> dict:
+        """Mascaras del tramo [a, b) (claves y suavizado sobre todo el tramo); solo se ESCRIBEN
+        los cuadros de `write` (default: todo el tramo). `plan` (de _range_plan) trae las caras,
+        el gating y el recorte del rango pedido completo; sin plan se deciden sobre [a, b)."""
         W, H, fps, step = self.W, self.H, self.fps, self.step
-        # A) caras en las claves (baja resolucion)
-        dw = 360
-        dh = int(round(dw * H / W / 2) * 2)
-        faces: dict[int, list] = {}
-        for n, rgb in _read_range(self.base_video, a, b, dw, dh, fps, step):
-            fs = [f for f in detect_faces(rgb) if f[2] >= 0.025]
-            faces[n] = sorted(fs, key=lambda f: -f[2] * f[3])[:2]
-        ks = sorted(faces)
-        with_face = [k for k in ks if faces[k]]
-        # B) gating por rango
-        if not ks or len(with_face) < max(1, self.FACE_SHARE * len(ks)):
+        wa, wb = write if write else (a, b)
+        wa, wb = max(a, wa), min(b, wb)
+        # A+B) caras, gating y recorte (del rango pedido si viene el plan)
+        if plan is None:
+            plan = self._range_plan(self._range_faces(a, b))
+        faces, with_face = plan["faces"], plan["with_face"]
+        if not plan["person"]:
             z = np.zeros((H, W), np.uint8)
             got = 0
-            for n in range(a, b):
+            for n in range(wa, wb):
                 self._write(n, z)
                 got += 1
                 if got % 16 == 0:
                     tick(16)
             tick(got % 16)
-            return {"quality": 1.0, "person": False, "keys": len(ks), "face_keys": len(with_face)}
-        crop = self._crop_for([faces[k][0] for k in with_face])
-        dims = self._inf_dims(crop)
+            return {"quality": 1.0, "person": False, "keys": plan["keys"],
+                    "face_keys": len(with_face)}
+        crop, dims = plan["crop"], plan["dims"]
         x0, y0, x1, y1 = crop
         cw, ch = x1 - x0, y1 - y0
         iw, ih = dims
@@ -735,9 +1061,15 @@ class MatteProvider:
             return faces[min(cands, key=lambda c: abs(c - k))]
 
         removed: list[float] = []
+        infer_ex = _pool(f"infer{self.workers}", self.workers)
+        nfin = max(2, self.workers * 2)
+        finish_ex = _pool(f"finish{nfin}", nfin)
         # C+D por bloques (memoria acotada), con una clave de solape a cada lado
         for c0 in range(a, b, self.CHUNK):
             c1 = min(b, c0 + self.CHUNK)
+            f0, f1 = max(c0, wa), min(c1, wb)
+            if f1 <= f0:
+                continue                          # bloque de puro contexto: nada que escribir
             ka = max(a, c0 - step)
             kb = min(b, c1 + step)
             keys: dict[int, np.ndarray] = {}
@@ -760,17 +1092,21 @@ class MatteProvider:
             def collect(fu):
                 n, g, rem = fu.result()
                 keys[n] = g
-                if c0 <= n < c1:
+                if f0 <= n < f1:
                     removed.append(rem)
 
-            with ThreadPoolExecutor(self.workers) as ex:
-                pend = []
+            pend = []
+            try:
                 for n, rgb in _read_range(self.base_video, ka, kb, W, H, fps, step):
-                    pend.append(ex.submit(work, n, rgb))
-                    if len(pend) > self.workers * 2:  # limita memoria en vuelo
+                    pend.append(infer_ex.submit(work, n, rgb))
+                    if len(pend) > self.workers:  # limita memoria y concurrencia en vuelo
                         collect(pend.pop(0))
                 for fu in pend:
                     collect(fu)
+            except BaseException:
+                for fu in pend:
+                    fu.cancel()
+                raise
             kk = sorted(keys)
             seq = temporal_smooth([keys[k] for k in kk])
             seq = area_hysteresis(seq, fps, step)
@@ -789,18 +1125,22 @@ class MatteProvider:
                 tick()
 
             written = set()
-            with ThreadPoolExecutor(max(2, self.workers * 2)) as ex:
-                futs = []
-                for n, rgb in _read_range(self.base_video, c0, c1, W, H, fps, None):
-                    futs.append(ex.submit(finish, n, rgb))
+            futs = []
+            try:
+                for n, rgb in _read_range(self.base_video, f0, f1, W, H, fps, None):
+                    futs.append(finish_ex.submit(finish, n, rgb))
                     written.add(n)
                     if len(futs) > 24:  # limita memoria en vuelo
                         futs.pop(0).result()
                 for fu in futs:
                     fu.result()
+            except BaseException:
+                for fu in futs:
+                    fu.cancel()
+                raise
             # cuadros pedidos mas alla del final del video: vacios (no se recalculan)
             z = None
-            for n in range(c0, c1):
+            for n in range(f0, f1):
                 if n not in written:
                     z = z if z is not None else np.zeros((H, W), np.uint8)
                     self._write(n, z)
@@ -808,7 +1148,8 @@ class MatteProvider:
             del keys
         rem = float(np.mean(removed)) if removed else 0.0
         return {"quality": round(max(0.0, 1.0 - rem), 3), "removed": round(rem, 3),
-                "person": bool(use_person), "keys": len(ks), "face_keys": len(with_face)}
+                "person": bool(use_person), "keys": plan["keys"], "face_keys": len(with_face),
+                "engine": engine(), "dims": [int(iw), int(ih)], "crop": [int(v) for v in crop]}
 
     @staticmethod
     def _interp(keys: dict, ks: list[int], n: int) -> np.ndarray | None:

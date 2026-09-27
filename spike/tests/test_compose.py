@@ -59,7 +59,8 @@ def test_compose_vertical_sdr_y_duracion(composed):
     out, starts = composed
     si = V.stream_info(out)
     v, a = si["video"], si["audio"]
-    assert (v["width"], v["height"]) == (2160, 3840)             # lienzo = display vertical
+    # lienzo = display vertical, limitado a 1.5x la salida 9:16 (1620x2880) con el mismo aspecto
+    assert (v["width"], v["height"]) == compose.canvas_size(2160, 3840) == (1620, 2880)
     assert v["color_transfer"] == "bt709" and v["color_space"] == "bt709"
     assert v["color_primaries"] == "bt709" and v["color_range"] == "tv"
     assert float(v["duration"]) == pytest.approx(SEG * len(MOVS), abs=0.15)

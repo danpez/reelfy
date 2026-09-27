@@ -68,7 +68,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
-            libayatana-appindicator3-dev patchelf cmake build-essential libfuse2 zstd
+            libayatana-appindicator3-dev patchelf cmake build-essential libfuse2 zstd \
+            libegl1 libgl1 libfontconfig1 libvulkan-dev
+          # glslc (compilador de shaders) habilita el backend Vulkan de acestep.cpp; si el
+          # repo de la distro no lo trae, la musica IA se compila solo para CPU.
+          sudo apt-get install -y glslc || echo "sin glslc: acestep.cpp solo CPU"
 
       - name: Deps de macOS (ollama para el LLM embebido)
         if: matrix.os == 'macos-14'
@@ -78,9 +82,47 @@ jobs:
         shell: bash
         run: |
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp spike/whisper.cpp
-          cmake -S spike/whisper.cpp -B spike/whisper.cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON
+          # GGML_NATIVE=OFF fuera de mac: compilar para la CPU del runner (p. ej. AVX-512)
+          # rompe con "illegal instruction" en equipos de usuarios sin esas extensiones.
+          NATIVE=""; [ "$RUNNER_OS" != "macOS" ] && NATIVE="-DGGML_NATIVE=OFF"
+          cmake -S spike/whisper.cpp -B spike/whisper.cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON $NATIVE
           cmake --build spike/whisper.cpp/build --config Release -j 4 --target whisper-cli
           find spike/whisper.cpp/build -name "whisper-cli*" || true
+
+      # Musica IA local (ACE-Step 1.5 via acestep.cpp, MIT). Commit fijo para builds
+      # reproducibles. Mac: Metal + Accelerate. Linux/Windows: backends cargables en runtime
+      # (variantes de CPU sin "illegal instruction" + Vulkan si hay SDK/glslc). Si esto
+      # falla, la app se construye igual y usa la musica procedural.
+      - name: Compilar acestep.cpp (musica IA)
+        shell: bash
+        continue-on-error: true
+        env:
+          ACE_SHA: b7ba6d9ce2f19ca7627fb8f340032c3ebe8ae253
+        run: |
+          set -u
+          git clone --filter=blob:none https://github.com/ServeurpersoCom/acestep.cpp spike/acestep.cpp
+          git -C spike/acestep.cpp checkout -q "$ACE_SHA"
+          git -C spike/acestep.cpp submodule update --init --recursive
+          B=spike/acestep.cpp/build
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            FLAGS="-DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_BLAS=ON"
+            VK=""
+          else
+            FLAGS="-DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DBUILD_SHARED_LIBS=ON"
+            VK=""
+            if command -v glslc >/dev/null 2>&1 || [ -n "${VULKAN_SDK:-}" ]; then VK="-DGGML_VULKAN=ON"; fi
+          fi
+          build() {
+            rm -rf "$B"
+            cmake -S spike/acestep.cpp -B "$B" -DCMAKE_BUILD_TYPE=Release $FLAGS "$@" &&
+              cmake --build "$B" --config Release -j 4 --target ace-synth ace-server
+          }
+          if [ -n "$VK" ]; then
+            build $VK || { echo "Vulkan fallo: se compila solo CPU"; build; } || echo "::warning::acestep.cpp no compilo (musica procedural)"
+          else
+            build || echo "::warning::acestep.cpp no compilo (musica procedural)"
+          fi
+          find "$B" \( -name "ace-synth*" -o -name "*ggml*" \) -type f | head -40 || true
 
       - name: Ensamblar el motor (Unix)
         if: matrix.os != 'windows-latest'

@@ -1010,7 +1010,8 @@ def detect_cuts(thumbs: np.ndarray, min_gap: int = 6) -> list[int]:
 
 
 def face_track(base_video, W: int, H: int, fps: float, n_frames: int, sample_fps: float = 10.0,
-               cache_dir=None, det_width: int = 480, cuts=None, return_cuts: bool = False):
+               cache_dir=None, det_width: int = 480, cuts=None, return_cuts: bool = False,
+               on_pct=None, cancel=None):
     """Pista de rostro en el video base (ya reencuadrado a W x H).
 
     YuNet a ~sample_fps sobre cuadros reducidos (det_width px de ancho), interpolacion y
@@ -1018,6 +1019,8 @@ def face_track(base_video, W: int, H: int, fps: float, n_frames: int, sample_fps
     cuts: None = detectarlos (cada cuadro se compara con el anterior en miniatura: la pista
     nunca se suaviza ni se extiende a traves de un corte de toma); [] = sin cortes; o la
     lista de cuadros de inicio de cada union. return_cuts: devuelve (pista, cortes).
+    on_pct(p 0..100): avance (cada ~16 cuadros leidos; si lanza, se propaga: cancelacion).
+    cancel() -> True: corta la lectura y lanza InterruptedError (no se escribe cache).
     """
     import hashlib
 
@@ -1077,6 +1080,11 @@ def face_track(base_video, W: int, H: int, fps: float, n_frames: int, sample_fps
             k += 1
             if (k if auto else k * step) >= n_frames:
                 break
+            if k % 16 == 0:
+                if cancel is not None and cancel():
+                    raise InterruptedError("face_track cancelado")
+                if on_pct is not None:
+                    on_pct(min(99.0, 100.0 * (k if auto else k * step) / max(1, n_frames)))
     finally:
         proc.stdout.close()
         proc.kill()

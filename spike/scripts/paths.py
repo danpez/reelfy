@@ -165,4 +165,8 @@ OLLAMA_BIN = (
     or shutil.which("ollama")
     or ("/opt/homebrew/bin/ollama" if IS_MAC else f"ollama{EXE}")
 )
-LLM_MODEL = os.environ.get("REELFY_LLM_MODEL", "qwen2.5:3b")
+# LLM local (texto + vision) del director y del pipeline: Qwen3.5 4B (Apache-2.0) en ollama.
+LLM_MODEL = os.environ.get("REELFY_LLM_MODEL", "qwen3.5:4b")
+LLM_SIZE = 3_389_983_735    # bytes de qwen3.5:4b (Q4_K_M), para el chequeo de espacio del setup
+# LLM de versiones anteriores que el setup borra del ollama EMBEBIDO al instalar el nuevo
+OLD_LLM_MODELS = ("qwen2.5:3b",)

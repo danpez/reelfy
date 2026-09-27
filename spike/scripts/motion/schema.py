@@ -8,8 +8,14 @@ el tipo, `min`/`max`/`step`, `opts`, `default`. Extensiones:
   - `len: n`       vector numerico de n componentes (path_to, pan).
   - `nullable`     admite null (p. ej. `box` sin caja).
   - `req: true`    campo obligatorio: normalize() lo completa con `default` si falta.
-  - `unit`         unidad para la UI ("s", "px", "dB", "x").
+  - `unit`         unidad para la UI ("s", "px", "dB", "x", "grados", "st").
+  - `hint`         texto de ayuda corto para el inspector (opcional).
   - claves con punto ("text.text") editan un objeto embebido (cutaways.text).
+  - `type: lines`  lista de lineas de texto con estilo propio; `fields` describe cada una.
+  - `type: rows`   lista de objetos (p. ej. music.stops); `fields` describe cada columna.
+  - `roles`        (bg_colors) papel de cada indice de la lista por fondo (cutaways.BG_COLOR_ROLES).
+  - num `nullable` con default null = "automatico" (el renderer decide; p. ej. punch.hold,
+    graphics x/y con `anchor`, grade.clarity = la del look).
 
 normalize() solo completa campos comunes y los `req`; los parametros opcionales ausentes se
 dejan asi para que cada renderer aplique su propio default de preset (el `default` del
@@ -33,7 +39,7 @@ DEFAULT_CAPTIONS = {"enabled": True, "preset": "clean_bold", "y": 0.72, "size": 
                     "font": "Poppins-ExtraBold", "color": "#FFFFFF", "accent": "#FFD23F",
                     "case": "none", "max_words": 4, "hide_during_titles": True}
 DEFAULT_MUSIC = {"enabled": True, "source": "ai", "track": None, "file": None, "prompt": "",
-                 "bpm": 110, "gain_db": -17, "duck_db": -9, "fade_in": 0.2, "fade_out": 1.5,
+                 "bpm": 0, "gain_db": -17, "duck_db": -9, "intro_fade": 0.0, "fade_out": 1.5,
                  "stops": [], "swells": []}
 DEFAULT_GRADE = {"enabled": True, "look": "warm_clean", "match_shots": True,
                  "vignette": 0.15, "grain": 0.025, "sharpen": 0.15}
@@ -87,6 +93,11 @@ SFX_NAMES = ["whoosh_soft", "whoosh_fast", "swoosh_up", "swoosh_down", "whip", "
              "pen_scribble", "heartbeat", "record_stop"]
 LOOKS = ["natural", "warm_clean", "cinematic", "bright_pop", "moody", "bw_contrast"]
 STYLES = ["dinamico", "elegante", "minimal", "energetico"]
+# transiciones que MEZCLAN A (congelado) con B: su ventana siempre empieza en la union
+# (transitions.MIXERS); `align` solo aplica a las centradas
+TRANSITION_MIXERS = ["film_burn", "torn_paper", "circle", "slide"]
+FACE_ANCHORS = ["face", "face_left", "face_right", "face_top"]
+BW_TONES = ["neutral", "warm", "cool", "sepia"]
 EASINGS = ["linear", "in_quad", "out_quad", "in_out_quad", "in_cubic", "out_cubic",
            "in_out_cubic", "out_quart", "in_expo", "out_expo", "in_out_expo", "out_back",
            "in_back", "out_elastic", "out_bounce", "smoothstep"]
@@ -100,7 +111,7 @@ except Exception:  # pragma: no cover
 
 # ---------------------------------------------------------------- helpers de esquema
 # `lines`: lista de objetos {text, scale, font, color, italic} (sus campos van en `fields`)
-KINDS_TYPES = ("num", "text", "color", "select", "bool", "seg", "font", "icon", "lines")
+KINDS_TYPES = ("num", "text", "color", "select", "bool", "seg", "font", "icon", "lines", "rows")
 
 
 def P(k: str, type: str, label: str, default: Any = None, **kw) -> dict:
@@ -182,7 +193,9 @@ TEXT_PRESET_DEFAULTS = {
 TEXT_PRESET_EXTRA = {
     "counter": [num("from", "Desde", 0, -1e9, 1e9, 1), num("to", "Hasta", 1000, -1e9, 1e9, 1),
                 P("prefix", "text", "Prefijo", "$"), P("suffix", "text", "Sufijo", ""),
-                num("decimals", "Decimales", 0, 0, 3, 1)],
+                num("decimals", "Decimales", 0, 0, 3, 1),
+                P("sep", "text", "Separador de miles", ","),
+                sel("anchor", "Crece desde", ["right", "center", "left"], "right", seg=True)],
 }
 
 # ---------------------------------------------------------------- captions
@@ -197,48 +210,91 @@ CAPTIONS_PARAMS = [
     sel("case", "Mayusculas", ["none", "upper", "lower", "title"], "none", seg=True),
     num("max_words", "Palabras por linea", 4, 1, 8, 1),
     P("hide_during_titles", "bool", "Ocultar durante titulos", True),
+    # finos (null = lo que dicta el estilo)
+    num("x", "Posicion X", 0.5, 0.1, 0.9, 0.005),
+    num("max_lines", "Lineas maximas", None, 1, 4, 1, nullable=True),
+    P("kw_accent", "bool", "Palabra clave en acento", None, nullable=True),
+    P("recenter", "bool", "Recentrar al entrar palabras", None, nullable=True),
+    num("stroke", "Contorno", None, 0.0, 12.0, 0.5, unit="px", nullable=True),
+    num("shadow", "Sombra", None, 0.0, 1.0, 0.05, nullable=True),
+    P("box", "color", "Caja de fondo", None, nullable=True),
+    P("highlight", "color", "Color de resaltado", None, nullable=True),
 ]
 
 # ---------------------------------------------------------------- graphics
 GRAPHIC_COMMON = [
-    num("x", "Posicion X", 0.5, 0.0, 1.0, 0.005),
-    num("y", "Posicion Y", 0.3, 0.0, 1.0, 0.005),
+    # x/y vacios + `anchor` = junto a la cara (graficos que lo soportan)
+    num("x", "Posicion X", 0.5, 0.0, 1.0, 0.005, nullable=True),
+    num("y", "Posicion Y", 0.3, 0.0, 1.0, 0.005, nullable=True),
     num("size", "Tamano", 0.18, 0.02, 1.0, 0.005),
     P("color", "color", "Color", "#FFFFFF"),
     sel("anim_in", "Animacion de entrada", GRAPHIC_ANIM_IN, "pop"),
     sel("anim_out", "Animacion de salida", GRAPHIC_ANIM_OUT, "fade"),
     num("rotation", "Rotacion", 0.0, -180.0, 180.0, 1.0, unit="grados"),
+    num("in_dur", "Duracion de la entrada", None, 0.05, 3.0, 0.05, unit="s", nullable=True),
+    num("out_dur", "Duracion de la salida", None, 0.05, 3.0, 0.05, unit="s", nullable=True),
 ]
+_ANCHOR = sel("anchor", "Junto a la cara (sin X/Y)", FACE_ANCHORS, None, nullable=True,
+              hint="Deja X e Y vacios para que siga a la cara")
 GRAPHIC_KIND_PARAMS = {
     "doodle": {"label": "Garabato", "params": [
         sel("name", "Figura", DOODLES, "sparkle", req=True),
         num("stroke", "Grosor", 8.0, 1.0, 40.0, 0.5, unit="px"),
         P("draw", "bool", "Se dibuja solo", True),
         num("wiggle", "Temblor a mano", 0.3, 0.0, 1.0, 0.05),
-        num("path_to", "Destino (flechas)", None, 0.0, 1.0, 0.005, len=2, nullable=True)]},
+        num("path_to", "Destino (flechas)", None, 0.0, 1.0, 0.005, len=2, nullable=True),
+        sel("style", "Trazo", ["brush", "sketch"], "brush", seg=True,
+            hint="sketch = contorno hueco aspero con rayado"),
+        dict(_ANCHOR),
+        num("bend", "Curvatura (flechas)", None, -1.0, 1.0, 0.02, nullable=True),
+        num("glow", "Halo", 0.0, 0.0, 1.0, 0.05),
+        num("shadow", "Sombra", 0.55, 0.0, 1.0, 0.05),
+        num("draw_time", "Tiempo de trazo", None, 0.1, 3.0, 0.05, unit="s", nullable=True)]},
     "icon": {"label": "Icono", "params": [
         P("name", "icon", "Icono", "sparkles", req=True),
         sel("variant", "Variante", ["outline", "filled"], "outline", seg=True),
         sel("badge", "Insignia", ["none", "circle", "squircle"], "none", seg=True),
         P("badge_color", "color", "Color de insignia", "#FFD23F"),
-        P("draw", "bool", "Se dibuja solo", True)]},
+        P("draw", "bool", "Se dibuja solo", True),
+        sel("style", "Estilo", ["clean", "sketch"], "clean", seg=True),
+        dict(_ANCHOR),
+        num("shadow", "Sombra", 0.6, 0.0, 1.0, 0.05)]},
     "card": {"label": "Tarjeta", "params": [
         sel("variant", "Tipo", CARD_VARIANTS, "generic", req=True),
         P("title", "text", "Titulo", ""), P("subtitle", "text", "Subtitulo", ""),
         P("value", "text", "Valor", ""), P("items", "text", "Elementos", [], list=True),
         P("icon", "icon", "Icono", ""),
-        sel("theme", "Tema", ["light", "dark", "brand"], "light", seg=True)]},
+        sel("theme", "Tema", ["light", "dark", "brand"], "light", seg=True),
+        P("accent", "color", "Color de acento", None, nullable=True),
+        P("label", "text", "Texto del boton", "")]},
     "lower_third": {"label": "Rotulo (lower third)", "params": [
-        P("title", "text", "Titulo", "", req=True), P("subtitle", "text", "Subtitulo", "")]},
+        P("title", "text", "Titulo", "", req=True), P("subtitle", "text", "Subtitulo", ""),
+        sel("theme", "Tema", ["dark", "light"], "dark", seg=True),
+        P("accent", "color", "Color de acento", None, nullable=True)]},
     "cta": {"label": "Llamada a la accion", "params": [
         sel("variant", "Tipo", CTA_VARIANTS, "follow", req=True),
-        P("label", "text", "Texto", ""), P("handle", "text", "Usuario", "")]},
+        P("label", "text", "Texto", ""), P("handle", "text", "Usuario", ""),
+        P("subtitle", "text", "Subtitulo", ""),
+        P("button", "text", "Boton", "Seguir"),
+        P("button_done", "text", "Boton pulsado", "Siguiendo"),
+        P("button_color", "color", "Color del boton", None, nullable=True),
+        sel("avatar", "Avatar", ["initial", "face"], "initial", seg=True)]},
     "progress": {"label": "Barra de progreso", "params": [
-        num("thickness", "Grosor", 8.0, 2.0, 30.0, 0.5, unit="px")]},
+        num("thickness", "Grosor", 8.0, 2.0, 30.0, 0.5, unit="px"),
+        num("bar_y", "Posicion vertical", 0.0, 0.0, 1.0, 0.005),
+        num("margin", "Margen", 0.0, 0.0, 200.0, 1.0, unit="px")]},
     "sticker_text": {"label": "Etiqueta", "params": [
         P("text", "text", "Texto", "", req=True), P("bg", "color", "Fondo", "#FFD23F"),
-        P("fg", "color", "Texto", "#111111")]},
+        P("fg", "color", "Texto", "#111111"),
+        P("font", "font", "Fuente", None, opts=FONTS, nullable=True),
+        P("border", "bool", "Borde", True)]},
 }
+# la barra de progreso solo usa color/animaciones propias y su `bar_y` (x/y/size no aplican)
+PROGRESS_COMMON = [
+    P("color", "color", "Color", "#FFFFFF"),
+    sel("anim_in", "Animacion de entrada", ["fade", "none"], "fade", seg=True),
+    sel("anim_out", "Animacion de salida", ["none", "fade"], "none", seg=True),
+]
 
 # ---------------------------------------------------------------- cutaways
 CUTAWAY_COMMON = [
@@ -246,53 +302,101 @@ CUTAWAY_COMMON = [
     P("bg_colors", "color", "Colores del fondo", [], list=True),
     P("text.text", "text", "Texto", "", multiline=True),
     sel("text.preset", "Estilo del texto", TEXT_PRESETS, "title_pop"),
+    num("in_dur", "Duracion de la entrada", None, 0.05, 2.0, 0.05, unit="s", nullable=True),
+    num("out_dur", "Duracion de la salida", None, 0.05, 2.0, 0.05, unit="s", nullable=True),
 ]
 CUTAWAY_KIND_PARAMS = {
     "title_card": {"label": "Tarjeta de titulo", "params": []},
-    "info_card": {"label": "Tarjeta de informacion", "params": []},
-    "photo": {"label": "Foto / cuadro congelado", "params": []},
+    "info_card": {"label": "Tarjeta de informacion", "params": [
+        sel("variant", "Tarjeta propia", CARD_VARIANTS, None, nullable=True,
+            hint="Vacio = la tarjeta va en graficos"),
+        P("title", "text", "Titulo", ""), P("subtitle", "text", "Subtitulo", ""),
+        P("value", "text", "Valor", ""), P("items", "text", "Elementos", [], list=True)]},
+    "photo": {"label": "Foto / cuadro congelado", "params": [
+        P("caption", "text", "Pie de foto", ""),
+        num("tilt", "Inclinacion", None, -20.0, 20.0, 0.5, unit="grados", nullable=True),
+        num("size", "Tamano", 0.72, 0.3, 0.8, 0.01)]},
     "self_broll": {"label": "Toma propia (B-roll)", "params": [
         num("src_t", "Tiempo del material", 0.0, 0.0, 36000.0, 0.01, unit="s", req=True),
-        num("zoom_from", "Zoom inicial", 1.0, 1.0, 2.5, 0.01, unit="x"),
-        num("zoom_to", "Zoom final", 1.15, 1.0, 2.5, 0.01, unit="x")]},
+        num("zoom_from", "Zoom inicial", 1.0, 1.0, 4.0, 0.01, unit="x"),
+        num("zoom_to", "Zoom final", 1.15, 1.0, 4.0, 0.01, unit="x"),
+        num("pan", "Desplazamiento", [0.0, 0.0], -1.0, 1.0, 0.01, len=2)]},
 }
 
 # ---------------------------------------------------------------- effects
+_CENTER = num("center", "Centro fijo", None, 0.0, 1.0, 0.005, len=2, nullable=True,
+              hint="Vacio = la cara")
+_TARGET = num("target", "Llevar la cara a", None, 0.0, 1.0, 0.005, len=2, nullable=True,
+              hint="Reencuadre: a donde llega la cara en el zoom maximo")
+
+
+def _fades(tin: float, tout: float) -> list[dict]:
+    return [num("fade_in", "Entrada", tin, 0.0, 5.0, 0.05, unit="s"),
+            num("fade_out", "Salida", tout, 0.0, 5.0, 0.05, unit="s")]
+
+
 EFFECT_KIND_PARAMS = {
     "zoom": {"label": "Zoom suave", "params": [
-        num("from", "Desde", 1.0, 1.0, 2.5, 0.01, unit="x"),
-        num("to", "Hasta", 1.15, 1.0, 2.5, 0.01, unit="x"),
-        sel("easing", "Curva", EASINGS, "in_out_cubic")]},
+        num("from", "Desde", 1.0, 1.0, 4.0, 0.01, unit="x"),
+        num("to", "Hasta", 1.15, 1.0, 4.0, 0.01, unit="x"),
+        sel("easing", "Curva", EASINGS, "in_out_cubic"),
+        dict(_TARGET), dict(_CENTER)]},
     "punch": {"label": "Punch-in", "params": [
-        num("amount", "Cantidad", 0.12, 0.0, 0.6, 0.01),
-        num("hold", "Duracion del golpe", 0.6, 0.0, 3.0, 0.05, unit="s")]},
+        num("amount", "Cantidad", 0.12, 0.0, 1.5, 0.01),
+        num("hold", "Duracion del golpe", None, 0.0, 10.0, 0.05, unit="s", nullable=True,
+            hint="Vacio = hasta el final del efecto"),
+        sel("mode", "Entrada", ["spring", "cut"], "spring", seg=True,
+            hint="spring = resorte con rebote; cut = golpe seco"),
+        sel("release", "Salida", ["smooth", "cut"], "smooth", seg=True),
+        num("attack", "Ataque", 0.0, 0.0, 2.0, 0.01, unit="s", hint="0 = resorte natural"),
+        num("freq", "Frecuencia del resorte", 4.2, 0.5, 20.0, 0.1, unit="Hz"),
+        num("damping", "Amortiguacion del resorte", 0.5, 0.05, 0.99, 0.01),
+        dict(_TARGET), dict(_CENTER)]},
     "shake": {"label": "Sacudida", "params": [
-        num("amp", "Amplitud", 10.0, 0.0, 60.0, 0.5, unit="px"),
-        num("freq", "Frecuencia", 12.0, 1.0, 30.0, 0.5, unit="Hz"),
-        num("decay", "Amortiguacion", 0.6, 0.0, 1.0, 0.05)]},
+        num("amp", "Amplitud", 10.0, 0.0, 200.0, 0.5, unit="px"),
+        num("freq", "Frecuencia", 12.0, 0.2, 60.0, 0.5, unit="Hz"),
+        num("decay", "Amortiguacion", 0.6, 0.0, 1.0, 0.05, hint="0 = constante; 1 = muere en ~0.3 s"),
+        num("rot", "Rotacion maxima", 0.8, 0.0, 10.0, 0.1, unit="grados"),
+        num("attack", "Ataque", 0.0, 0.0, 2.0, 0.01, unit="s")]},
     "kenburns": {"label": "Ken Burns", "params": [
-        num("from", "Desde", 1.0, 1.0, 2.5, 0.01, unit="x"),
-        num("to", "Hasta", 1.12, 1.0, 2.5, 0.01, unit="x"),
-        num("pan", "Desplazamiento", [0.02, -0.01], -0.5, 0.5, 0.005, len=2)]},
+        num("from", "Desde", 1.0, 1.0, 4.0, 0.01, unit="x"),
+        num("to", "Hasta", 1.12, 1.0, 4.0, 0.01, unit="x"),
+        num("pan", "Desplazamiento", [0.02, -0.01], -1.0, 1.0, 0.005, len=2),
+        sel("easing", "Curva", EASINGS, "in_out_quad"),
+        dict(_CENTER)]},
     "bw": {"label": "Blanco y negro", "params": [
         num("contrast", "Contraste", 1.2, 0.5, 2.0, 0.05),
-        P("subject_color", "bool", "Persona a color", False)]},
+        P("subject_color", "bool", "Persona a color", False),
+        sel("tone", "Tono", BW_TONES, "neutral", seg=True),
+        num("vignette", "Vinieta", 0.55, 0.0, 1.0, 0.05),
+        num("lift", "Levantar negros", 0.06, 0.0, 0.2, 0.01),
+        num("fade", "Fundido de entrada/salida", 0.06, 0.0, 2.0, 0.01, unit="s")]},
     "color_pop": {"label": "Color pop (fondo gris)", "params": [
         num("bg_desat", "Desaturar fondo", 1.0, 0.0, 1.0, 0.05),
-        num("bg_dark", "Oscurecer fondo", 0.25, 0.0, 1.0, 0.05)]},
+        num("bg_dark", "Oscurecer fondo", 0.25, 0.0, 1.0, 0.05)] + _fades(0.3, 0.2)},
     "bg_blur": {"label": "Desenfoque de fondo", "params": [
-        num("radius", "Radio", 24.0, 0.0, 80.0, 1.0, unit="px")]},
+        num("radius", "Radio", 24.0, 0.0, 200.0, 1.0, unit="px")] + _fades(0.4, 0.25)},
     "bg_replace": {"label": "Reemplazo de fondo", "params": [
         sel("background", "Fondo", BACKGROUNDS, "gradient"),
-        P("bg_colors", "color", "Colores del fondo", [], list=True)]},
+        P("bg_colors", "color", "Colores del fondo", [], list=True),
+        num("grain", "Grano del fondo", 0.025, 0.0, 0.3, 0.005),
+        num("vignette", "Vinieta del fondo", 0.22, 0.0, 1.0, 0.01)] + _fades(0.45, 0.3)},
     "subject_outline": {"label": "Contorno de la persona", "params": [
         P("color", "color", "Color", "#FFFFFF"),
-        num("width", "Grosor", 8.0, 1.0, 40.0, 0.5, unit="px"),
+        num("width", "Grosor", 8.0, 0.0, 80.0, 0.5, unit="px"),
         num("glow", "Brillo", 0.5, 0.0, 1.0, 0.05)]},
     "rgb_split": {"label": "Separacion RGB", "params": [
-        num("amount", "Cantidad", 8.0, 0.0, 40.0, 0.5, unit="px")]},
+        num("amount", "Cantidad", 8.0, 0.0, 200.0, 0.5, unit="px"),
+        num("angle", "Angulo", 0.0, -180.0, 180.0, 1.0, unit="grados"),
+        num("radial", "Radial", 0.35, 0.0, 1.0, 0.05),
+        num("jitter", "Variacion por cuadro", 0.0, 0.0, 1.0, 0.05),
+        num("attack", "Ataque", 0.04, 0.0, 2.0, 0.01, unit="s"),
+        P("hold", "bool", "Sostener (sin caida)", False)]},
     "flash_frame": {"label": "Destello", "params": [
-        P("color", "color", "Color", "#FFFFFF")]},
+        P("color", "color", "Color", "#FFFFFF"),
+        num("peak", "Intensidad maxima", 0.95, 0.0, 1.0, 0.05),
+        num("bloom", "Sobreexposicion", 0.8, 0.0, 2.0, 0.05),
+        num("attack", "Ataque", 0.035, 0.0, 2.0, 0.005, unit="s")]},
 }
 MATTE_EFFECTS = ("color_pop", "bg_blur", "bg_replace", "subject_outline")
 
@@ -310,32 +414,66 @@ TRANSITION_LABELS = {"cut": "Corte", "flash": "Destello", "light_leak": "Fuga de
                      "torn_paper": "Papel rasgado", "circle": "Circulo", "slide": "Empuje"}
 SFX_PARAMS = [
     sel("name", "Sonido", SFX_NAMES, "whoosh_soft", req=True),
-    num("gain_db", "Volumen", -6.0, -40.0, 6.0, 0.5, unit="dB"),
+    num("gain_db", "Volumen", -6.0, -40.0, 12.0, 0.5, unit="dB", hint="0 = pico al nivel de la voz"),
     num("pan", "Paneo", 0.0, -1.0, 1.0, 0.05),
+    num("variant", "Variante", None, 0, 9, 1, nullable=True, hint="Vacio = automatica"),
+    num("pitch", "Tono", None, -12.0, 12.0, 0.5, unit="st", nullable=True,
+        hint="Vacio = afinado a la tonalidad de la musica"),
+    num("dur", "Duracion", None, 0.05, 10.0, 0.05, unit="s", nullable=True,
+        hint="Risers: anticipacion; continuos: recorta o repite"),
 ]
 MUSIC_MOODS = ["upbeat", "chill", "inspiring", "corporate", "playful", "dramatic"]
+STOP_FIELDS = [
+    num("at", "Momento", None, 0.0, 36000.0, 0.01, unit="s", req=True, nullable=True),
+    num("dur", "Duracion del silencio", None, 0.05, 10.0, 0.05, unit="s", nullable=True),
+    sel("mode", "Tipo", ["tape", "cut"], "tape", seg=True,
+        hint="tape = la cancion se frena; cut = corte seco"),
+    num("fade", "Frenado / fundido", None, 0.0, 2.0, 0.01, unit="s", nullable=True),
+    num("fade_back", "Regreso", None, 0.0, 2.0, 0.01, unit="s", nullable=True),
+]
+SWELL_FIELDS = [
+    num("start", "Inicio", None, 0.0, 36000.0, 0.01, unit="s", req=True, nullable=True),
+    num("end", "Fin", None, 0.0, 36000.0, 0.01, unit="s", req=True, nullable=True),
+    num("db", "Subida", 3.0, -24.0, 12.0, 0.5, unit="dB"),
+    num("ramp", "Rampa", None, 0.0, 3.0, 0.05, unit="s", nullable=True),
+]
 MUSIC_PARAMS = [
     P("enabled", "bool", "Musica", True),
-    sel("source", "Origen", ["ai", "procedural", "library", "none"], "ai", seg=True),
+    sel("source", "Origen", ["ai", "procedural", "library", "file", "none"], "ai", seg=True),
     P("track", "text", "Pista de biblioteca", None, nullable=True),
+    P("file", "text", "Archivo propio (origen: file)", None, nullable=True),
     P("prompt", "text", "Descripcion para la IA", ""),
     sel("mood", "Animo", MUSIC_MOODS, None, nullable=True),
-    num("bpm", "BPM (0 o 110 = automatico)", 110, 0, 180, 1),
+    num("bpm", "BPM (0 = automatico)", 0, 0, 180, 1),
+    P("bpm_lock", "bool", "Forzar BPM", False, hint="Sin esto, 110 tambien cuenta como automatico"),
     P("keyscale", "text", "Tonalidad (p. ej. A major)", None, nullable=True),
-    num("seed", "Variacion", None, 0, 999999, 1, nullable=True),
+    num("seed", "Variacion", None, 0, 999999, 1, nullable=True, hint="Otra musica con el mismo pedido"),
     sel("ending", "Final", ["auto", "natural", "hit", "fade"], "auto", seg=True),
     num("drop_at", "Golpe principal en", None, 0.0, 36000.0, 0.01, unit="s", nullable=True),
-    num("gain_db", "Volumen", -17.0, -40.0, 0.0, 0.5, unit="dB"),
-    num("duck_db", "Bajar bajo la voz", -9.0, -30.0, 0.0, 0.5, unit="dB"),
-    num("fade_in", "Entrada", 0.2, 0.0, 5.0, 0.05, unit="s"),
-    num("fade_out", "Salida", 1.5, 0.0, 8.0, 0.05, unit="s"),
+    num("gain_db", "Volumen bajo la voz", -17.0, -40.0, 0.0, 0.5, unit="dB"),
+    num("duck_db", "Subida en pausas", -9.0, -30.0, 0.0, 0.5, unit="dB",
+        hint="Diferencia total entre la cama bajo la voz y los huecos"),
+    num("voice_carve_db", "Hueco para la voz (EQ)", -3.0, -12.0, 0.0, 0.5, unit="dB"),
+    num("intro_fade", "Entrada suave", 0.0, 0.0, 5.0, 0.05, unit="s",
+        hint="0 = entra con su arranque (golpe incluido); > 0 = sube en ese tiempo"),
+    num("fade_out", "Cola final", 1.5, 0.6, 3.0, 0.05, unit="s",
+        hint="Donde cae el golpe/desvanecido final antes del ultimo cuadro"),
+    P("stops", "rows", "Silencios dramaticos", [], fields=STOP_FIELDS),
+    P("swells", "rows", "Subidas de volumen", [], fields=SWELL_FIELDS),
 ]
 GRADE_PARAMS = [
     P("enabled", "bool", "Color", True),
     sel("look", "Look", LOOKS, "warm_clean"),
     P("match_shots", "bool", "Igualar tomas", True),
+    num("strength", "Fuerza del look", 1.0, 0.0, 1.5, 0.05),
+    num("exposure", "Exposicion", 0.0, -1.0, 1.0, 0.05, unit="EV"),
+    num("temperature", "Temperatura", 0.0, -1.0, 1.0, 0.05, hint="+ calido / - frio"),
+    num("tint", "Tinte", 0.0, -1.0, 1.0, 0.05, hint="+ magenta / - verde"),
+    num("saturation", "Saturacion", 1.0, 0.0, 2.0, 0.05),
+    num("contrast", "Contraste", 0.0, -0.5, 0.5, 0.05),
+    num("clarity", "Claridad", None, 0.0, 1.0, 0.05, nullable=True, hint="Vacio = la del look"),
     num("vignette", "Vinieta", 0.15, 0.0, 1.0, 0.01),
-    num("grain", "Grano", 0.025, 0.0, 0.2, 0.005),
+    num("grain", "Grano", 0.025, 0.0, 0.3, 0.005),
     num("sharpen", "Nitidez", 0.15, 0.0, 1.0, 0.01),
 ]
 DIRECTOR_PARAMS = [
@@ -362,7 +500,8 @@ def _build_kinds() -> dict:
         label = d.pop("label")
         text_presets[name] = {"label": label,
                               "params": _with_defaults(TEXT_COMMON, d) + TEXT_PRESET_EXTRA.get(name, [])}
-    graphics = {k: {"label": v["label"], "params": GRAPHIC_COMMON + v["params"]}
+    graphics = {k: {"label": v["label"],
+                    "params": (PROGRESS_COMMON if k == "progress" else GRAPHIC_COMMON) + v["params"]}
                 for k, v in GRAPHIC_KIND_PARAMS.items()}
     cutaways = {k: {"label": v["label"], "params": CUTAWAY_COMMON + v["params"]}
                 for k, v in CUTAWAY_KIND_PARAMS.items()}
@@ -380,7 +519,10 @@ def _build_kinds() -> dict:
             "effects": {"label": "Efectos", "key": "kind", "items": effects, "common": "range"},
             "transitions": {"label": "Transiciones", "key": "kind", "common": "event",
                             "items": {k: {"label": TRANSITION_LABELS[k],
-                                          "params": TRANSITION_PARAMS[1:]}
+                                          "mixer": k in TRANSITION_MIXERS,
+                                          "params": [q for q in TRANSITION_PARAMS[1:]
+                                                     if not (q["k"] == "align"
+                                                             and k in TRANSITION_MIXERS)]}
                                       for k in TRANSITION_KINDS}},
             "sfx": {"label": "SFX", "key": "name", "common": "event",
                     "items": {k: {"label": k.replace("_", " "), "params": SFX_PARAMS[1:]}
@@ -481,7 +623,9 @@ def _adopt_modules(kinds: dict) -> list[str]:
         defs = getattr(gr, "DEFAULTS", {}) or {}
         for kind, spec in kinds["tracks"]["graphics"]["items"].items():
             for prm in spec["params"]:
-                if prm["k"] == "anim_in":
+                if kind == "progress":
+                    pass                        # la barra solo entiende fade|none
+                elif prm["k"] == "anim_in":
                     prm["opts"] = list(ain)
                 elif prm["k"] == "anim_out":
                     prm["opts"] = list(aout)
@@ -493,6 +637,14 @@ def _adopt_modules(kinds: dict) -> list[str]:
     def adopt_cutaways(cu):
         defs = getattr(cu, "DEFAULTS", {}) or {}
         s_in, s_out = list(getattr(cu, "SCENE_IN", ())), list(getattr(cu, "SCENE_OUT", ()))
+        roles = getattr(cu, "BG_COLOR_ROLES", None)
+        if isinstance(roles, dict):
+            roles = {str(k): [str(x) for x in v] for k, v in roles.items()}
+            for trk in ("cutaways", "effects"):
+                for spec in kinds["tracks"][trk]["items"].values():
+                    for prm in spec["params"]:
+                        if prm["k"] == "bg_colors":
+                            prm["roles"] = roles
         for kind, spec in kinds["tracks"]["cutaways"]["items"].items():
             ks = {q["k"] for q in spec["params"]}
             if s_in and "anim_in" not in ks:
@@ -521,10 +673,15 @@ def _adopt_modules(kinds: dict) -> list[str]:
             else:                             # formato propio del modulo ({clave: spec})
                 params = [c for c in (_convert_param(k, sp, _LABELS.get(k, k))
                                       for k, sp in mp.items()) if c is not None]
+            mixers = set(getattr(tr, "MIXERS", TRANSITION_MIXERS) or TRANSITION_MIXERS)
+            own_align = next((q for q in params if q["k"] == "align"), None)
             params = [q for q in params if q["k"] != "align"]
             if not any(q["k"] == "dur" for q in params):
                 params.insert(0, num("dur", "Duracion", 0.0, 0.0, 2.0, 0.05, unit="s"))
-            spec["params"] = params + [dict(align)]
+            spec["mixer"] = kind in mixers
+            if kind not in mixers:              # en las mezclas A->B `align` no aplica
+                params.append(own_align or dict(align))
+            spec["params"] = params
         return True
 
     for name, fn in (("text", adopt_text), ("graphics", adopt_graphics),
@@ -591,6 +748,27 @@ def _sfx_extra() -> set:
         return set(assets.sfx_catalog())
     except Exception:  # pragma: no cover
         return set()
+
+
+def resolve_sfx_name(name) -> tuple[str | None, int | None]:
+    """Nombre de SFX del plan -> (nombre del catalogo, variante 0-based del sufijo `_N`).
+    Acepta alias en espanol/ingles, prefijos, tags y sufijo de variante (audio.parse_sfx_name):
+    'riser' -> riser_short, 'riser_short_2' -> (riser_short, 1). (None, None) si no existe."""
+    if not isinstance(name, str) or not name.strip():
+        return None, None
+    cat = {k: {} for k in SFX_NAMES}
+    try:
+        from . import assets
+        cat.update(assets.sfx_catalog() or {})
+    except Exception:  # pragma: no cover
+        pass
+    if name in cat:
+        return name, None
+    try:
+        from . import audio
+        return audio.parse_sfx_name(name, cat)
+    except Exception:  # pragma: no cover - sin audio: solo nombres exactos
+        return None, None
 
 
 def _kind_params(track: str, kind: str) -> list[dict]:
@@ -730,6 +908,32 @@ def _fix_param(item: dict, p: dict, fill: bool) -> None:
             _set(item, k, p.get("default"))
     elif typ == "lines":
         _set(item, k, _norm_lines(v))
+    elif typ == "rows":
+        _set(item, k, _norm_rows(v, p.get("fields") or []))
+
+
+def _norm_rows(v: Any, fields: list[dict]) -> list[dict]:
+    """Lista de objetos (`rows`): se descartan las entradas que no son objetos y las opciones
+    invalidas (el modulo aplica su default). Los numeros los sanea el normalizador del bloque
+    (p. ej. _norm_music descarta un stop sin `at` o con `dur` <= 0) y validate() reporta los
+    que salen de rango. Conserva las claves extra."""
+    if not isinstance(v, list):
+        return []
+    out = []
+    for row in v:
+        if not isinstance(row, dict):
+            continue
+        d = dict(row)
+        for f in fields:
+            k = f["k"]
+            if k not in d or d[k] is None:
+                continue
+            if f["type"] in ("select", "seg") and d[k] not in f["opts"]:
+                d.pop(k)
+            elif f["type"] == "bool" and not isinstance(d[k], bool):
+                d[k] = bool(d[k]) if isinstance(d[k], (int, float)) else f.get("default")
+        out.append(d)
+    return out
 
 
 def _norm_lines(v: Any) -> list[dict] | None:
@@ -945,6 +1149,15 @@ def normalize(plan: dict, fill: bool = False) -> dict:
             if track == "text" and not it.get("preset"):
                 it["preset"] = "title_pop"
             kind = it.get(key)
+            if track == "sfx" and kind not in KINDS["tracks"][track]["items"] and \
+                    kind not in _sfx_extra():
+                # alias ('riser', 'campana', 'pop_2'...): se resuelve al nombre del catalogo
+                # (con la variante del sufijo) en vez de descartar el SFX sin avisar
+                real, var = resolve_sfx_name(kind)
+                if real is not None:
+                    it[key] = kind = real
+                    if var is not None and it.get("variant") is None:
+                        it["variant"] = var
             if kind not in KINDS["tracks"][track]["items"]:
                 if not (track == "sfx" and kind in _sfx_extra()):
                     continue                              # kind invalido -> se descarta
@@ -958,6 +1171,9 @@ def normalize(plan: dict, fill: bool = False) -> dict:
                 _fix_param(it, prm, fill)
             if track == "transitions":
                 dv = _num(it.get("dur"))
+                if dv is None:
+                    dv = _num(next((q.get("default") for q in _kind_params(track, kind)
+                                    if q["k"] == "dur"), None))
                 it["dur"] = 0.35 if dv is None else min(2.0, max(0.05, dv))
             if track == "cutaways" and "text" in it and not isinstance(it["text"], dict):
                 it["text"] = {"preset": "title_pop", "text": str(it["text"])}
@@ -1003,6 +1219,22 @@ def _check_param(errs: list, where: str, item: dict, prm: dict) -> None:
         errs.append(f"{where}: '{k}'={v!r} no es una opcion valida")
     elif t == "text" and not prm.get("list") and not isinstance(v, str):
         errs.append(f"{where}: '{k}' debe ser texto")
+    elif t == "rows":
+        if not isinstance(v, list) or not all(isinstance(r, dict) for r in v):
+            errs.append(f"{where}: '{k}' debe ser una lista de objetos")
+            return
+        for i, r in enumerate(v):
+            for f in prm.get("fields") or []:
+                fv = r.get(f["k"])
+                if fv is None:
+                    continue
+                if f["type"] == "num" and not f.get("len"):
+                    x = _num(fv)
+                    if x is None or x < f["min"] - 1e-9 or x > f["max"] + 1e-9:
+                        errs.append(f"{where}: '{k}[{i}].{f['k']}' fuera de rango "
+                                    f"[{f['min']}, {f['max']}]")
+                elif f["type"] in ("select", "seg") and fv not in f["opts"]:
+                    errs.append(f"{where}: '{k}[{i}].{f['k']}'={fv!r} no es una opcion valida")
     elif t == "lines":
         if not isinstance(v, list) or not all(isinstance(ln, (dict, str)) for ln in v):
             errs.append(f"{where}: '{k}' debe ser una lista de lineas")

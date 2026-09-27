@@ -41,6 +41,7 @@ pillow==12.3.0
 platformdirs==4.10.0
 pooch==1.9.0
 protobuf==7.35.1
+pybind11==3.1.0
 pycparser==3.0
 pydantic==2.13.4
 pydantic_core==2.46.4
@@ -51,6 +52,9 @@ requests==2.34.2
 scenedetect==0.7
 scikit-learn==1.9.0
 scipy==1.18.0
+# Motion Engine v0.5: compositor por cuadro (Skia, BSD-3). En Linux necesita libEGL/libGL/
+# fontconfig del sistema (dependencias del .deb en tauri.conf.json).
+skia-python==144.0.post2
 soundfile==0.14.0
 soxr==1.1.0
 starlette==1.3.1

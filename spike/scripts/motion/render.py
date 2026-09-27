@@ -1,15 +1,21 @@
 """Compositor del Motion Engine: orquestacion del render, cuadro exacto, draft y shorts.
 
-Contrato: docs/MOTION-ENGINE.md, secciones 1, 4.2, 4.2b y 4.3.
+Contrato: docs/MOTION-ENGINE.md, secciones 1, 2 y 4.
 
   render_pro(plan, out_path, opts) -> stats
+    0. prepare    plan normalizado + Timeline + job; la MUSICA arranca ya en segundo plano
+                  (music.prefetch: ACE-Step en GPU corre en paralelo con todo lo demas)
     1. timeline   keeps (cuts habilitados) cuantizados a cuadro (expandiendo), fragmentos
                   absorbidos, uniones pegadas a cambios de toma; remap y uniones
     2. base pass  video base (tamano del formato) con cortes + voz de estudio (cache por hash,
                   con lock: seguro con ensure_base en segundo plano)
-    3. analisis   camera.face_track (sin suavizar a traves de uniones/tomas) + anclas de
-                  encuadre por item + matte.MatteProvider (solo rangos que lo piden) + grade
-    4. audio      music.get_music + audio.mix (si existen; si no, solo voz)
+    3. analisis   matte.MatteProvider (solo rangos que lo piden; incremental) EN PARALELO con
+                  camera.face_track + grade.Grader.prepare; luego anclas por item (_anchor de
+                  camara, _face0 de graficos anclados a la cara)
+    4. audio      EN PARALELO con el compositor: music.get_music (acierto de cache) +
+                  audio.mix(voz, SFX con variant/pitch/dur, musica con su final horneado, seed).
+                  En draft no espera a la musica IA en generacion (procedural + music_pending).
+                  Cancelar no espera al hilo de audio (el candado de music.py sondea)
     5. compositor N procesos (spawn), cada uno rangos contiguos de cuadros con su
                   FrameReader y ChunkWriter; fronteras de chunk fuera de transiciones
     6. concat + mux (AAC 192k, +faststart) y, con opts.shorts, los highlights remapeados
@@ -30,13 +36,16 @@ disenan para 9:16: en otros formatos se dibujan dentro de una CAJA DE LAYOUT 9:1
 Opciones (`opts`):
   fmt ('9:16'|'1:1'|'4:5'|'16:9'|'original'), W, H (explicitos), fps (30), quality
   ('final'|'draft'), workers (default min(4, cpu//3); 0/1 = en proceso), cache_dir,
+  music_cache_dir (cache de music.py; default la suya), stems_dir (voz/musica/sfx por separado),
   enhance_audio (True), air (margen desenfocado para fuentes horizontales, 0 = sin margen),
   logo ({path,size,opacity,pos} o None), progress (bool: barra superior automatica),
   dither (1.0: grano/dither final de +-2 niveles sobre TODO el cuadro; 0 = sin),
   min_fragment (s, default timeline.MIN_FRAG), shorts (bool), shorts_dir,
   modules ({nombre: modulo_importable}), sys_path ([rutas extra para los workers]),
   on_pct(stage, pct_total), on_step(msg), cancel() -> bool, strict (errores de renderer
-  se propagan), keep_chunks (debug), cache_keep.
+  se propagan), keep_chunks (debug), cache_keep, prefetch_music (ensure_analysis; True),
+  threads (hilos de cv2/OMP por worker; default cpu//workers),
+  draft_wait_music (False: en draft se mezcla con la procedural si la IA aun se genera).
 """
 from __future__ import annotations
 
@@ -209,11 +218,13 @@ class _Progress:
     """Progreso global 0..100 monotono por etapas (rangos dinamicos) + cancelacion."""
 
     def __init__(self, opts: dict, stages: dict | None = None):
+        import threading
         self.on_pct = opts.get("on_pct")
         self.on_step = opts.get("on_step")
         self.cancel = opts.get("cancel")
         self.stages = stages or STAGES
         self.last = -1.0
+        self._lock = threading.Lock()   # lo llaman el hilo principal, el de audio y el matte
 
     def step(self, msg: str) -> None:
         _log(msg)
@@ -224,9 +235,13 @@ class _Progress:
         self.check()
         a, b = self.stages.get(stage, (self.last, self.last))
         v = round(a + (b - a) * max(0.0, min(100.0, p)) / 100.0, 1)
-        if self.on_pct and v > self.last:
+        if not self.on_pct:
+            return
+        with self._lock:
+            if v <= self.last:
+                return
             self.last = v
-            self.on_pct(stage, v)
+        self.on_pct(stage, v)
 
     def check(self) -> None:
         if self.cancel and self.cancel():
@@ -278,6 +293,55 @@ def _is_behind(it: dict, track: str, mods: dict) -> bool:
             return bool(it["behind"])
         return bool(schema.TEXT_PRESET_DEFAULTS.get(it.get("preset") or "", {}).get("behind"))
     return bool(it.get("behind"))
+
+
+def _num_or(v: Any, default: float) -> float:
+    """Numero finito o `default` (parse robusto: None, texto, NaN, inf -> default)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
+
+
+def _mixers(mods: dict) -> tuple:
+    tr = mods.get("transitions")
+    mx = getattr(tr, "MIXERS", None) if tr is not None else None
+    if isinstance(mx, (tuple, list, set)):
+        return tuple(mx)
+    return tuple(k for k, v in _reg(tr, "WINDOWS").items() if float(v) < 0.5)
+
+
+def transition_frac(it: dict, mods: dict) -> float:
+    """Fraccion de la ventana ANTES de la union. Usa transitions.effective_frac (las mezclas
+    A->B siempre 0.0: prev congelado solo existe despues de la union; las centradas respetan
+    `align`). Sin el helper: misma regla con WINDOWS."""
+    tr = mods.get("transitions")
+    fn = getattr(tr, "effective_frac", None) if tr is not None else None
+    if callable(fn):
+        try:
+            return min(1.0, max(0.0, float(fn(it))))
+        except Exception:  # noqa: un item raro no tumba el render
+            pass
+    k = it.get("kind")
+    if k in _mixers(mods):
+        return 0.0
+    a = it.get("align")
+    frac = {"center": 0.5, "start": 0.0, "end": 1.0}.get(a.strip().lower() if isinstance(a, str) else a)
+    return frac if frac is not None else float(_reg(tr, "WINDOWS").get(k, 0.5))
+
+
+def transition_dur(it: dict, mods: dict) -> float:
+    """Duracion (s) de la transicion con parse robusto: invalida, 0 o negativa -> default del
+    kind (transitions.DEFAULTS) -> 0.35; tope 4 s. El corte seco es el kind 'cut' (no dur 0:
+    schema.normalize acota dur al rango del kind, asi que 0 nunca llega del pipeline)."""
+    tr = mods.get("transitions")
+    defs = getattr(tr, "DEFAULTS", {}) if tr is not None else {}
+    kd = _num_or((defs.get(it.get("kind")) or {}).get("dur") if isinstance(defs, dict) else None, 0.35)
+    if kd <= 0:
+        kd = 0.35
+    d = _num_or(it.get("dur"), kd)
+    return min(4.0, d if d > 0 else kd)
 
 
 def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict, list[str]]:
@@ -400,15 +464,13 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
         if J <= 0 or J >= n_frames:
             skip(f"transitions:{iid}:fuera_del_video")
             continue
-        align = it.get("align") or "auto"
-        frac = {"center": 0.5, "start": 0.0, "end": 1.0}.get(align)
-        if frac is None:
-            frac = float(reg["windows"].get(k, 0.5))
-        if not snapped and frac < 0.5:
+        frac = transition_frac(it, mods)
+        if not snapped and k in _mixers(mods):
             # mezcla A->B sin cambio de contenido: se dibuja igual (A congelado sobre el
             # video que sigue) pero se avisa para que la UI lo muestre
             warnings.append(f"transitions:{iid}:sin_union")
-        L = max(1, int(round(float(it.get("dur") or 0.35) * fps)))
+        dur = transition_dur(it, mods)
+        L = max(1, int(round(dur * fps)))
         F0 = max(0, J - int(round(L * frac)))
         F1 = min(n_frames, F0 + L)
         d = copy.deepcopy(it)
@@ -475,14 +537,49 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
     return job, skipped
 
 
+GRAPHIC_ANCHORS = ("face", "face_left", "face_right", "face_top")
+
+
+def _box_face(f, W: int, H: int, box) -> list[float]:
+    """Cara (cx, cy, w, h) normalizada al cuadro -> normalizada a la caja de layout."""
+    bx, by, bw, bh = box
+    cx, cy, fw, fh = (float(v) for v in f[:4])
+    return [round((cx * W - bx) / bw, 5), round((cy * H - by) / bh, 5),
+            round(fw * W / bw, 5), round(fh * H / bh, 5)]
+
+
+def set_face0(job: dict, rows: np.ndarray | None, mods: dict) -> None:
+    """item['_face0'] = cara al INICIO de cada grafico anclado a la cara (`anchor` face*, sin
+    x/y): primera cara valida dentro de su rango, en coordenadas de la caja de layout. El
+    renderer la usa en los huecos del detector (el grafico no desaparece ni salta)."""
+    gr = mods.get("graphics")
+    anchors = tuple(getattr(gr, "ANCHORS", GRAPHIC_ANCHORS) or GRAPHIC_ANCHORS)
+    fps, N = job["fps"], job["n_frames"]
+    box = tuple(job.get("layout") or (0, 0, job["W"], job["H"]))
+    for it in job["graphics"]:
+        if it.get("anchor") not in anchors or (it.get("x") is not None and it.get("y") is not None):
+            continue
+        it.pop("_face0", None)
+        if rows is None:
+            continue
+        f0 = int(math.floor(it["_fs"] * fps))
+        f1 = min(N, max(f0 + 1, int(math.ceil(it["_fe"] * fps))))
+        seg = rows[max(0, f0):f1]
+        ok = np.where(~np.isnan(seg).any(axis=1))[0] if len(seg) else []
+        if len(ok):
+            it["_face0"] = _box_face(seg[int(ok[0])], job["W"], job["H"], box)
+
+
 def set_anchors(job: dict, face: np.ndarray | None, mods: dict) -> None:
     """Ancla de encuadre FIJA por efecto de camara (camera.item_anchor: mediana de la cara en
-    su rango). Determinista y estable: el mismo item encuadra igual en todos los procesos."""
+    su rango) y `_face0` de los graficos anclados a la cara. Determinista y estable: el mismo
+    item encuadra igual en todos los procesos."""
+    rows = _face_rows(face, job["n_frames"]) if face is not None else None
+    set_face0(job, rows, mods)
     cam = mods.get("camera")
     fn = getattr(cam, "item_anchor", None) if cam is not None else None
     if not callable(fn):
         return
-    rows = _face_rows(face, job["n_frames"]) if face is not None else None
     fps = job["fps"]
     for it in job["effects"]:
         if it.get("_stage") != "matrix" or it.get("center") is not None:
@@ -1135,11 +1232,22 @@ def plan_chunks(n_frames: int, n_chunks: int, transitions: list[dict],
 _W: dict[str, Any] = {}
 
 
-def _make_grader(mods: dict, base, shots, W, H, fps, cache_dir):
+def _grade_size(job: dict) -> tuple[int, int]:
+    """Tamano con el que se MIDE el grade: el del base (el del formato). La igualacion no
+    depende de la resolucion (mide a 360 px), asi el draft y /frame reutilizan la cache del
+    export en vez de volver a medir (~4-7 s)."""
+    bs = job.get("base_size")
+    return (int(bs[0]), int(bs[1])) if bs else (job["W"], job["H"])
+
+
+def _make_grader(mods: dict, base, shots, W, H, fps, cache_dir, on_pct=None):
     G = mods["grade"].Grader
     kw = {"cache_dir": cache_dir} if cache_dir and _accepts(G, "cache_dir") else {}
     g = G(base, shots, W, H, fps, **kw)
-    g.prepare()
+    if on_pct is not None and _accepts(g.prepare, "on_pct"):
+        g.prepare(on_pct=on_pct)
+    else:
+        g.prepare()
     return g
 
 
@@ -1153,7 +1261,7 @@ def _make_analysis(job: dict, mods: dict, analysis: dict):
     if grader is None and job.get("grade_on") and mods.get("grade") is not None:
         # sin base (cuadro suelto de /frame) el Grader aplica el look sin igualar tomas
         try:
-            grader = _make_grader(mods, analysis.get("base"), job["shots"], job["W"], job["H"],
+            grader = _make_grader(mods, analysis.get("base"), job["shots"], *_grade_size(job),
                                   job["fps"], analysis.get("cache_dir") if analysis.get("base") else None)
         except Exception as e:  # noqa
             _log(f"grade no disponible: {e}")
@@ -1278,19 +1386,23 @@ class _SafeMain:
                 os.environ[k] = v
 
 
-def worker_threads(nw: int) -> int:
+def worker_threads(nw: int, override: int | None = None) -> int:
+    """Hilos de cv2 (y OMP/BLAS) por worker: los nucleos repartidos entre los procesos, asi
+    N workers x hilos = nucleos (sin sobresuscripcion). `opts.threads` lo fija a mano."""
+    if override:
+        return max(1, int(override))
     return max(1, (os.cpu_count() or 4) // max(1, nw))
 
 
 def _run_parallel(job: dict, analysis: dict, tasks: list, nw: int, n: int,
-                  prog: "_Progress") -> list[dict]:
+                  prog: "_Progress", threads: int | None = None) -> list[dict]:
     """Reparte los chunks en `nw` procesos spawn. Un worker que muere o falla al iniciar
     rompe el pool con error claro (nunca se cuelga); cancelar mata los procesos."""
     from concurrent.futures import ProcessPoolExecutor, FIRST_EXCEPTION, wait
     ctxm = mp.get_context("spawn")
     counter = ctxm.Value("i", 0)
     nproc = max(1, min(nw, len(tasks)))
-    th = worker_threads(nproc)
+    th = worker_threads(nproc, threads)
     env = {k: th for k in ("OMP_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "OPENBLAS_NUM_THREADS",
                            "MKL_NUM_THREADS")}
     with _SafeMain(env):
@@ -1338,8 +1450,9 @@ def _face_file(job: dict, mods: dict, cache: Path, bkey: str) -> Path | None:
 
 
 def _ensure_face(job: dict, mods: dict, base_video: str, cache: Path, bkey: str,
-                 prog: "_Progress | None" = None) -> Path | None:
-    """Pista de rostro del base (sin suavizar a traves de uniones/tomas), cacheada."""
+                 prog: "_Progress | None" = None, on_pct=None, cancel=None) -> Path | None:
+    """Pista de rostro del base (sin suavizar a traves de uniones/tomas), cacheada.
+    on_pct/cancel se pasan a camera.face_track si los acepta (progreso y cancelacion)."""
     fp = _face_file(job, mods, cache, bkey)
     if fp is None:
         return None
@@ -1348,12 +1461,20 @@ def _ensure_face(job: dict, mods: dict, base_video: str, cache: Path, bkey: str,
             prog.step("Siguiendo el rostro…")
         cam = mods["camera"]
         kw = {"cuts": job.get("cut_frames")} if _accepts(cam.face_track, "cuts") else {}
+        if on_pct is not None and _accepts(cam.face_track, "on_pct"):
+            kw["on_pct"] = on_pct
+        if cancel is not None and _accepts(cam.face_track, "cancel"):
+            kw["cancel"] = cancel
         try:
             arr = np.asarray(cam.face_track(base_video, job["W"], job["H"], job["fps"],
                                             job["n_frames"], **kw), np.float32)
             tmp = fp.with_name(f"{fp.stem}.{os.getpid()}.{uuid.uuid4().hex[:6]}.part.npy")
             np.save(tmp, arr)
             os.replace(tmp, fp)
+        except V.Canceled:
+            raise
+        except InterruptedError as e:
+            raise V.Canceled("render cancelado") from e
         except Exception as e:  # noqa
             _log(f"face_track fallo: {e}")
     return fp if fp.exists() else None
@@ -1361,20 +1482,52 @@ def _ensure_face(job: dict, mods: dict, base_video: str, cache: Path, bkey: str,
 
 def _analysis(job: dict, mods: dict, base: dict, cache_dir: Path, bkey: str, prog: _Progress,
               stats: dict) -> dict:
+    """Pista de rostro + grade (en un hilo) EN PARALELO con el matte (hilo principal): las tres
+    etapas leen el mismo base y son independientes. Antes iban en serie."""
+    import threading
     W, H, fps = job["W"], job["H"], job["fps"]
     out = {"base": base["video"], "cache_dir": str(cache_dir), "face_path": None,
            "grader_pickle": None, "matte_pickle": None}
     t0 = time.time()
-    fp = _ensure_face(job, mods, base["video"], cache_dir, bkey, prog)
-    face = None
-    if fp is not None:
-        out["face_path"] = str(fp)
-        face = np.load(fp)
-        V.touch(fp)
-    set_anchors(job, face, mods)
-    stats["t_face"] = round(time.time() - t0, 3)
-    prog.pct("analysis", 20)
-    if job["matte_ranges"] and mods.get("matte") is not None:
+    side: dict[str, Any] = {}
+
+    matte_on = bool(job["matte_ranges"]) and mods.get("matte") is not None
+
+    def band(a, b):
+        """Avance del hilo rostro/grade en [a, b] % del analisis. Con matte la barra la lleva
+        el matte (el rostro corre en paralelo y suele terminar antes): este hilo no reporta."""
+        if matte_on:
+            return None
+        return lambda p: prog.pct("analysis", a + (b - a) * max(0.0, min(100.0, float(p))) / 100.0)
+
+    def face_and_grade():
+        ta = time.time()
+        try:
+            side["fp"] = _ensure_face(job, mods, base["video"], cache_dir, bkey,
+                                      on_pct=band(0, 60), cancel=prog.cancel)
+        except BaseException as e:  # noqa: se reporta en el hilo principal
+            side["face_err"] = e
+        side["t_face"] = time.time() - ta
+        if not matte_on:
+            try:
+                prog.pct("analysis", 60)
+            except BaseException:  # noqa: la cancelacion la atiende el hilo principal
+                pass
+        if job["grade_on"] and not isinstance(side.get("face_err"), V.Canceled):
+            tb = time.time()
+            try:
+                side["grader"] = _make_grader(mods, base["video"], job["shots"], *_grade_size(job), fps,
+                                              str(cache_dir), on_pct=band(60, 90))
+            except Exception as e:  # noqa
+                side["grade_err"] = e
+            side["t_grade"] = time.time() - tb
+
+    need_face = _face_file(job, mods, cache_dir, bkey)
+    if need_face is not None and not need_face.exists():
+        prog.step("Siguiendo el rostro…")
+    th = threading.Thread(target=face_and_grade, name="analysis-face-grade", daemon=True)
+    th.start()
+    if matte_on:
         prog.step("Recortando a la persona (matte)…")
         t1 = time.time()
         try:
@@ -1383,11 +1536,14 @@ def _analysis(job: dict, mods: dict, base: dict, cache_dir: Path, bkey: str, pro
                 msrc = _ensure_fg_video(base["video"], job, prog.cancel)
                 mw, mh = job["matte_box"][2], job["matte_box"][3]
             out["matte_src"] = msrc
-            mp_ = mods["matte"].MatteProvider(msrc, mw, mh, fps, job["matte_ranges"],
-                                              str(cache_dir), job["quality"])
-            mp_.prepare(on_pct=lambda p: prog.pct("analysis", 20 + 0.7 * p))
+            mp_ = _final_matte_for_draft(job, mods, msrc, cache_dir)
+            if mp_ is None:
+                mp_ = mods["matte"].MatteProvider(msrc, mw, mh, fps, job["matte_ranges"],
+                                                  str(cache_dir), job["quality"])
+            mp_.prepare(on_pct=lambda p: prog.pct("analysis", 0.9 * p))
             if getattr(mp_, "dir", None) is not None:
                 V.touch(mp_.dir)                 # LRU: el matte en uso no se poda
+            _matte_stats(mp_, job, stats)
             try:
                 out["matte_pickle"] = pickle.dumps(mp_)
             except Exception:
@@ -1399,42 +1555,96 @@ def _analysis(job: dict, mods: dict, base: dict, cache_dir: Path, bkey: str, pro
             _log(f"matte fallo: {e}")
             stats["skipped"].append("matte:error")
         stats["t_matte"] = round(time.time() - t1, 3)
-    prog.pct("analysis", 90)
+    # espera el hilo de rostro/grade (atendiendo la cancelacion)
+    while th.is_alive():
+        th.join(0.2)
+        prog.check()
+    prog.pct("analysis", 95)
+    if "face_err" in side:
+        _log(f"face_track fallo: {side['face_err']}")
+    fp = side.get("fp")
+    face = None
+    if fp is not None:
+        out["face_path"] = str(fp)
+        face = np.load(fp)
+        V.touch(fp)
+    set_anchors(job, face, mods)
+    stats["t_face"] = round(side.get("t_face", 0.0), 3)
     if job["grade_on"]:
-        try:
-            g = _make_grader(mods, base["video"], job["shots"], W, H, fps, str(cache_dir))
+        g = side.get("grader")
+        if g is None:
+            _log(f"grade fallo al preparar: {side.get('grade_err')}")
+            job["grade_on"] = False
+        else:
             out["_grader_obj"] = g
             try:
                 out["grader_pickle"] = pickle.dumps(g)
             except Exception:
                 out["grader_pickle"] = None
-        except Exception as e:  # noqa
-            _log(f"grade fallo al preparar: {e}")
-            job["grade_on"] = False
+        stats["t_grade_prep"] = round(side.get("t_grade", 0.0), 3)
     stats["t_analysis"] = round(time.time() - t0, 3)
     prog.pct("analysis", 100)
     return out
 
 
-def _audio(plan: dict, job: dict, tl: T.Timeline, mods: dict, voice: str, out_wav: Path,
-           prog: _Progress, stats: dict, cache_dir: Path | None = None) -> str:
-    t0 = time.time()
-    fx = plan["fx"]
-    dur = job["final_duration"]
-    events = []
-    for it in fx.get("sfx") or []:
-        if not it.get("enabled", True):
-            continue
-        try:
-            at = tl.remap_clamped(float(it["at"]))
-            ev = {"id": it.get("id"), "name": it.get("name"), "at": round(at, 4),
-                  "gain_db": float(it.get("gain_db", -6.0)), "pan": float(it.get("pan", 0.0))}
-        except (KeyError, TypeError, ValueError):
-            stats["skipped"].append(f"sfx:{it.get('id')}:dato_invalido")
-            continue
-        if at < dur:
-            events.append(ev)
-    mcfg = copy.deepcopy(fx.get("music") or {})
+MATTE_QUALITY_WARN = 0.85
+
+
+def _final_matte_for_draft(job: dict, mods: dict, msrc: str, cache_dir: Path):
+    """En draft, si las mascaras FINALES (tamano del base) ya estan completas en la cache
+    (ensure_analysis o un export previo), se usan tal cual: el compositor las reescala al
+    cuadro draft. Evita recalcular mascaras draft (~10-15 s) en cada vista previa real."""
+    if job.get("quality") != "draft" or job.get("matte_box") or not job.get("base_size"):
+        return None
+    bw, bh = job["base_size"]
+    try:
+        full = mods["matte"].MatteProvider(msrc, bw, bh, job["fps"], job["matte_ranges"],
+                                           str(cache_dir), "final")
+        fn = getattr(full, "missing_runs", None) or getattr(full, "missing_ranges", None)
+        if fn is not None and not fn():
+            return full
+    except Exception:  # noqa
+        pass
+    return None
+
+
+def _matte_stats(mp_, job: dict, stats: dict) -> None:
+    """Calidad del matte por rango (quality_of: 1 = limpio) y avisos para la UI: sin compuerta
+    de persona, o rango donde la persona tocaba muebles grandes (conviene evitar contorno o
+    reemplazo de fondo ahi)."""
+    rngs = []
+    for a, b in job.get("matte_ranges") or []:
+        q = None
+        fn = getattr(mp_, "quality_of", None)
+        if callable(fn):
+            try:
+                q = fn(int(a), int(b))
+            except Exception:  # noqa
+                q = None
+        rngs.append({"start": int(a), "end": int(b), "quality": q})
+        if q is not None and q < MATTE_QUALITY_WARN:
+            stats.setdefault("warnings", []).append(f"matte:{a}-{b}:calidad_baja")
+    warn = getattr(mp_, "warning", None)
+    err = getattr(mp_, "error", None)
+    stats["matte"] = {"ranges": rngs, "warning": warn, "error": err,
+                      "step": getattr(mp_, "step", None)}
+    if warn:
+        stats.setdefault("warnings", []).append("matte:sin_compuerta_de_persona")
+
+
+# claves del resultado de music.get_music que se copian a la cfg del mezclador. NO src_offset:
+# en audio.py `offset` es buscar dentro del archivo y el wav de get_music ya viene ajustado.
+MUSIC_KEYS = ("wav", "bpm", "beats", "downbeats", "sections", "drop", "hook_end", "ending",
+              "keyscale", "lufs")
+RISERS = ("riser_short", "riser_long")
+
+
+def music_cfg(plan: dict, job: dict, tl: T.Timeline, skipped: list | None = None) -> tuple[dict, bool]:
+    """cfg de musica en TIEMPO FINAL (stops, swells y drop_at remapeados) + si esta activa.
+    Es la MISMA cfg para el precalentamiento (music.prefetch) y para el paso de audio: asi el
+    get_music del paso 4 es un acierto de cache (o espera a la generacion en curso)."""
+    mcfg = copy.deepcopy((plan.get("fx") or {}).get("music") or {})
+    bad = skipped if skipped is not None else []
 
     def remap_list(key, fn):
         out = []
@@ -1442,29 +1652,154 @@ def _audio(plan: dict, job: dict, tl: T.Timeline, mods: dict, voice: str, out_wa
             try:
                 r = fn(s)
             except (KeyError, TypeError, ValueError, AttributeError):
-                stats["skipped"].append(f"music:{key}:dato_invalido")
+                bad.append(f"music:{key}:dato_invalido")
                 continue
             if r is not None:
                 out.append(r)
         mcfg[key] = out
 
-    remap_list("stops", lambda s: dict(s, at=tl.remap_clamped(float(s["at"]))))
-    remap_list("swells", lambda s: (lambda r: dict(s, start=r[0], end=r[1]) if r else None)(
-        tl.map_range(float(s["start"]), float(s["end"]))))
+    def remap_stop(s):
+        """at y dur a tiempo FINAL: el silencio va de at a at+dur en el original; si cruza un
+        corte dura lo que queda en el video (antes dur quedaba en tiempo original y el hueco se
+        comia la frase siguiente y movia el drop automatico, que entra en at+dur)."""
+        at_o = float(s["at"])
+        if not math.isfinite(at_o):
+            raise ValueError("at")
+        at = tl.remap_clamped(at_o)
+        out = dict(s, at=round(at, 4))
+        d = _num_or(s.get("dur"), float("nan"))
+        if math.isfinite(d) and d > 0:
+            out["dur"] = round(max(0.05, tl.remap_clamped(at_o + d) - at), 4)
+        return out
+
+    remap_list("stops", remap_stop)
+    remap_list("swells", lambda s: (lambda r: dict(s, start=round(r[0], 4), end=round(r[1], 4))
+                                    if r else None)(tl.map_range(float(s["start"]), float(s["end"]))))
     if mcfg.get("drop_at") is not None:
         try:
-            mcfg["drop_at"] = tl.remap_clamped(float(mcfg["drop_at"]))
+            mcfg["drop_at"] = round(tl.remap_clamped(float(mcfg["drop_at"])), 4)
         except (TypeError, ValueError):
             mcfg["drop_at"] = None
-    music_on = bool(mcfg.get("enabled", True)) and mcfg.get("source", "ai") != "none"
+    mcfg.pop("src_offset", None)
+    on = bool(mcfg.get("enabled", True)) and mcfg.get("source", "ai") != "none"
+    return mcfg, on
+
+
+def prefetch_music(plan: dict, job: dict, tl: T.Timeline, mods: dict, opts: dict):
+    """Arranca la generacion de la musica (ACE-Step en GPU) en segundo plano al INICIO del job,
+    en paralelo con el base pass y el analisis. Devuelve el hilo o None."""
+    mus = mods.get("music")
+    fn = getattr(mus, "prefetch", None) if mus is not None else None
+    if not callable(fn):
+        return None
+    mcfg, on = music_cfg(plan, job, tl)
+    if not on or job["final_duration"] <= 0.25:
+        return None
+    try:
+        kw = {"cache_dir": opts["music_cache_dir"]} if opts.get("music_cache_dir") else {}
+        return fn(mcfg, job["final_duration"], job["style"], job["seed"], **kw)
+    except Exception as e:  # noqa: el precalentamiento nunca tumba el render
+        _log(f"prefetch de musica fallo: {e}")
+        return None
+
+
+def sfx_events(plan: dict, job: dict, tl: T.Timeline, skipped: list) -> list[dict]:
+    """Eventos de SFX en tiempo FINAL para audio.mix: {id, name, at, gain_db, pan, variant,
+    pitch, dur}. `dur` se remapea: en los risers es la anticipacion (antes de `at`); en el resto
+    el sonido va de `at` a `at+dur` (si el tramo cruza un corte, dura lo que queda en el video)."""
+    dur = job["final_duration"]
+    events = []
+    for it in (plan.get("fx") or {}).get("sfx") or []:
+        if not isinstance(it, dict) or not it.get("enabled", True):
+            continue
+        try:
+            at_o = float(it["at"])
+            if not math.isfinite(at_o):
+                raise ValueError("at")
+            at = tl.remap_clamped(at_o)
+            ev = {"id": it.get("id"), "name": it.get("name"), "at": round(at, 4),
+                  "gain_db": _num_or(it.get("gain_db"), -6.0), "pan": _num_or(it.get("pan"), 0.0)}
+        except (KeyError, TypeError, ValueError):
+            skipped.append(f"sfx:{it.get('id')}:dato_invalido")
+            continue
+        if it.get("variant") is not None:
+            v = _num_or(it.get("variant"), -1)
+            if v >= 0:
+                ev["variant"] = int(v)
+        if it.get("pitch") is not None:
+            ev["pitch"] = max(-24.0, min(24.0, _num_or(it.get("pitch"), 0.0)))
+        d = _num_or(it.get("dur"), 0.0)
+        if d > 0:
+            name = str(it.get("name") or "")
+            if name.startswith(RISERS):
+                fd = at - tl.remap_clamped(at_o - d)
+            else:
+                fd = tl.remap_clamped(at_o + d) - at
+            ev["dur"] = round(fd if fd > 1e-3 else d, 4)
+        if at < dur:
+            events.append(ev)
+    return events
+
+
+def _music_pending(mus, mcfg: dict, dur: float, job: dict, kw: dict) -> bool:
+    """True si la musica IA de esta cfg aun no esta en la cache (el prefetch la esta
+    generando): music.pending, o False si el modulo no lo expone."""
+    fn = getattr(mus, "pending", None)
+    if not callable(fn):
+        return False
+    try:
+        return bool(fn(mcfg, dur, job["style"], job["seed"], **kw))
+    except Exception:  # noqa
+        return False
+
+
+def _audio(plan: dict, job: dict, tl: T.Timeline, mods: dict, voice: str, out_wav: Path,
+           prog: _Progress, stats: dict, opts: dict | None = None, box: dict | None = None) -> str:
+    """Paso 4: musica (get_music; normalmente acierto de cache gracias a prefetch_music) +
+    audio.mix(voz, SFX, musica) con la seed del plan. Devuelve el wav a muxear.
+
+    Corre en un hilo EN PARALELO con el compositor: no emite pasos (on_step) para no pisar la
+    etiqueta del compositor; `box` recibe la fase ('music' | 'mix') y el avance de la musica
+    para que el hilo principal los muestre si tiene que esperar antes del mux.
+    En draft, si la musica IA aun no esta en cache (el prefetch la genera), NO se espera: se
+    mezcla con la procedural y stats.music_pending = True (el Studio refresca la vista previa
+    cuando el prefetch termina). opts.draft_wait_music = True fuerza la espera."""
+    o = opts or {}
+    bx = box if box is not None else {}
+    t0 = time.time()
+    dur = job["final_duration"]
+    events = sfx_events(plan, job, tl, stats["skipped"])
+    mcfg, music_on = music_cfg(plan, job, tl, stats["skipped"])
     mus, aud = mods.get("music"), mods.get("audio")
     if music_on and mus is not None and hasattr(mus, "get_music"):
-        prog.step("Preparando la música…")
+        kw = {"cache_dir": o["music_cache_dir"]} if o.get("music_cache_dir") else {}
+        gcfg = mcfg
+        stats["music_pending"] = False
+        if job.get("quality") == "draft" and not o.get("draft_wait_music") and \
+                _music_pending(mus, mcfg, dur, job, kw):
+            gcfg = dict(mcfg, source="procedural")
+            stats["music_pending"] = True
+            _log("la musica IA se sigue generando: la vista previa usa la procedural")
+        else:
+            _log("Preparando la música…")
+        bx["phase"] = "music"
+
+        def on_music(p):
+            bx["music_pct"] = float(p)
+            prog.pct("audio", 0.8 * p)          # tambien atiende la cancelacion
+
         try:
-            m = mus.get_music(mcfg, dur, job["style"], job["seed"],
-                              lambda p: prog.pct("audio", 0.8 * p))
+            m = mus.get_music(gcfg, dur, job["style"], job["seed"], on_music, **kw)
             if m:
-                mcfg.update({k: m[k] for k in ("wav", "bpm", "beats") if k in m})
+                mcfg.update({k: m[k] for k in MUSIC_KEYS if k in m})
+                stats["music"] = {k: m.get(k) for k in ("wav", "source", "engine", "bpm", "drop",
+                                                        "keyscale", "cached", "gen_s", "lufs",
+                                                        "fallback_from") if k in m}
+                stats["music"]["ending"] = m.get("ending")
+                if stats["music_pending"]:
+                    stats["music"]["pending_source"] = mcfg.get("source", "ai")
+                if m.get("warnings"):
+                    stats["music"]["warnings"] = list(m["warnings"])
         except V.Canceled:
             raise
         except Exception as e:  # noqa
@@ -1477,21 +1812,48 @@ def _audio(plan: dict, job: dict, tl: T.Timeline, mods: dict, voice: str, out_wa
     mcfg["enabled"] = music_on and bool(mcfg.get("wav"))
     result = voice
     if aud is not None and hasattr(aud, "mix") and (events or mcfg["enabled"]):
-        prog.step("Mezclando voz, música y efectos…")
+        bx["phase"] = "mix"
+        _log("Mezclando voz, música y efectos…")
+        prog.check()
         try:
-            info = aud.mix(voice, dur, events, mcfg, str(out_wav)) or {}
-            stats["audio"] = {k: v for k, v in info.items() if isinstance(v, (int, float, str, bool))}
+            kw = {}
+            if _accepts(aud.mix, "seed"):
+                kw["seed"] = job["seed"]
+            if o.get("stems_dir") and _accepts(aud.mix, "stems_dir"):
+                kw["stems_dir"] = str(o["stems_dir"])
+            info = aud.mix(voice, dur, events, mcfg, str(out_wav), **kw) or {}
+            stats["audio"] = _json_safe(info)
             if out_wav.exists():
                 result = str(out_wav)
         except Exception as e:  # noqa
+            if prog.cancel and prog.cancel():
+                raise V.Canceled("render cancelado")
             _log(f"mezcla fallo ({e}); se usa solo la voz")
             stats["skipped"].append("audio:error")
     elif events and aud is None:
         stats["skipped"].append("audio:modulo")
+    bx["phase"] = "done"
     stats["sfx_events"] = len(events)
     stats["t_audio"] = round(time.time() - t0, 3)
     prog.pct("audio", 100)
     return result
+
+
+def _json_safe(v: Any, depth: int = 0):
+    """Copia serializable (escalares, listas y dicts) de un resultado de modulo."""
+    if isinstance(v, (bool, int, str)) or v is None:
+        return v
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, (np.floating, np.integer)):
+        return _json_safe(v.item(), depth)
+    if depth > 4:
+        return None
+    if isinstance(v, dict):
+        return {str(k): _json_safe(x, depth + 1) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_json_safe(x, depth + 1) for x in v]
+    return str(v)
 
 
 def _fit_audio(wav: str, n_samples: int, out: Path) -> str:
@@ -1526,7 +1888,15 @@ def prepare(plan: dict, opts: dict | None = None) -> dict:
                               min_frag=float(o.get("min_fragment", T.MIN_FRAG)))
     mods = load_modules(o.get("modules"))
     job, skipped = build_job(pn, tl, o, mods)
+    # SFX que normalize descarto (nombre que no existe ni como alias): se avisa en vez de
+    # desaparecer en silencio
+    kept = {it.get("id") for it in pn["fx"].get("sfx") or []}
+    for it in ((plan.get("fx") or {}).get("sfx") or []) if isinstance(plan.get("fx"), dict) else []:
+        if isinstance(it, dict) and it.get("id") and it.get("enabled", True) and it["id"] not in kept:
+            known = schema.resolve_sfx_name(it.get("name"))[0] is not None
+            skipped.append(f"sfx:{it['id']}:{'dato_invalido' if known else 'nombre_desconocido'}")
     job["matte_box"], job["matte_box_base"] = _pillar_boxes(info, o)
+    job["base_size"] = [o["base_W"], o["base_H"]]
     return {"plan": pn, "opts": o, "timeline": tl, "mods": mods, "job": job, "skipped": skipped,
             "source": info}
 
@@ -1605,13 +1975,16 @@ def ensure_analysis(plan: dict, opts: dict | None = None, prep: dict | None = No
     o, mods, job = pr["opts"], pr["mods"], pr["job"]
     prog = _Progress(o, {"timeline": (0, 0), "base": (0, 55), "analysis": (55, 100)})
     t0 = time.time()
+    # la musica del plan tambien se precalienta (la vista previa real y el export la usan)
+    mth = prefetch_music(pr["plan"], job, pr["timeline"], mods, o) \
+        if o.get("prefetch_music", True) else None
     base = ensure_base(plan, o, pr, prog)
     stats: dict[str, Any] = {"skipped": []}
     bkey = Path(base["video"]).stem.replace("base_", "")
     an = _analysis(job, mods, base, Path(o["cache_dir"]), bkey, prog, stats)
     return {"base": base["video"], "voice": base["voice"], "face_path": an.get("face_path"),
             "matte": bool(an.get("_matte_obj")), "grade": bool(an.get("_grader_obj")),
-            "t_total": round(time.time() - t0, 3), **stats}
+            "music_prefetch": mth is not None, "t_total": round(time.time() - t0, 3), **stats}
 
 
 def _stage_weights(pr: dict) -> dict:
@@ -1627,10 +2000,19 @@ def _stage_weights(pr: dict) -> dict:
     mus = fx.get("music") or {}
     music_on = bool(mus.get("enabled", True)) and mus.get("source", "ai") != "none" and \
         mods.get("music") is not None
+    # el audio (y la musica, precalentada desde el inicio) corre EN PARALELO con el
+    # compositor: su tramo de la barra es minimo. Si la musica IA aun no esta en cache y el
+    # render la va a esperar (export), el mux se lleva un tramo visible para esa espera
+    wait_music = 0
+    if music_on and (job["quality"] != "draft" or o.get("draft_wait_music")):
+        kw = {"cache_dir": o["music_cache_dir"]} if o.get("music_cache_dir") else {}
+        mcfg, on = music_cfg(pr["plan"], job, pr["timeline"])
+        if on and _music_pending(mods["music"], mcfg, job["final_duration"], job, kw):
+            wait_music = 12
     return {"timeline": 0.5, "base": 1 if base_cached else 28,
             "analysis": 2 + (0 if face_cached else 5) + (14 if job["matte_ranges"] and mods.get("matte") else 0),
-            "audio": 1 + (12 if music_on else 0) + (2 if fx.get("sfx") else 0),
-            "render": 50, "mux": 3 + (3 if o.get("shorts") else 0)}
+            "audio": 0.5 if (music_on or fx.get("sfx")) else 0.2,
+            "render": 50, "mux": 3 + (3 if o.get("shorts") else 0) + wait_music}
 
 
 def render_pro(plan: dict, out_path, opts: dict | None = None) -> dict:
@@ -1656,6 +2038,9 @@ def render_pro(plan: dict, out_path, opts: dict | None = None) -> dict:
     for s in pr["skipped"]:
         _log(f"se omite {s}")
     prog.pct("timeline", 100)
+    # la musica (ACE-Step en GPU) se genera en paralelo desde YA: base pass, analisis y
+    # compositor corren mientras tanto; el paso de audio la toma de la cache
+    stats["music_prefetch"] = prefetch_music(pr["plan"], job, tl, mods, o) is not None
 
     # 2) base (al tamano del formato; el draft lo lee escalado)
     prog.step("Preparando el video base (reencuadre, color y cortes)…")
@@ -1670,13 +2055,32 @@ def render_pro(plan: dict, out_path, opts: dict | None = None) -> dict:
     grader_obj = analysis.pop("_grader_obj", None)
     matte_obj = analysis.pop("_matte_obj", None)
 
-    # 4) audio
+    # 4) audio EN PARALELO con el compositor (solo el mux necesita los dos). Escribe en su
+    # propia subcarpeta; si el render se cancela no se le espera (es daemon) y el hilo borra lo
+    # suyo al terminar (tolera que el job ya no exista).
     work = cache / f"job_{os.getpid()}_{uuid.uuid4().hex[:8]}"
-    work.mkdir(parents=True, exist_ok=True)
+    awork = work / "audio"
+    awork.mkdir(parents=True, exist_ok=True)
     tmp_out = V._tmp_path(out_path)
+    audio_box: dict[str, Any] = {"phase": "start"}
+
+    def audio_job():
+        try:
+            a = _audio(pr["plan"], job, tl, mods, base["voice"], awork / "mix.wav", prog, stats, o,
+                       box=audio_box)
+            audio_box["wav"] = _fit_audio(a, int(round(n / fps * V.SR)), awork / "mix_fit.wav")
+        except BaseException as e:  # noqa: se relanza en el hilo principal
+            audio_box["err"] = e
+        finally:
+            if audio_box.get("abandon"):         # render cancelado: limpia lo suyo
+                shutil.rmtree(awork, ignore_errors=True)
+                if not o.get("keep_chunks"):
+                    shutil.rmtree(work, ignore_errors=True)
+
+    import threading
+    audio_th = threading.Thread(target=audio_job, name="render-audio", daemon=True)
     try:
-        mix = _audio(pr["plan"], job, tl, mods, base["voice"], work / "mix.wav", prog, stats)
-        mix = _fit_audio(mix, int(round(n / fps * V.SR)), work / "mix_fit.wav")
+        audio_th.start()
 
         # 5) compositor
         prog.step("Componiendo efectos, textos y gráficos…")
@@ -1707,8 +2111,8 @@ def render_pro(plan: dict, out_path, opts: dict | None = None) -> dict:
                 prog.pct("render", done / n * 100)
             threads = 0
         else:
-            results = _run_parallel(job, analysis, tasks, nw, n, prog)
-            threads = worker_threads(min(nw, len(tasks)))
+            results = _run_parallel(job, analysis, tasks, nw, n, prog, o.get("threads"))
+            threads = worker_threads(min(nw, len(tasks)), o.get("threads"))
         t_comp_wall = time.time() - t0
         prog.pct("render", 100)
         errs: dict[str, int] = {}
@@ -1731,6 +2135,23 @@ def render_pro(plan: dict, out_path, opts: dict | None = None) -> dict:
                      errors=errs)
 
         # 6) concat + mux (a un temporal unico; nunca queda un .part en la carpeta de salida)
+        ta = time.time()
+        shown = None
+        while audio_th.is_alive():
+            audio_th.join(0.2)
+            prog.check()
+            if time.time() - ta < 0.6:
+                continue
+            ph = audio_box.get("phase")
+            if ph != shown and ph in ("music", "mix"):
+                prog.step("Generando la música…" if ph == "music" else "Mezclando voz, música y efectos…")
+                shown = ph
+            if ph == "music":                   # la espera avanza en el tramo del mux
+                prog.pct("mux", 70.0 * float(audio_box.get("music_pct") or 0.0) / 100.0)
+        stats["t_audio_wait"] = round(time.time() - ta, 3)
+        if "err" in audio_box:
+            raise audio_box["err"]
+        mix = audio_box["wav"]
         prog.step("Uniendo y exportando…")
         t0 = time.time()
         video_only = work / "video.mp4"
@@ -1738,17 +2159,22 @@ def render_pro(plan: dict, out_path, opts: dict | None = None) -> dict:
             os.replace(tasks[0][2], video_only)
         else:
             V.concat([t[2] for t in sorted(tasks)], video_only, cancel=prog.cancel)
-        prog.pct("mux", 40)
+        prog.pct("mux", 75)
         V.mux(video_only, mix, tmp_out, cancel=prog.cancel)
         os.replace(tmp_out, out_path)
         stats["t_mux"] = round(time.time() - t0, 3)
-        prog.pct("mux", 70)
+        prog.pct("mux", 90)
         if o.get("shorts"):
             prog.step("Cortando los shorts…")
             stats["shorts"] = render_shorts(pr["plan"], out_path, o, tl)
         prog.pct("mux", 100)
     except BaseException:
         tmp_out.unlink(missing_ok=True)
+        if audio_th.is_alive():
+            # no se espera a la musica: get_music atiende la cancelacion (sondea el candado)
+            # y el hilo es daemon; limpia su carpeta al terminar
+            audio_box["abandon"] = True
+            audio_th.join(0.5)
         raise
     finally:
         if not o.get("keep_chunks"):
@@ -1972,7 +2398,7 @@ def render_frame(plan: dict, t_final: float, opts: dict | None = None) -> np.nda
             g = None
             if job["grade_on"] and mods.get("grade") is not None:
                 try:
-                    g = _make_grader(mods, str(bv), job["shots"], W, H, fps, str(cache))
+                    g = _make_grader(mods, str(bv), job["shots"], *_grade_size(job), fps, str(cache))
                 except Exception as e:  # noqa
                     _log(f"grade no disponible: {e}")
             if len(_FRAME_CACHE) > 3:

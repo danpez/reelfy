@@ -1,5 +1,6 @@
 """Tests de motion/graphics.py: contrato de renderers, catalogo completo, determinismo,
 animacion (dibujo, boil, salida), tarjetas (contador, zona segura) y presupuesto de tiempo."""
+import os
 import math
 import time
 
@@ -10,6 +11,16 @@ from motion import ctx as C
 from motion import graphics as G
 
 W, H = 540, 960  # resolucion de prueba (draft) salvo donde se indica
+
+def _load_factor() -> float:
+    """Holgura de los umbrales de rendimiento cuando la maquina esta cargada por otros procesos
+    (la Mac se comparte con otros renders): carga/nucleos, entre 1 y 3."""
+    try:
+        la = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return 1.0
+    return min(3.0, max(1.0, la / (os.cpu_count() or 8)))
+
 
 
 def _frame(w=W, h=H, bg="#6E7B64"):
@@ -265,7 +276,7 @@ def test_performance_final(kind, item, budget):
         G.RENDERERS[kind](cv, item, t, 3.0, ctx)
         ts.append((time.perf_counter() - t0) * 1000)
     # percentil 25: costo propio del renderer (la maquina puede estar cargada por otros procesos)
-    assert float(np.percentile(ts, 25)) < budget, f"{kind}: {np.percentile(ts, 25):.2f} ms"
+    assert float(np.percentile(ts, 25)) < budget * _load_factor(), f"{kind}: {np.percentile(ts, 25):.2f} ms"
 
 
 # -------------------------------------------------------------- robustez / integracion con schema
@@ -692,3 +703,39 @@ def test_share_cta_never_leaves_empty_circle_for_long():
         if (patch.sum(axis=2) < 200).sum() < 3:
             empty += 1
     assert empty <= 4, empty  # a lo mas ~0.13 s sin avion en el circulo por ciclo
+
+
+# -------------------------------------------------------------- ola 2
+def test_location_card_compact_without_map():
+    """`map: false`: tarjeta de ubicacion compacta (pin + direccion) cuando no hay b-roll."""
+    base = {"id": "loc", "kind": "card", "variant": "location", "title": "Av. Central 123",
+            "subtitle": "a 2 cuadras de la Glorieta Norte", "size": 0.74}
+    ctx = _ctx(1.0)
+    h_full = G.card_size(dict(base), ctx)[1]
+    h_compact = G.card_size(dict(base, map=False), ctx)[1]
+    assert h_compact < 0.6 * h_full
+    a = _draw("card", dict(base, map=False), 1.2)
+    assert _diff(a, BG).mean() > 0.001
+
+
+def test_link_below_arrow_scale_shortens_arrow():
+    """`arrow_scale` acorta la flecha del link (para no pisar los subtitulos); 0 la quita."""
+    it = {"id": "lk", "kind": "cta", "variant": "link_below", "label": "Agenda tu cita", "x": 0.47,
+          "y": 0.45, "size": 0.62, "anim_out": "none"}
+
+    def bottom(img):
+        base = _frame()[0]
+        d = np.abs(img[..., :3].astype(int) - base[..., :3].astype(int)).sum(-1) > 30
+        ys = np.nonzero(d.any(1))[0]
+        return ys.max() if len(ys) else 0
+    full = bottom(_draw("cta", dict(it), 1.5))
+    short = bottom(_draw("cta", dict(it, arrow_scale=0.5), 1.5))
+    none = bottom(_draw("cta", dict(it, arrow_scale=0.0), 1.5))
+    assert none < short < full
+
+
+def test_gradients_are_dithered():
+    """Los degradados de fondos/tarjetas se dibujan con dither (sin anillos de 8 bits)."""
+    import inspect
+    src = inspect.getsource(G)
+    assert src.count("setShader(skia.GradientShader") == src.count("setDither(True)")

@@ -19,9 +19,23 @@ Pasos:
   4. validacion: schema.normalize/validate (si existe) o validacion minima propia.
 
 API:
-  direct(plan, style="dinamico", intensity=0.75, seed=7, use_llm=True, on_step=None, trim=True)
-      -> plan v2 (copia). plan.director lleva script, kit, notes, timings, rev.
-  redirect(plan, style=None, intensity=None, seed=None, only_ids=None, use_llm=False) -> plan v2
+  direct(plan, style="dinamico", intensity=0.75, seed=7, use_llm=True, on_step=None, trim=True,
+         music_sync=None, music=None) -> plan v2 (copia). plan.director lleva script, kit, notes,
+      timings, rev y music_grid ({bpm, beats, downbeats, drop, key}: rejilla de la pista IA).
+      music_sync (default = use_llm y musica IA lista): genera la musica real antes de cerrar la
+      coreografia (music.get_music con la cfg en tiempo final, como la pide render) y alinea
+      punches, el golpe del drop y los pops de SFX a sus beats; el render reusa el cache.
+      music: la musica que eligio el usuario (se mezcla en fx.music antes de la rejilla; con otra
+      fuente que no sea la IA no hay sincronia).
+  sign_name(video, shots, role) -> {name, line} | None : nombre en un letrero-directorio: el
+      letrero debe tener UNA sola persona de la profesion y dos lecturas del VLM coincidir. Queda
+      como candidato (entities.name_candidate, name_src "letrero", name_confirmed false): no se
+      publica en rotulo/CTA hasta que el usuario lo confirme (name_usable(entities)).
+  find_enums(words, w0, w1) -> enumeraciones (clausulas paralelas / listas con comas).
+  music_grid(plan, style, seed, music_cfg) / music_cfg_final(plan, music_cfg).
+  redirect(plan, style=None, intensity=None, seed=None, only_ids=None, use_llm=False,
+           music_sync=None, music_timeout=12) -> plan v2 (reusa director.music_grid si la pista no
+      cambia; conserva las notas del nombre y de la musica)
   detect_shots(video, duration=None) -> list[dict]
   analyze_shots(plan, use_llm=True, on_step=None, scan=None, deadline=None, on_basic=None)
       -> list[dict] (+ face, motion, rows = perfil de color del fondo, speech)
@@ -45,8 +59,25 @@ Tipografia: un "kit" por estilo y video (display + sans en 2-3 pesos + un acento
 manuscrito): como maximo 4 fuentes y 3 familias. El color de tinta se elige contra el fondo
 real de la franja (luminancia/tono medidos por toma) y todo texto sobre caja cumple WCAG 4.5.
 Tiempos SIEMPRE originales (el render remapea). Aleatoriedad solo via FrameCtx.rand(key).
-Opcional (`trim=True`): el director propone recortes `cuts` con src "ai" para b-roll mudo
-demasiado largo (el Studio puede desactivarlos con `enabled: false`).
+Direccion de arte (ola 2): subtitulos con presencia iguales en todo el video; nunca texto sobre
+ojos/nariz/boca (pista de rostro a 2 fps por toma); texto detras del sujeto solo si se lee
+(oclusion estimada <= BEHIND_MAX, si no sube o pasa delante); precio como contador en la toma
+(la persona sigue visible, fondo tratado detras) salvo en energetico (escena); enumeraciones con
+iconos que se dibujan (escena de lista para 3+); flechas hacia tarjetas largas; subrayado o
+circulo a mano en la linea protagonista; remate con rotulo nombre + rol y CTA seguir + link
+sostenidos hasta el ultimo cuadro; efectos de sujeto (reemplazo de fondo, contorno) solo con
+recorte limpio (shots[].matte_q >= MATTE_OK).
+Ola 3 (revision del critico, flujo real del servidor con los clips en orden de subida):
+b-roll que llega al FINAL = tarjeta de cierre (se conserva END_KEEP s; seguir + link + ubicacion
+hasta el ultimo cuadro); el CTA final entra al terminar la ultima palabra del remate (el chiste se
+ve limpio; el desenfoque solo despues); el link de la frase del CTA se sostiene hasta el final en
+vez de repetirse; rotulo al inicio (primera toma a camara tras el hook, sin titulos encima); sin
+nombre confirmado, rotulo y seguir solo con el rol; escenas relampago (~1 s) y jump-cuts por
+clausula en tomas largas; el precio aterriza en 0.45 s y queda quieto >= 0.8 s (transicion seca
+despues o cruza el corte); marcas (subrayado/circulo) en la linea de SU palabra; flechas tambien
+en tarjetas sobre b-roll.
+Opcional (`trim=True`): el director propone recortes `cuts` con src "ai" (b-roll mudo largo,
+silencios > SILENCE_MAX, cola `tail`); el Studio puede desactivarlos con `enabled: false`.
 """
 from __future__ import annotations
 
@@ -78,7 +109,8 @@ try:  # dentro del motor (scripts/ en sys.path)
 except Exception:  # pragma: no cover
     _paths = None
 
-PROMPT_VERSION = "d5"
+PROMPT_VERSION = "d6"
+SHOTS_VERSION = "s7"          # analisis de tomas (rostro por tiempo, calidad del recorte)
 TRACKS = ("text", "graphics", "cutaways", "effects", "transitions", "sfx")
 ID_PREFIX = {"text": "tx", "graphics": "gr", "cutaways": "cw", "effects": "fx",
              "transitions": "tr", "sfx": "sf"}
@@ -114,21 +146,29 @@ LOOKS = ("natural", "warm_clean", "cinematic", "bright_pop", "moody", "bw_contra
 
 _COMMON = {"id", "start", "end", "enabled", "src", "locked", "intensity", "z"}
 _EVENT = {"id", "at", "enabled", "src", "locked", "intensity"}
+# campos del catalogo 3.1 + extensiones que los modulos ya implementan (reportes de la ola 1):
+# text kicker/rotation/case; graphics map (tarjeta de ubicacion sin mapa), button/subtitle;
+# effects punch mode/release/target, bg_replace grain/vignette; transitions x/y (rostro), ring,
+# mode, peak, gate, intensity; sfx dur (revelado / trazo / anticipacion del riser), variant, pitch.
 FIELDS = {
     "text": _COMMON | {"preset", "text", "lines", "x", "y", "size", "font", "color", "accent",
                        "accent_words", "align", "stroke", "shadow", "anim_in", "anim_out",
-                       "behind", "box", "from", "to", "prefix", "suffix", "decimals"},
+                       "behind", "box", "from", "to", "prefix", "suffix", "decimals", "kicker",
+                       "rotation", "case", "anchor", "count_dur"},
     "graphics": _COMMON | {"kind", "x", "y", "size", "color", "anim_in", "anim_out", "rotation",
                            "name", "stroke", "draw", "wiggle", "path_to", "variant", "badge",
                            "badge_color", "title", "subtitle", "value", "items", "icon", "theme",
-                           "label", "handle", "thickness", "text", "bg", "fg"},
+                           "label", "handle", "thickness", "text", "bg", "fg", "map", "bend",
+                           "shadow", "button", "arrow_color", "aspect", "double", "arrow_scale"},
     "cutaways": _COMMON | {"kind", "background", "bg_colors", "text", "graphics", "src_t",
                            "zoom_from", "zoom_to", "card", "anim_in", "anim_out"},
     "effects": _COMMON | {"kind", "from", "to", "easing", "amount", "hold", "amp", "freq", "decay",
                           "pan", "contrast", "subject_color", "bg_desat", "bg_dark", "radius",
-                          "background", "bg_colors", "color", "width", "glow"},
-    "transitions": _EVENT | {"kind", "dur", "dir", "color", "align"},
-    "sfx": _EVENT | {"name", "gain_db", "pan"},
+                          "background", "bg_colors", "color", "width", "glow", "mode", "release",
+                          "target", "fade_in", "fade_out", "grain", "vignette"},
+    "transitions": _EVENT | {"kind", "dur", "dir", "color", "align", "x", "y", "ring", "mode",
+                             "peak", "gate"},
+    "sfx": _EVENT | {"name", "gain_db", "pan", "dur", "variant", "pitch"},
 }
 KIND_KEY = {"text": "preset", "graphics": "kind", "cutaways": "kind", "effects": "kind",
             "transitions": "kind", "sfx": "name"}
@@ -143,11 +183,16 @@ KIND_SET = {"text": set(TEXT_PRESETS), "graphics": set(GRAPHIC_KINDS),
 #   companion   : preset de los bloques sin enfasis.
 #   scenes      : presupuesto de "escenas" (fraccion del video con tratamiento de pantalla
 #                 completa: cutaways, fondo reemplazado, blanco y negro...) y recursos.
-#   broll_keep  : segundos de b-roll mudo que se conservan al proponer recortes (trim).
+#   broll_keep  : segundos de b-roll mudo que se conservan al proponer recortes (trim); el que
+#                 lleva la tarjeta de ubicacion conserva CARD_KEEP y el del final END_KEEP.
+#   tail        : segundos que quedan despues de la ultima palabra (remate del CTA final).
+#   flash       : escenas relampago (title_card de ~1 s con icono que se dibuja) por video.
 STYLES: dict[str, dict] = {
     "dinamico": {
-        "captions": {"preset": "minimal_small", "y": 0.745, "size": 0.040,
-                     "font": "Poppins-ExtraBold", "case": "none", "max_words": 4},
+        # subtitulos con presencia (bold blanco, sombra suave, palabra activa en acento),
+        # iguales en todo el video: 0.064 W = 69 px en 1080
+        "captions": {"preset": "clean_bold", "y": 0.73, "size": 0.064,
+                     "font": "Poppins-ExtraBold", "case": "none", "max_words": 3},
         "presets": [("stack", 4), ("cascade", 2), ("serif_elegant", 2), ("highlight_marker", 2),
                     ("title_pop", 1)],
         "companion": ["title_pop", "kicker"],
@@ -160,7 +205,7 @@ STYLES: dict[str, dict] = {
         "look": {"look": "warm_clean", "vignette": 0.15, "grain": 0.022, "sharpen": 0.15},
         "music": {"prompt": "upbeat modern pop instrumental, bright plucks, punchy drums, "
                             "positive and confident, social media ad",
-                  "bpm": 112, "gain_db": -17.0, "duck_db": -9.0},
+                  "bpm": 112, "gain_db": -14.0, "duck_db": -9.0, "mood": "upbeat"},
         "doodles": ["sparkle", "star4", "arrow_curve", "underline", "circle_scribble", "burst",
                     "squiggle", "star4"],
         "backgrounds": ["rays", "grid_warp", "dark_stars"],
@@ -170,11 +215,12 @@ STYLES: dict[str, dict] = {
                    "outline": False},
         "gap": (4.0, 2.0), "coverage": (0.3, 0.85), "cutaways": 1.6, "punch": 1.0,
         "accent_p": (0.45, 0.95), "zoom_face": 0.125, "jump_zoom": 0.14, "sfx_db": 0.0,
-        "progress": False, "color_pop": True, "broll_keep": 2.8,
+        "progress": False, "color_pop": True, "broll_keep": 1.6, "punch_mode": "cut",
+        "price": "overlay", "marks": 0.75, "flash": 1, "tail": 1.9,
     },
     "elegante": {
-        "captions": {"preset": "minimal_small", "y": 0.745, "size": 0.038,
-                     "font": "Poppins-SemiBold", "case": "none", "max_words": 4},
+        "captions": {"preset": "clean_bold", "y": 0.73, "size": 0.058,
+                     "font": "Poppins-Bold", "case": "none", "max_words": 3},
         "presets": [("serif_elegant", 4), ("stack", 2), ("cascade", 1)],
         "companion": ["kicker", "serif_elegant"],
         "hook_presets": ["serif_elegant"],
@@ -186,7 +232,7 @@ STYLES: dict[str, dict] = {
         "look": {"look": "cinematic", "vignette": 0.24, "grain": 0.03, "sharpen": 0.1},
         "music": {"prompt": "warm elegant instrumental, soft piano and strings, lo-fi texture, "
                             "calm premium mood",
-                  "bpm": 88, "gain_db": -19.0, "duck_db": -8.0},
+                  "bpm": 88, "gain_db": -17.0, "duck_db": -8.0, "mood": "inspiring"},
         "doodles": ["sparkle", "underline", "swirl", "star4", "loop"],
         "backgrounds": ["gradient", "paper"],
         "drama": {"effect": "bw", "contrast": 1.2, "giant": False, "shake": False,
@@ -195,11 +241,12 @@ STYLES: dict[str, dict] = {
                    "outline": False},
         "gap": (4.5, 2.6), "coverage": (0.25, 0.7), "cutaways": 0.7, "punch": 0.6,
         "accent_p": (0.3, 0.7), "zoom_face": 0.115, "jump_zoom": 0.1, "sfx_db": -2.0,
-        "progress": False, "color_pop": False, "broll_keep": 3.4,
+        "progress": False, "color_pop": False, "broll_keep": 2.2, "price": "overlay", "marks": 0.35,
+        "flash": 0, "tail": 2.0,
     },
     "minimal": {
-        "captions": {"preset": "clean_bold", "y": 0.74, "size": 0.05,
-                     "font": "Montserrat-Bold", "case": "none", "max_words": 4},
+        "captions": {"preset": "clean_bold", "y": 0.73, "size": 0.06,
+                     "font": "Montserrat-ExtraBold", "case": "none", "max_words": 3},
         "presets": [("title_pop", 3), ("highlight_marker", 2)],
         "companion": ["kicker"],
         "hook_presets": ["title_pop"],
@@ -209,7 +256,7 @@ STYLES: dict[str, dict] = {
         "trans_dur": 0.8,
         "look": {"look": "natural", "vignette": 0.08, "grain": 0.0, "sharpen": 0.1},
         "music": {"prompt": "minimal ambient electronic instrumental, soft pulses, clean and airy",
-                  "bpm": 100, "gain_db": -20.0, "duck_db": -8.0},
+                  "bpm": 100, "gain_db": -17.0, "duck_db": -8.0, "mood": "chill"},
         "doodles": ["underline", "sparkle"],
         "backgrounds": ["color"],
         "drama": {"effect": None, "contrast": 1.2, "giant": False, "shake": False,
@@ -217,10 +264,11 @@ STYLES: dict[str, dict] = {
         "scenes": {"budget": (0.0, 0.06), "bg_replace": [], "bg_blur": True, "outline": False},
         "gap": (5.5, 3.2), "coverage": (0.12, 0.4), "cutaways": 0.0, "punch": 0.5,
         "accent_p": (0.15, 0.4), "zoom_face": 0.11, "jump_zoom": 0.08, "sfx_db": -4.0,
-        "progress": False, "color_pop": False, "broll_keep": 3.0,
+        "progress": False, "color_pop": False, "broll_keep": 2.0, "price": "card", "marks": 0.3,
+        "flash": 0, "tail": 1.8,
     },
     "energetico": {
-        "captions": {"preset": "bold_caps", "y": 0.74, "size": 0.056,
+        "captions": {"preset": "bold_caps", "y": 0.725, "size": 0.056,
                      "font": "Poppins-Black", "case": "upper", "max_words": 3},
         "presets": [("stack", 4), ("title_pop", 2), ("highlight_marker", 2), ("cascade", 1)],
         "companion": ["title_pop"],
@@ -232,7 +280,7 @@ STYLES: dict[str, dict] = {
         "trans_dur": 0.85,
         "look": {"look": "bright_pop", "vignette": 0.12, "grain": 0.02, "sharpen": 0.2},
         "music": {"prompt": "high energy electronic trap instrumental, hype, heavy 808, big drops",
-                  "bpm": 128, "gain_db": -15.0, "duck_db": -10.0},
+                  "bpm": 128, "gain_db": -14.0, "duck_db": -10.0, "mood": "upbeat"},
         "doodles": ["burst", "lightning", "exclaim", "star5", "rays", "arrow_straight", "squiggle"],
         "backgrounds": ["rays", "halftone", "grid_warp", "dark_stars"],
         "drama": {"effect": "bw", "contrast": 1.45, "giant": True, "shake": True,
@@ -241,7 +289,8 @@ STYLES: dict[str, dict] = {
                    "outline": True},
         "gap": (3.0, 1.4), "coverage": (0.45, 0.95), "cutaways": 1.4, "punch": 1.3,
         "accent_p": (0.6, 1.0), "zoom_face": 0.135, "jump_zoom": 0.18, "sfx_db": 1.0,
-        "progress": True, "color_pop": True, "broll_keep": 2.4,
+        "progress": True, "color_pop": True, "broll_keep": 1.4, "punch_mode": "cut",
+        "price": "scene", "marks": 0.8, "flash": 2, "tail": 1.7,
     },
 }
 
@@ -324,9 +373,9 @@ _STREET = {"avenida": "Av.", "av": "Av.", "calle": "Calle", "calzada": "Calz.",
            "carretera": "Carr.", "privada": "Priv.", "paseo": "Paseo", "circuito": "Circuito",
            "prolongacion": "Prol.", "plaza": "Plaza", "colonia": "Col."}
 _LANDMARK_RX = re.compile(
-    r"\b(a (?:\w+ )?(?:cuadras?|minutos?|pasos?|metros?) de(?: la| el| los| las)?|"
-    r"frente a(?:l| la| el)?|enfrente de(?: la| el)?|junto a(?:l| la| el)?|cerca de(?: la| el)?|"
-    r"a un lado de(?: la| el)?|esquina con)\s+(.+)$", re.I)
+    r"\b(a (?:\w+ )?(?:cuadras?|minutos?|pasos?|metros?) de(?:l| la| el| los| las)?|"
+    r"frente a(?:l| la| el)?|enfrente de(?:l| la| el)?|junto a(?:l| la| el)?|cerca de(?:l| la| el)?|"
+    r"a un lado de(?:l| la| el)?|esquina con)\s+(.+)$", re.I)
 _CTA_W = {"link", "enlace", "sigueme", "siguenos", "comenta", "comentame", "guarda", "comparte",
           "agenda", "agendar", "agendame", "escribeme", "escribenos", "mandame", "whatsapp",
           "llama", "llamanos", "checa", "reserva", "reservar", "visita", "visitanos", "descarga",
@@ -357,6 +406,7 @@ _TOPIC_ROLES = [
     ({"nutricion", "dieta", "nutriologa", "nutriologo", "calorias"}, "Nutricion"),
     ({"abogado", "abogada", "demanda", "legal", "juicio"}, "Abogado"),
     ({"entrenamiento", "gym", "gimnasio", "rutina", "musculo"}, "Coach fitness"),
+    ({"barberia", "barbero", "barba", "fade", "navaja", "degradado"}, "Barbero"),
     ({"cabello", "corte", "tinte", "salon", "unas", "manicure"}, "Estilista"),
     ({"casa", "departamento", "inmueble", "renta", "credito", "hipoteca"}, "Bienes raices"),
     ({"piel", "facial", "acne", "dermatologa", "dermatologo"}, "Dermatologia"),
@@ -382,7 +432,7 @@ ICON_EN = {
     "shield": "shield-check", "safe": "shield-check", "home": "home", "store": "building-store",
     "shop": "building-store", "building": "building", "gift": "gift", "fire": "flame",
     "rocket": "rocket", "idea": "bulb", "eye": "eye", "look": "eye", "see": "eye",
-    "hand": "hand-finger", "touch": "hand-finger", "feel": "hand-finger", "tongue": "mood-tongue",
+    "hand": "hand-finger", "touch": "hand-finger", "feel": "mood-smile", "tongue": "mood-tongue",
     "hourglass": "hourglass", "wait": "hourglass", "follow": "user-plus", "user": "user",
     "trophy": "trophy", "best": "trophy", "lightning": "bolt", "fast": "bolt", "energy": "bolt",
     "health": "heartbeat", "doctor": "stethoscope", "medical": "stethoscope", "car": "car",
@@ -395,9 +445,36 @@ ICON_EN = {
 ICON_ES_EXTRA = {"preocupes": "mood-smile", "preocupar": "mood-smile", "tiempo": "hourglass",
                  "cambiar": "refresh", "hablar": "message-circle", "hablemos": "message-circle",
                  "costo": "cash", "cuesta": "cash", "disponible": "calendar-event",
-                 "disponibles": "calendar-event", "caminar": "walk", "cerca": "map-pin"}
+                 "disponibles": "calendar-event", "caminar": "walk", "cerca": "map-pin",
+                 # vocabulario general de servicios (cualquier negocio, no un guion en particular)
+                 "ven": "eye", "ver": "eye", "vean": "eye", "vista": "eye", "ojos": "eye",
+                 "corte": "scissors", "cortes": "scissors", "cortar": "scissors", "tijeras": "scissors",
+                 "barba": "moustache", "bigote": "moustache", "navaja": "razor", "afeitado": "razor",
+                 "rasurado": "razor", "cejas": "eye", "cabello": "brush", "peinado": "brush",
+                 "dieta": "salad", "ensalada": "salad", "verduras": "carrot", "fruta": "apple",
+                 "frutas": "apple", "agua": "droplet", "hidratacion": "droplet", "sueno": "moon",
+                 "dormir": "moon", "descanso": "zzz", "ejercicio": "run", "entrenar": "barbell",
+                 "pesas": "barbell", "gimnasio": "barbell", "peso": "scale", "kilos": "scale",
+                 "comida": "tools-kitchen-2", "cocina": "chef-hat", "cafe": "coffee", "pan": "bread",
+                 "huevo": "egg", "carne": "meat", "pescado": "fish", "medicina": "pill",
+                 "pastillas": "pill", "vacuna": "vaccine", "masaje": "massage", "yoga": "yoga",
+                 "blanqueamiento": "sparkles", "ortodoncia": "dental", "brackets": "dental",
+                 "resina": "dental", "carilla": "dental", "carillas": "dental", "implante": "dental",
+                 "consulta": "stethoscope", "revision": "stethoscope",
+                 "muela": "dental", "muelas": "dental", "caries": "dental", "sonrisa": "mood-smile",
+                 "envio": "truck", "envios": "truck", "regalo": "gift", "descuento": "discount",
+                 "promocion": "discount", "oferta": "tag", "garantia": "shield-check",
+                 "seguro": "shield-check", "calidad": "award", "experiencia": "award",
+                 "certificado": "certificate", "curso": "school", "clases": "school",
+                 "libro": "book", "musica": "music", "fotos": "camera", "video": "video",
+                 "casa": "home", "hogar": "home", "auto": "car", "carro": "car",
+                 "whatsapp": "brand-whatsapp", "mensaje": "message-circle", "llamada": "phone",
+                 "rapido": "bolt", "energia": "bolt", "salud": "heartbeat", "corazon": "heart",
+                 "familia": "users", "equipo": "users", "ninos": "friends", "mascota": "paw",
+                 "perro": "dog", "gato": "cat", "sol": "sun", "idea": "bulb", "meta": "target",
+                 "resultados": "chart-bar", "crecer": "trending-up", "lista": "list-check"}
 # lemas por prefijo (sentir -> sientes/sienten/siento, ver -> ves/ven...)
-ICON_STEMS = (("sient", "hand-finger"), ("toca", "hand-finger"),
+ICON_STEMS = (("sient", "mood-smile"), ("senti", "mood-smile"), ("toca", "hand-finger"),
               ("mira", "eye"), ("luce", "sparkles"), ("brill", "sparkles"), ("limpi", "sparkles"),
               ("sonri", "mood-smile"), ("agend", "calendar-event"), ("ubica", "map-pin"),
               ("prote", "shield-check"), ("cuid", "shield-check"))
@@ -799,6 +876,7 @@ def _shot_faces(sc: dict, shots: list[dict]) -> list[dict]:
         if not idx:
             idx = [min(range(len(sc["med_t"])), key=lambda j: abs(sc["med_t"][j] - (s["start"] + s["end"]) / 2))] if sc["med_t"] else []
         boxes = []
+        track: list[list[float]] = []
         for j in idx:
             img = sc["med"][j]
             h, w = img.shape[:2]
@@ -816,6 +894,7 @@ def _shot_faces(sc: dict, shots: list[dict]) -> list[dict]:
             if fw * fh < 0.0008 * w * h:
                 continue
             boxes.append(((x + fw / 2) / w, (y + fh / 2) / h, fw / w, fh / h))
+            track.append([round(float(sc["med_t"][j]), 2)] + [round(v, 4) for v in boxes[-1]])
         ratio = len(boxes) / max(1, len(idx))
         if boxes:
             a = np.array(boxes)
@@ -823,7 +902,7 @@ def _shot_faces(sc: dict, shots: list[dict]) -> list[dict]:
             spread = float(np.std(a[:, 0]))
         else:
             face, spread = None, 0.0
-        out.append({"face": face, "face_ratio": ratio, "face_spread": spread})
+        out.append({"face": face, "face_ratio": ratio, "face_spread": spread, "track": track})
     return out
 
 
@@ -957,6 +1036,55 @@ def _speech_ratio(plan: dict, a: float, b: float) -> float:
     return tot / max(1e-3, b - a)
 
 
+MATTE_OK = 0.94     # calidad minima de la mascara (1 = limpia) para contorno / reemplazo de fondo
+
+
+def _matte_quality(video: str, s: dict) -> float | None:
+    """Calidad estimada de la mascara del sujeto en una toma (misma medida que
+    matte.MatteProvider.quality_of: 1 - fraccion de la mascara MODNet que la compuerta de persona
+    tuvo que quitar; baja cuando la persona toca muebles grandes). Dos cuadros de la toma a
+    960 px. None si no hay modelos o no hay cara."""
+    try:
+        import cv2
+        from . import matte as M
+        if not (M.model_ready() and M.model_ready(which="person")):
+            return None
+    except Exception:
+        return None
+    qs = []
+    a, b = float(s["start"]), float(s["end"])
+    for frac in (0.3, 0.7):
+        rgb = _grab_frame(video, a + (b - a) * frac, 960)
+        if rgb is None:
+            continue
+        try:
+            H, W = rgb.shape[:2]
+            faces = sorted([f for f in M.detect_faces(rgb) if f[2] >= 0.025], key=lambda f: -f[2] * f[3])[:1]
+            if not faces:
+                continue
+            cx, cy, fw, fh, _sc = faces[0]
+            x0, x1 = max(0.0, (cx - 3.3 * fw) * W), min(float(W), (cx + 3.3 * fw) * W)
+            y0 = max(0.0, (cy - 2.2 * fh) * H)
+            if x1 - x0 < 0.5 * W:
+                c = (x0 + x1) / 2
+                x0, x1 = max(0.0, c - W / 4), min(float(W), c + W / 4)
+            x0, y0, x1 = int(x0), int(y0), int(math.ceil(x1))
+            cw, ch = x1 - x0, H - y0
+            k = min(1.0, math.sqrt(384 * 672 / max(1, cw * ch)))
+            iw, ih = max(32, int(round(cw * k / 32)) * 32), max(32, int(round(ch * k / 32)) * 32)
+            x = cv2.resize(rgb[y0:H, x0:x1], (iw, ih), interpolation=cv2.INTER_AREA)
+            m = M.infer(x, 2)
+            pp = M.person_prob(rgb)
+            pf = cv2.resize(pp, (W, H), interpolation=cv2.INTER_LINEAR)[y0:H, x0:x1]
+            pc = cv2.resize(pf, (iw, ih), interpolation=cv2.INTER_LINEAR)
+            fc = [((cx * W - x0) / cw, (cy * H - y0) / ch, fw * W / cw, fh * H / ch, 1.0)]
+            _g, rem = M.gate_matte(m, fc, pc, 16.0 * (W / 1080.0) * (iw / cw))
+            qs.append(1.0 - float(rem))
+        except Exception:
+            continue
+    return _r(float(np.mean(qs)), 3) if qs else None
+
+
 def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | None = None,
                   deadline: float | None = None, on_basic: Callable | None = None) -> list[dict]:
     """Tomas con campos del contrato (+ face/motion/rows). Nunca lanza: sin video -> una toma.
@@ -999,7 +1127,7 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
     try:
         st = Path(str(video)).stat()
         vkey = _hkey(str(video), st.st_size, int(st.st_mtime), [(s["start"], s["end"]) for s in shots_in],
-                     PROMPT_VERSION, _vlm_model() if use_llm else "none")
+                     PROMPT_VERSION, SHOTS_VERSION, _vlm_model() if use_llm else "none")
     except Exception:
         vkey = None
     if vkey:
@@ -1022,6 +1150,8 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
                     "person": fa["face_ratio"] >= 0.3,
                     "face": [_r(x, 4) for x in fa["face"]] if fa["face"] and fa["face_ratio"] >= 0.3 else None,
                     "motion": _r(float(np.median(seg)) if len(seg) else 0.0, 2),
+                    # rostro a 2 fps (t, cx, cy, w, h): para no tapar la cara cuando la persona camina
+                    "face_track": (fa.get("track") or []) if fa["face"] and fa["face_ratio"] >= 0.3 else [],
                     "rows": _shot_rows(sc, s), "speech": _r(_speech_ratio(plan, s["start"], s["end"]), 2)})
     basic([dict(o, framing=_framing_from_face(o["face"]), use="a_camara" if o["face"] else "broll",
                 place="", text_seen=[]) for o in out])
@@ -1040,6 +1170,9 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
                 img = hi if hi is not None else img
             vlm[i] = _vlm_describe(img, timeout=max(5.0, min(30.0, (deadline - _now()) if deadline else 30.0)))
             _step(on_step, "tomas", 0.2 + 0.7 * (i + 1) / len(shots), f"toma {i + 1}/{len(shots)}")
+    _step(on_step, "tomas", 0.93, "midiendo el recorte del sujeto")
+    for o in out:
+        o["matte_q"] = _matte_quality(str(video), o) if o["face"] else None
     for i, o in enumerate(out):
         fa = faces[i]
         v = vlm[i] or {}
@@ -1059,7 +1192,7 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
                   "free_space": _free_space(face) if face else str(v.get("free_space") or "arriba"),
                   "vlm": bool(vlm[i])})
     keys = ("start", "end", "src", "person", "framing", "place", "text_seen", "use", "free_space",
-            "face", "motion", "rows", "speech", "vlm")
+            "face", "motion", "rows", "speech", "vlm", "matte_q", "face_track")
     out = [{k: o[k] for k in keys} for o in out]
     if vkey and (not use_vlm or all(v is not None for v in vlm)):
         _cache_put("shots", vkey, out)
@@ -1190,6 +1323,8 @@ def extract_entities(words: list[dict], sents: list[dict], shots: list[dict] | N
                     break
             else:
                 break
+        while name_ws and norm(name_ws[-1]) in ("de", "del", "la", "las", "los", "el"):
+            name_ws.pop()                  # "Parque Azul del (centro)": sin conector colgando
         if not name_ws:
             continue
         lead_disp = " ".join(_display(w["text"]) for w in swords[k0:k0 + len(lead_tokens)])
@@ -1339,6 +1474,149 @@ def _ocr_confirm(ent: dict, shots: list[dict]) -> dict:
     return info
 
 
+# raices de la profesion que deben aparecer en la MISMA entrada del letrero que el nombre
+_ROLE_SIGN = {"Dentista": ("dentist", "odontolog", "dental"), "Nutricion": ("nutri",),
+              "Abogado": ("abogad", "legal", "juridic"), "Dermatologia": ("dermat",),
+              "Barbero": ("barber",), "Estilista": ("estilist", "salon", "belleza"),
+              "Coach fitness": ("entrenador", "coach", "fitness"), "Doctora": ("medic", "doctor"),
+              "Doctor": ("medic", "doctor")}
+_SIGN_SCHEMA = {"type": "object", "properties": {"entries": {"type": "array", "items": {
+    "type": "object", "properties": {"name": {"type": "string"}, "line": {"type": "string"}},
+    "required": ["name", "line"]}}}, "required": ["entries"]}
+_NAME_RX = re.compile(r"^(dra?|dr|doctora|doctor|lic|ing|mtra?|psic)\.?\s+([A-Za-zÁÉÍÓÚÑÜáéíóúñü]+\.?"
+                      r"(?:\s+[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+\.?){1,4})$", re.I)
+_NAME_SMALL = {"de", "del", "la", "las", "los", "y"}
+
+
+def _pretty_name(raw: str) -> str | None:
+    """'DRA. ANA RUIZ DE LA O' -> 'Dra. Ana Ruiz de la O' (None si no parece nombre con titulo)."""
+    m = _NAME_RX.match(re.sub(r"\s+", " ", str(raw or "").strip().strip(".,;:")))
+    if not m:
+        return None
+    ttl = _NAME_TITLES.get(norm(m.group(1)), m.group(1).capitalize() + ".")
+    parts = []
+    for k, w in enumerate(m.group(2).split()):
+        lw = w.lower()
+        parts.append(lw if (k > 0 and lw in _NAME_SMALL) else lw[:1].upper() + lw[1:])
+    return f"{ttl} {' '.join(parts)}"
+
+
+# como se escribe la profesion en un letrero (para la pregunta dirigida al VLM)
+_ROLE_ASK = {"Dentista": "DENTISTA (u odontologia/dental)", "Nutricion": "NUTRIOLOGA o NUTRICION",
+             "Abogado": "ABOGADO o ABOGADA", "Dermatologia": "DERMATOLOGIA", "Barbero": "BARBERIA o BARBERO",
+             "Estilista": "ESTILISTA o SALON DE BELLEZA", "Coach fitness": "ENTRENADOR o COACH"}
+
+
+def _vlm_sign_read(img: np.ndarray, ask: str, timeout: float = 30.0) -> dict | None:
+    """Lectura dirigida del letrero: TODAS las entradas cuya descripcion dice la profesion
+    ({entries: [{name, line}]})."""
+    import cv2
+    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        return None
+    prompt = ("Hay un letrero con nombres de profesionales. Lista TODAS las personas cuya descripcion "
+              f"dice {ask}. Para cada una copia EXACTO su nombre completo con titulo (Dra./Dr.) y la "
+              "linea de descripcion que lo acompana. Si no hay ninguna, entries vacio.")
+    try:
+        raw = _ollama_chat([{"role": "user", "content": prompt,
+                             "images": [base64.b64encode(buf.tobytes()).decode()]}],
+                           fmt=_SIGN_SCHEMA, model=_vlm_model(), num_ctx=4096, temperature=0.0,
+                           num_predict=260, timeout=timeout)
+    except Exception:
+        return None
+    return _json_loose(raw)
+
+
+def _sign_entries(r: dict | None, stems: tuple) -> list[tuple[str, str]] | None:
+    """Entradas validas de una lectura (nombre con titulo + linea con la profesion), sin
+    duplicados. None si la lectura no sirve (respuesta rota)."""
+    if not isinstance(r, dict):
+        return None
+    ents = r.get("entries")
+    if ents is None and r.get("found") is not None:          # formato viejo {found, name, line}
+        ents = [r] if r.get("found") else []
+    if not isinstance(ents, list):
+        return None
+    out: dict[str, tuple[str, str]] = {}
+    for e in ents:
+        if not isinstance(e, dict):
+            continue
+        nm = _pretty_name(e.get("name", ""))
+        line = str(e.get("line", ""))
+        if nm and any(st in norm(line) for st in stems):
+            out.setdefault(norm(nm), (nm, line[:80]))
+    return list(out.values())
+
+
+def sign_name(video: str, shots: list[dict], role: str, deadline: float | None = None) -> dict | None:
+    """Nombre de quien habla leido en un letrero-directorio (fachada con varios consultorios).
+
+    Pregunta dirigida al VLM: TODAS las entradas cuya descripcion dice <profesion>. Solo se
+    acepta si el letrero tiene EXACTAMENTE una persona de esa profesion y DOS lecturas
+    independientes (dos resoluciones / cuadros) coinciden en el nombre. Si alguna lectura ve
+    dos o mas personas de la profesion, no hay nombre (no se puede saber quien habla).
+    Devuelve {name, line, reads} o None. Es un dato del cliente: queda como candidato
+    (entities.name_candidate) hasta que el usuario lo confirme en el Studio."""
+    stems = _ROLE_SIGN.get(role or "") or ((norm(role)[:6],) if role and len(norm(role)) >= 5 else ())
+    if not stems or not video or not Path(str(video)).exists() or not llm_available(_vlm_model()):
+        return None
+    rx = re.compile(r"\b(?:dra?|dr|doctora|doctor|lic)\.?\s+[A-Za-z]", re.I)
+    cands = [s for s in shots or [] if s.get("use") != "a_camara"
+             and any(rx.search(str(t)) for t in s.get("text_seen") or [])]
+    if not cands:
+        return None
+    ask = _ROLE_ASK.get(role or "") or str(role).upper()
+    try:
+        stv = Path(str(video)).stat()
+        vid = (str(video), stv.st_size, int(stv.st_mtime))
+    except OSError:
+        vid = (str(video),)
+    for s in cands:
+        key = _hkey(vid, s["start"], s["end"], role, PROMPT_VERSION, "sign2", _vlm_model())
+        hit = _cache_get("sign", key)
+        if hit is not None:
+            if hit.get("name"):
+                return hit
+            continue
+        L = float(s["end"]) - float(s["start"])
+        reads: list[tuple[str, str]] = []
+        agreed = None
+        complete = True
+        many = False
+        # letrero cercano al inicio del b-roll (la camara suele alejarse): 4 cuadros x 2 tamanos,
+        # hasta que DOS lecturas coincidan
+        for frac in (0.1, 0.18, 0.26, 0.34):
+            for side in (1280, 1600):
+                if deadline is not None and _now() > deadline:
+                    complete = False
+                    break
+                img = _grab_frame(str(video), float(s["start"]) + L * frac, side)
+                if img is None:
+                    continue
+                ents = _sign_entries(_vlm_sign_read(img, ask), stems)
+                if not ents:
+                    continue
+                if len(ents) > 1:
+                    many = True             # varias personas de la profesion: no se sabe quien es
+                    break
+                reads.append(ents[0])
+                same = [x for x in reads if norm(x[0]) == norm(ents[0][0])]
+                if len(same) >= 2:
+                    agreed = same[0]
+                    break
+            if agreed or many or not complete:
+                break
+        if agreed and not many:
+            res = {"name": agreed[0], "line": agreed[1], "reads": len(reads)}
+        else:
+            res = {"name": "", "reads": len(reads), "many": many}
+        if complete or many:
+            _cache_put("sign", key, res)
+        if res.get("name"):
+            return res
+    return None
+
+
 def _classify(sent: dict, words: list[dict], idx: int, n_sents: int, anc: dict) -> dict:
     ws = words[sent["w0"]:sent["w1"] + 1]
     sn = [w["n"] for w in ws]
@@ -1397,15 +1675,33 @@ def _classify(sent: dict, words: list[dict], idx: int, n_sents: int, anc: dict) 
             "energy": energy, "tone": tone, "title": None}
 
 
+_ICON_MEMO: dict[str, str | None] = {}
+
+
 def resolve_icon(tag: str) -> str | None:
-    """Palabra (ES/EN) -> icono Tabler existente, evitando coincidencias parciales absurdas."""
+    """Palabra (ES/EN) -> icono Tabler existente, evitando coincidencias parciales absurdas.
+    Memorizado: la busqueda por nombre en el catalogo cuesta ~0.2 s por palabra desconocida."""
     t = norm(tag)
     if not t:
         return None
+    if t in _ICON_MEMO:
+        return _ICON_MEMO[t]
+    _ICON_MEMO[t] = r = _resolve_icon(t)
+    return r
+
+
+def _resolve_icon(t: str) -> str | None:
     for table in (ICON_ES_EXTRA, assets.ICON_ES, ICON_EN):
         n = table.get(t)
         if n and assets.icon_exists(n):
             return n
+    # plurales del espanol: 'resinas' -> 'resina', 'blanqueamientos' -> 'blanqueamiento'
+    for cut in (1, 2):
+        if len(t) > 4 + cut and t.endswith("s" if cut == 1 else "es"):
+            for table in (ICON_ES_EXTRA, assets.ICON_ES):
+                n = table.get(t[:-cut])
+                if n and assets.icon_exists(n):
+                    return n
     if len(t) >= 4 and t.endswith("s") and ICON_EN.get(t[:-1]):
         n = ICON_EN[t[:-1]]
         if assets.icon_exists(n):
@@ -1718,6 +2014,22 @@ def measure_text(item: dict, style: str = "dinamico") -> tuple[float, float, flo
         return None
 
 
+def measure_lines(item: dict, style: str = "dinamico", with_text: bool = False) -> list:
+    """Tinta de cada linea (normalizada) segun motion/text.py; [] si el modulo no esta. Con
+    `with_text`, [(caja, texto de la linea)] tal como la partio el layout."""
+    try:
+        from . import text as TX
+        clean = {k: v for k, v in item.items() if not k.startswith("_")}
+        out = []
+        for row in TX.measure_lines(clean, _measure_ctx(style), with_text=True):
+            (a, b, c, d), txt = row
+            box = (a / 1080.0, b / 1920.0, c / 1080.0, d / 1920.0)
+            out.append((box, txt) if with_text else box)
+        return out
+    except Exception:
+        return []
+
+
 _CARD_H_EST = {"location": 0.43, "price": 0.27, "schedule": 0.17, "link": 0.2, "phone": 0.2,
                "rating": 0.2, "checklist": 0.25, "stat": 0.22, "generic": 0.16}
 
@@ -1829,9 +2141,99 @@ _NOUN_SUFFIX = ("eza", "cion", "sion", "miento", "aje", "ura", "encia", "ancia",
                 "tura", "ado", "ada", "ia")
 _VERB_END = ("ar", "er", "ir", "ando", "iendo", "amos", "emos", "imos", "an", "en")
 STROKE_PRESETS = ("stack", "title_pop", "cascade", "highlight_marker", "kicker")
+# verbos frecuentes que terminan como sustantivo (-ia, -ado...): no son "el servicio"
+_VERBISH = {"cambia", "cambian", "limpia", "limpian", "copia", "envia", "anuncia", "estudia", "varia",
+            "confia", "cuida", "ayuda", "cuidado", "pasado", "quedado", "dejado", "logrado", "cansado"}
+
+
+# ---------------------------------------------------------------- enumeraciones
+_ENUM_JOIN = {"y", "e", "o", "u", "ni"}
+
+
+def find_enums(words: list[dict], w0: int, w1: int) -> list[list[list[dict]]]:
+    """Enumeraciones dentro de las palabras [w0, w1] de una frase (2-5 elementos):
+      - clausulas paralelas: 'como comes y como duermes' (tras 'y' se repite el arranque de
+        un tramo anterior de 1-5 palabras: los dos tramos son los elementos);
+      - lista con comas: 'cortes, barba y cejas' (elementos de 1-3 palabras separados por coma
+        y cerrados con y/e/o).
+    Devuelve [[palabras del elemento 1], [elemento 2], ...] por enumeracion encontrada."""
+    ws = words[w0:w1 + 1]
+    ns = [w["n"] for w in ws]
+    out = []
+    # 1) paralelas
+    for k in range(1, len(ws) - 1):
+        if ns[k] not in _ENUM_JOIN:
+            continue
+        for j in range(max(0, k - 5), k):
+            L = k - j
+            if ns[j] == ns[k + 1] and len(ns[j]) >= 2 and k + 1 + L <= len(ws):
+                a, b = ws[j:k], ws[k + 1:k + 1 + L]
+                if any(w["n"] not in STOP for w in a) and any(w["n"] not in STOP for w in b):
+                    out.append([a, b])
+                break
+    # 2) lista con comas
+    segs, cur = [], []
+    closed = False
+    for k, w in enumerate(ws):
+        if not closed and ns[k] in _ENUM_JOIN and cur and segs:
+            segs.append(cur)            # 'y' tras las comas: empieza el ultimo elemento
+            cur = []
+            closed = True
+            continue
+        cur.append(w)
+        if not closed and w["text"].endswith(","):
+            segs.append(cur)
+            cur = []
+    if cur:
+        segs.append(cur)
+    if len(segs) >= 3:
+        items = []
+        for i, sg in enumerate(segs):
+            content = [w for w in sg if w["n"] not in STOP and not re.fullmatch(r"\d+", w["n"])]
+            if not content:
+                items = []
+                break
+            if i == 0:
+                it_ = content[-1:]
+            elif i == len(segs) - 1:
+                it_ = []
+                for w in sg:
+                    if w["n"] in STOP and it_:
+                        break
+                    if w["n"] not in STOP:
+                        it_.append(w)
+                    if len(it_) >= 2:
+                        break
+            else:
+                if len(sg) > 3:
+                    items = []
+                    break
+                it_ = content
+            items.append(it_)
+        if len(items) >= 3 and not any(len(x) > 3 for x in items):
+            out.append(items)
+    return out
 
 
 # ---------------------------------------------------------------- paso 3: coreografo
+def _draw_time(name: str) -> float:
+    """Tiempo de trazo de un garabato (graphics.DRAW_TIME) para el SFX de lapiz."""
+    try:
+        from . import graphics as G
+        return float(G.DRAW_TIME.get(name, 0.5))
+    except Exception:
+        return 0.5
+
+
+def _transitions_mod():
+    """motion.transitions si esta disponible (DEFAULTS, SFX, hit_time); None si no."""
+    try:
+        from . import transitions as TM
+        return TM
+    except Exception:
+        return None
+
+
 class _Choreo:
     """Coreografo determinista. Trabaja en tiempo original para emitir y en tiempo final para
     las reglas de ritmo y de no encimar."""
@@ -1888,6 +2290,12 @@ class _Choreo:
         self.drop_at = None
         self.K = self._type_kit()
         self.acc_light = self._accent_on_light()
+        cap = self.S["captions"]
+        cap_sz = float(cap["size"]) * (1.28 if cap["preset"] == "bold_caps" else 1.0)
+        # borde superior de la linea de subtitulos: nada con flecha/tarjeta debe bajar de aqui
+        self.cap_top = float(cap["y"]) - cap_sz * (1080.0 / 1920.0) * 0.8
+        self.grid = None                     # rejilla de la musica (beats en tiempo final)
+        self.snapped: list[tuple[float, float]] = []
         self.ink: list[tuple] = []          # (fa, fb, x0, y0, x1, y1, id) tinta de textos
         self.shown: set[str] = set()        # entidades ya mostradas (no repetir)
         self.trans_req: list[dict] = []
@@ -1895,7 +2303,14 @@ class _Choreo:
         self.bg_fx: list[tuple[float, float, str]] = []
         self.broll_card: dict[int, dict] = {}
         self.sent_main = None
-        self.n_cut_left = 0
+        # presupuesto de escenas a pantalla completa (listas, precio en escena, tarjetas grandes)
+        self.n_cut_left = int(round(self.S["cutaways"] * self.I * max(1.0, self.D / 25.0)))
+        self.name = name_usable(self.ent)       # nombre publicable (voz o confirmado)
+        self.link_item = None                   # CTA link_below de la frase del link
+        self.link_ext = False                   # ese link se sostiene hasta el ultimo cuadro
+        self.protect: list[tuple[float, float]] = []   # (desde, hasta) tiempo final: dato que se lee
+        self.cap_ranges = None                  # captions.y_ranges (tomas de cuerpo completo)
+        self.last_word = max(self.words, key=lambda w: w["f1"]) if self.words else None
         for tr, items in self.fixed.items():
             for it in items:
                 self.ids.add(str(it.get("id")))
@@ -2009,6 +2424,9 @@ class _Choreo:
             if talk and not d["face_nominal"]:
                 z0 = _clamp(self.S["zoom_face"] / max(0.03, face[3]), 1.0, 1.45)
             d["z0"] = z0
+            mq = s.get("matte_q")
+            # recorte del sujeto confiable (contorno / reemplazo de fondo); sin medicion = se permite
+            d["matte_ok"] = bool(talk and not d["face_nominal"] and (mq is None or float(mq) >= MATTE_OK))
             zmax = z0 * (1.0 + self.S["jump_zoom"] * (0.6 + 0.4 * self.I)) * 1.03
             d["zmax"] = zmax
             d["face_x"] = face[0] if face else None
@@ -2039,13 +2457,24 @@ class _Choreo:
         return self._geom(shot, self.zoom_level(shot, t0, t1))
 
     def face_rect(self, shot: dict, t0: float, t1: float) -> tuple | None:
-        """Caja de la cabeza en el cuadro de salida (zoom anclado en la cara)."""
+        """Caja de la cabeza en el cuadro de salida (zoom anclado en la cara). Si la toma trae
+        pista de rostro (2 fps), es la union de las posiciones en [t0, t1]: la persona que
+        camina no queda debajo de un icono."""
         face = shot.get("face")
         if not face or not shot.get("talk"):
             return None
-        cx, cy, fw, fh = face
+        ax, ay, fw0, fh0 = face
         z = self.zoom_level(shot, t0, t1) * 1.08
-        return (cx - fw * z * 0.7, cy - fh * z * 1.05, cx + fw * z * 0.7, cy + fh * z * 0.8)
+        pts = [tr for tr in shot.get("face_track") or [] if t0 - 0.3 <= tr[0] <= t1 + 0.3]
+        if not pts:
+            pts = [[0.0, ax, ay, fw0, fh0]]
+        x0 = y0 = 9.0
+        x1 = y1 = -9.0
+        for _t, cx, cy, fw, fh in pts:
+            ox, oy = ax + (cx - ax) * z / 1.08, ay + (cy - ay) * z / 1.08     # zoom anclado en la mediana
+            x0, x1 = min(x0, ox - fw * z * 0.7), max(x1, ox + fw * z * 0.7)
+            y0, y1 = min(y0, oy - fh * z * 1.05), max(y1, oy + fh * z * 0.8)
+        return (x0, y0, x1, y1)
 
     def shot_at(self, t: float) -> dict:
         for s in self.shots:
@@ -2290,7 +2719,9 @@ class _Choreo:
         return it
 
     def sfx(self, at: float, name: str, prio: int = 5, gain: float | None = None, pan: float = 0.0,
-            src_id: str = "", vary: bool = False) -> None:
+            src_id: str = "", vary: bool = False, dur: float | None = None) -> None:
+        """Pide un SFX. `dur` (s): tiempo de revelado (typing), de trazo (pen_scribble) o
+        anticipacion (riser_*): audio.py estira/recorta el sonido a esa duracion."""
         if name not in SFX_NAMES or at is None:
             return
         g = SFX_GAIN.get(name, -6) if gain is None else gain
@@ -2298,18 +2729,22 @@ class _Choreo:
             key = f"sfxv:{src_id}:{name}"
             g += (self.rc.rand(key + "g") - 0.5) * 4.0
             pan = pan + (self.rc.rand(key + "p") - 0.5) * 0.5
-        self.sfx_req.append({"at": float(at), "name": name, "prio": prio,
-                             "gain": g + self.S["sfx_db"], "pan": _clamp(pan, -0.6, 0.6),
-                             "src": src_id})
+        req = {"at": float(at), "name": name, "prio": prio, "gain": g + self.S["sfx_db"],
+               "pan": _clamp(pan, -0.6, 0.6), "src": src_id}
+        if dur is not None and name in ("typing", "pen_scribble", "riser_short", "riser_long"):
+            req["dur"] = _r(_clamp(float(dur), 0.15, 4.0), 2)
+        self.sfx_req.append(req)
 
     def text_sfx(self, preset: str, t0: float, it: dict, prio: int, n_lines: int = 1,
-                 line_ts: list | None = None) -> None:
+                 line_ts: list | None = None, reveal: float | None = None) -> None:
         """SFX de entrada de un bloque: rota entre variantes del preset (+-2 dB, paneo) y marca
-        cada linea nueva con un tic suave (ritmo sin saturar)."""
+        cada linea nueva con un tic suave (ritmo sin saturar). `reveal` = segundos que tarda en
+        escribirse (typing / pen_scribble duran eso)."""
         opts = TEXT_SFX.get(preset, ["pop"])
         name = opts[self.used["tsfx:" + preset] % len(opts)]
         self.used["tsfx:" + preset] += 1
-        self.sfx(t0 + 0.05, name, prio=prio, src_id=it["id"], vary=True)
+        self.sfx(t0 + 0.05, name, prio=prio, src_id=it["id"], vary=True,
+                 dur=reveal if name in ("typing", "pen_scribble") else None)
         for k, t in enumerate(line_ts or []):
             soft = "tick" if k % 2 == 0 else "pop_soft"
             self.sfx(t, soft, prio=2, gain=SFX_GAIN[soft] - 5.0, src_id=it["id"] + f"l{k}", vary=True)
@@ -2340,6 +2775,8 @@ class _Choreo:
             if s["talk"]:
                 jz = 1.0 + self.S["jump_zoom"] * (0.6 + 0.4 * self.I)
                 push = 0.025 + 0.035 * self.I
+                # tomas largas a camara: reencuadre tipo jump-cut (cerrado/abierto) por clausula
+                merged = [pc for sg in merged for pc in self._jump_pieces(sg[0], sg[1])]
                 start_tight = self.rand(f"cam{s['k']}") < 0.35 and len(merged) > 1
                 for k, (a, b) in enumerate(merged):
                     tight = (k % 2 == 1) != start_tight
@@ -2353,8 +2790,39 @@ class _Choreo:
             elif not fixed_cam or len(merged) == len(segs):
                 d = 1 if self.rand(f"kb{s['k']}") < 0.5 else -1
                 self.add("effects", "kb", {"start": s["start"], "end": s["end"], "kind": "kenburns",
-                                           "from": 1.0, "to": _r(1.08 + 0.08 * self.I, 3),
+                                           "from": 1.04, "to": _r(1.1 + 0.08 * self.I, 3),
                                            "pan": [_r(0.03 * d, 3), -0.015]}, event=False)
+
+    JUMP_MAX = 4.2          # s (tiempo final): un encuadre fijo mas largo se parte en jump-cuts
+    JUMP_MIN = 1.8
+
+    def _jump_pieces(self, a: float, b: float) -> list[list[float]]:
+        """Parte [a, b] (tiempo original, un tramo continuo a camara) en encuadres de 1.8-3.6 s
+        cortando justo antes de una palabra que abre clausula/frase (pausa, puntuacion)."""
+        out = []
+        pos = a
+        ws = [w for w in self.words if a < w["t0"] < b]
+        while self.f(b) - self.f(pos) > self.JUMP_MAX:
+            best = None
+            for w, nx in zip(ws, ws[1:]):
+                t = nx["t0"] - 0.04
+                if t <= w["t1"] - 0.02:
+                    t = (w["t1"] + nx["t0"]) / 2
+                d0, d1 = self.f(t) - self.f(pos), self.f(b) - self.f(t)
+                if d0 < self.JUMP_MIN or d0 > 3.6 or d1 < self.JUMP_MIN or not self.kept(t):
+                    continue
+                sc = min(0.6, nx["t0"] - w["t1"]) * 3
+                sc += 1.5 if re.search(r"[.?!]$", w["text"]) else (0.8 if re.search(r"[,;:]$", w["text"]) else 0.0)
+                sc += 0.6 if nx["n"] in CLAUSE_W else 0.0
+                sc -= abs(d0 - 2.6) * 0.3
+                if best is None or sc > best[0]:
+                    best = (sc, t)
+            if best is None:
+                break
+            out.append([pos, best[1]])
+            pos = best[1]
+        out.append([pos, b])
+        return out
 
     # ---------------------------------------------------------- 2. transiciones
     def shot_changes(self) -> list[dict]:
@@ -2409,6 +2877,14 @@ class _Choreo:
                 continue
             pool = self.S["transitions"] if r["ctx"] == "shot" else self.S["scene_trans"]
             pref = r.get("prefer")
+            # un dato que se esta leyendo (precio, palabra protagonista) no se lava con una
+            # transicion larga: justo despues de el solo entran transiciones secas y cortas
+            guard = any(pa - 0.05 <= r["f"] <= pb + 0.45 for pa, pb in self.protect)
+            if guard:
+                short = [(k, w) for k, w in list(pool) + list(self.S["transitions"])
+                         if k in ("whip", "zoom_blur", "glitch", "flash", "slide") and k not in recent]
+                pool = short or [("whip", 1)]
+                pref = None
             if pref and pref not in recent and pref in TRANS_DUR:
                 kind = pref
             else:
@@ -2416,14 +2892,52 @@ class _Choreo:
                      [(k, w) for k, w in self.S["transitions"] if k not in recent] or list(pool)
                 kind = self.pick("trans", [k for k, _ in ok], weights=[w for _, w in ok], avoid_last=False)
             recent = (recent + [kind])[-2:]
-            dur = TRANS_DUR[kind] * self.S["trans_dur"] * (0.85 if r["ctx"] == "scene" else 1.0)
+            TM = _transitions_mod()
+            base_dur = TRANS_DUR[kind]
+            if TM is not None:
+                base_dur = float((getattr(TM, "DEFAULTS", {}).get(kind) or {}).get("dur") or base_dur)
+            dur = base_dur * self.S["trans_dur"] * (0.85 if r["ctx"] == "scene" else 1.0)
+            if guard:
+                dur = min(dur, 0.34)
             dirn = r.get("dir") or ("left" if i % 2 == 0 else "right")
-            fields = {"at": r["at"], "kind": kind, "dur": _r(dur, 3), "dir": dirn,
-                      "color": "#FFFFFF" if kind != "light_leak" else self.pal.get("warm", "#FF7A3D")}
+            fields = {"at": r["at"], "kind": kind, "dur": _r(dur, 3)}
+            if kind in ("whip", "slide", "torn_paper"):
+                fields["dir"] = dirn
+            if kind == "flash":
+                fields["color"] = "warm" if self.style == "elegante" else "white"
+            elif kind == "light_leak":
+                fields["color"] = "gold" if self.style == "elegante" else "warm"
+            elif kind == "glitch":
+                fields["color"] = self.pal["accent"]
+            # punto protegido / centro: rostro de la toma A (quema, papel, zoom) o de B (circulo)
+            fa_ = self.f(r["at"])
+            sa = self.shot_at(self.o(max(0.0, fa_ - 0.1)))
+            sb = self.shot_at(r["at"] + 0.02)
+            src_shot = sb if kind == "circle" else sa
+            if kind in ("film_burn", "torn_paper", "circle", "zoom_blur") and src_shot.get("talk") \
+                    and src_shot.get("face") and not src_shot.get("face_nominal"):
+                fields["x"] = _r(_clamp(src_shot["face"][0], 0.1, 0.9), 3)
+                fields["y"] = _r(_clamp(src_shot["face"][1], 0.1, 0.8), 3)
             it = self.add("transitions", "cut" if r["ctx"] == "shot" else "scene", fields)
-            if it and TRANS_SFX.get(kind):
-                self.sfx(r["at"], TRANS_SFX[kind], prio=8, src_id=it["id"],
-                         pan=-0.25 if dirn == "left" else 0.25)
+            if it:
+                hit = r["at"]
+                if TM is not None and hasattr(TM, "hit_time"):
+                    try:
+                        hit = float(TM.hit_time(dict(it)))
+                    except Exception:
+                        hit = r["at"]
+                pan = -0.25 if dirn == "left" else 0.25
+                # aire (whoosh) en el golpe visual + el acento sugerido por el modulo, mas bajo
+                air = TRANS_SFX.get(kind)
+                if air:
+                    self.sfx(hit, air, prio=8, src_id=it["id"], pan=pan)
+                names = [n_ for n_ in ((getattr(TM, "SFX", {}) or {}).get(kind) or []) if n_ != air] \
+                    if TM is not None else []
+                if names:
+                    nm = names[self.used["trs:" + kind] % len(names)]
+                    self.used["trs:" + kind] += 1
+                    self.sfx(hit, nm, prio=4, gain=SFX_GAIN.get(nm, -6) - 3.0, src_id=it["id"] + "a", pan=pan,
+                             dur=0.8 if nm.startswith("riser") else None)
 
     # ---------------------------------------------------------- bloques de texto
     def _chunks(self, w0: int, w1: int, emph: set, secondary: set | None = None) -> list[list[dict]]:
@@ -2656,6 +3170,17 @@ class _Choreo:
                     texts.append(" ".join(t_))
             if len(texts) > max_lines:
                 texts = self._rewrap([_display(w["text"]) for w in words], font, base, max_lines)
+            # una linea de una sola palabra corta ("no", "y") se une a la vecina que quepa
+            k = 0
+            while len(texts) > 1 and k < len(texts):
+                if len(texts[k].split()) == 1 and len(texts[k]) <= 3:
+                    j = k + 1 if k + 1 < len(texts) else k - 1
+                    merged = (texts[k] + " " + texts[j]) if j > k else (texts[j] + " " + texts[k])
+                    if _text_w(font, base, merged) <= self.MAXW / 0.8:
+                        texts[min(k, j)] = merged
+                        del texts[max(k, j)]
+                        continue
+                k += 1
             lines = [{"text": t, "scale": 1.0, "font": font} for t in texts]
             size = self._fit_lines(lines, base, self.MAXW)
             anim = {"title_pop": "word_stagger", "serif_elegant": "rise", "script_accent": "mask",
@@ -2735,6 +3260,8 @@ class _Choreo:
     def _x_for(self, spec: dict) -> float:
         return SAFE["left"] + 0.04 if spec.get("align") == "left" else self.XC
 
+    COUNT_DUR = 0.45                 # s de conteo del precio (text.counter count_dur)
+
     MIN_SIZE = {"kicker": 0.036, "stack": 0.07, "title_pop": 0.05, "serif_elegant": 0.055,
                 "script_accent": 0.06, "highlight_marker": 0.045, "cascade": 0.045,
                 "typewriter": 0.04}
@@ -2750,21 +3277,58 @@ class _Choreo:
         if compact and g.get("head_top"):
             # sobre el fondo reemplazado el hueco llega casi a la cabeza (no hay nada detras)
             g = dict(g, top=(g["top"][0], g["top"][1] + 0.014))
-        spec = self._text_spec(preset, blk, emph, humor, acc_words, compact)
+        spec0 = self._text_spec(preset, blk, emph, humor, acc_words, compact)
         fa, fb = self.f(t0), self.f(t1)
-        pl = self._place(spec, g, zones, fa, fb, self.MIN_SIZE.get(preset, 0.05), first_bonus)
-        if pl is None and fallback and preset not in ("title_pop", "kicker"):
-            spec = self._text_spec("title_pop", blk, emph, humor, acc_words)
-            pl = self._place(spec, g, zones, fa, fb, 0.05, first_bonus)
-        if pl is None:
+        fr = self.face_rect(shot, t0, t1)
+        zones_try = list(zones)
+        r = None
+        spec = None
+        while zones_try:
+            spec = copy.deepcopy(spec0)
+            pl = self._place(spec, g, zones_try, fa, fb, self.MIN_SIZE.get(preset, 0.05), first_bonus)
+            if pl is None and fallback and preset not in ("title_pop", "kicker"):
+                spec = self._text_spec("title_pop", blk, emph, humor, acc_words)
+                pl = self._place(spec, g, zones_try, fa, fb, 0.05, first_bonus)
+            if pl is None:
+                return None
+            zone, y, size = pl
+            spec["size"] = _r(size, 4)
+            x = self._x_for(spec)
+            spec.update({"start": t0, "end": t1, "x": _r(x, 3), "y": _r(y, 4)})
+            probe = {k: v for k, v in spec.items() if not k.startswith("_")}
+            r = measure_text(probe, self.style)
+            # nunca texto sobre la cara (ojos, nariz, boca): si la tinta real la toca, se prueba
+            # otra zona. El cabello de la coronilla si puede rozarse (descendentes de la ultima linea)
+            core = None if fr is None else (fr[0] + 0.12 * (fr[2] - fr[0]), fr[1] + 0.2 * (fr[3] - fr[1]),
+                                            fr[2] - 0.12 * (fr[2] - fr[0]), fr[3])
+
+            def hits(rr):
+                return rr is not None and core is not None and rr[0] < core[2] and core[0] < rr[2] \
+                    and rr[1] < core[3] and core[1] < rr[3]
+            if hits(r) and zone in ("center", "center_low", "low"):
+                # bajo la cara: se baja o se achica dentro de su franja antes de descartarla
+                hi_z = g["low"][1] if zone == "center_low" else g[zone][1]
+                for _ in range(6):
+                    dy = core[3] + 0.006 - r[1]
+                    if r[3] + dy <= hi_z + 1e-4:
+                        spec["y"] = _r(float(spec["y"]) + dy, 4)
+                    else:
+                        spec["size"] = _r(float(spec["size"]) * 0.9, 4)
+                        if spec["size"] < self.MIN_SIZE.get(spec["preset"], 0.05) * 0.95:
+                            break
+                    probe = {k: v for k, v in spec.items() if not k.startswith("_")}
+                    r = measure_text(probe, self.style)
+                    if not hits(r) and r is not None and r[3] <= hi_z + 1e-4:
+                        break
+                size, y = float(spec["size"]), float(spec["y"])
+            if hits(r):
+                zones_try = [z_ for z_ in zones_try if z_ != zone and not (zone == "center_low" and z_ in ("center", "low"))]
+                r = None
+                continue
+            break
+        else:
             return None
-        zone, y, size = pl
         lines = spec.pop("_lines")
-        spec["size"] = _r(size, 4)
-        x = self._x_for(spec)
-        spec.update({"start": t0, "end": t1, "x": _r(x, 3), "y": _r(y, 4)})
-        probe = {k: v for k, v in spec.items() if not k.startswith("_")}
-        r = measure_text(probe, self.style)
         if r is None:
             bw = max(_text_w(ln["font"], size * ln.get("scale", 1.0), ln["text"]) for ln in lines)
             bh = self._block_h(lines, size)
@@ -2803,11 +3367,12 @@ class _Choreo:
         elif name == "lightning":
             self.sfx(t, "impact_soft", prio=3, pan=(x - 0.5) * 0.8, src_id=src, vary=True)
         else:        # trazos largos: subrayado, circulo, flechas, garabatos
-            self.sfx(t, "pen_scribble", prio=3, pan=(x - 0.5) * 0.8, src_id=src, vary=True)
+            self.sfx(t, "pen_scribble", prio=3, pan=(x - 0.5) * 0.8, src_id=src, vary=True,
+                     dur=_draw_time(name))
 
     def accent_for(self, it: dict, ws: list[dict], emph: set, key: str, t0: float, t1: float,
                    icons: list[str] | None = None, force: str | None = None,
-                   icon: str | None = None) -> dict | None:
+                   icon: str | None = None, only: bool = False) -> dict | None:
         """Garabato o icono junto a un titulo (zona 'accent'): dura >= 0.8 s, nunca toca la
         tinta de otro texto (con el relleno de su caja) ni la cabeza."""
         (x0, y0, x1, y1), zone, lines, mode = it["_geom"]
@@ -2837,37 +3402,34 @@ class _Choreo:
         if choice == "icon" and icon:
             if fb - fa < 0.9:
                 return None
-            sz = 0.12
-            hh = sz / 2 / self.aspect
-            cands = [(x1 + sz / 2 + 0.025, cy), (x0 - sz / 2 - 0.025, cy),
-                     (x1 - sz * 0.15, y0 - hh - 0.016), (x0 + sz * 0.15, y0 - hh - 0.016),
-                     (x1 - sz * 0.15, y1 + hh + 0.016)]
-            if away < 0:
-                cands = [cands[1], cands[0], cands[3], cands[2], cands[4]]
-            for ix, iy in cands:
-                if self.accent_ok(ix, iy, sz, fa, fb, shot, t0, t1):
-                    bcol = self.pal["accent"] if mode == "dark" else self.pal["dark"]
-                    fields = {"start": t0, "end": t1, "kind": "icon", "name": icon, "variant": "outline",
-                              "badge": "circle", "badge_color": bcol,
-                              "color": self.pal["dark"] if _luma(bcol) > 0.55 else "#FFFFFF",
-                              "draw": True, "x": _r(ix, 3), "y": _r(iy, 4), "size": sz, "anim_in": "pop",
-                              "anim_out": "pop_out", "rotation": _r((self.rand(key + "rot") - 0.5) * 14, 1)}
-                    g = self.add("graphics", "icon", fields, zone="accent")
-                    if g:
-                        self.last["accent_kind"] = "icon"
-                        self.used["topic_icon"] += 1
-                        self.sfx(t0 + 0.02, "bubble" if self.used["icon_sfx"] % 2 else "pop", prio=4,
-                                 pan=(ix - 0.5) * 0.8, src_id=g["id"], vary=True)
-                        self.used["icon_sfx"] += 1
-                    return g
+            spot = self.accent_spot((x0, y0, x1, y1), 0.12, fa, fb, shot, t0, t1, away)
+            if spot is not None:
+                ix, iy, sz = spot
+                bcol = self.pal["accent"] if mode == "dark" else self.pal["dark"]
+                fields = {"start": t0, "end": t1, "kind": "icon", "name": icon, "variant": "outline",
+                          "badge": "circle", "badge_color": bcol,
+                          "color": self.pal["dark"] if _luma(bcol) > 0.55 else "#FFFFFF",
+                          "draw": True, "x": _r(ix, 3), "y": _r(iy, 4), "size": sz, "anim_in": "pop",
+                          "anim_out": "pop_out", "rotation": _r((self.rand(key + "rot") - 0.5) * 14, 1)}
+                g = self.add("graphics", "icon", fields, zone="accent")
+                if g:
+                    self.last["accent_kind"] = "icon"
+                    self.used["topic_icon"] += 1
+                    self.sfx(t0 + 0.02, "bubble" if self.used["icon_sfx"] % 2 else "pop", prio=4,
+                             pan=(ix - 0.5) * 0.8, src_id=g["id"], vary=True)
+                    self.used["icon_sfx"] += 1
+                return g
+            if only:
+                return None
             choice = self.pick("doodle", [d for d in self.S["doodles"]
-                                          if d not in ("underline", "circle_scribble")] or ["sparkle"])
+                                          if d not in ("underline", "circle_scribble") and not d.startswith("arrow")]
+                               or ["sparkle"])
         name = choice if choice in DOODLES else "sparkle"
         sz = {"sparkle": 0.1, "star4": 0.09, "burst": 0.15, "question": 0.11, "cross": 0.1,
               "exclaim": 0.1, "lightning": 0.1, "star5": 0.09, "rays": 0.16, "swirl": 0.12,
               "loop": 0.13, "heart": 0.1, "check": 0.1, "squiggle": 0.14}.get(name, 0.12)
         fields = {"start": t0, "end": t1, "kind": "doodle", "name": name, "draw": True,
-                  "wiggle": 0.35, "color": acc_col, "stroke": 7.0, "anim_in": "draw",
+                  "wiggle": 0.35, "color": acc_col, "anim_in": "draw",
                   "anim_out": "fade", "rotation": 0.0}
         own = it["id"]
         if name == "underline":
@@ -2893,15 +3455,11 @@ class _Choreo:
                 name = "sparkle"
                 sz = 0.1
                 fields["name"] = name
-            hh = sz / 2 / self.aspect
-            cands = [(x1 + sz * 0.3, y0 - hh * 0.35), (x0 - sz * 0.3, y0 - hh * 0.35),
-                     (x1 + sz / 2 + 0.015, cy), (x0 - sz / 2 - 0.015, cy),
-                     (x1 + sz * 0.2, y1 + hh * 0.5)]
-            if away < 0:
-                cands = [cands[1], cands[0], cands[3], cands[2], cands[4]]
-            pos = next(((px, py) for px, py in cands if self.accent_ok(px, py, sz, fa, fb, shot, t0, t1)), None)
-            if pos is None:
+            spot = self.accent_spot((x0, y0, x1, y1), sz, fa, fb, shot, t0, t1, away)
+            if spot is None:
                 return None
+            pos = spot[:2]
+            sz = spot[2]
             fields.update({"x": _r(pos[0], 3), "y": _r(pos[1], 4), "size": sz,
                            "rotation": _r((self.rand(key + "r") - 0.5) * 24, 1)})
         g = self.add("graphics", "doodle", fields, zone="accent")
@@ -2910,8 +3468,271 @@ class _Choreo:
             self._doodle_sfx(name, t0 + 0.03, fields["x"], g["id"])
         return g
 
+    def beat_snap(self, t: float, tol: float = 0.1, down: bool = False) -> float:
+        """t (original) -> el beat de la musica mas cercano (si esta a <= tol s en tiempo final y
+        no cruza un corte). Sin rejilla (musica no sincronizada) devuelve t."""
+        g = self.grid
+        if not g:
+            return t
+        arr = (g.get("downbeats") if down else None) or g.get("beats") or []
+        if not arr:
+            return t
+        ft = self.f(t)
+        b = min(arr, key=lambda x: abs(x - ft))
+        if abs(b - ft) > tol or abs(b - ft) < 1e-3:
+            return t
+        t2 = self.o(b)
+        if not self.kept(t2) or abs((t2 - t) - (b - ft)) > 0.02:
+            return t
+        self.snapped.append((ft, b))
+        return t2
+
+    def drop_hit(self) -> None:
+        """Golpe de la musica (drop): punch en seco + impacto, salvo que ahi ya haya una
+        transicion (el cambio de toma ya es el golpe) o una escena."""
+        g = self.grid
+        if not g or g.get("drop") is None:
+            return
+        fd = float(g["drop"])
+        if fd < 0.4 or fd > self.D - 1.0:
+            return
+        if any(abs(r["f"] - fd) < 0.25 for r in self.trans_req) or \
+                any(abs(fd - ch["f"]) < 0.25 for ch in self.shot_changes()):
+            return
+        t = self.o(fd)
+        it = self.punch_at(t, 0.12 + 0.06 * self.I, 0.6, role="drop", min_gap=0.8)
+        if it:
+            self.sfx(t, "impact_soft", prio=7, src_id=it["id"])
+
+    def occlusion(self, item: dict, shot: dict, t0: float, t1: float) -> float:
+        """Fraccion (ponderada) de la linea MAS tapada que quedaria detras de la persona si el
+        texto va DETRAS: cabeza (con cabello) + hombros/torso estimados desde el rostro. Se mide
+        cada linea (una linea chica tapada tambien vuelve ilegible el bloque)."""
+        fr = self.face_rect(shot, t0, t1)
+        if fr is None:
+            return 0.0
+        lines = measure_lines(item, self.style)
+        if not lines:
+            r = measure_text(item, self.style)
+            lines = [r] if r else []
+        if not lines:
+            return 0.0
+        hx0, hy0, hx1, hy1 = fr
+        cx = (hx0 + hx1) / 2
+        hw = (hx1 - hx0) / 2
+        body = [(hx0 - hw * 0.1, hy0 - 0.01, hx1 + hw * 0.1, hy1),                 # cabeza + cabello
+                (cx - hw * 0.9, hy1 - 0.01, cx + hw * 0.9, hy1 + 0.04),               # cuello
+                (cx - hw * 2.6, hy1 + 0.035, cx + hw * 2.6, 1.0)]                     # hombros y torso
+        worst = 0.0
+        for x0, y0, x1, y1 in lines:
+            area = max(1e-6, (x1 - x0) * (y1 - y0))
+            cov = 0.0
+            mid = y0 + (y1 - y0) * 0.55
+            for k, (bx0, by0, bx1, by1) in enumerate(body):
+                ix = max(0.0, min(x1, bx1) - max(x0, bx0))
+                # la mitad de arriba de las letras pesa mas para leer que los pies
+                top = max(0.0, min(mid, by1) - max(y0, by0))
+                bot = max(0.0, min(y1, by1) - max(mid, by0))
+                c = ix * (1.3 * top + 0.7 * bot)
+                cov += c * (0.8 if k == 0 else 1.0)          # la cabeza es una elipse, no una caja
+            worst = max(worst, cov / area)
+        return min(1.0, worst)
+
+    BEHIND_MAX = 0.3           # oclusion (ponderada) maxima para que un texto detras se lea
+
+    def legible_behind(self, item: dict, shot: dict, t0: float, t1: float) -> dict:
+        """Texto detras del sujeto SOLO si se lee (oclusion <= BEHIND_MAX). Si no, sube hasta que
+        solo lo roce la coronilla; si aun asi no se lee, va delante, arriba de la cabeza."""
+        if not item.get("behind"):
+            return item
+        if self.occlusion(item, shot, t0, t1) <= self.BEHIND_MAX:
+            return item
+        g = self.geom(shot, t0, t1)
+        ht = g.get("head_top")
+        r = measure_text(item, self.style)
+        if ht is None or r is None:
+            return dict(item, behind=False)
+        for _ in range(10):
+            dy = min(0.02, max(0.0, r[3] - (ht + 0.02)))
+            if dy <= 0 or r[1] - dy < SAFE["top"]:
+                break
+            item = dict(item, y=_r(float(item["y"]) - dy, 4))
+            r = measure_text(item, self.style) or r
+            if self.occlusion(item, shot, t0, t1) <= self.BEHIND_MAX:
+                return item
+        # delante y por encima de la cabeza, dentro de SAFE (achica hasta caber en la franja
+        # [SAFE.top, cabeza]); nunca sobre la cara
+        item = dict(item, behind=False)
+        lo_, hi_ = SAFE["top"] + 0.005, ht - 0.012
+        for _ in range(16):
+            r = measure_text(item, self.style)
+            if r is None:
+                break
+            h_ = r[3] - r[1]
+            if h_ > hi_ - lo_:
+                item["size"] = _r(float(item["size"]) * max(0.7, (hi_ - lo_) / h_ * 0.98), 4)
+                continue
+            if r[3] > hi_:
+                item["y"] = _r(float(item["y"]) - (r[3] - hi_), 4)
+            elif r[1] < lo_:
+                item["y"] = _r(float(item["y"]) + (lo_ - r[1]), 4)
+            else:
+                break
+        return item
+
+    def hero_mark(self, it: dict, ws: list[dict], key: str, t_hero: float, t1: float,
+                  hero: dict | None = None) -> dict | None:
+        """Garabato de enfasis SOBRE la palabra protagonista (como un editor a mano): subrayado
+        bajo SU linea o circulo alrededor de un numero / palabra corta. Se dibuja cuando se
+        pronuncia (nunca antes de que aparezca su linea), con SFX de lapiz."""
+        if it.get("preset") not in ("stack", "title_pop", "cascade", "serif_elegant") or it.get("box"):
+            return None
+        rows = measure_lines(it, self.style, with_text=True)
+        spec_lines = it.get("lines") or [{"text": t_} for t_ in str(it.get("text", "")).split("\n")]
+        # solo si el layout respeto las lineas del director (si re-envolvio, la caja no es la linea)
+        if not rows or len(rows) != len(spec_lines) or any(
+                norm(txt) != norm(str(sl.get("text", ""))) for (_, txt), sl in zip(rows, spec_lines)):
+            return None
+        lines = [bx for bx, _ in rows]
+        # linea protagonista: la que CONTIENE la palabra protagonista (la marca entra cuando se
+        # dice); sin palabra, la de mayor escala (stack) o la que trae el acento
+        k = None
+        if hero is not None:
+            hn = norm(_display(hero["text"]))
+            for i, sl in enumerate(spec_lines):
+                if hn and hn in [norm(x) for x in str(sl.get("text", "")).split()]:
+                    k = i
+                    break
+            if k is None:
+                return None
+            t_hero = max(t_hero, hero["t0"])
+        if k is None:
+            acc = {norm(w) for w in it.get("accent_words") or []}
+            k = max(range(len(lines)), key=lambda i: (float(spec_lines[i].get("scale", 1.0)),
+                                                      any(norm(w) in acc for w in str(spec_lines[i].get("text", "")).split()),
+                                                      lines[i][2] - lines[i][0]))
+        x0, y0, x1, y1 = lines[k]
+        txt = str(spec_lines[k].get("text", ""))
+        fa, fb = self.f(t_hero), self.f(t1)
+        if fb - fa < 0.7:
+            return None
+        shot = self.shot_at(ws[0]["t0"])
+        mode = (self.last.get("hero_mark"))
+        short = len(norm(txt)) <= 7 or bool(re.fullmatch(r"[\d$.,]+", txt.strip()))
+        name = "circle_scribble" if (short and mode != "circle_scribble") else "underline"
+        col = self.acc_light if it.get("color") == self.pal["dark"] else self.pal["accent"]
+        if norm(str(it.get("accent", ""))) and it.get("accent") and _luma(it["accent"]) > 0.35 \
+                and it.get("color") != self.pal["dark"]:
+            col = "#FFFFFF" if hue_dist(it["accent"], self.pal["accent"]) < 30 else self.pal["accent"]
+        # huecos hasta las lineas vecinas del mismo bloque (el trazo no las cruza)
+        above = max([ln[3] for i, ln in enumerate(lines) if i != k and ln[3] <= y0 + 0.002] + [-1.0])
+        below = min([ln[1] for i, ln in enumerate(lines) if i != k and ln[1] >= y1 - 0.002] + [2.0])
+        if name == "circle_scribble":
+            w_, h_ = (x1 - x0) * 1.28 + 0.03, (y1 - y0) * 1.7 + 0.02
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            room = min(cy - above, below - cy) - 0.006
+            h_ = min(h_, 2 * room)
+            if h_ < (y1 - y0) * 1.18:
+                name = "underline"            # no cabe el circulo entre lineas: subrayado
+            else:
+                rect = (cx - w_ / 2, cy - h_ / 2, cx + w_ / 2, cy + h_ / 2)
+                fields = {"x": _r(cx, 3), "y": _r(cy, 4), "size": _r(w_, 3),
+                          "aspect": _r(_clamp(h_ * self.aspect / w_, 0.3, 1.0), 3)}
+        if name == "underline":
+            w_ = min(self.MAXW, (x1 - x0) * 1.06)
+            cx, cy = (x0 + x1) / 2, min(y1 + 0.012, self.cap_top - 0.02)
+            if cy + 0.014 > below - 0.004:
+                return None
+            rect = (cx - w_ / 2, cy - 0.012, cx + w_ / 2, cy + 0.014)
+            fields = {"x": _r(cx, 3), "y": _r(cy, 4), "size": _r(w_, 3)}
+        if rect[0] < SAFE["left"] - 0.02 or rect[2] > SAFE["right"] + 0.04 or rect[1] < SAFE["top"] - 0.01:
+            return None
+        fr = self.face_rect(shot, t_hero, t1)
+        if fr is not None and rect[0] < fr[2] and fr[0] < rect[2] and rect[1] < fr[3] and fr[1] < rect[3]:
+            return None
+        if not self.clear_of_ink(rect if name == "underline" else (rect[0], rect[1], rect[2], rect[3]),
+                                 fa, fb, skip=it["id"]):
+            return None
+        if not self.free_accent(cx, cy, fa, fb):
+            return None
+        fields.update({"start": t_hero, "end": t1, "kind": "doodle", "name": name, "draw": True,
+                       "wiggle": 0.3, "color": col, "anim_in": "draw", "anim_out": "fade", "rotation": 0.0})
+        g = self.add("graphics", "mark", fields, zone="accent")
+        if g:
+            self.last["hero_mark"] = name
+            self._doodle_sfx(name, t_hero + 0.02, cx, g["id"])
+        return g
+
+    def arrow_to(self, rect: tuple, t0: float, t1: float, shot: dict, own: str) -> dict | None:
+        """Flecha dibujada a mano que senala una tarjeta/CTA desde un hueco libre (nunca
+        cruza la cara ni otra tinta)."""
+        fa, fb = self.f(t0), self.f(t1)
+        if fb - fa < 1.2:              # la flecha tarda ~0.5 s en dibujarse
+            return None
+        x0, y0, x1, y1 = rect
+        face_x = shot.get("face_x") if shot.get("talk") else None
+        sides = (1, -1) if (face_x is None or face_x < 0.5) else (-1, 1)
+        cands = []
+        for side in sides:
+            ex = (x1 - 0.12) if side > 0 else (x0 + 0.12)
+            cands.append((ex + side * 0.11, y0 - 0.1, ex, y0 - 0.012))        # llega por arriba
+            cands.append((ex + side * 0.11, y1 + 0.09, ex, y1 + 0.012))       # llega por abajo
+        fr = self.face_rect(shot, t0, t1)
+        for sx, sy, ex, ey in cands:
+            sx = _clamp(sx, SAFE["left"] + 0.04, SAFE["right"] - 0.03)
+            box = (min(sx, ex) - 0.03, min(sy, ey) - 0.015, max(sx, ex) + 0.03, max(sy, ey) + 0.015)
+            if box[1] < SAFE["top"] or box[3] > min(SAFE["bottom"], self.cap_top - 0.005):
+                continue
+            if fr is not None and box[0] < fr[2] and fr[0] < box[2] and box[1] < fr[3] and fr[1] < box[3]:
+                continue
+            if not self.clear_of_ink(box, fa, fb, skip=own, margin=0.0):
+                continue
+            if not self.free_accent(sx, sy, fa, fb):
+                continue
+            ta = self.o(fa + (0.3 if fb - fa < 1.8 else 0.4))
+            g = self.add("graphics", "arrow", {
+                "start": ta, "end": t1, "kind": "doodle", "name": "arrow_curve", "x": _r(sx, 3), "y": _r(sy, 4),
+                "size": 0.14, "path_to": [_r(ex, 3), _r(ey, 4)],
+                "color": self.doodle_color(ta, t1, sx, sy), "draw": True, "wiggle": 0.3,
+                "anim_in": "draw", "anim_out": "fade", "rotation": 0.0}, zone="accent")
+            if g:
+                self.ink.append((self.f(ta), fb, *box, g["id"]))
+                self._doodle_sfx("arrow_curve", ta + 0.02, sx, g["id"])
+            return g
+        return None
+
+    def accent_spot(self, rect: tuple, sz: float, fa: float, fb: float, shot: dict, t0: float, t1: float,
+                    away: int = 1) -> tuple[float, float, float] | None:
+        """Primer lugar libre para un acento de tamano ~sz junto a un titulo: esquinas y lados del
+        bloque (del lado contrario a la cara primero), luego junto a la cabeza (como los destellos
+        de un editor), achicando hasta 70% si no cabe. Nunca sobre la cara ni otra tinta."""
+        x0, y0, x1, y1 = rect
+        cy = (y0 + y1) / 2
+        fr = self.face_rect(shot, t0, t1)
+        for k in (1.0, 0.85, 0.7):
+            s_ = sz * k
+            hw, hh = s_ / 2, s_ / 2 / self.aspect
+            c = [(x1 - hw * 0.4, y0 - hh * 0.9), (x0 + hw * 0.4, y0 - hh * 0.9),     # esquinas de arriba
+                 (x1 + hw + 0.015, cy), (x0 - hw - 0.015, cy),                         # lados
+                 (x1 - hw * 0.4, y1 + hh * 0.9), (x0 + hw * 0.4, y1 + hh * 0.9)]      # esquinas de abajo
+            if away < 0:
+                c = [c[1], c[0], c[3], c[2], c[5], c[4]]
+            if fr is not None:
+                fx0, fy0, fx1, fy1 = fr
+                fy = (fy0 + fy1) / 2
+                side = [(fx1 + hw + 0.02, fy - 0.02), (fx0 - hw - 0.02, fy - 0.02),
+                        (fx1 + hw + 0.01, fy0 - hh * 0.6), (fx0 - hw - 0.01, fy0 - hh * 0.6)]
+                if away < 0:
+                    side = [side[1], side[0], side[3], side[2]]
+                c += side
+            for px, py in c:
+                if self.accent_ok(px, py, s_, fa, fb, shot, t0, t1):
+                    return px, py, s_
+        return None
+
     def punch_at(self, t: float, amount: float, hold: float, role: str = "punch",
                  min_gap: float = 1.6) -> dict | None:
+        t = self.beat_snap(t, 0.1)
         ft = self.f(t)
         if any(abs(ft - p) < min_gap for p in self.punches):
             return None
@@ -2920,13 +3741,18 @@ class _Choreo:
         shot = self.shot_at(t)
         if not shot["talk"]:
             return None
-        end = min(t + hold + 0.35, shot["end"] - 0.02)
+        cut = self.S.get("punch_mode") == "cut"
+        # modo corte (dinamico/energetico, como la referencia): entra en seco en la palabra y se
+        # sostiene hasta el final del item (hold null), luego regresa en seco: un jump-zoom
+        end = min(t + (max(hold, 0.55) + 0.45 if cut else hold + 0.35), shot["end"] - 0.02)
         if end - t < 0.3:
             return None
         amount *= self.S["punch"]
-        it = self.add("effects", role, {"start": t, "end": end, "kind": "punch",
-                                        "amount": _r(_clamp(amount, 0.03, 0.4), 3),
-                                        "hold": _r(hold, 2)})
+        fields = {"start": t, "end": end, "kind": "punch", "amount": _r(_clamp(amount, 0.03, 0.4), 3),
+                  "hold": None if cut else _r(hold, 2)}
+        if cut:
+            fields.update({"mode": "cut", "release": "cut"})
+        it = self.add("effects", role, fields)
         if it:
             self.punches.append(ft)
         return it
@@ -3031,13 +3857,18 @@ class _Choreo:
             line_ts = []
             for ln in blk[1:]:
                 line_ts.append(ln[0]["t0"])
-            self.text_sfx(it["preset"], t0, it, prio=5 if hero else 3, line_ts=line_ts)
+            self.text_sfx(it["preset"], t0, it, prio=5 if hero else 3, line_ts=line_ts,
+                          reveal=max(0.3, self.f(ws[-1]["t1"]) - self.f(ws[0]["t0"]) + 0.2))
             if hero:
                 hw = next((w for w in ws if w["i"] in primary), ws[-1])
                 p_acc = _lerp(*self.S["accent_p"], self.I)
+                # el acento entra con la palabra protagonista, o antes si esta llega al final del
+                # bloque (debe verse >= 0.9 s para alcanzar a dibujarse)
+                t_acc = max(t0, min(hw["t0"] - 0.05, self.o(self.f(t1) - 0.95)))
                 if accents and self.rand(f"acc{hw['i']}") < p_acc:
-                    self.accent_for(it, ws, accent_set, f"a{hw['i']}", max(t0, hw["t0"] - 0.05), t1,
-                                    info.get("icons"))
+                    self.accent_for(it, ws, accent_set, f"a{hw['i']}", t_acc, t1, info.get("icons"))
+                if accents and self.S.get("marks", 0) > 0 and self.rand(f"mk{hw['i']}") < self.S["marks"] * (0.5 + 0.5 * self.I):
+                    self.hero_mark(it, ws, f"m{hw['i']}", max(t0 + 0.15, hw["t0"]), t1, hero=hw)
                 if punches and (info["energy"] != "baja" or self.I > 0.8):
                     self.punch_at(hw["t0"], 0.07 + 0.07 * self.I, 0.35)
         return placed
@@ -3055,7 +3886,8 @@ class _Choreo:
             if self.f(c0["start"]) > 2.0:
                 target = c0["start"]
         if target is not None and self.I >= 0.4:
-            self.sfx(target, "riser_short", prio=7)
+            # anticipacion: el riser culmina en `target` (no empieza antes del inicio del video)
+            self.sfx(target, "riser_short", prio=7, dur=min(1.4, max(0.4, self.f(target) - 0.2)))
 
     # ---------------------------------------------------------- 3. hook
     def hook(self) -> None:
@@ -3079,7 +3911,7 @@ class _Choreo:
         self.sfx(max(0.0, first["t0"] - 0.05), "whoosh_fast", prio=9)
         if self.S["scenes"]["outline"]:
             sh = self.shot_at(first["t0"])
-            if sh["talk"] and not sh.get("face_nominal"):
+            if sh["talk"] and not sh.get("face_nominal") and sh.get("matte_ok", True):
                 it = self.add("effects", "hook_outline", {
                     "start": first["t0"], "end": min(first["t0"] + 1.4, sh["end"] - 0.05),
                     "kind": "subject_outline", "color": "#FFFFFF", "width": 7.0, "glow": 0.6})
@@ -3127,19 +3959,30 @@ class _Choreo:
                     and shot["face_x"] is not None
                     and 0.25 <= shot["face_x"] <= 0.75 and (g["head_top"] or 0) >= 0.17)
         placed = None
-        if giant_ok and self.free("top", self.f(t0), self.f(end)):
-            content = [w for w in ws if w["n"] not in STOP and len(w["n"]) >= 3] or ws
-            short = [w for w in content if len(w["n"]) <= 8]
-            hero = (short[-1:] or [min(content, key=lambda w: len(w["n"]))])
-            h = hero[0]
+        content = [w for w in ws if w["n"] not in STOP and len(w["n"]) >= 3] or ws
+        short = [w for w in content if len(w["n"]) <= 8]
+        hero = (short[-1:] or [min(content, key=lambda w: len(w["n"]))])
+        h = hero[0]
+        # la palabra protagonista queda QUIETA y nitida >= 0.8 s (el texto puede cruzar un poco
+        # hacia la frase siguiente; la transicion que sigue es corta y seca)
+        settle = 0.3
+        end_txt = min(max(end, self.o(self.f(h["t0"]) + settle + 0.85)), shot["end"] - 0.02)
+        static = self.f(end_txt) - (self.f(h["t0"]) + settle)
+        self.protect.append((self.f(h["t0"]) + settle, self.f(h["t0"]) + settle + 0.8))
+        if giant_ok and self.free("top", self.f(t0), self.f(end_txt)):
+            end = end_txt
             before = [w for w in ws if w["i"] < h["i"]]
             after = [w for w in ws if w["i"] > h["i"]]
+            giant = [h]
+            if after and all(w["n"] in STOP or len(w["n"]) <= 4 for w in after) and len(after) <= 2:
+                giant, after = giant + after, []          # 'ESCUCHA ESTO': todo gigante, arriba
             font = self.K["display"]
             lines = []
             if before:
                 lines.append({"text": " ".join(_display(w["text"]) for w in before).upper(),
                               "scale": 0.3, "font": font})
-            lines.append({"text": _display(h["text"]).upper(), "scale": 1.0, "font": font})
+            lines.append({"text": " ".join(_display(w["text"]) for w in giant).upper(), "scale": 1.0,
+                          "font": font})
             if after:
                 lines.append({"text": " ".join(_display(w["text"]) for w in after).upper(),
                               "scale": 0.3, "font": font})
@@ -3157,22 +4000,26 @@ class _Choreo:
             top_ = max(SAFE["top"], top_)
             bh = sh + gh + ah
             y = top_ + bh / 2
-            placed = self.add("text", "drama", {
+            fields = self.legible_behind({
                 "start": t0, "end": end, "preset": "behind_giant", "lines": lines,
                 "x": 0.5, "y": _r(y, 4), "size": _r(size, 4), "font": font,
                 "color": "#FFFFFF", "accent": self.pal["accent"], "align": "center",
-                "behind": True, "anim_in": self.pick("drama_anim", ["scale_down", "letter_stagger"]),
-                "anim_out": "fade", "shadow": 0.2, "accent_words": []}, zone="top")
+                "behind": True,
+                "anim_in": self.pick("drama_anim", ["scale_down", "letter_stagger"]) if static >= 0.8 else "pop",
+                "anim_out": "fade", "shadow": 0.2, "accent_words": []}, shot, t0, end)
+            if not fields.get("behind"):
+                fields["shadow"] = 0.6
+            placed = self.add("text", "drama", fields, zone="top")
             if placed:
                 r = measure_text(placed, self.style)
                 if r is not None:
                     self.ink.append((self.f(t0), self.f(end), *r, placed["id"]))
         if not placed:
-            self.title_block([ws], "serif_elegant", emph, ["center", "top"], t0, end, "drama")
+            self.title_block([ws], "serif_elegant", emph, ["center", "top"], t0, end_txt, "drama")
         for w in ws:
             self.titled_words.add(w["i"])
-        # audio: la musica se corta en seco, golpe grave y regresa con la siguiente toma
-        self.sfx(t0 - 0.1, "record_stop", prio=7)
+        # audio: la musica se frena (tape stop de la propia pista, sin SFX record_stop encima),
+        # golpe grave y regresa con la siguiente toma
         self.sfx(ws[0]["t0"], D["sfx"], prio=10)
         back = min(shot["end"], ws[-1]["t1"] + 0.6)
         self.music_stops.append({"at": _r(t0 - 0.12), "dur": _r(max(0.4, min(2.2, back - t0)), 3)})
@@ -3192,7 +4039,8 @@ class _Choreo:
             for w in cands:
                 n = w["n"]
                 if len(n) >= 5 and n not in STOP and not re.fullmatch(r"\d+", n) and \
-                        n.endswith(_NOUN_SUFFIX) and not n.endswith(_VERB_END[:3]) and n not in _PRICE_W:
+                        n.endswith(_NOUN_SUFFIX) and not n.endswith(_VERB_END[:3]) and n not in _PRICE_W \
+                        and n not in _VERBISH:
                     return _display(w["text"]).strip("¿?¡!").upper()
         t = str(self.script.get("topic") or "").strip()
         if t and len(t.split()) <= 2:
@@ -3226,8 +4074,7 @@ class _Choreo:
 
     def data(self) -> None:
         a = self.anc
-        n_cut = int(round(self.S["cutaways"] * self.I * max(1.0, self.D / 25.0)))
-        self.n_cut_left = n_cut
+        n_cut = self.n_cut_left
         # precio
         if "price" in a:
             i0, i1 = a["price"]
@@ -3245,7 +4092,11 @@ class _Choreo:
             cur = (self.ent.get("price", "").split() or ["", "MXN"])[-1]
             service = self._service(s)
             done = False
-            if n_cut > 0 and val > 0 and self.f(end) - self.f(t0) >= 1.1 and self.free("full", self.f(t0), self.f(end)):
+            mode = self.S.get("price", "scene")
+            if mode == "overlay" and val > 0:
+                done = self._price_overlay(i0, i1, s, shot, end, val, cur, service)
+            if not done and mode != "card" and n_cut > 0 and val > 0 and self.f(end) - self.f(t0) >= 1.1 \
+                    and self.free("full", self.f(t0), self.f(end)):
                 bg = self.pick("bg", [b for b in self.S["backgrounds"] if b not in ("blur_self",) and b not in LIGHT_BG]
                                or ["gradient"])
                 amount = f"{int(val):,}" if val == int(val) else f"{val:,.2f}"
@@ -3269,7 +4120,7 @@ class _Choreo:
                              "prefix": "$", "suffix": "", "decimals": 0 if val == int(val) else 2,
                              "text": cur, "x": 0.5, "y": ny, "size": _r(size, 4), "font": font,
                              "color": "#FFFFFF", "accent": self.pal["accent"], "align": "center",
-                             "anim_in": "pop", "shadow": 0.4},
+                             "anim_in": "pop", "shadow": 0.4, "count_dur": self.COUNT_DUR},
                     "graphics": gr}, zone="full")
                 if cw:
                     done = True
@@ -3285,7 +4136,8 @@ class _Choreo:
                         self.titled_words.add(w["i"])
             if not done:
                 # servicio como titulo, "Precio" como subtitulo y la moneda junto al valor
-                self.card("price", i0, max(t0, self.words[i0]["t0"] - 0.35), max(end, self.words[i0]["t0"] + 2.2),
+                self.card("price", i0, max(t0, self.words[i0]["t0"] - 0.35),
+                          min(max(end, self.words[i0]["t0"] + 2.2), shot["end"] - 0.03),
                           title=_cap_first(service.lower()) if service else "Precio",
                           value=self.ent.get("price", "") or "", subtitle="Precio" if service else "",
                           icon="cash", theme="brand", sfx_name="cash")
@@ -3306,7 +4158,16 @@ class _Choreo:
                                             "icon": "map-pin"}
                 if "address" in a:
                     self._address_hero(s)
-                if "landmark" in a:
+                    if "landmark" in a:
+                        # la referencia no se titula (va en la tarjeta): un icono que la acompana
+                        la, lb = a["landmark"]
+                        cw_ = [w for w in self.words[la:lb + 1] if w["n"] not in STOP and len(w["n"]) >= 4]
+                        if cw_:
+                            ic = "walk" if assets.icon_exists("walk") else "map-pin"
+                            self._float_accent(cw_[0], self.shot_at(cw_[0]["t0"]), icon_only=True, icon=ic)
+                elif "landmark" in a:
+                    # sin direccion: la referencia es el dato (en la tarjeta va como titulo); con
+                    # direccion, la referencia solo va en la tarjeta (sin repetirla tres veces)
                     la, lb = a["landmark"]
                     ws_ = [w for w in self.words[la:lb + 1] if w["i"] not in self.titled_words]
                     if ws_:
@@ -3330,12 +4191,14 @@ class _Choreo:
                     for i in range(a["landmark"][0], a["landmark"][1] + 1):
                         self.titled_words.add(i)
                 elif card is not None and "landmark" in a:
+                    # la tarjeta ya mostro la referencia: sin repetirla como titulo, un icono
+                    # (caminar) que acompana la frase
                     la, lb = a["landmark"]
-                    ws_ = [w for w in self.words[la:lb + 1] if w["f0"] >= self.f(card["end"]) - 0.1]
+                    ws_ = [w for w in self.words[la:lb + 1] if w["f0"] >= self.f(card["end"]) - 0.1
+                           and w["n"] not in STOP and len(w["n"]) >= 4]
                     if ws_:
-                        self.title_sequence(self._sent_of(la), ws_[0]["i"], lb, "place",
-                                            ["center", "top"], ["center", "top"], main="stack",
-                                            companion="title_pop")
+                        ic = "walk" if assets.icon_exists("walk") else "map-pin"
+                        self._float_accent(ws_[0], self.shot_at(ws_[0]["t0"]), icon_only=True, icon=ic)
             s["info"]["_done"] = True
             if "landmark" in a:
                 self._sent_of(a["landmark"][0])["info"]["_done"] = True
@@ -3352,20 +4215,175 @@ class _Choreo:
             end = max(end, t0 + 1.3)
             hw = [w for w in self.words[sched_i:min(s["w1"], sched_i + 1) + 1]]
             title = _cap_first(" ".join(_display(w["text"]) for w in hw))
+            # sin repetir "Agenda": el link (con su etiqueta) llega enseguida
             self.card("schedule", sched_i, t0, end, title=title,
-                      subtitle=self.ent.get("schedule") or ("Agenda en el link" if link_i is not None else ""),
+                      subtitle=self.ent.get("schedule") or ("En el link de abajo" if link_i is not None else ""),
                       icon="calendar-event", theme="light", sfx_name="ding")
             s["info"]["_done"] = True
         if link_i is not None:
             s = self._sent_of(link_i)
             shot = self.shot_at(self.words[link_i]["t0"])
             t0 = self.words[link_i]["t0"] - 0.06
-            end = min(shot["end"] - 0.03, s["t1"] + 1.2)
+            end = min(shot["end"] - 0.03, s["t1"] + 0.7)
             if self.reserved:
                 end = min(end, self.o(self.reserved[0][0] - 0.3))
             end = max(end, min(t0 + 1.6, shot["end"] - 0.03))
-            self.cta("link_below", t0, end, label=self.ent.get("link_label") or "Link abajo")
+            if s["id"] + 1 < len(self.sents):
+                # la siguiente frase manda (su titulo entra en su primera palabra)
+                end = min(end, max(t0 + 1.0, self.sents[s["id"] + 1]["t0"] - 0.12))
+            it = self.cta("link_below", t0, end, label=self.ent.get("link_label") or "Link abajo")
+            if it is not None:
+                self.link_item = it
+                self.extend_link(it)
             s["info"]["_done"] = True
+
+    def _price_overlay(self, i0: int, i1: int, s: dict, shot: dict, end: float, val: float, cur: str,
+                       service: str) -> bool:
+        """Precio SIN tapar a la persona: contador grande en el hueco libre (arriba de la cabeza si
+        cabe; si no, al pecho, delante), etiqueta del servicio, destellos y fondo tratado detras
+        de ella (reemplazo de fondo oscuro si el recorte es limpio; si no, desenfoque)."""
+        if not shot["talk"] or shot.get("face_nominal") or not shot.get("face"):
+            return False
+        w0 = self.words[i0]
+        # el contador arranca ~0.3 s antes del numero y aterriza (0.45 s de conteo) mientras se
+        # dice: el valor final queda quieto y legible >= 0.8 s antes de la transicion
+        lead = 0.3
+        # toma corta: el conteo arranca antes (hasta 0.8 s antes del numero) para que el valor
+        # final quede quieto ~1 s antes del corte
+        room = self.f(shot["end"] - 0.03) - (self.f(w0["t0"]) - lead + 0.12 + self.COUNT_DUR)
+        if room < 1.0:
+            lead = min(0.8, lead + (1.0 - room))
+        t0 = self.snap_start(max(shot["start"] + 0.03, w0["t0"] - lead))
+        land = self.o(self.f(t0) + 0.12 + self.COUNT_DUR)
+        end = min(max(end, self.words[i1]["t1"] + 0.6, self.o(self.f(land) + 1.15)), shot["end"] - 0.03)
+        # si aun asi la toma se acaba antes de que el precio se lea quieto ~1 s, el numero cruza el
+        # corte hasta 0.6 s sobre la toma siguiente: se queda un instante, como en un editor
+        cross = None
+        nxt_shot = self.shot_at(shot["end"] + 0.02) if shot["end"] < self.tl.duration - 0.1 else None
+        if self.f(end) - self.f(land) < 0.95 and nxt_shot is not None and nxt_shot["k"] != shot["k"]:
+            cross = self.o(min(self.f(land) + 1.05, self.f(shot["end"]) + 0.6))
+        fa, fb = self.f(t0), self.f(cross or end)
+        if fb - fa < 1.0 or not self.free("full", fa, fb):
+            return False
+        g = self.geom(shot, t0, end)
+        font = self.K["display"]
+        amount = f"{int(val):,}" if val == int(val) else f"{val:,.2f}"
+        base = {"preset": "counter", "from": 0, "to": int(val) if val == int(val) else val, "prefix": "$",
+                "suffix": "", "decimals": 0 if val == int(val) else 2, "text": cur, "x": 0.5,
+                "font": font, "color": "#FFFFFF", "accent": self.pal["accent"], "align": "center",
+                "anim_in": "pop", "anim_out": "pop_out", "shadow": 0.85, "anchor": "center",
+                "count_dur": self.COUNT_DUR}
+        size0 = min(0.24, 0.7 / max(1.0, _text_w(font, 1.0, "$" + amount)))
+        sticker_h = 0.05 if service else 0.0
+        best = None
+        for z in ("top", "center_low"):
+            if not self.free(z, fa, fb):
+                continue
+            lo, hi = (g["center"][0], g["low"][1]) if z == "center_low" else g[z]
+            lo += sticker_h
+            size = size0
+            for _ in range(8):
+                r = measure_text(dict(base, y=0.5, size=size), self.style)
+                h = (r[3] - r[1]) if r else size * 0.8 / self.aspect
+                if h <= hi - lo or size < 0.12:
+                    break
+                size *= 0.9
+            if h > hi - lo or size < 0.12:
+                continue
+            y = (lo + hi) / 2 if z == "top" else lo + h / 2 + 0.01
+            if best is None or size > best[0] * 1.15:
+                best = (size, z, y, h)
+        if best is None:
+            return False
+        size, zone, y, h = best
+        if cross is not None:
+            r_ = measure_text(dict(base, y=y, size=size), self.style)
+            fr2 = self.face_rect(nxt_shot, shot["end"], cross)
+            if r_ is not None and fr2 is not None and r_[0] < fr2[2] and fr2[0] < r_[2] and r_[1] < fr2[3] and fr2[1] < r_[3]:
+                cross = None                    # en la toma siguiente taparia la cara
+        t_txt_end = cross or end
+        spec = dict(base, start=t0, end=t_txt_end, y=_r(y, 4), size=_r(size, 4))
+        dark_bg = shot.get("matte_ok") and bool(self.S["scenes"]["bg_replace"])
+        if dark_bg and zone == "top":
+            spec["color"] = "#FFFFFF"          # sobre el fondo oscuro nuevo, arriba de la cabeza
+        else:
+            self._apply_ink(spec, self._bg_at(shot, y - h / 2, y + h / 2, t0, end))
+            spec.pop("_mode", None)
+        spec["shadow"] = max(float(spec.get("shadow", 0.5)), 0.85 if spec["color"] == "#FFFFFF" else 0.12)
+        it = self.add("text", "price", spec, zone=zone)
+        if not it:
+            return False
+        r = measure_text(it, self.style) or (0.2, y - h / 2, 0.8, y + h / 2)
+        self.ink.append((fa, fb, *r, it["id"]))
+        for w in self.words[s["w0"]:s["w1"] + 1]:
+            self.titled_words.add(w["i"])
+        # fondo detras de ella: escena oscura si el recorte es limpio, si no desenfoque
+        if dark_bg:
+            bgk = self.pick("bg", [b for b in self.S["backgrounds"] if b not in LIGHT_BG] or ["dark_stars"])
+            fx_ = self.add("effects", "price_bg", {"start": t0, "end": end, "kind": "bg_replace",
+                                                  "background": bgk,
+                                                  "bg_colors": [self.pal["dark"], self.pal["accent2"]]},
+                           event=False)
+            if fx_:
+                self.bg_fx.append((fa, fb, "dark"))
+        else:
+            self.add("effects", "price_blur", {"start": t0, "end": end, "kind": "bg_blur", "radius": 20.0},
+                     event=False)
+        # etiqueta del servicio encima del numero + destellos a los lados
+        if service:
+            sy = max(SAFE["top"] + 0.03, r[1] - 0.035)
+            bgc = self.pal["accent"] if _luma(self.pal["accent"]) < 0.9 else "#FFFFFF"
+            st = self.add("graphics", "price_tag", {
+                "start": t0 + 0.1, "end": end, "kind": "sticker_text", "text": service, "x": 0.5,
+                "y": _r(sy, 4), "size": 0.052, "bg": bgc, "fg": self.pal["dark"] if _luma(bgc) > 0.55 else "#FFFFFF",
+                "anim_in": "pop", "anim_out": "pop_out", "rotation": -3.0, "color": "#FFFFFF"}, zone="accent",
+                event=False)
+            if st:
+                self.acc_pos[st["id"]] = (0.5, sy)
+                self.sfx(t0 + 0.14, "pop", prio=5, src_id=st["id"], vary=True)
+        self.protect.append((self.f(land), self.f(land) + 0.8))
+        # circulo a mano alrededor del precio cuando aterriza (como un editor que lo remarca)
+        t_c = self.o(self.f(land) + 0.05)
+        if self.f(end) - self.f(t_c) >= 0.8 and self.S.get("marks", 0) > 0:
+            cw_, ch_ = (r[2] - r[0]) * 1.16 + 0.04, (r[3] - r[1]) * 1.55 + 0.02
+            cx_, cy_ = (r[0] + r[2]) / 2, (r[1] + r[3]) / 2
+            rect = (cx_ - cw_ / 2, cy_ - ch_ / 2, cx_ + cw_ / 2, cy_ + ch_ / 2)
+            fr = self.face_rect(shot, t_c, end)
+            # nunca sobre ojos/nariz/boca (puede rozar barbilla o cabello, como los titulos)
+            core = None if fr is None else (fr[0] + 0.12 * (fr[2] - fr[0]), fr[1] + 0.2 * (fr[3] - fr[1]),
+                                            fr[2] - 0.12 * (fr[2] - fr[0]), fr[3] - 0.15 * (fr[3] - fr[1]))
+            inside = rect[0] >= SAFE["left"] - 0.02 and rect[2] <= SAFE["right"] + 0.04 and rect[1] >= SAFE["top"] - 0.01
+            if inside and (core is None or not (rect[0] < core[2] and core[0] < rect[2] and rect[1] < core[3] and core[1] < rect[3])):
+                mk = self.add("graphics", "price_mark", {
+                    "start": t_c, "end": end, "kind": "doodle", "name": "circle_scribble",
+                    "x": _r(cx_, 3), "y": _r(cy_, 4), "size": _r(min(0.86, cw_), 3),
+                    "aspect": _r(_clamp(ch_ * self.aspect / cw_, 0.3, 1.0), 3),
+                    "color": self.pal["accent"] if spec["color"] == "#FFFFFF" else self.acc_light,
+                    "draw": True, "wiggle": 0.3, "anim_in": "draw", "anim_out": "fade", "rotation": -2.0},
+                    zone="edge", event=False)          # abraza al contador y su etiqueta: sin regla de separacion
+                if mk:
+                    self.occ["accent"].append((self.f(t_c), self.f(end), mk["id"]))
+                    self.acc_pos[mk["id"]] = (cx_, cy_)
+                    self.ink.append((self.f(t_c), fb, *rect, mk["id"]))
+                    self._doodle_sfx("circle_scribble", t_c + 0.02, cx_, mk["id"])
+        ta = max(t0 + 0.2, min(w0["t0"], self.o(self.f(end) - 1.05)))
+        for k, (dx, dy, nm, sz) in enumerate(((1, -0.2, "sparkle", 0.11), (-1, 0.35, "star4", 0.075))):
+            px = _clamp((r[2] + sz / 2 + 0.012 if dx > 0 else r[0] - sz / 2 - 0.012),
+                        SAFE["left"] + sz / 2, SAFE["right"] - sz / 2)
+            py = _clamp(y + dy * h, SAFE["top"] + 0.04, SAFE["bottom"] - 0.05)
+            if self.f(end) - self.f(ta + 0.12 * k) >= 0.9 and self.accent_ok(px, py, sz, fa, fb, shot, t0, end):
+                d = self.add("graphics", "price_spark", {
+                    "start": ta + 0.12 * k, "end": end, "kind": "doodle", "name": nm, "x": _r(px, 3),
+                    "y": _r(py, 4), "size": sz, "color": self.pal["accent"] if k == 0 else "#FFFFFF",
+                    "draw": True, "wiggle": 0.3, "anim_in": "draw", "anim_out": "fade",
+                    "rotation": _r((self.rand(f"ps{k}") - 0.5) * 20, 1)}, zone="accent", event=k == 0)
+                if d and k == 0:
+                    self._doodle_sfx(nm, ta + 0.03, px, d["id"])
+        self.sfx(w0["t0"] + 0.12, "cash", prio=9, src_id=it["id"])
+        self.sfx(t0 + 0.03, "whoosh_fast", prio=6, src_id=it["id"] + "in")
+        self.punch_at(w0["t0"], 0.1 + 0.05 * self.I, 0.5, role="price_punch", min_gap=0.8)
+        self.music_swells.append({"start": _r(t0), "end": _r(end), "db": 2.0})
+        return True
 
     def _address_hero(self, s: dict) -> dict | None:
         """Titulo protagonista de la direccion: calle chica + numero gigante, con pin y fondo
@@ -3401,6 +4419,7 @@ class _Choreo:
              value: str = "", icon: str = "", theme: str = "light", sfx_name: str = "pop",
              cut_end: float | None = None) -> dict | None:
         shot = self.shot_at(self.words[wi]["t0"])
+        t1 = max(min(t1, shot["end"] - 0.03), min(t0 + 0.9, shot["end"] - 0.03))   # no cruza el corte
         g = self.geom(shot, t0, t1)
         fa, fb = self.f(t0), self.f(t1)
         base = {"kind": "card", "variant": variant, "title": title, "subtitle": subtitle,
@@ -3424,6 +4443,9 @@ class _Choreo:
                                          it["id"]))
                         self.sfx(t0 + 0.05, sfx_name, prio=8, src_id=it["id"])
                         self.sfx(t0 + 0.02, "swipe", prio=2, src_id=it["id"])
+                        if self.I >= 0.5:
+                            self.arrow_to((self.XC - size / 2, y - h / 2, self.XC + size / 2, y + h / 2),
+                                          t0, t1, shot, it["id"])
                         return it
         # no cabe sobre la toma: escena a pantalla completa con la tarjeta grande (en `card`)
         if getattr(self, "n_cut_left", 0) > 0 and self.S["cutaways"] > 0 and fb - fa >= 1.2 \
@@ -3452,7 +4474,7 @@ class _Choreo:
                 return cw
         # tarjeta compacta (encabezado con icono, sin mapa/boton) si la completa no cupo
         if variant in ("location", "link", "schedule"):
-            compact = dict(base, variant="generic")
+            compact = dict(base, map=False) if variant == "location" else dict(base, variant="generic")
             for z, lo, hi in spans:
                 if not self.free(z, fa, fb) or (z == "center" and not self.free("low", fa, fb)):
                     continue
@@ -3490,7 +4512,7 @@ class _Choreo:
         shot = self.shot_at(t0)
         g = self.geom(shot, t0, t1)
         fa, fb = self.f(t0), self.f(t1)
-        size = 0.46 if variant == "link_below" else 0.62
+        size = 0.66 if variant == "link_below" else 0.68
         for z in zones:
             if not self.free(z, fa, fb):
                 continue
@@ -3498,13 +4520,20 @@ class _Choreo:
             if hi - lo < 0.06:
                 continue
             yy = 0.6 if z == "low" else ((lo + hi) / 2 if z == "top" else hi - 0.04)
+            if variant == "link_below":
+                # la flecha rebota hacia abajo: el centro de la pastilla queda arriba de subtitulos
+                yy = min(yy, self._link_y_max(size))
+                if yy - self._link_h(size) / 2 < max(lo, SAFE["top"]) - 0.01:
+                    continue
             it = self.add("graphics", "cta", {
                 "start": t0, "end": t1, "kind": "cta", "variant": variant, "label": label,
                 "handle": handle, "x": _r(self.XC, 3), "y": _r(yy, 4), "size": size,
                 "color": self.pal["accent"], "anim_in": "pop", "anim_out": "fade", "rotation": 0.0},
                 zone=z)
             if it:
-                self.ink.append((fa, fb, self.XC - size / 2, yy - 0.035, self.XC + size / 2, yy + 0.1, it["id"]))
+                hh = self._link_h(size) if variant == "link_below" else size * 0.17 * 1080 / 1920
+                self.ink.append((fa, fb, self.XC - size / 2, yy - hh / 2, self.XC + size / 2,
+                                 yy + (2.45 * hh if variant == "link_below" else hh / 2), it["id"]))
                 self.sfx(t0 + 0.04, "click", prio=8, src_id=it["id"])
                 if variant == "link_below":
                     self.sfx(t0 + 0.3, "swoosh_down", prio=3, src_id=it["id"])
@@ -3547,8 +4576,8 @@ class _Choreo:
             ws = [w for ln in blk for w in ln]
             shot = self.shot_at(ws[0]["t0"])
             face = shot.get("face")
-            if not shot["talk"] or shot.get("face_nominal") or not face:
-                continue
+            if not shot["talk"] or shot.get("face_nominal") or not face or not shot.get("matte_ok", True):
+                continue                         # sin recorte limpio no hay fondo reemplazado
             if not (0.3 <= face[0] <= 0.7 and face[3] >= 0.095):
                 continue
             a = max(ws[0]["t0"] - 0.12, shot["start"] + 0.05)
@@ -3558,7 +4587,11 @@ class _Choreo:
                 continue
             if self.drama_range and a < self.drama_range[1] and self.drama_range[0] < b:
                 continue
-            if not self.free("full", self.f(a), self.f(b)):
+            # la escena cambia el fondo detras de la persona: basta con que no haya otra escena ni
+            # titulos (un rotulo en la franja baja puede convivir)
+            if not (self.free("top", self.f(a), self.f(b))
+                    and self._zone_free_but("center", self.f(a), self.f(b),
+                                            {e[2] for e in self.occ["center"] if str(e[2]).startswith("gr_name")})):
                 continue
             score = len(blk) + (1 if any(w["n"] in CLAUSE_W for w in ws[1:]) else 0) + dur * 0.3
             if best is None or score > best[0]:
@@ -3579,10 +4612,132 @@ class _Choreo:
         self.music_swells.append({"start": _r(a), "end": _r(b), "db": 1.5})
         # titulos de la frase (el bloque sobre el fondo nuevo sale con tinta de contraste)
         n = self.title_sequence(s, s["w0"], s["w1"], "title", ["top", "center"],
-                                ["center", "center_low", "top"], humor=info["tone"] == "humor")
+                                ["center", "center_low", "top"], humor=info["tone"] == "humor",
+                                end_limit=self.title_limit())
         if self.S["color_pop"] and self.I >= 0.55:
             self._color_pop(s)
         info["_done"] = n > 0
+        return True
+
+    # ---------------------------------------------------------- 6b. escenas relampago
+    def flash_scenes(self) -> None:
+        """Insertos de ~1 s a pantalla completa en la palabra protagonista de una frase de
+        beneficio/problema (fondo del estilo + palabra gigante + icono que se dibuja), como los
+        cortes a grafico del editor de referencia. Entran con transicion y salen en seco."""
+        n = int(self.S.get("flash", 0) or 0)
+        if n <= 0 or self.I < 0.45 or self.windows is not None:
+            return
+        order = {"beneficio": 0, "problema": 1, "oferta": 1, "otro": 2}
+        cands = []
+        for s in self.sents:
+            sec = s["info"]["section"]
+            if sec not in order:
+                continue
+            ws = self.words[s["w0"]:s["w1"] + 1]
+            emph = set(s["info"]["emph"]) | {w["i"] for w in ws if w["kw"] and w["n"] not in STOP}
+            if s["info"].get("title"):
+                emph |= set(range(s["info"]["title"][0], s["info"]["title"][1] + 1))
+            # palabra del inserto: un sustantivo con icono ('LIMPIEZA'), no un intensificador
+            pool_w = [w for w in ws if w["i"] in emph and w["n"] not in STOP and len(w["n"]) >= 4
+                      and not w["n"].endswith(("isimo", "isima", "mente"))]
+            if not pool_w or s["info"].get("_done"):
+                continue
+            if any(len(e) >= 3 for e in find_enums(self.words, s["w0"], s["w1"])):
+                continue                     # la lista tiene su propia escena de iconos
+            pool_w.sort(key=lambda w: (2 * bool(tone_icon(w["n"], self.role)) + w["n"].endswith(_NOUN_SUFFIX)
+                                       + 0.5 * w["kw"] + len(w["n"]) / 20), reverse=True)
+            for rank, hero in enumerate(pool_w[:2]):
+                if hero["i"] in self.titled_words:
+                    continue
+                icon = tone_icon(hero["n"], self.role, self.used["topic_icon"])
+                if not icon:
+                    pool = topic_icons(self.role)
+                    icon = pool[0] if pool else None
+                if icon:
+                    cands.append((order[sec], rank, s["id"], s, hero, icon))
+        cands.sort(key=lambda c: c[:3])
+        placed = 0
+        done_s: set = set()
+        for *_k, s, hero, icon in cands:
+            if placed >= n:
+                break
+            if s["id"] in done_s:
+                continue
+            if self._flash(s, hero, icon):
+                placed += 1
+                done_s.add(s["id"])
+
+    def _flash(self, s: dict, hero: dict, icon: str) -> bool:
+        shot = self.shot_at(hero["t0"])
+        a = self.snap_start(max(hero["t0"] - 0.12, shot["start"] + 0.03))
+        fa = self.f(a)
+        fb = min(self.f(hero["t1"]) + 0.75, fa + 1.2, shot["f1"] - 0.03)
+        hook_end = self.f(self.sents[0]["t1"]) if self.sents else 0.0
+        # se acomoda entre lo que ya hay: empieza al terminar un titulo que acaba enseguida y
+        # termina antes del siguiente (siempre con la palabra dentro)
+        busy = [(a_, b_) for z in ("top", "center", "low") for a_, b_, iid in self.occ[z]
+                if not str(iid).startswith("reserve:") and a_ < fb and fa < b_]
+        for a_, b_ in busy:
+            if a_ <= fa and b_ - fa <= 0.3:
+                fa = b_ + 0.02
+            elif a_ > fa + 0.5:
+                fb = min(fb, a_ - 0.05)
+        if fa > self.f(hero["t0"]) + 0.15:
+            return False
+        a = self.o(fa)
+        if fb - fa < 0.75 or fa < max(3.0, hook_end):
+            return False                     # el hook muestra la cara (confianza)
+        if any(a_ < fb + 0.6 and fa - 0.6 < b_ for a_, b_, _ in self.occ["full"]) \
+                or any(a_ < fb and fa < b_ for a_, b_, _ in self.bg_fx) \
+                or any(a_ < fb and fa < b_ for a_, b_ in self.reserved) \
+                or any(self.f(float(t["start"])) < fb and fa < self.f(float(t["end"])) for t in self.fx["text"]):
+            return False
+        if self.drama_range and self.f(self.drama_range[0]) - 0.3 < fb and fa < self.f(self.drama_range[1]) + 0.3:
+            return False
+        b = self.o(fb)
+        # palabra gigante (con 1-2 palabras previas chicas) + icono del rubro que se dibuja
+        prev = [w for w in self.words[max(s["w0"], hero["i"] - 2):hero["i"]] if w["i"] >= s["w0"]]
+        while prev and prev[0]["n"] in STOP and len(prev) > 1 and prev[-1]["n"] not in STOP:
+            prev.pop(0)
+        font = self.K["display"]
+        lines = []
+        if prev and self.f(prev[0]["t0"]) >= fa - 0.05:
+            lines.append({"text": " ".join(_display(w["text"]) for w in prev), "scale": 0.36,
+                          "font": self.K["text"]})
+        lines.append({"text": _display(hero["text"]).strip("¿?¡!").upper(), "scale": 1.0, "font": font,
+                      "color": self.pal["accent"]})
+        size = self._fit_lines(lines, 0.2, 0.74)
+        bg = self.pick("bg", [b_ for b_ in self.S["backgrounds"] if b_ not in LIGHT_BG and b_ != "blur_self"]
+                       or ["dark_stars"])
+        bcol = self.pal["accent"] if _luma(self.pal["accent"]) < 0.9 else "#FFFFFF"
+        ty = 0.5
+        gr = [{"kind": "icon", "name": icon, "variant": "outline", "badge": "circle", "badge_color": bcol,
+               "color": self.pal["dark"] if _luma(bcol) > 0.55 else "#FFFFFF", "draw": True,
+               "x": 0.5, "y": _r(ty - size * 0.95 / self.aspect - 0.1, 4), "size": 0.2, "anim_in": "pop",
+               "offset": 0.04},
+              {"kind": "doodle", "name": "sparkle", "x": 0.78, "y": _r(ty - size * 0.55 / self.aspect, 4),
+               "size": 0.1, "color": self.pal["accent"], "draw": True, "anim_in": "draw", "offset": 0.12},
+              {"kind": "doodle", "name": "star4", "x": 0.22, "y": _r(ty + size * 0.45 / self.aspect, 4),
+               "size": 0.07, "color": "#FFFFFF", "draw": True, "anim_in": "draw", "offset": 0.2}]
+        cw = self.add("cutaways", "flash", {
+            "start": a, "end": b, "kind": "title_card", "background": bg,
+            "bg_colors": [self.pal["dark"], self.pal["accent2"]],
+            # `text` (ademas de las lineas) marca la escena con texto: el render oculta los subtitulos
+            "text": {"preset": "stack", "lines": lines, "text": " ".join(ln["text"] for ln in lines),
+                     "x": 0.5, "y": ty, "size": _r(size, 4), "font": font,
+                     "color": "#FFFFFF", "accent": self.pal["accent"], "anim_in": "pop", "align": "center",
+                     "accent_words": [lines[-1]["text"]]},
+            "graphics": gr}, zone="full")
+        if not cw:
+            return False
+        self.request_transition(a, "scene")
+        self.sfx(a + 0.02, "pop", prio=7, src_id=cw["id"], vary=True)
+        self.sfx(b - 0.02, "whoosh_soft", prio=8, src_id=cw["id"] + "o")
+        self.music_swells.append({"start": _r(a), "end": _r(b), "db": 2.0})
+        self.used["topic_icon"] += 1
+        for w in self.words[s["w0"]:s["w1"] + 1]:
+            if fa - 0.05 <= w["f0"] and w["f1"] <= fb + 0.1:
+                self.titled_words.add(w["i"])
         return True
 
     # ---------------------------------------------------------- 7. tomas sin voz (b-roll)
@@ -3616,6 +4771,9 @@ class _Choreo:
                     self.sfx(t0 + 0.05, "notification", prio=8, src_id=it["id"])
                     self.sfx(t0 + 0.02, "swipe", prio=3, src_id=it["id"])
                     self.sfx(t0 + 0.9, "pop_soft", prio=2, gain=-9.0, src_id=it["id"] + "pin")
+                    if self.I >= 0.5:
+                        self.arrow_to((self.XC - size / 2, y - h / 2, self.XC + size / 2, y + h / 2),
+                                      t0, t1, s, it["id"])
             elif "address" not in self.shown and re.match(r"^(.*?)(\d{1,6}[A-Za-z]?)$", self.ent.get("address", "").strip()):
                 m = re.match(r"^(.*?)(\d{1,6}[A-Za-z]?)$", self.ent.get("address", "").strip())
                 lines = [{"text": m.group(1).strip().rstrip(",").upper(), "scale": 0.4, "font": self.K["text"]},
@@ -3648,47 +4806,113 @@ class _Choreo:
                 self.music_swells.append({"start": _r(s["start"]), "end": _r(s["end"]), "db": 4.0})
 
     # ---------------------------------------------------------- 8. rotulo de nombre
+    def _lt_texts(self) -> tuple[str, str] | None:
+        """(titulo, subtitulo) del rotulo: nombre publicable + rol; sin nombre confirmado, el
+        rol + el tema (nunca un nombre leido en un letrero sin confirmar)."""
+        role = str(self.ent.get("role") or "").strip()
+        if self.name:
+            return self.name, role
+        if not role:
+            return None
+        sub = str(self.script.get("topic") or "").strip()
+        if not sub or norm(sub) == norm(role) or len(sub.split()) > 3:
+            sv = ""
+            if "price" in self.anc:
+                sv = self._service(self._sent_of(self.anc["price"][0]))
+            sub = sv.capitalize() if sv else ""
+        if not sub or norm(sub) == norm(role):
+            return None
+        return role, _cap_first(sub.lower())
+
     def lower_third(self) -> None:
-        name = self.ent.get("name")
-        if not name:
+        """Rotulo nombre + rol que PRESENTA a quien habla: en la primera toma a camara despues
+        del hook (como un editor), donde no haya ningun titulo encima (franja baja Y centro
+        libres). El remate final queda solo para seguir + link."""
+        txt = self._lt_texts()
+        if txt is None:
             return
+        title, sub = txt
         start_f = 2.0
         if self.sents:
             start_f = max(start_f, self.f(self.sents[0]["t1"]) + 0.3)
-        if self.drama_range:
-            start_f = max(start_f, self.f(self.drama_range[1]) + 0.2) if self.f(self.drama_range[0]) < start_f + 3 else start_f
-        for s in self.shots:
-            if not s["talk"]:
+        if self.drama_range and self.f(self.drama_range[0]) < start_f + 3:
+            start_f = max(start_f, self.f(self.drama_range[1]) + 0.2)
+        end_lim = (self.reserved[0][0] - 2.0) if self.reserved else self.D - 2.5
+        for sh, L in [(sh, L) for L in (2.4, 2.0) for sh in self.shots]:
+            if not sh["talk"] or sh.get("face_nominal"):
                 continue
-            fa = max(s["f0"] + 0.4, start_f)
-            fb = min(s["f1"] - 0.3, fa + 2.8)
-            if fb - fa < 1.8:
-                continue
-            if self.free("low", fa, fb):
+            lo, hi = max(sh["f0"] + 0.3, start_f), min(sh["f1"] - 0.2, end_lim)
+            fa = lo
+            while fa + L <= hi + 1e-6:
+                fb = fa + L
+                if sh["k"] != self.shot_at(self.o(fb - 0.05))["k"] or not self.kept(self.o(fa + 0.05)) \
+                        or not (self.free("low", fa, fb) and self.free("center", fa, fb)) \
+                        or any(a < fb and fa < b for a, b in self.reserved) \
+                        or any(a < fb and fa < b for a, b, _ in self.bg_fx):
+                    fa += 0.25
+                    continue
                 t0, t1 = self.o(fa), self.o(fb)
-                lo, hi = self.geom(s, t0, t1)["low"]
-                if hi - lo < 0.06:
+                g = self.geom(sh, t0, t1)
+                y = _clamp(max(g["low"][0] + 0.02, 0.615), 0.5, self.cap_top - 0.04)
+                rect = (0.07, y - 0.04, 0.8, y + 0.04)
+                fr = self.face_rect(sh, t0, t1)
+                if (fr is not None and rect[1] < fr[3]) or not self.clear_of_ink(rect, fa, fb):
+                    fa += 0.25
                     continue
                 it = self.add("graphics", "name", {
-                    "start": t0, "end": t1, "kind": "lower_third", "title": name,
-                    "subtitle": self.ent.get("role", ""), "x": 0.07, "y": _r((lo + hi) / 2, 4),
-                    "size": 0.056, "color": self.pal["accent"], "anim_in": "slide_left", "anim_out": "fade",
-                    "rotation": 0.0}, zone="low")
+                    "start": t0, "end": t1, "kind": "lower_third", "title": title, "subtitle": sub,
+                    "x": 0.07, "y": _r(y, 4), "size": 0.064, "color": self.pal["accent"], "theme": "dark",
+                    "anim_in": "draw", "anim_out": "undraw", "rotation": 0.0}, zone="low")
                 if it:
-                    self.sfx(t0 + 0.02, "swipe", prio=6, src_id=it["id"])
+                    self.occ["center"].append((fa, fb, it["id"]))
+                    self.ink.append((fa, fb, *rect, it["id"]))
+                    self.sfx(t0 + 0.02, "swipe", prio=7, src_id=it["id"])
+                    self.sfx(t0 + 0.3, "pop_soft", prio=3, src_id=it["id"] + "b", vary=True)
                     return
+                fa += 0.25
 
     # ---------------------------------------------------------- 9. CTA final
+    def _closing_broll(self) -> dict | None:
+        """Toma sin voz que cierra el video (el usuario subio la fachada al final): es la
+        tarjeta de cierre."""
+        if not self.last_word:
+            return None
+        for sh in self.shots:
+            if not sh["talk"] and sh["f1"] >= self.D - 0.05 and sh["f0"] >= self.last_word["f1"] - 0.15 \
+                    and sh["f1"] - sh["f0"] >= 1.2:
+                return sh
+        return None
+
     def _final_window(self) -> tuple[float, float] | None:
+        """Cierre hasta el ULTIMO cuadro (el CTA no se desvanece antes del final):
+          - si el video termina en un b-roll mudo, el cierre es esa toma completa;
+          - si la ultima frase es el remate (humor / cierre), el CTA entra al TERMINAR la ultima
+            palabra: el chiste se ve limpio y la cola (~2 s) es el CTA;
+          - si no, los ultimos ~2-2.6 s."""
         if self.D < 6:
             return None
-        last_f = max([w["f1"] for w in self.words] + [0.0])
-        fa = max(self.D - 2.3, self.D * 0.8, min(self.D - 1.6, last_f - 1.5))
-        fb = self.D - 0.1
-        return (fa, fb) if fb - fa >= 1.2 else None
+        lw = self.last_word
+        last_f = lw["f1"] if lw else 0.0
+        fa = None
+        cb = self._closing_broll()
+        if cb is not None and self.D - cb["f0"] >= 1.5:
+            fa = cb["f0"] + 0.02
+        elif lw is not None:
+            info = self._sent_of(lw["i"])["info"]
+            if info.get("tone") == "humor" or info.get("section") == "cierre":
+                fa = max(last_f - 0.05, self.D - 3.2)
+                if self.D - fa < 1.6:
+                    # el crudo termina casi con la voz: el CTA entra EN la ultima palabra (el
+                    # titulo del remate termina ahi y su subtitulo la muestra)
+                    fa = max(lw["f0"] - 0.1, self.D - 2.0)
+        if fa is None:
+            fa = max(self.D - 2.6, self.D * 0.8, min(self.D - 1.8, last_f - 1.6))
+        fa = min(fa, self.D - 1.2)
+        fb = self.D
+        return (fa, fb) if fb - fa >= 1.2 - 1e-6 else None
 
     def reserve_final_cta(self) -> None:
-        """Reserva el cierre (~2 s) para el CTA: sin titulos ni acentos encima (cierre limpio)."""
+        """Reserva el cierre para el CTA: sin titulos ni acentos encima (cierre limpio)."""
         win = self._final_window()
         if win is None or self.windows is not None:
             return
@@ -3696,36 +4920,213 @@ class _Choreo:
         for z in ("top", "center", "low"):
             self.occ[z].append((win[0], win[1], "reserve:cta"))
 
+    def title_limit(self) -> float | None:
+        """Fin maximo (tiempo original) de un titulo: justo antes del cierre reservado."""
+        return self.o(self.reserved[0][0]) - 0.02 if self.reserved else None
+
+    @staticmethod
+    def _link_h(size: float) -> float:
+        """Alto (fraccion de H) de la pastilla link_below de ancho `size` (graphics: h = 0.2 W')."""
+        return size * 0.2 * 1080.0 / 1920.0
+
+    def _link_y_max(self, size: float, arrow: float = 1.0) -> float:
+        """y maxima del centro de link_below para que su flecha (escala `arrow`) no pise los
+        subtitulos (graphics: la flecha llega a h/2 + 0.3h + 1.66h*escala bajo el centro)."""
+        h = self._link_h(size)
+        return self.cap_top - 0.012 - (0.8 + 1.66 * arrow) * h
+
+    def _zone_free_but(self, zone: str, fa: float, fb: float, skip: set) -> bool:
+        for z in ([zone, "full"] if zone != "full" else ["full"]):
+            for a, b, iid in self.occ[z]:
+                if iid in skip or str(iid).startswith("reserve:"):
+                    continue
+                if fa < b - 1e-6 and a < fb - 1e-6:
+                    return False
+        return True
+
+    def extend_link(self, it: dict) -> bool:
+        """El link de la frase del CTA se sostiene hasta el ULTIMO cuadro si el cierre empieza a
+        menos de 6 s (en vez de repetir un link identico): mas tiempo en pantalla y el remate
+        suma el 'seguir' encima."""
+        if not self.reserved or it is None:
+            return False
+        fs_, fe = self.f(float(it["start"])), self.f(float(it["end"]))
+        fa_r = self.reserved[0][0]
+        if fa_r - fe > 6.0:
+            return False
+        zone = zone_of("graphics", it)
+        if zone != "low":
+            # en la franja del pecho bloquearia los titulos del remate: se baja a la franja baja,
+            # mas grande y sin flecha (un pase largo en pantalla; la voz ya dijo 'aqui abajo')
+            size = 0.7
+            y = min(0.625, self._link_y_max(size, 0.0))
+            if _zone_y(y) != "low" or not self._zone_free_but("low", fs_, self.D, {it["id"]}):
+                return False
+            for z in ("top", "center", "low"):
+                self.occ[z] = [e for e in self.occ[z] if e[2] != it["id"]]
+            self.ink = [r for r in self.ink if r[6] != it["id"]]
+            hh = self._link_h(size)
+            self.ink.append((fs_, fe, self.XC - size / 2, y - hh / 2, self.XC + size / 2, y + hh / 2, it["id"]))
+            it.update({"y": _r(y, 4), "size": size, "arrow_scale": 0.0})
+            self.occ["low"].append((fs_, fe, it["id"]))
+        elif not self._zone_free_but("low", fe, self.D, {it["id"]}):
+            return False
+        it["end"] = _r(float(self.tl.duration))
+        it["anim_out"] = "none"
+        self.occ["low"].append((fe, self.D, it["id"]))
+        rect = next((r[2:6] for r in self.ink if r[6] == it["id"]), None)
+        if rect is not None:
+            self.ink.append((fe, self.D, *rect, it["id"]))
+        self.link_ext = True
+        return True
+
+    def _follow_fields(self) -> dict:
+        """Textos del CTA seguir: @usuario, o el nombre publicable (+ rol), o SOLO el rol si el
+        nombre no esta confirmado (nunca el nombre de un letrero sin confirmar)."""
+        handle = str(self.ent.get("handle") or "").strip()
+        if handle:
+            return {"label": "Sígueme", "handle": handle}
+        if self.name:
+            return {"label": "Sígueme", "handle": ""}
+        role = str(self.ent.get("role") or "").strip()
+        if role:
+            return {"label": role, "handle": role, "subtitle": "Sígueme para más"}
+        return {"label": "Sígueme", "handle": ""}
+
     def final_cta(self) -> None:
+        """Remate hasta el ultimo cuadro: seguir (nombre/rol) + link grande con flecha (o el link
+        de la frase del CTA sostenido); sobre el b-roll de cierre suma la ubicacion. Fondo
+        desenfocado detras de la persona solo DESPUES de la ultima palabra (el gag se ve)."""
         if not self.reserved:
             if self.windows is None and self.D >= 6 and not any(
                     it.get("kind") == "cta" for it in self.fixed["graphics"]):
                 win = self._final_window()
                 if win:
-                    self.cta("follow", self.o(win[0]), self.o(win[1]), label="Sigueme")
+                    self.cta("follow", self.o(win[0]), self.o(win[1]), label="Sígueme")
             return
         fa, fb = self.reserved[0]
         for z in ("top", "center", "low"):
             self.occ[z] = [e for e in self.occ[z] if e[2] != "reserve:cta"]
         if any(it.get("kind") == "cta" and self.f(float(it["end"])) > fa for it in self.fixed["graphics"]):
             return
-        link = self.anc.get("link") is not None
-        variant = "link_below" if link else "follow"
-        label = (self.ent.get("link_label") or "Link abajo") if link else "Sigueme"
-        t0, t1 = self.o(fa), self.o(fb)
-        it = self.cta(variant, t0, t1, label=label, handle=self.ent.get("handle", ""),
-                      zones=("low", "center"))
-        if it is None:
+        t0, t1 = self.o(fa), float(self.tl.duration)
+        shot = self.shot_at(t0 + 0.02)
+        g = self.geom(shot, t0, t1)
+        ext = self.link_item if getattr(self, "link_ext", False) else None
+        link = self.anc.get("link") is not None and ext is None
+        lo = max(g["center"][0], SAFE["top"] + 0.05) if shot["talk"] else 0.4
+        stack = ["follow"] + (["link_below"] if link else [])
+        placed = []
+        if ext is not None:
+            # seguir encima del link sostenido (si no cabe al pecho, arriba de la cabeza)
+            ly = float(ext["y"])
+            ltop = ly - self._link_h(float(ext["size"])) / 2
+            for fs in (0.78, 0.74, 0.7):
+                hf = fs * 0.17 * 1080 / 1920
+                yy = ltop - 0.026 - hf / 2
+                if yy - hf / 2 >= lo:
+                    placed = [("follow", yy, fs)]
+                    break
+            if not placed and g.get("head_top"):
+                top0, top1 = g["top"]
+                hf = 0.76 * 0.17 * 1080 / 1920
+                if top1 - top0 >= hf + 0.02:
+                    placed = [("follow", (top0 + top1) / 2, 0.76)]
+        else:
+            opts = ((0.78, 0.66, 1.0), (0.74, 0.64, 1.0), (0.78, 0.68, 0.0), (0.74, 0.62, 0.0), (0.68, 0.56, 0.0))
+            for fs, ls, ar in opts:
+                hf = fs * 0.17 * 1080 / 1920
+                y = lo + 0.012
+                pos = {}
+                for v in stack:
+                    if v == "follow":
+                        pos[v] = (y + hf / 2, fs)
+                        y += hf + 0.024
+                    else:
+                        hl = self._link_h(ls)
+                        pos[v] = (y + hl / 2, ls)
+                        y += hl
+                if "link_below" in pos and pos["link_below"][0] > self._link_y_max(pos["link_below"][1], ar):
+                    continue
+                if "link_below" not in pos and pos["follow"][0] > self.cap_top - 0.05:
+                    continue
+                placed = [(v, *pos[v]) for v in stack]
+                self._final_arrow = ar
+                break
+            if not placed:
+                # no cabe la pila: solo el link (o solo seguir) en el hueco, sin flecha
+                v = stack[-1]
+                ls = 0.6
+                yy = min(self._link_y_max(ls, 0.0), max(lo + 0.05, 0.5)) if v == "link_below" else max(lo + 0.05, 0.52)
+                placed = [(v, yy, ls if v == "link_below" else 0.74)]
+                self._final_arrow = 0.0
+        first = None
+        ff = self._follow_fields()
+        for k, (v, yy, sz) in enumerate(placed):
+            st = t0 + 0.3 * k
+            fields = {"start": st, "end": t1, "kind": "cta", "variant": v,
+                      "label": (self.ent.get("link_label") or "Link abajo") if v == "link_below" else ff["label"],
+                      "handle": ff.get("handle", "") if v == "follow" else self.ent.get("handle", ""),
+                      "x": _r(self.XC, 3), "y": _r(yy, 4), "size": sz,
+                      "color": self.pal["accent"], "anim_in": "pop", "anim_out": "none", "rotation": 0.0}
+            if v == "follow" and ff.get("subtitle"):
+                fields["subtitle"] = ff["subtitle"]
+            if v == "link_below" and getattr(self, "_final_arrow", 1.0) < 1.0:
+                fields["arrow_scale"] = 0.0          # sin flecha diminuta: la pastilla sola
+            zn = ("center" if k == 0 else "low") if ext is None else _zone_y(yy)
+            it = self.add("graphics", "cta", fields, zone=zn, event=True)
+            if not it:
+                continue
+            first = first or it
+            h = sz * 0.17 * 1080 / 1920 if v == "follow" else self._link_h(sz) * 2.6
+            self.ink.append((fa, fb, self.XC - sz / 2, yy - h / 2, self.XC + sz / 2, yy + h / 2, it["id"]))
+            self.sfx(st + 0.04, "click", prio=8, src_id=it["id"])
+            if v == "follow":
+                self.sfx(st + 1.1, "success", prio=5, src_id=it["id"] + "ok")
+            else:
+                self.sfx(st + 0.3, "swoosh_down", prio=4, src_id=it["id"])
+        if first is None and ext is None:
             return
-        shot = self.shot_at(t0)
-        if self.S["scenes"]["bg_blur"] and shot["talk"] and not shot.get("face_nominal"):
-            self.add("effects", "cta_blur", {"start": t0, "end": t1, "kind": "bg_blur", "radius": 16.0},
-                     event=False)
-        elif self.S["scenes"]["outline"] and shot["talk"] and not shot.get("face_nominal"):
-            self.add("effects", "cta_outline", {"start": t0, "end": t1, "kind": "subject_outline",
+        if not shot["talk"]:
+            self._closing_location(t0, t1, placed)
+            return
+        lw = self.last_word
+        b0 = max(t0, (lw["t1"] + 0.12) if lw else t0)
+        if self.f(t1) - self.f(b0) < 0.6:
+            return
+        if self.S["scenes"]["bg_blur"] and not shot.get("face_nominal"):
+            self.add("effects", "cta_blur", {"start": b0, "end": t1, "kind": "bg_blur", "radius": 16.0,
+                                             "fade_in": 0.25}, event=False)
+        elif self.S["scenes"]["outline"] and shot.get("matte_ok"):
+            self.add("effects", "cta_outline", {"start": b0, "end": t1, "kind": "subject_outline",
                                                 "color": self.pal["accent"], "width": 6.0, "glow": 0.5},
                      event=False)
-        self.sfx(t0 + 0.5, "success", prio=4, src_id=it["id"] + "ok")
+
+    def _closing_location(self, t0: float, t1: float, placed: list) -> None:
+        """Cierre sobre la fachada (b-roll final): la ubicacion en tarjeta compacta arriba de los
+        CTA (donde encontrarte + seguir + agendar)."""
+        title = self.ent.get("address") or self.ent.get("landmark")
+        if not title:
+            return
+        sub = self.ent.get("landmark") if self.ent.get("address") else ""
+        top_cta = min([yy - (sz * 0.17 * 1080 / 1920) / 2 for _v, yy, sz in placed] + [0.62])
+        base = {"kind": "card", "variant": "location", "title": title, "subtitle": sub, "value": "",
+                "icon": "map-pin", "theme": "light", "color": "#FFFFFF", "anim_in": "rise", "anim_out": "none",
+                "rotation": 0.0, "items": [], "map": False}
+        for size in (0.74, 0.66, 0.58):
+            h = card_height(dict(base, size=size), self.style)
+            y = top_cta - 0.03 - h / 2
+            if y - h / 2 < SAFE["top"] + 0.02:
+                continue
+            st = self.o(self.f(t0) + 0.15)
+            it = self.add("graphics", "end_place", dict(base, start=st, end=t1, x=_r(self.XC, 3), y=_r(y, 4),
+                                                        size=size), zone="top")
+            if it:
+                self.occ["top"].append((self.f(st), self.D, it["id"]))
+                self.ink.append((self.f(st), self.D, self.XC - size / 2, y - h / 2, self.XC + size / 2, y + h / 2,
+                                 it["id"]))
+                self.sfx(st + 0.05, "notification", prio=6, src_id=it["id"])
+            return
 
     # ---------------------------------------------------------- 10. resto del guion
     def sentences(self) -> None:
@@ -3739,8 +5140,10 @@ class _Choreo:
             if s["info"].get("_done"):
                 continue
             covered = sum(self.f(w["t1"]) - self.f(w["t0"]) for w in self.words if w["i"] in self.titled_words)
-            if covered / total >= target and s["info"]["section"] not in ("beneficio", "problema"):
-                break
+            # el remate con humor siempre lleva titulo (es el chiste: se lee, no solo se oye)
+            if covered / total >= target and s["info"]["section"] not in ("beneficio", "problema") \
+                    and s["info"].get("tone") != "humor":
+                continue
             info = s["info"]
             humor = info["tone"] == "humor"
             fxk = info["fx"]
@@ -3756,7 +5159,8 @@ class _Choreo:
                     info["_done"] = True
                     continue
             n = self.title_sequence(s, s["w0"], s["w1"], "title", ["top", "center"],
-                                    ["center", "center_low", "top"], humor=humor)
+                                    ["center", "center_low", "top"], humor=humor,
+                                    end_limit=self.title_limit())
             if not color_pop_used and (fxk == "color_pop" or (self.S["color_pop"] and info["section"] == "beneficio"
                                                               and self.I >= 0.55)):
                 color_pop_used = self._color_pop(s)
@@ -3803,7 +5207,7 @@ class _Choreo:
         cw = self.add("cutaways", "scene", {
             "start": a, "end": b, "kind": "title_card", "background": bg,
             "bg_colors": [self.pal["dark"], self.pal["accent2"]],
-            "text": {"preset": "stack", "lines": lines, "x": 0.5, "y": 0.46, "size": _r(size, 4),
+            "text": {"preset": "stack", "lines": lines, "text": txt, "x": 0.5, "y": 0.46, "size": _r(size, 4),
                      "font": font, "color": "#FFFFFF", "accent": self.pal["accent"],
                      "anim_in": "word_stagger", "align": "center"},
             "graphics": [{"kind": "doodle", "name": "sparkle", "x": 0.78, "y": 0.38, "size": 0.1,
@@ -3829,17 +5233,156 @@ class _Choreo:
         font = self.K["display"]
         lines = [{"text": _display(hero[0]["text"]).upper(), "scale": 1.0, "font": font}]
         size = self._fit_lines(lines, 0.32, self.MAXW)
-        y = _clamp(g["head_top"] + 0.03, SAFE["top"] + 0.08, 0.42)
-        it = self.add("text", "behind", {"start": a, "end": b, "preset": "behind_giant", "lines": lines,
-                                         "x": 0.5, "y": _r(y, 4), "size": _r(size, 4), "font": font,
-                                         "color": "#FFFFFF", "accent": self.pal["accent"],
-                                         "behind": True, "anim_in": "scale_down", "anim_out": "fade",
-                                         "align": "center", "shadow": 0.2}, zone="top")
+        # la coronilla tapa ~15% inferior de la palabra (se siente detras y se lee)
+        gh = size * 1.12 / self.aspect
+        y = _clamp(g["head_top"] - 0.15 * gh, SAFE["top"] + gh / 2, 0.42)
+        fields = self.legible_behind({"start": a, "end": b, "preset": "behind_giant", "lines": lines,
+                                      "x": 0.5, "y": _r(y, 4), "size": _r(size, 4), "font": font,
+                                      "color": "#FFFFFF", "accent": self.pal["accent"],
+                                      "behind": True, "anim_in": "scale_down", "anim_out": "fade",
+                                      "align": "center", "shadow": 0.2}, shot, a, b)
+        it = self.add("text", "behind", fields, zone="top")
         if it:
             self.sfx(a + 0.05, "impact_soft", prio=6, src_id=it["id"])
             self.titled_words.add(hero[0]["i"])
             return True
         return False
+
+    # ---------------------------------------------------------- 10b. enumeraciones
+    def _enum_icons_for(self, items: list[list[dict]]) -> list[str] | None:
+        """Un icono distinto por elemento; los que no tienen traduccion toman uno del rubro (o
+        uno generico) para que la lista se vea completa. None si ninguno se reconoce."""
+        icons: list[str | None] = []
+        for k, it_ in enumerate(items):
+            ic = None
+            for w in reversed(it_):
+                if w["n"] in STOP:
+                    continue
+                ic = tone_icon(w["n"], self.role, k)
+                if ic and ic not in icons:
+                    break
+                ic = None
+            icons.append(ic)
+        if sum(1 for ic in icons if ic) < max(1, len(items) - 1):
+            return None
+        spare = [n for n in topic_icons(self.role) + ["circle-check", "star", "sparkles", "heart", "award"]
+                 if n not in icons and assets.icon_exists(n)]
+        return [ic or spare.pop(0) for ic in icons]
+
+    def enumerations(self) -> None:
+        """Listas de 3+ elementos ('cortes, barba y cejas'): escena de iconos a pantalla completa
+        que se dibujan al pronunciar cada uno, con su etiqueta y un punteado que los une (como
+        el editor de referencia). Las de 2 (clausulas paralelas) se marcan con iconos junto al
+        titulo en enum_icons()."""
+        self.enum_pending: list[tuple[dict, list, list[str]]] = []
+        for s in self.sents:
+            if s["info"].get("_done"):
+                continue
+            for items in find_enums(self.words, s["w0"], s["w1"]):
+                icons = self._enum_icons_for(items)
+                if not icons:
+                    continue
+                if len(items) >= 3 and self.n_cut_left > 0 and self.S["cutaways"] > 0 \
+                        and self._enum_scene(s, items, icons):
+                    self.n_cut_left -= 1
+                    break
+                self.enum_pending.append((s, items, icons))
+
+    def _enum_scene(self, s: dict, items: list[list[dict]], icons: list[str]) -> bool:
+        first, last = items[0][0], items[-1][-1]
+        shot = self.shot_at(first["t0"])
+        a = max(first["t0"] - 0.25, s["t0"] - 0.05, shot["start"] + 0.03)
+        nxt = self.sents[s["id"] + 1]["t0"] if s["id"] + 1 < len(self.sents) else self.tl.duration
+        b = min(last["t1"] + 0.6, nxt - 0.05, self.shot_at(last["t0"])["end"] - 0.03)
+        fa, fb = self.f(a), self.f(b)
+        # lo que termina apenas empezada la escena (el golpe del drama que se sostiene) la retrasa
+        busy = [e for z in ("full", "top", "center", "low", "accent") for e in self.occ[z]
+                if fa < e[1] - 1e-6 and e[0] < fb - 1e-6 and not str(e[2]).startswith("reserve:")]
+        if busy and all(e[1] <= fa + 0.45 for e in busy):
+            fa = max(e[1] for e in busy) + 0.02
+            a = self.o(fa)
+        if fb - fa < 1.2 or fb - fa > 4.5 or not self.free("full", fa, fb):
+            return False
+        n = len(items)
+        cols = n if n <= 3 else 2
+        rows = (n + cols - 1) // cols
+        sz = {1: 0.28, 2: 0.26, 3: 0.22}.get(cols, 0.22)
+        xs = [0.47 + (c - (cols - 1) / 2) * (0.28 if cols == 3 else 0.34) for c in range(cols)]
+        dy_row = 0.25
+        y0 = 0.45 - (rows - 1) * dy_row / 2
+        gr = []
+        bcol = self.pal["accent"] if _luma(self.pal["accent"]) < 0.9 else "#FFFFFF"
+        for k, (it_, ic) in enumerate(zip(items, icons)):
+            r_, c_ = divmod(k, cols)
+            x, y = xs[c_], y0 + r_ * dy_row
+            off = max(0.05, self.f(it_[0]["t0"]) - fa - 0.08)
+            label = " ".join(_display(w["text"]) for w in it_).strip(",.;:").upper()
+            gr.append({"kind": "icon", "name": ic, "variant": "outline", "badge": "circle", "badge_color": bcol,
+                       "color": self.pal["dark"] if _luma(bcol) > 0.55 else "#FFFFFF", "draw": True,
+                       "x": _r(x, 3), "y": _r(y, 4), "size": sz, "anim_in": "pop", "offset": _r(off, 3)})
+            gr.append({"kind": "sticker_text", "text": label, "x": _r(x, 3), "y": _r(y + sz * 0.5 / self.aspect * 1.2 + 0.035, 4),
+                       "size": 0.05 if cols < 3 else 0.044, "bg": "#FFFFFF", "fg": self.pal["dark"], "anim_in": "pop",
+                       "rotation": _r((self.rand(f"el{k}") - 0.5) * 6, 1), "offset": _r(off + 0.12, 3)})
+            if k > 0 and c_ > 0 and r_ == 0:
+                # punteado SOLO en la primera fila (arco por encima de los iconos): entre filas o
+                # en la segunda fila rozaria iconos y etiquetas
+                px, py = xs[c_ - 1], y
+                gr.append({"kind": "doodle", "name": "dotted_path", "x": _r(px + 0.09, 3),
+                           "y": _r(py - sz * 0.62 / self.aspect, 4),
+                           "path_to": [_r(x - 0.09, 3), _r(y - sz * 0.62 / self.aspect, 4)],
+                           "size": 0.2, "color": "#FFFFFF", "draw": True, "anim_in": "draw",
+                           "offset": _r(max(0.0, off - 0.2), 3), "bend": 0.5})
+        label = self._enum_label(s, first)
+        text = None
+        if label:
+            box = self.pal["accent"]
+            text = {"preset": "kicker", "text": label,
+                    "x": 0.47, "y": _r(max(SAFE["top"] + 0.05, y0 - sz * 0.5 / self.aspect - 0.09), 4), "size": 0.058,
+                    "font": self.K["text"], "box": box, "color": "#141414" if _luma(box) > 0.55 else "#FFFFFF",
+                    "anim_in": "slide_left"}
+        bg = self.pick("bg", [b_ for b_ in self.S["backgrounds"] if b_ in ("grid_warp", "dark_stars")] or ["dark_stars"])
+        fields = {"start": a, "end": b, "kind": "title_card", "background": bg,
+                  "bg_colors": [self.pal["dark"], self.pal["accent2"]], "graphics": gr}
+        if text:
+            fields["text"] = text
+        cw = self.add("cutaways", "list", fields, zone="full")
+        if not cw:
+            return False
+        self.scene_transitions(a, b)
+        for k, it_ in enumerate(items):
+            self.sfx(it_[0]["t0"] - 0.05, "pop" if k % 2 == 0 else "bubble", prio=6, src_id=cw["id"] + f"i{k}", vary=True)
+        self.music_swells.append({"start": _r(a), "end": _r(b), "db": 2.5})
+        for w in self.words[s["w0"]:s["w1"] + 1]:
+            if a <= w["t0"] <= b:
+                self.titled_words.add(w["i"])
+        return True
+
+    def _enum_label(self, s: dict, first: dict) -> str:
+        """Etiqueta de la escena de lista: el sintagma que la introduce, completo y corto
+        ('MEJORA TU ENERGIA', 'CAMBIA TU ESTILO', 'HACEMOS'): <= 3 palabras antes de la lista,
+        sin adverbios en -mente ni palabras funcionales colgando."""
+        lead = [w for w in self.words[s["w0"]:first["i"]] if not w["n"].endswith("mente")]
+        while lead and lead[-1]["n"] in STOP:
+            lead.pop()
+        lead = lead[-3:]
+        while lead and lead[0]["n"] in STOP:
+            lead.pop(0)
+        if not lead:
+            t = str(self.script.get("topic") or "").strip()
+            return t.upper() if t and len(t.split()) <= 3 else ""
+        return " ".join(_display(w["text"]) for w in lead).strip(",.¿?¡!").upper()
+
+    def enum_icons(self) -> None:
+        """Enumeraciones cortas: un icono que se dibuja junto al titulo al decir cada elemento."""
+        for s, items, icons in getattr(self, "enum_pending", []):
+            for k, (it_, ic) in enumerate(zip(items, icons)):
+                t_i = it_[0]["t0"] - 0.05
+                tit = [x for x in self.fx["text"] if x.get("_geom") and float(x["start"]) <= t_i + 0.3
+                       and float(x["end"]) >= t_i + 0.6]
+                if not tit:
+                    continue
+                self.accent_for(tit[0], it_, set(), f"en{s['id']}_{k}", t_i, float(tit[0]["end"]),
+                                force="icon", icon=ic, only=True)
 
     # ---------------------------------------------------------- 11. ritmo
     def rhythm(self) -> None:
@@ -3889,7 +5432,7 @@ class _Choreo:
             g = self.add("graphics", "beat", {"start": t, "end": self.o(min(self.D, mid + 1.3)),
                                                "kind": "doodle", "name": name, "x": x, "y": 0.2, "size": 0.1,
                                                "color": self.doodle_color(t, self.o(mid + 1.2), x, 0.2),
-                                               "draw": True, "wiggle": 0.3, "stroke": 7.0,
+                                               "draw": True, "wiggle": 0.3,
                                                "anim_in": "draw", "anim_out": "fade", "rotation": 0.0},
                          zone="accent")
             if g:
@@ -3905,7 +5448,7 @@ class _Choreo:
                 out |= set(range(a, b + 1))
         return out
 
-    def _float_accent(self, w: dict, shot: dict, icon_only: bool = False) -> dict | None:
+    def _float_accent(self, w: dict, shot: dict, icon_only: bool = False, icon: str | None = None) -> dict | None:
         t0 = w["t0"] - 0.05
         t1 = min(w["t1"] + 1.2, shot["end"] - 0.03)
         fa, fb = self.f(t0), self.f(t1)
@@ -3922,7 +5465,7 @@ class _Choreo:
         if pos is None:
             return None
         x, y = pos
-        icon = tone_icon(w["n"], self.role, self.used["topic_icon"])
+        icon = icon or tone_icon(w["n"], self.role, self.used["topic_icon"])
         if icon:
             dark_bg = self._bg_at(shot, y - 0.03, y + 0.03, t0, t1)
             light = dark_bg is not None and contrast("#FFFFFF", dark_bg["rgb"]) < 2.4
@@ -3943,7 +5486,7 @@ class _Choreo:
         g = self.add("graphics", "beat_doodle", {
             "start": t0, "end": t1, "kind": "doodle", "name": name, "x": x, "y": _r(y, 4),
             "size": 0.11, "color": self.doodle_color(t0, t1, x, y), "draw": True, "wiggle": 0.35,
-            "stroke": 7.0, "anim_in": "draw", "anim_out": "fade",
+            "anim_in": "draw", "anim_out": "fade",
             "rotation": _r((self.rand("bd" + str(w["i"])) - 0.5) * 20, 1)}, zone="accent")
         if g:
             self._doodle_sfx(name, t0 + 0.03, x, g["id"])
@@ -4008,9 +5551,13 @@ class _Choreo:
             at = r["at"]
             if not self.kept(at):
                 at = self.snap_start(at)
-            self.add("sfx", r["name"], {"at": max(0.0, at), "name": r["name"],
-                                        "gain_db": _r(_clamp(r["gain"], -30, 3), 1),
-                                        "pan": _r(r["pan"], 2)})
+            if SFX_CAT.get(r["name"]) in ("ui", "tonal") and r["name"] not in ("typing",):
+                at = self.beat_snap(at, 0.07)      # pops/destellos al pulso de la musica
+            fields = {"at": max(0.0, at), "name": r["name"], "gain_db": _r(_clamp(r["gain"], -30, 3), 1),
+                      "pan": _r(r["pan"], 2)}
+            if r.get("dur") is not None:
+                fields["dur"] = r["dur"]
+            self.add("sfx", r["name"], fields)
 
     # ---------------------------------------------------------- orquestacion
     def run(self) -> dict:
@@ -4019,11 +5566,15 @@ class _Choreo:
         self.reserve_final_cta()
         self.hook()
         self.drama()
+        self.drop_hit()
+        self.enumerations()
         self.data()
+        self.flash_scenes()
+        self.lower_third()
         self.scenes()
         self.broll()
-        self.lower_third()
         self.sentences()
+        self.enum_icons()
         self.final_cta()
         self.riser()
         self.assign_transitions()
@@ -4044,11 +5595,15 @@ class _Choreo:
 
 
 # ---------------------------------------------------------------- configuracion global
-def _captions_cfg(style: str, pal: dict) -> dict:
+def _captions_cfg(style: str, pal: dict, ch: "_Choreo | None" = None) -> dict:
     c = STYLES[style]["captions"]
-    return {"enabled": True, "preset": c["preset"], "y": c["y"], "size": c["size"], "font": c["font"],
-            "color": "#FFFFFF", "accent": pal["accent"], "case": c["case"],
-            "max_words": c["max_words"], "hide_during_titles": True}
+    cfg = {"enabled": True, "preset": c["preset"], "y": c["y"], "size": c["size"], "font": c["font"],
+           "color": "#FFFFFF", "accent": pal["accent"], "case": c["case"],
+           "max_words": c["max_words"], "hide_during_titles": True}
+    yr = getattr(ch, "cap_ranges", None) if ch is not None else None
+    if yr:
+        cfg["y_ranges"] = yr
+    return cfg
 
 
 def _grade_cfg(style: str) -> dict:
@@ -4069,9 +5624,13 @@ def _music_cfg(style: str, script: dict, ch: _Choreo) -> dict:
             swells[-1]["db"] = max(swells[-1]["db"], sw["db"])
         else:
             swells.append(dict(sw))
+    mood = m.get("mood")
+    humor = sum(1 for s in script.get("sents") or [] if (s.get("info") or {}).get("tone") == "humor")
+    if mood == "upbeat" and humor >= 2:
+        mood = "playful"          # guion con varios chistes: cama juguetona
     cfg = {"enabled": True, "source": "ai", "track": None, "file": None, "prompt": prompt,
-           "bpm": m["bpm"], "gain_db": m["gain_db"], "duck_db": m["duck_db"], "fade_in": 0.2,
-           "fade_out": 1.5, "stops": stops, "swells": swells}
+           "mood": mood, "bpm": m["bpm"], "gain_db": m["gain_db"], "duck_db": m["duck_db"],
+           "fade_in": 0.2, "fade_out": 1.5, "stops": stops, "swells": swells, "ending": "hit"}
     if ch.drop_at is not None:
         cfg["drop_at"] = ch.drop_at
     return cfg
@@ -4181,7 +5740,7 @@ def _script_from_public(plan: dict, pub: dict, shots: list[dict]) -> dict:
                     s["info"][key] = src[key]
     e2 = dict(plan.get("entities") or {})
     for k, v in e2.items():
-        if isinstance(v, str):
+        if isinstance(v, (str, bool)):
             ent[k] = v
     return {"words": words, "sents": sents, "entities": ent, "anchors": anc,
             "topic": pub.get("topic", ""), "llm": pub.get("llm", False), "ocr": pub.get("ocr", {})}
@@ -4189,45 +5748,98 @@ def _script_from_public(plan: dict, pub: dict, shots: list[dict]) -> dict:
 
 def choreograph(plan: dict, shots: list[dict], script: dict, style: str = "dinamico",
                 intensity: float = 0.75, seed: int = 7, fixed: dict | None = None,
-                windows: list | None = None, rev: int = 0) -> tuple[dict, _Choreo]:
+                windows: list | None = None, rev: int = 0, grid: dict | None = None) -> tuple[dict, _Choreo]:
+    # el coreografo marca frases como hechas (info._done): cada pasada parte de una copia limpia
+    script = dict(script)
+    script["sents"] = [dict(s_, info={k: v for k, v in s_["info"].items() if not k.startswith("_")})
+                       for s_ in script["sents"]]
     ch = _Choreo(plan, shots, script, style, intensity, seed, fixed=fixed, windows=windows, rev=rev)
+    ch.grid = grid
     fx = ch.run()
     return fx, ch
 
 
-def propose_trims(plan: dict, shots: list[dict], words: list[dict], keep: float = 2.8) -> list[dict]:
-    """Recortes sugeridos (cuts con src "ai") para que ninguna toma muda se alargue: de un
-    b-roll sin voz se conservan `keep` s (el inicio: la revelacion) y se quita el silencio que
-    lo rodea (deja 0.35 s tras la ultima palabra y 0.3 s antes de la siguiente). No propone
-    nada si el plan ya trae recortes de la IA (el usuario pudo haberlos desactivado)."""
+def _music_ready() -> bool:
+    try:
+        from . import music as MU
+        return bool(MU.music_ready())
+    except Exception:
+        return False
+
+
+CARD_KEEP = 2.0      # s de b-roll que se conservan cuando lleva la tarjeta de ubicacion
+END_KEEP = 2.2       # s del b-roll que queda al FINAL (tarjeta de cierre con el CTA)
+SILENCE_MAX = 2.5    # s: un silencio mayor (tiempo final) se recorta aunque no sea b-roll
+
+
+def propose_trims(plan: dict, shots: list[dict], words: list[dict], keep: float = 1.6,
+                  tail: float = 1.7, hold: dict | None = None, end_keep: float = END_KEEP) -> list[dict]:
+    """Recortes sugeridos (cuts con src "ai") para que no haya aire muerto:
+      - de un b-roll sin voz se conservan `keep` s (el inicio: la revelacion; `hold[k]` para la
+        toma k, p. ej. la que lleva la tarjeta de ubicacion) y se quita el silencio que lo rodea
+        (deja 0.3 s tras la ultima palabra y 0.25 s antes de la siguiente);
+      - un b-roll DESPUES de la ultima palabra (el usuario lo subio al final) es la tarjeta de
+        cierre: conserva >= `end_keep` s y la cola nunca se lo come;
+      - silencios de mas de SILENCE_MAX s entre palabras (tiempo final) se acortan;
+      - cola: quedan `tail` s despues de la ultima palabra (el remate del CTA) o el b-roll final.
+    Nunca borra mas que (duracion - keep) de un clip sin voz. No propone nada si el plan ya
+    trae recortes de la IA (el usuario pudo haberlos desactivado)."""
     if any(isinstance(c, dict) and c.get("src") == "ai" for c in plan.get("cuts") or []):
         return []
     tl = _timeline(plan)
     out: list[dict] = []
+    hold = hold or {}
 
     def add(a, b, reason):
         if b - a < 0.25:
             return
-        if tl.remap_clamped(b) - tl.remap_clamped(a) < 0.25:        # ya cortado
+        tl_now = _timeline(dict(plan, cuts=list(plan.get("cuts") or []) + out)) if out else tl
+        if tl_now.remap_clamped(b) - tl_now.remap_clamped(a) < 0.25:        # ya cortado
             return
         out.append({"start": _r(a), "end": _r(b), "enabled": True, "src": "ai",
                     "id": f"cut_ai_{len(out) + 1}", "reason": reason})
 
-    for s in shots:
+    last = max((w["t1"] for w in words), default=None)
+    broll_keep: dict[int, float] = {}
+    for k, s in enumerate(shots):
         if s.get("use", "a_camara") == "a_camara":
             continue
         a, b = float(s["start"]), float(s["end"])
         if any(w["t1"] > a + 0.05 and w["t0"] < b - 0.05 for w in words):
             continue
+        kb = float(hold.get(k, keep))
+        if last is None or a >= last - 0.05:
+            kb = max(kb, end_keep)             # cierre sobre el b-roll final
+        broll_keep[k] = kb
         fa, fb = tl.remap_clamped(a), tl.remap_clamped(b)
-        if fb - fa > keep + 0.6:
-            add(tl.inverse(fa + keep), b, "b-roll mudo largo")
+        if fb - fa > kb + 0.4:
+            add(tl.inverse(fa + kb), b, "b-roll mudo largo")
         prev = [w for w in words if w["t1"] <= a + 0.05]
-        if prev and fa - tl.remap_clamped(prev[-1]["t1"]) > 0.7:
-            add(prev[-1]["t1"] + 0.35, a, "silencio antes del b-roll")
+        if prev and fa - tl.remap_clamped(prev[-1]["t1"]) > 0.55:
+            add(prev[-1]["t1"] + 0.3, a, "silencio antes del b-roll")
         nxt = [w for w in words if w["t0"] >= b - 0.05]
-        if nxt and tl.remap_clamped(nxt[0]["t0"]) - fb > 0.8:
-            add(b, nxt[0]["t0"] - 0.3, "silencio despues del b-roll")
+        if nxt and tl.remap_clamped(nxt[0]["t0"]) - fb > 0.6:
+            add(b, nxt[0]["t0"] - 0.25, "silencio despues del b-roll")
+    # silencios largos entre palabras que no son b-roll (ya con los recortes de arriba)
+    ws = sorted(words, key=lambda w: w["t0"])
+    tl2 = _timeline(dict(plan, cuts=list(plan.get("cuts") or []) + out))
+    for w, nx in zip(ws, ws[1:]):
+        if tl2.remap_clamped(nx["t0"]) - tl2.remap_clamped(w["t1"]) <= SILENCE_MAX:
+            continue
+        if any(k in broll_keep and float(s["start"]) < nx["t0"] and w["t1"] < float(s["end"])
+               for k, s in enumerate(shots)):
+            continue
+        add(w["t1"] + 0.4, nx["t0"] - 0.3, "silencio largo")
+    # cola: `tail` s despues de la ultima palabra, pero NUNCA dentro de lo que se conserva de un
+    # b-roll que viene despues de la ultima palabra (esa toma es la tarjeta de cierre)
+    if last is not None:
+        dur = float(tl.duration)
+        start = last + tail
+        for k, s in enumerate(shots):
+            if k in broll_keep and float(s["start"]) >= last - 0.05 and float(s["end"]) > start:
+                start = max(start, tl.inverse(tl.remap_clamped(float(s["start"])) + broll_keep[k]))
+        if tl.remap_clamped(dur) - tl.remap_clamped(start) > 0.4:
+            add(start, dur, "silencio al final")
     return out
 
 
@@ -4243,10 +5855,129 @@ def _silence_notes(plan: dict, words: list[dict], limit: float = 2.5) -> list[st
     return notes
 
 
+def music_cfg_final(plan: dict, mcfg: dict) -> tuple[dict, float]:
+    """(cfg, duracion) de la musica en TIEMPO FINAL, igual que render._audio la pide a
+    music.get_music (stops/swells/drop_at remapeados): asi la llamada del director y la del
+    render comparten el cache de la pista."""
+    tl = _timeline(plan)
+    c = copy.deepcopy(mcfg)
+    c["stops"] = [dict(st, at=tl.remap_clamped(float(st["at"]))) for st in c.get("stops") or []
+                  if isinstance(st, dict) and st.get("at") is not None]
+    sw = []
+    for x in c.get("swells") or []:
+        try:
+            r = tl.map_range(float(x["start"]), float(x["end"]))
+        except Exception:
+            r = None
+        if r:
+            sw.append(dict(x, start=r[0], end=r[1]))
+    c["swells"] = sw
+    if c.get("drop_at") is not None:
+        c["drop_at"] = tl.remap_clamped(float(c["drop_at"]))
+    return c, float(tl.final_duration)
+
+
+def music_grid(plan: dict, style: str, seed: int, mcfg: dict, timeout: float = 40.0) -> dict | None:
+    """Genera (o toma del cache) la musica real del plan y devuelve su rejilla en tiempo final:
+    {bpm, beats, downbeats, drop, source}. None si no hay musica o no termina a tiempo (el hilo
+    sigue y deja el cache caliente para el render)."""
+    try:
+        from . import music as MU
+    except Exception:
+        return None
+    c, dur = music_cfg_final(plan, mcfg)
+    box: dict = {}
+
+    def run():
+        try:
+            box["r"] = MU.get_music(c, dur, style, int(seed))
+        except Exception as ex:  # pragma: no cover - la musica nunca tumba al director
+            box["err"] = str(ex)
+    th = threading.Thread(target=run, name="director-music", daemon=True)
+    th.start()
+    th.join(max(0.5, timeout))
+    r = box.get("r")
+    if not r or not r.get("wav") or not r.get("beats"):
+        return None
+    return {"bpm": float(r.get("bpm") or 0.0), "beats": [float(b) for b in r.get("beats") or []],
+            "downbeats": [float(b) for b in r.get("downbeats") or []],
+            "drop": (float(r["drop"]) if r.get("drop") is not None else None),
+            "source": r.get("source"), "engine": r.get("engine")}
+
+
+def _music_key(plan: dict, mcfg: dict, style: str, seed: int) -> str:
+    """Huella de la PISTA de musica que pedira el render (cfg en tiempo final sin las claves de
+    mezcla): si no cambia, la rejilla de beats guardada sigue valiendo (redirect)."""
+    c, dur = music_cfg_final(plan, mcfg)
+    c = {k: v for k, v in c.items() if k not in ("swells", "gain_db", "duck_db", "fade_in", "locked")}
+    return _hkey(c, round(dur, 3), style, int(seed))
+
+
+def _music_syncable(mcfg: dict | None) -> bool:
+    """La rejilla solo sirve si la musica que va a sonar es la pista IA (activa)."""
+    m = mcfg or {}
+    return m.get("enabled", True) is not False and m.get("source", "ai") == "ai"
+
+
+def _merge_music(mcfg: dict, music: dict | None) -> dict:
+    """cfg de musica del director + lo que eligio el usuario (fuente, prompt, bpm, semilla...);
+    los stops/swells/drop los decide la coreografia."""
+    if not music:
+        return mcfg
+    out = dict(mcfg)
+    out.update({k: v for k, v in music.items() if k not in ("stops", "swells", "drop_at")})
+    if out.get("source") == "none":
+        out["enabled"] = False
+    return out
+
+
+def _grid_public(grid: dict, key: str) -> dict:
+    return {"bpm": _r(grid.get("bpm") or 0.0, 2), "beats": [_r(b) for b in grid.get("beats") or []],
+            "downbeats": [_r(b) for b in grid.get("downbeats") or []],
+            "drop": (_r(grid["drop"]) if grid.get("drop") is not None else None), "key": key}
+
+
+def name_usable(ent: dict) -> str:
+    """Nombre que se puede publicar en rotulo / CTA: el dicho en el audio o el que el usuario
+    confirmo. El leido en un letrero (name_src 'letrero') espera confirmacion en el Studio."""
+    nm = str((ent or {}).get("name") or "").strip()
+    if not nm:
+        return ""
+    if (ent or {}).get("name_src") == "letrero" and not (ent or {}).get("name_confirmed"):
+        return ""
+    return nm
+
+
+def _broll_hold(shots: list[dict], script: dict, plan: dict, keep: float) -> dict:
+    """Tomas sin voz que llevaran la tarjeta de ubicacion (empiezan <= 6 s despues de la frase
+    de la direccion): conservan CARD_KEEP s para que la tarjeta se alcance a leer."""
+    anc = script.get("anchors") or {}
+    i0 = (anc.get("address") or anc.get("landmark") or [None])[0]
+    if i0 is None:
+        return {}
+    words = script["words"]
+    sid = words[i0].get("s")
+    s_end = next((s["t1"] for s in script["sents"] if s["id"] == sid), words[i0]["t1"])
+    tl = _timeline(plan)
+    out = {}
+    for k, sh in enumerate(shots):
+        if sh.get("use", "a_camara") == "a_camara":
+            continue
+        d = tl.remap_clamped(float(sh["start"])) - tl.remap_clamped(float(s_end))
+        if -1.0 <= d <= 6.0:
+            out[k] = max(keep, CARD_KEEP)
+    return out
+
+
 def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: int = 7,
-           use_llm: bool = True, on_step: Callable | None = None, trim: bool = True) -> dict:
+           use_llm: bool = True, on_step: Callable | None = None, trim: bool = True,
+           music_sync: bool | None = None, music: dict | None = None) -> dict:
     """Plan v1 (o v2) -> plan v2 con TODA la edicion decidida (copia; no modifica `plan`).
-    `trim`: propone recortes (cuts src "ai") para b-roll mudo demasiado largo."""
+    `trim`: propone recortes (cuts src "ai") de b-roll mudo largo, silencios y cola.
+    `music_sync` (default = use_llm con musica IA lista): genera la musica ANTES de terminar la
+    coreografia y alinea punches, golpe del drop y SFX a sus beats (el render reusa el cache).
+    `music`: musica que eligio el usuario (se mezcla en fx.music ANTES de la rejilla; con otra
+    fuente que no sea la IA no se sincroniza)."""
     t_start = _now()
     style = style if style in STYLES else "dinamico"
     p = _base_v2(plan)
@@ -4285,8 +6016,29 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
     t = _now()
     script = analyze_script(p, shots, use_llm=False, llm_result=llm_box.get("r"))
     notes: list[str] = []
+    ent0 = script["entities"]
+    if ent0.get("name"):
+        ent0["name_src"] = "voz"
+    prev_ent = plan.get("entities") if isinstance(plan.get("entities"), dict) else {}
+    if prev_ent.get("name") and (prev_ent.get("name_confirmed") or prev_ent.get("name_src") == "usuario"):
+        # nombre que el usuario confirmo o escribio en el Studio: manda sobre el analisis
+        ent0.update({k: prev_ent[k] for k in ("name", "name_src", "name_confirmed", "name_candidate")
+                     if k in prev_ent})
+    if use_llm and not ent0.get("name") and ent0.get("role") and (script.get("ocr") or {}).get("name_candidates"):
+        # letrero-directorio: pregunta dirigida al VLM por LA persona de la misma profesion. Es un
+        # candidato: no se publica (rotulo/CTA) hasta que el usuario lo confirme en el Studio
+        t_s = _now()
+        sn = sign_name(p.get("video"), shots, ent0["role"], deadline=t_start + budget + 12.0)
+        timings["sign_ms"] = round((_now() - t_s) * 1000)
+        if sn and sn.get("name"):
+            ent0.update({"name_candidate": sn["name"], "name_src": "letrero", "name_confirmed": False})
+            script["ocr"]["sign_name"] = sn
+            notes.append(f"nombre leido en el letrero junto a la profesion ('{sn.get('line', '')}'): "
+                         f"{sn['name']} - no se muestra hasta confirmarlo en el Studio")
+    keep = STYLES[style]["broll_keep"]
     if trim:
-        trims = propose_trims(p, shots, script["words"], STYLES[style]["broll_keep"])
+        trims = propose_trims(p, shots, script["words"], keep, tail=STYLES[style].get("tail", 1.7),
+                              hold=_broll_hold(shots, script, p, keep))
         if trims:
             p["cuts"] = list(p.get("cuts") or []) + trims
             removed = sum(c["end"] - c["start"] for c in trims)
@@ -4296,26 +6048,41 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
     locked_ids = set((plan.get("director") or {}).get("locked") or [])
     fixed = {tr: [copy.deepcopy(it) for it in old.get(tr) or [] if isinstance(it, dict) and (
         it.get("locked") or it.get("src") == "user" or it.get("id") in locked_ids)] for tr in TRACKS}
-    fx, ch = choreograph(p, shots, script, style, intensity, seed, fixed=fixed)
+    fx, ch = choreograph(p, shots, script, style, intensity, seed, fixed=copy.deepcopy(fixed))
+    timings["choreo_ms"] = round((_now() - t) * 1000)
+    mcfg = _merge_music(_music_cfg(style, script, ch), music)
+    if music_sync is None:
+        music_sync = bool(use_llm) and _music_ready()
+    grid_pub = None
+    if music_sync and not _music_syncable(mcfg):
+        music_sync = False
+        notes.append("musica elegida por el usuario (no IA): sin sincronia de beats")
+    if music_sync:
+        _step(on_step, "musica", 0.0, "componiendo la musica")
+        t_m = _now()
+        grid = music_grid(p, style, seed, mcfg, timeout=max(8.0, t_start + budget + 40.0 - _now()))
+        timings["music_ms"] = round((_now() - t_m) * 1000)
+        if grid:
+            fx, ch = choreograph(p, shots, script, style, intensity, seed, fixed=copy.deepcopy(fixed),
+                                 grid=grid)
+            mcfg = _merge_music(_music_cfg(style, script, ch), music)
+            grid_pub = _grid_public(grid, _music_key(p, mcfg, style, seed))
+            notes.append(f"musica sincronizada: {grid['bpm']:.0f} BPM, drop en {grid['drop'] or 0:.2f} s "
+                         f"(tiempo final), {len(ch.snapped)} eventos al beat")
     for tr in TRACKS:
         if fixed[tr]:
             fx[tr] = sorted(fixed[tr] + fx[tr], key=lambda it: (float(it.get("at", it.get("start", 0))), str(it["id"])))
-    timings["choreo_ms"] = round((_now() - t) * 1000)
     pal = assets.palette(style)
-    fx["captions"] = _captions_cfg(style, pal)
-    fx["music"] = _music_cfg(style, script, ch)
+    fx["captions"] = _captions_cfg(style, pal, ch)
+    fx["music"] = mcfg
     fx["grade"] = _grade_cfg(style)
     p["fx"] = fx
     p["shots"] = [{k: v for k, v in s.items() if k != "vlm"} for s in shots]
-    ent = {k: script["entities"].get(k, "") for k in ("name", "role", "price", "address", "landmark",
-                                                       "cta", "link_label", "handle")}
-    for k in ("schedule", "phone"):
-        if script["entities"].get(k):
-            ent[k] = script["entities"][k]
-    p["entities"] = ent
+    p["entities"] = _entities_public(script["entities"])
     prev = plan.get("director") or {}
     notes += _silence_notes(p, script["words"])
-    if (script.get("ocr") or {}).get("name_candidates") and not ent.get("name"):
+    if (script.get("ocr") or {}).get("name_candidates") and not p["entities"].get("name_candidate") \
+            and not p["entities"].get("name"):
         notes.append("nombre leido en letreros (no usado; confirmar en el Studio): "
                      + ", ".join(script["ocr"]["name_candidates"][:3]))
     p["director"] = {"style": style, "intensity": float(intensity), "seed": int(seed),
@@ -4324,18 +6091,38 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
                      "vlm": _vlm_model() if any(s.get("vlm") for s in shots) else "heuristico",
                      "rev": 0, "script": _script_public(script), "timings": timings,
                      "kit": {k: v for k, v in ch.K.items()}, "notes": notes}
+    if grid_pub:
+        p["director"]["music_grid"] = grid_pub
     p = _finalize(p)
     p["director"]["timings"]["total_ms"] = round((_now() - t_start) * 1000)
     _step(on_step, "listo", 1.0, "")
     return p
 
 
+def _entities_public(e: dict) -> dict:
+    ent = {k: e.get(k, "") for k in ("name", "role", "price", "address", "landmark", "cta", "link_label",
+                                     "handle")}
+    for k in ("schedule", "phone", "name_candidate", "name_src"):
+        if e.get(k):
+            ent[k] = e[k]
+    if "name_confirmed" in e:
+        ent["name_confirmed"] = bool(e["name_confirmed"])
+    return ent
+
+
+_KEEP_NOTES = ("nombre leido", "musica", "recortes IA")
+
+
 def redirect(plan: dict, style: str | None = None, intensity: float | None = None,
              seed: int | None = None, only_ids: list[str] | None = None,
-             use_llm: bool = False) -> dict:
+             use_llm: bool = False, music_sync: bool | None = None, music_timeout: float = 12.0) -> dict:
     """Re-dirige un plan v2 respetando items `locked` y `src:"user"` (y los ids en
     director.locked). Con `only_ids`, solo re-hace esos items (mismo momento, otra propuesta).
-    Tambien acepta en only_ids/locked las claves "captions", "music" y "grade"."""
+    Tambien acepta en only_ids/locked las claves "captions", "music" y "grade".
+    Sincronia con la musica: si la pista no cambia (misma huella que la rejilla guardada en
+    director.music_grid) se reusa la rejilla; si cambia y `music_sync` (default: re-direccion
+    completa con musica IA lista) se pide la rejilla nueva con `music_timeout` (el render reusa
+    la pista). Las notas del nombre del letrero y de la musica se conservan."""
     p = _base_v2(plan)
     p["duration"] = _plan_duration(p)
     d = dict(p.get("director") or {})
@@ -4377,29 +6164,80 @@ def redirect(plan: dict, style: str | None = None, intensity: float | None = Non
         windows = removed_windows
     removed = [{k: v for k, v in it.items() if k != "id"} for tr in TRACKS for it in old.get(tr) or []
                if only and it.get("id") in only]
-    for k in range(4):
-        fx, ch = choreograph(copy.deepcopy(p), shots, script, style, intensity,
-                             seed if not only else seed + rev + 97 * k,
-                             fixed=copy.deepcopy(fixed), windows=windows, rev=rev + k)
-        if not only:
-            break
-        new_items = [{kk: v for kk, v in it.items() if kk != "id"} for tr in TRACKS for it in fx[tr]]
-        # "otra propuesta": si todo lo rehecho quedo identico, se intenta con otra semilla
-        if not removed or any(it not in removed for it in new_items) or not new_items:
-            break
+    stored = d.get("music_grid") if isinstance(d.get("music_grid"), dict) else None
+    pal = assets.palette(style)
+
+    def music_for(ch_):
+        keep_m = "music" in locked_ids or (only and "music" not in only)
+        if keep_m and isinstance(old.get("music"), dict):
+            return copy.deepcopy(old["music"])
+        m = _music_cfg(style, script, ch_)
+        um = old.get("music") if isinstance(old.get("music"), dict) else {}
+        if um and (um.get("source", "ai") != "ai" or um.get("enabled") is False):
+            m = _merge_music(m, {k: um[k] for k in ("source", "enabled", "track", "file", "gain_db") if k in um})
+        return m
+
+    def run(grid_):
+        fx_, ch_ = None, None
+        for k in range(4):
+            fx_, ch_ = choreograph(copy.deepcopy(p), shots, script, style, intensity,
+                                   seed if not only else seed + rev + 97 * k,
+                                   fixed=copy.deepcopy(fixed), windows=windows, rev=rev + k, grid=grid_)
+            if not only:
+                break
+            new_items = [{kk: v for kk, v in it.items() if kk != "id"} for tr in TRACKS for it in fx_[tr]]
+            # "otra propuesta": si todo lo rehecho quedo identico, se intenta con otra semilla
+            if not removed or any(it not in removed for it in new_items) or not new_items:
+                break
+        return fx_, ch_
+
+    fx, ch = run(None)
+    mcfg = music_for(ch)
+    grid = None
+    grid_note = None
+    if _music_syncable(mcfg):
+        key = _music_key(p, mcfg, style, seed)
+        if stored and stored.get("key") == key and stored.get("beats"):
+            grid = stored
+        else:
+            if music_sync is None:
+                music_sync = not only and _music_ready()
+            if music_sync:
+                g2 = music_grid(p, style, seed, mcfg, timeout=music_timeout)
+                if g2:
+                    grid = _grid_public(g2, key)
+                else:
+                    grid_note = "musica nueva generandose: sin sincronia de beats en esta propuesta"
+        if grid:
+            fx, ch = run(grid)
+            m2 = music_for(ch)
+            if _music_key(p, m2, style, seed) == grid.get("key"):
+                mcfg = m2
     for tr in TRACKS:
         fx[tr] = sorted(fixed[tr] + fx[tr], key=lambda it: (float(it.get("at", it.get("start", 0))), str(it["id"])))
-    pal = assets.palette(style)
-    for key, fn in (("captions", lambda: _captions_cfg(style, pal)),
-                    ("music", lambda: _music_cfg(style, script, ch)),
-                    ("grade", lambda: _grade_cfg(style))):
-        keep = key in locked_ids or (only and key not in only)
-        fx[key] = copy.deepcopy(old[key]) if keep and isinstance(old.get(key), dict) else fn()
+    for key_, fn in (("captions", lambda: _captions_cfg(style, pal, ch)),
+                     ("grade", lambda: _grade_cfg(style))):
+        keep = key_ in locked_ids or (only and key_ not in only)
+        fx[key_] = copy.deepcopy(old[key_]) if keep and isinstance(old.get(key_), dict) else fn()
+    fx["music"] = mcfg
     p["fx"] = fx
     p["shots"] = shots
+    prev_notes = [n for n in d.get("notes") or [] if isinstance(n, str) and n.startswith(_KEEP_NOTES)
+                  and not n.startswith("musica")]
+    notes = prev_notes + _silence_notes(p, script["words"])
+    if grid:
+        notes.append(f"musica sincronizada: {float(grid.get('bpm') or 0):.0f} BPM, drop en "
+                     f"{float(grid.get('drop') or 0):.2f} s (tiempo final), {len(ch.snapped)} eventos al beat")
+    elif grid_note:
+        notes.append(grid_note)
     d.update({"style": style, "intensity": intensity, "seed": seed, "rev": rev,
-              "script": _script_public(script), "kit": dict(ch.K),
-              "notes": _silence_notes(p, script["words"])})
+              "script": _script_public(script), "kit": dict(ch.K), "notes": notes})
+    if grid:
+        d["music_grid"] = grid
+    else:
+        d.pop("music_grid", None)
+    p["entities"] = _entities_public(dict(p.get("entities") or {}, **{
+        k: v for k, v in script["entities"].items() if k not in (p.get("entities") or {})}))
     p["director"] = d
     return _finalize(p)
 

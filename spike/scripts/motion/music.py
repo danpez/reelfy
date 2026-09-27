@@ -1970,6 +1970,17 @@ class _Progress:
             if self.cb:
                 self.cb(p)
 
+    def poll(self) -> None:
+        """Vuelve a llamar al callback con el valor actual (sin avanzar): si el job se cancelo,
+        el callback lanza. Lo usa la espera del candado para no quedar sorda a la cancelacion."""
+        if self.cb:
+            try:
+                self.cb(max(0, self.v))
+            except MusicCancelled:
+                raise
+            except Exception as e:  # cancelacion
+                raise MusicCancelled(e) from e
+
 
 def ace_request(prompt: dict, gen_dur: float, seed: int) -> dict:
     """Request DiT-only (sin LM): toda la metadata dada, lyrics [Instrumental], salida float."""
@@ -3131,16 +3142,30 @@ def _hash(obj: Any) -> str:
     return hashlib.sha1(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
+LOCK_POLL_S = 0.1
+
+
 @contextmanager
-def _lock(d: Path, name: str = ".music.lock"):
+def _lock(d: Path, name: str = ".music.lock", poll: Callable | None = None):
     """Candado entre procesos e hilos (evita dos generaciones simultaneas en la GPU; un
-    `prefetch` en curso y el get_music del render se esperan en vez de generar dos veces)."""
+    `prefetch` en curso y el get_music del render se esperan en vez de generar dos veces).
+
+    Espera SONDEANDO (LOCK_NB cada LOCK_POLL_S) y llama a `poll()` entre intentos: si el job se
+    cancela mientras otro genera con ACE, poll lanza y el get_music suelta al instante (antes
+    quedaba bloqueado en flock hasta que terminaba la generacion ajena)."""
     d.mkdir(parents=True, exist_ok=True)
     f = open(d / name, "a+")
     try:
         try:
             import fcntl
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            while True:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except (BlockingIOError, PermissionError):
+                    if poll is not None:
+                        poll()
+                    time.sleep(LOCK_POLL_S)
         except ImportError:  # Windows: sin candado (una generacion a la vez por diseno)
             pass
         yield
@@ -3312,13 +3337,23 @@ def _adopt_legacy_raws(cache: Path, prompt: dict, seed: int, rbase: str) -> None
                 pass
 
 
+# avance (0-100) de las generaciones ACE en curso en este proceso, por crudo: quien espera el
+# candado (el get_music del render mientras el prefetch genera) muestra ese avance
+_GEN_PCT: dict[str, float] = {}
+
+
+def _raw_key(prompt: dict, seed: int) -> str:
+    """Clave del crudo de ACE: (caption, bpm, tonalidad, seed); la duracion no entra."""
+    return _hash({"v": RAW_VERSION, "engine": "ace", "model": DIT_MODEL, "caption": prompt["caption"],
+                  "bpm": prompt["bpm"], "key": prompt["keyscale"], "seed": int(seed)})
+
+
 def _source_ai(prompt: dict, D: float, seed: int, cache: Path, fopt: dict, on_pct) -> dict:
     if not music_ready():
         raise RuntimeError("musica IA no instalada (ace-synth o modelos faltantes)")
     # el crudo se indexa por (caption, bpm, tonalidad, seed): cambiar la duracion del video reusa
     # cualquier crudo con material suficiente (solo se regenera si falta mucho)
-    rbase = _hash({"v": RAW_VERSION, "engine": "ace", "model": DIT_MODEL, "caption": prompt["caption"],
-                   "bpm": prompt["bpm"], "key": prompt["keyscale"], "seed": int(seed)})
+    rbase = _raw_key(prompt, seed)
     gen_s = 0.0
     cands = _raw_candidates(cache, rbase)
     if not cands:
@@ -3326,7 +3361,24 @@ def _source_ai(prompt: dict, D: float, seed: int, cache: Path, fopt: dict, on_pc
         cands = _raw_candidates(cache, rbase)
     pick = _pick_raw(cands, D)
     if pick is None:
-        with _lock(cache):
+        gkey = f"{cache.resolve()}/{rbase}"
+
+        def waiting():
+            """Espera del candado: avanza con la generacion en curso de ESTE crudo (p. ej. el
+            prefetch en otro hilo) y consulta la cancelacion."""
+            g = _GEN_PCT.get(gkey)
+            if g is not None:
+                _pct(on_pct, g * 0.9)
+            poll = getattr(on_pct, "poll", None)
+            if poll is not None:
+                poll()
+
+        def gen_cb(p):
+            _GEN_PCT[gkey] = float(p)
+            if on_pct:
+                _pct(on_pct, p * 0.9)
+
+        with _lock(cache, poll=waiting if on_pct is not None else None):
             pick = _pick_raw(_raw_candidates(cache, rbase), D)
             if pick is None:
                 gd = gen_duration(D)
@@ -3336,8 +3388,7 @@ def _source_ai(prompt: dict, D: float, seed: int, cache: Path, fopt: dict, on_pc
                 try:
                     for sd in (int(seed), int(seed) + 1009):
                         t0 = time.time()
-                        wav = _ace_generate(prompt, gd, sd, work,
-                                            (lambda p: _pct(on_pct, p * 0.9)) if on_pct else None)
+                        wav = _ace_generate(prompt, gd, sd, work, gen_cb)
                         x = load_audio(wav, SR)
                         pk = float(np.abs(x).max())
                         if pk > 0.98:  # el VAE puede pasar de 1.0 en float: bajar antes de guardar en PCM
@@ -3353,6 +3404,7 @@ def _source_ai(prompt: dict, D: float, seed: int, cache: Path, fopt: dict, on_pc
                         if q >= 0.7:
                             break
                 finally:
+                    _GEN_PCT.pop(gkey, None)
                     shutil.rmtree(work, ignore_errors=True)
                 q, x, ana, sd = best
                 ana.update(quality=q, seed_used=sd, gen_s=round(gen_s, 2), gen_dur=gd)
@@ -3577,6 +3629,27 @@ def get_music(cfg: dict | None, duration: float, style: str = "dinamico", seed: 
     r = _empty_result(D, "; ".join(errors))
     r["warnings"] = warn or None
     return r
+
+
+def pending(cfg: dict | None, duration: float, style: str = "dinamico", seed: int = 7,
+            cache_dir: str | Path | None = None) -> bool:
+    """True si get_music con estos argumentos tendria que GENERAR con ACE-Step (fuente ai, motor
+    instalado y sin crudo reutilizable en la cache). Barato (no genera ni bloquea): la vista
+    previa lo usa para mezclar con el procedural mientras el prefetch termina."""
+    D = _num(duration, float("nan"))
+    if D is None or not math.isfinite(D) or D <= 0.25:
+        return False
+    try:
+        c, _ = _coerce_cfg(cfg, D, seed)
+        if not c["enabled"] or c["source"] != "ai" or not music_ready():
+            return False
+        cache = Path(cache_dir) if cache_dir else _default_cache()
+        st = style if style in STYLE_MUSIC else "dinamico"
+        mood = c["mood"] or STYLE_DEFAULT_MOOD[st]
+        prompt = build_prompt(st, mood, c["prompt"], c["bpm"], c["seed"], c["keyscale"])
+        return _pick_raw(_raw_candidates(cache, _raw_key(prompt, c["seed"])), D) is None
+    except Exception:  # noqa: ante la duda, no adelantarse (get_music decide)
+        return False
 
 
 def prefetch(cfg: dict | None, duration: float, style: str = "dinamico", seed: int = 7,

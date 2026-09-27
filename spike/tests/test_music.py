@@ -853,3 +853,71 @@ def test_fit_aligns_drop_when_requested(raw_long):
     y, info = M.fit(x, SR, ana, D, drop_at=want)
     bar = 4 * 60.0 / ana["bpm"]
     assert info["drop"] is not None and abs(info["drop"] - want) <= bar / 2
+
+
+# ---------------------------------------------------------------- ola 2: candado cancelable
+def test_candado_sondea_y_suelta_al_cancelar(tmp_path):
+    """Mientras otro (el prefetch) genera con el candado tomado, un get_music cancelado suelta
+    al instante: la espera sondea LOCK_NB y consulta poll() (antes: flock bloqueante sordo a la
+    cancelacion; el render tardaba 10 s en soltar)."""
+    import threading
+    import time as _t
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with M._lock(tmp_path):
+            held.set()
+            release.wait(10)
+    th = threading.Thread(target=holder, daemon=True)
+    th.start()
+    assert held.wait(5)
+    state = {"n": 0}
+
+    class Cancel(Exception):
+        pass
+
+    def poll():
+        state["n"] += 1
+        if state["n"] >= 3:
+            raise Cancel()
+    t0 = _t.time()
+    with pytest.raises(Cancel):
+        with M._lock(tmp_path, poll=poll):
+            pass
+    assert _t.time() - t0 < 1.5 and state["n"] == 3
+    release.set()
+    th.join(5)
+    with M._lock(tmp_path, poll=poll):                   # libre: entra sin sondear
+        pass
+
+
+def test_progress_poll_envuelve_la_cancelacion():
+    calls = []
+
+    def cb(p):
+        calls.append(p)
+        if len(calls) > 1:
+            raise RuntimeError("cancelado")
+    pr = M._Progress(cb)
+    pr(40)
+    with pytest.raises(M.MusicCancelled):
+        pr.poll()
+    assert calls == [40, 40]                              # poll repite el valor, no avanza
+
+
+def test_pending_solo_para_ia_sin_crudo(tmp_path):
+    """pending(): True solo si get_music tendria que GENERAR con ACE (fuente ai, motor listo y
+    sin crudo reutilizable). Procedural, desactivada o duracion invalida -> False."""
+    assert M.pending({"source": "procedural"}, 20.0, cache_dir=tmp_path) is False
+    assert M.pending({"enabled": False}, 20.0, cache_dir=tmp_path) is False
+    assert M.pending({"source": "ai"}, 0.1, cache_dir=tmp_path) is False
+    assert M.pending({"source": "ai"}, 20.0, cache_dir=tmp_path) is M.music_ready()
+    if M.music_ready():
+        st = "dinamico"
+        c, _ = M._coerce_cfg({"source": "ai"}, 20.0, 7)
+        pr = M.build_prompt(st, c["mood"] or M.STYLE_DEFAULT_MOOD[st], c["prompt"], c["bpm"], c["seed"],
+                            c["keyscale"])
+        rb = M._raw_key(pr, c["seed"])
+        (tmp_path / f"raw_{rb}_30.flac").write_bytes(b"x")
+        (tmp_path / f"raw_{rb}_30.json").write_text(json.dumps({"start": 0.0, "end": 28.0, "gen_dur": 30}))
+        assert M.pending({"source": "ai"}, 20.0, cache_dir=tmp_path) is False

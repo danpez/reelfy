@@ -168,6 +168,7 @@ def is_dark(kind: str, colors, ctx) -> bool:
 def _vignette_paint(ctx, strength: float, cx: float = 0.5, cy: float = 0.45, col="#000000") -> skia.Paint:
     W, H = ctx.W, ctx.H
     p = skia.Paint()
+    p.setDither(True)  # degradados sin anillos (8 bits)
     p.setShader(skia.GradientShader.MakeRadial(
         skia.Point(W * cx, H * cy), H * 0.78,
         [C.color(col, 0.0), C.color(col, 0.0), C.color(col, strength)], [0.0, 0.45, 1.0]))
@@ -177,6 +178,7 @@ def _vignette_paint(ctx, strength: float, cx: float = 0.5, cy: float = 0.45, col
 def _light_paint(ctx, col, alpha: float, cx=0.5, cy=0.4, r=0.6) -> skia.Paint:
     W, H = ctx.W, ctx.H
     p = skia.Paint()
+    p.setDither(True)  # degradados sin anillos (8 bits)
     p.setShader(skia.GradientShader.MakeRadial(skia.Point(W * cx, H * cy), H * r,
                                                [C.color(col, alpha), C.color(col, 0.0)]))
     return p
@@ -245,6 +247,7 @@ def _glow_sprite(ctx, col, alpha: float):
         c = surf.getCanvas()
         c.clear(skia.ColorTRANSPARENT)
         p = skia.Paint()
+        p.setDither(True)  # degradados sin anillos (8 bits)
         p.setShader(skia.GradientShader.MakeRadial(skia.Point(n / 2, n / 2), n / 2,
                                                    [C.color(col, alpha), C.color(col, alpha * 0.35),
                                                     C.color(col, 0.0)], [0.0, 0.45, 1.0]))
@@ -494,6 +497,7 @@ def _bg_dark_stars(canvas, colors, lt, ctx):
 
     def bd(c):
         p = skia.Paint()
+        p.setDither(True)  # degradados sin anillos (8 bits)
         p.setShader(skia.GradientShader.MakeLinear([skia.Point(0, 0), skia.Point(0, H)],
                                                    [C.color(C.mix(bg, "#000000", 0.2)), C.color(C.mix(bg, neb, 0.12))]))
         c.drawPaint(p)
@@ -541,6 +545,7 @@ def _bg_dark_stars(canvas, colors, lt, ctx):
         tl = L * 0.35 * (1 - abs(2 * ph - 1) * 0.6)
         tp = skia.Paint(AntiAlias=True, StrokeWidth=ctx.px(3.2), Style=skia.Paint.kStroke_Style)
         tp.setStrokeCap(skia.Paint.kRound_Cap)
+        tp.setDither(True)  # degradados sin anillos (8 bits)
         tp.setShader(skia.GradientShader.MakeLinear([skia.Point(hx, hy), skia.Point(hx - d[0] * tl, hy - d[1] * tl)],
                                                     [C.color(st, 0.95 * (1 - ph)), C.color(st, 0.0)]))
         canvas.drawLine(hx, hy, hx - d[0] * tl, hy - d[1] * tl, tp)
@@ -577,6 +582,7 @@ def _bg_rays(canvas, colors, lt, ctx):
         path.close()
     rp = skia.Paint(AntiAlias=True)
     rp.setMaskFilter(graphics.blur_mask(max(0.6, ctx.px(7) / div)))  # bordes suaves (7 px ref)
+    rp.setDither(True)  # degradados sin anillos (8 bits)
     rp.setShader(skia.GradientShader.MakeRadial(
         skia.Point(cx, cy), h * 0.75,
         [C.color(wedge, 0.0), C.color(wedge, 0.55), C.color(wedge, 1.0)], [0.0, 0.3, 1.0]))
@@ -867,6 +873,8 @@ def _text_item(item, dark: bool, ctx) -> dict | None:
     ti.setdefault("y", 0.45)
     ti.setdefault("color", "#FFFFFF" if dark else "#15151B")
     ti.setdefault("accent", ctx.palette["accent"] if dark else C.mix(ctx.palette["accent"], "#000000", 0.25))
+    # el texto mide el fondo de la ESCENA (no el video tapado): refuerzo de sombra / placa correctos
+    ti.setdefault("_bg_lum", 0.1 if dark else 0.9)
     return ti
 
 
