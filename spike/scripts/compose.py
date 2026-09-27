@@ -10,14 +10,30 @@ Enfoque robusto en 2 pasos (evita los problemas de un filter_complex gigante):
      MISMOS parámetros (resolución/fps/audio) -> concat demuxer los une sin re-encode.
   2) Componer las capas overlay sobre el video principal (pocas, manejable).
 """
-import json
 import subprocess
 from pathlib import Path
 
 import paths
+from motion import video_io
 
 FFMPEG = str(paths.FFMPEG)
 FFPROBE = str(paths.FFPROBE)
+FPS_DEFAULT = 30
+
+
+def _vbitrate(w, h, fps=FPS_DEFAULT):
+    """Bitrate del intermedio: visualmente sin perdida para cualquier resolucion
+    (12M se quedaba corto en 4K: bloques en sombras y degradados)."""
+    return video_io.hq_bitrate(w, h, fps)
+
+
+def _color_tags():
+    return list(video_io.COLOR_TAGS)
+
+
+# propiedades de color del cuadro (sin esto el mp4 sale con primaries/transfer 'unknown':
+# el filtro scale fija las del cuadro y el encoder ignora -color_primaries/-color_trc)
+SETPARAMS = video_io.SETPARAMS_709
 
 
 def _run(cmd):
@@ -26,24 +42,15 @@ def _run(cmd):
 
 
 def probe(path):
-    """dims, duración y si tiene audio."""
-    r = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
-                        "stream=width,height,codec_type", "-show_entries", "format=duration",
-                        "-of", "json", str(path)], capture_output=True, text=True)
-    try:
-        d = json.loads(r.stdout)
-    except Exception:  # noqa
-        return {"w": 0, "h": 0, "dur": 0.0, "audio": False, "type": "video"}
-    w = h = 0
-    audio = False
-    for s in d.get("streams", []):
-        if s.get("codec_type") == "video" and not w:
-            w, h = s.get("width", 0), s.get("height", 0)
-        if s.get("codec_type") == "audio":
-            audio = True
-    dur = float(d.get("format", {}).get("duration") or 0)
-    return {"w": w, "h": h, "dur": round(dur, 3), "audio": audio,
-            "type": "video" if dur > 0 else "image"}
+    """dims de DISPLAY (rotación aplicada: un MOV de iPhone 3840x2160 con rotation -90
+    es 2160x3840), duración, si tiene audio y si es HDR (HLG/PQ)."""
+    i = video_io.probe(path)
+    if not i.get("w") and not i.get("duration"):
+        return {"w": 0, "h": 0, "dur": 0.0, "audio": False, "type": "video",
+                "rotation": 0, "hdr": None}
+    return {"w": i["w"], "h": i["h"], "dur": round(i["duration"], 3), "audio": i["has_audio"],
+            "type": "video" if i["duration"] > 0 else "image", "rotation": i["rotation"],
+            "hdr": i["hdr"]}
 
 
 def _has_audio(path):
@@ -59,19 +66,27 @@ def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0, fin=0.0, fout=0.0):
     desvanecen VIDEO (a/desde negro) y AUDIO al inicio/fin del clip."""
     dur = max(0.1, t_out - t_in)
     fin = max(0.0, min(float(fin), dur / 2)); fout = max(0.0, min(float(fout), dur / 2))
-    vf = [f"scale={w}:{h}:force_original_aspect_ratio=increase",
-          f"crop={w}:{h}", f"fps={fps}", "setsar=1", "format=yuv420p"]
+    info = video_io.probe(src)
+    # ffmpeg autorrota al decodificar (los cuadros ya llegan en orientación de display);
+    # la escala conserva 10 bits y el tonemap HLG/PQ -> SDR bt709 va ANTES de bajar a 8 bits.
+    vf = [f"scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos",
+          f"crop={w}:{h}", f"fps={fps}", "setsar=1"] + video_io.tonemap_filters(info)
     af = [f"volume={max(0.0, float(vol)):.3f}", "aresample=48000"]
     if fin > 0.01:
         vf.append(f"fade=t=in:st=0:d={fin:.3f}"); af.append(f"afade=t=in:st=0:d={fin:.3f}")
     if fout > 0.01:
         vf.append(f"fade=t=out:st={dur - fout:.3f}:d={fout:.3f}")
         af.append(f"afade=t=out:st={dur - fout:.3f}:d={fout:.3f}")
-    cmd = [FFMPEG, "-y", "-ss", f"{t_in:.3f}", "-i", str(src), "-t", f"{dur:.3f}"]
-    if not _has_audio(src):
+    cmd = [FFMPEG, "-y"] + video_io.hwaccel_args() + ["-ss", f"{t_in:.3f}", "-i", str(src),
+                                                    "-t", f"{dur:.3f}"]
+    if not info.get("has_audio"):
         cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
                 "-map", "0:v:0", "-map", "1:a:0"]
-    cmd += ["-vf", ",".join(vf), "-af", ",".join(af), "-c:v", "h264_videotoolbox", "-b:v", "12M",
+    else:
+        # 1a pista de audio explícita (los iPhone traen una 2a pista APAC espacial)
+        cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+    cmd += ["-vf", ",".join(vf), "-af", ",".join(af), "-c:v", "h264_videotoolbox",
+            "-b:v", _vbitrate(w, h, fps)] + _color_tags() + [
             "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)]
     _run(cmd)
 
@@ -79,16 +94,18 @@ def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0, fin=0.0, fout=0.0):
 def _norm_image(src, dur, out, w, h, fps, fin=0.0, fout=0.0):
     """Imagen fija -> clip de `dur` s a WxH/fps con audio en silencio (+ fade opcional)."""
     fin = max(0.0, min(float(fin), dur / 2)); fout = max(0.0, min(float(fout), dur / 2))
-    vf = [f"scale={w}:{h}:force_original_aspect_ratio=increase",
+    # RGB -> YUV con matriz bt709 explícita (coincide con la etiqueta de color del intermedio)
+    vf = [f"scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos:"
+          "out_color_matrix=bt709:out_range=tv",
           f"crop={w}:{h}", f"fps={fps}", "setsar=1", "format=yuv420p"]
     if fin > 0.01:
         vf.append(f"fade=t=in:st=0:d={fin:.3f}")
     if fout > 0.01:
         vf.append(f"fade=t=out:st={dur - fout:.3f}:d={fout:.3f}")
-    vf = ",".join(vf)
+    vf = ",".join(vf + [SETPARAMS])
     _run([FFMPEG, "-y", "-loop", "1", "-t", f"{dur:.3f}", "-i", str(src),
           "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
-          "-vf", vf, "-c:v", "h264_videotoolbox", "-b:v", "12M",
+          "-vf", vf, "-c:v", "h264_videotoolbox", "-b:v", _vbitrate(w, h, fps)] + _color_tags() + [
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", "-shortest", str(out)])
 
 
@@ -97,8 +114,8 @@ def _norm_black(dur, out, w, h, fps):
     _run([FFMPEG, "-y", "-f", "lavfi", "-t", f"{dur:.3f}", "-i",
           f"color=c=black:s={w}x{h}:r={fps}",
           "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
-          "-c:v", "h264_videotoolbox", "-b:v", "12M", "-c:a", "aac", "-ar", "48000",
-          "-ac", "2", "-b:a", "192k", "-shortest", str(out)])
+          "-vf", f"format=yuv420p,{SETPARAMS}", "-c:v", "h264_videotoolbox", "-b:v", _vbitrate(w, h, fps)] + _color_tags() + [
+          "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", "-shortest", str(out)])
 
 
 def _overlay_xy(pos, W, H, mx, my):
@@ -109,7 +126,7 @@ def _overlay_xy(pos, W, H, mx, my):
     }.get(pos, ("(W-w)/2", "(H-h)/2"))
 
 
-def _concat_xfade(parts, trans, out):
+def _concat_xfade(parts, trans, out, w=1080, h=1920, fps=FPS_DEFAULT):
     """Une los segmentos con TRANSICIONES: crossfade (xfade+acrossfade) en los
     bordes que lo pidan; los demás bordes usan un xfade de ~1 frame (corte limpio),
     para mantener un solo grafo uniforme. Re-encoda (necesario para mezclar)."""
@@ -131,8 +148,10 @@ def _concat_xfade(parts, trans, out):
         fc.append(f"{aprev}[{i}:a]acrossfade=d={T:.3f}{ao}")
         vprev, aprev = vo, ao
         acc = acc + durs[i] - T
+    fc.append(f"{vprev}format=yuv420p,{SETPARAMS}[vout]")
     _run([FFMPEG, "-y", *inputs, "-filter_complex", ";".join(fc),
-          "-map", vprev, "-map", aprev, "-c:v", "h264_videotoolbox", "-b:v", "12M",
+          "-map", "[vout]", "-map", aprev, "-c:v", "h264_videotoolbox",
+          "-b:v", _vbitrate(w, h, fps)] + _color_tags() + [
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)])
 
 
@@ -149,7 +168,8 @@ def compose(spec, out, work, on_step=None):
         raise ValueError("La composición no tiene clips en la pista principal.")
     fps = int(spec.get("fps", 30))
 
-    # lienzo: dimensiones del primer VIDEO (o del primer clip); pipeline reencuadra luego
+    # lienzo: dimensiones de DISPLAY del primer VIDEO (o del primer clip); pipeline
+    # reencuadra luego. probe ya aplica la rotación (iPhone vertical = 2160x3840).
     W = H = 0
     for s in main:
         if s.get("type") == "video":
@@ -203,7 +223,7 @@ def compose(spec, out, work, on_step=None):
     has_trans = any(t and t.get("type") == "crossfade" and float(t.get("dur", 0)) > 0.05
                     for t in trans[1:])
     if has_trans and len(parts) > 1:
-        _concat_xfade(parts, trans, main_mp4)
+        _concat_xfade(parts, trans, main_mp4, W, H, fps)
     else:
         listf = work / "concat.txt"
         listf.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts))
@@ -257,7 +277,9 @@ def compose(spec, out, work, on_step=None):
         fc.append(f"[{idx}:v]scale={ow}:-2,setsar=1,format=yuva420p[s{idx}]")
         fc.append(f"[{last}][s{idx}]overlay={ox}:{oy}:enable='between(t,{st:.3f},{st + dur:.3f})'[l{idx}]")
         last = f"l{idx}"; idx += 1
+    fc.append(f"[{last}]format=yuv420p,{SETPARAMS}[vout]")
     _run([FFMPEG, "-y", *inputs, "-filter_complex", ";".join(fc),
-          "-map", f"[{last}]", "-map", "0:a?", "-c:v", "h264_videotoolbox", "-b:v", "12M",
+          "-map", "[vout]", "-map", "0:a?", "-c:v", "h264_videotoolbox",
+          "-b:v", _vbitrate(W, H, fps)] + _color_tags() + [
           "-c:a", "aac", "-b:a", "192k", str(out)])
     return str(out)

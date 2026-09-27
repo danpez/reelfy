@@ -56,3 +56,12 @@ reelfy-desktop/src-tauri/gen/
 
 # clave Pexels y ajustes locales (DATA en dev)
 spike/settings.json
+
+# Motion engine (v0.5): assets propios versionados; modelos y builds pesados fuera
+!spike/assets/motion/
+spike/assets/motion/music/*.wav
+spike/models/modnet*.onnx
+spike/acestep.cpp/
+spike/music-models/
+spike/.pytest_cache/
+.engine-cache/

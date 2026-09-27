@@ -857,10 +857,10 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
                       key=lambda c: c["start"])
         if cuts:
             keeps, t = [], 0.0
-            for c in cuts:
-                if c["start"] - t > 0.05:
-                    keeps.append((t, c["start"]))
-                t = max(t, c["end"])
+            for cut in cuts:            # NO usar `c`: es `custom` (zoom/air/logo del export)
+                if cut["start"] - t > 0.05:
+                    keeps.append((t, cut["start"]))
+                t = max(t, cut["end"])
             if src_dur - t > 0.05:
                 keeps.append((t, src_dur))
         elif "cuts" not in plan:                            # older plans: detect now

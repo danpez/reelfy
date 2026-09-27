@@ -1,0 +1,916 @@
+{
+ "whoosh_soft": {
+  "file": "whoosh_soft.flac",
+  "dur": 1.5559,
+  "hit": 0.5924,
+  "tags": [
+   "whoosh",
+   "transition",
+   "movement",
+   "soft",
+   "transicion",
+   "movimiento"
+  ],
+  "variants": [
+   {
+    "file": "whoosh_soft.flac",
+    "dur": 1.5559,
+    "hit": 0.5924
+   },
+   {
+    "file": "whoosh_soft_2.flac",
+    "dur": 1.6874,
+    "hit": 0.6702
+   },
+   {
+    "file": "whoosh_soft_3.flac",
+    "dur": 1.5001,
+    "hit": 0.521
+   }
+  ],
+  "category": "whoosh",
+  "desc": "Paso de aire suave (transiciones tranquilas)",
+  "lufs_100ms": -9.82,
+  "peak_db": -1.05
+ },
+ "whoosh_fast": {
+  "file": "whoosh_fast.flac",
+  "dur": 0.9143,
+  "hit": 0.2871,
+  "tags": [
+   "whoosh",
+   "transition",
+   "fast",
+   "movement",
+   "transicion",
+   "rapido"
+  ],
+  "variants": [
+   {
+    "file": "whoosh_fast.flac",
+    "dur": 0.9143,
+    "hit": 0.2871
+   },
+   {
+    "file": "whoosh_fast_2.flac",
+    "dur": 0.9716,
+    "hit": 0.2667
+   },
+   {
+    "file": "whoosh_fast_3.flac",
+    "dur": 1.0015,
+    "hit": 0.337
+   }
+  ],
+  "category": "whoosh",
+  "desc": "Whoosh rapido con doppler (cortes, entradas de texto)",
+  "lufs_100ms": -9.33,
+  "peak_db": -1.05
+ },
+ "swoosh_up": {
+  "file": "swoosh_up.flac",
+  "dur": 1.1543,
+  "hit": 0.5969,
+  "tags": [
+   "swoosh",
+   "rise",
+   "up",
+   "reveal",
+   "sube",
+   "aparece"
+  ],
+  "variants": [
+   {
+    "file": "swoosh_up.flac",
+    "dur": 1.1543,
+    "hit": 0.5969
+   },
+   {
+    "file": "swoosh_up_2.flac",
+    "dur": 0.9916,
+    "hit": 0.4529
+   }
+  ],
+  "category": "whoosh",
+  "desc": "Barrido ascendente que culmina en el golpe",
+  "lufs_100ms": -8.02,
+  "peak_db": -1.05
+ },
+ "swoosh_down": {
+  "file": "swoosh_down.flac",
+  "dur": 1.0324,
+  "hit": 0.0612,
+  "tags": [
+   "swoosh",
+   "fall",
+   "down",
+   "exit",
+   "baja",
+   "sale"
+  ],
+  "variants": [
+   {
+    "file": "swoosh_down.flac",
+    "dur": 1.0324,
+    "hit": 0.0612
+   },
+   {
+    "file": "swoosh_down_2.flac",
+    "dur": 0.9446,
+    "hit": 0.0676
+   }
+  ],
+  "category": "whoosh",
+  "desc": "Barrido descendente (salidas)",
+  "lufs_100ms": -9.0,
+  "peak_db": -1.05
+ },
+ "whip": {
+  "file": "whip.flac",
+  "dur": 0.7173,
+  "hit": 0.1986,
+  "tags": [
+   "whip",
+   "whip pan",
+   "transition",
+   "latigazo",
+   "transicion"
+  ],
+  "variants": [
+   {
+    "file": "whip.flac",
+    "dur": 0.7173,
+    "hit": 0.1986
+   },
+   {
+    "file": "whip_2.flac",
+    "dur": 0.6345,
+    "hit": 0.168
+   },
+   {
+    "file": "whip_3.flac",
+    "dur": 0.7356,
+    "hit": 0.2205
+   }
+  ],
+  "category": "whoosh",
+  "desc": "Latigazo con chasquido (whip pan)",
+  "lufs_100ms": -13.5,
+  "peak_db": -1.05
+ },
+ "pop": {
+  "file": "pop.flac",
+  "dur": 0.3823,
+  "hit": 0.0007,
+  "tags": [
+   "pop",
+   "appear",
+   "sticker",
+   "icon",
+   "aparece"
+  ],
+  "variants": [
+   {
+    "file": "pop.flac",
+    "dur": 0.3823,
+    "hit": 0.0007
+   },
+   {
+    "file": "pop_2.flac",
+    "dur": 0.3899,
+    "hit": 0.0006
+   },
+   {
+    "file": "pop_3.flac",
+    "dur": 0.3701,
+    "hit": 0.0007
+   }
+  ],
+  "category": "ui",
+  "desc": "Pop con caida de tono (aparece un elemento)",
+  "lufs_100ms": -9.0,
+  "peak_db": -3.36
+ },
+ "pop_soft": {
+  "file": "pop_soft.flac",
+  "dur": 0.5399,
+  "hit": 0.0022,
+  "tags": [
+   "pop",
+   "soft",
+   "subtle",
+   "suave"
+  ],
+  "variants": [
+   {
+    "file": "pop_soft.flac",
+    "dur": 0.5399,
+    "hit": 0.0022
+   },
+   {
+    "file": "pop_soft_2.flac",
+    "dur": 0.5,
+    "hit": 0.0023
+   }
+  ],
+  "category": "ui",
+  "desc": "Pop suave y redondo",
+  "lufs_100ms": -10.0,
+  "peak_db": -4.06
+ },
+ "bubble": {
+  "file": "bubble.flac",
+  "dur": 0.5727,
+  "hit": 0.0015,
+  "tags": [
+   "bubble",
+   "blup",
+   "cute",
+   "burbuja"
+  ],
+  "variants": [
+   {
+    "file": "bubble.flac",
+    "dur": 0.5727,
+    "hit": 0.0015
+   },
+   {
+    "file": "bubble_2.flac",
+    "dur": 0.5372,
+    "hit": 0.001
+   }
+  ],
+  "category": "ui",
+  "desc": "Burbujas ascendentes",
+  "lufs_100ms": -10.0,
+  "peak_db": -3.88
+ },
+ "click": {
+  "file": "click.flac",
+  "dur": 0.1842,
+  "hit": 0.0023,
+  "tags": [
+   "click",
+   "button",
+   "ui",
+   "mouse",
+   "boton"
+  ],
+  "variants": [
+   {
+    "file": "click.flac",
+    "dur": 0.1842,
+    "hit": 0.0023
+   },
+   {
+    "file": "click_2.flac",
+    "dur": 0.1558,
+    "hit": 0.0023
+   },
+   {
+    "file": "click_3.flac",
+    "dur": 0.1764,
+    "hit": 0.0024
+   }
+  ],
+  "category": "ui",
+  "desc": "Click de interfaz (presion y liberacion)",
+  "lufs_100ms": -18.05,
+  "peak_db": -1.05
+ },
+ "tick": {
+  "file": "tick.flac",
+  "dur": 0.1987,
+  "hit": 0.0024,
+  "tags": [
+   "tick",
+   "clock",
+   "counter",
+   "reloj",
+   "contador"
+  ],
+  "variants": [
+   {
+    "file": "tick.flac",
+    "dur": 0.1987,
+    "hit": 0.0024
+   },
+   {
+    "file": "tick_2.flac",
+    "dur": 0.2151,
+    "hit": 0.0025
+   }
+  ],
+  "category": "ui",
+  "desc": "Tick corto (contadores, relojes)",
+  "lufs_100ms": -14.81,
+  "peak_db": -1.05
+ },
+ "typing": {
+  "file": "typing.flac",
+  "dur": 1.4451,
+  "hit": 0.0045,
+  "tags": [
+   "typing",
+   "keyboard",
+   "type",
+   "teclado",
+   "escribir"
+  ],
+  "variants": [
+   {
+    "file": "typing.flac",
+    "dur": 1.4451,
+    "hit": 0.0045,
+    "loop": [
+     0.0587,
+     1.1336
+    ]
+   }
+  ],
+  "category": "ui",
+  "desc": "Tecleo (texto que se escribe)",
+  "lufs_100ms": -11.6,
+  "peak_db": -1.05,
+  "loop": [
+   0.0587,
+   1.1336
+  ]
+ },
+ "shutter": {
+  "file": "shutter.flac",
+  "dur": 0.2666,
+  "hit": 0.003,
+  "tags": [
+   "shutter",
+   "camera",
+   "photo",
+   "camara",
+   "foto"
+  ],
+  "variants": [
+   {
+    "file": "shutter.flac",
+    "dur": 0.2666,
+    "hit": 0.003
+   }
+  ],
+  "category": "ui",
+  "desc": "Obturador de camara",
+  "lufs_100ms": -12.33,
+  "peak_db": -1.05
+ },
+ "swipe": {
+  "file": "swipe.flac",
+  "dur": 0.4319,
+  "hit": 0.0712,
+  "tags": [
+   "swipe",
+   "slide",
+   "card",
+   "desliza",
+   "tarjeta"
+  ],
+  "variants": [
+   {
+    "file": "swipe.flac",
+    "dur": 0.4319,
+    "hit": 0.0712
+   },
+   {
+    "file": "swipe_2.flac",
+    "dur": 0.3885,
+    "hit": 0.0618
+   }
+  ],
+  "category": "ui",
+  "desc": "Deslizar (tarjetas, paneles)",
+  "lufs_100ms": -10.17,
+  "peak_db": -1.05
+ },
+ "notification": {
+  "file": "notification.flac",
+  "dur": 1.6263,
+  "hit": 0.0045,
+  "tags": [
+   "notification",
+   "message",
+   "alert",
+   "notificacion",
+   "mensaje"
+  ],
+  "variants": [
+   {
+    "file": "notification.flac",
+    "dur": 1.6263,
+    "hit": 0.0045,
+    "root": 9
+   }
+  ],
+  "category": "tonal",
+  "desc": "Notificacion de dos notas (marimba)",
+  "lufs_100ms": -10.0,
+  "peak_db": -5.07,
+  "root": 9
+ },
+ "ding": {
+  "file": "ding.flac",
+  "dur": 2.5436,
+  "hit": 0.0032,
+  "tags": [
+   "ding",
+   "bell",
+   "correct",
+   "idea",
+   "campana",
+   "acierto"
+  ],
+  "variants": [
+   {
+    "file": "ding.flac",
+    "dur": 2.5436,
+    "hit": 0.0032,
+    "root": 4
+   },
+   {
+    "file": "ding_2.flac",
+    "dur": 2.4759,
+    "hit": 0.0035,
+    "root": 7
+   }
+  ],
+  "category": "tonal",
+  "desc": "Ding FM limpio",
+  "lufs_100ms": -10.0,
+  "peak_db": -8.46,
+  "root": 4
+ },
+ "bell": {
+  "file": "bell.flac",
+  "dur": 4.5472,
+  "hit": 0.007,
+  "tags": [
+   "bell",
+   "ring",
+   "campana",
+   "anuncio"
+  ],
+  "variants": [
+   {
+    "file": "bell.flac",
+    "dur": 4.5472,
+    "hit": 0.007,
+    "root": 7
+   }
+  ],
+  "category": "tonal",
+  "desc": "Campana con parciales reales",
+  "lufs_100ms": -9.0,
+  "peak_db": -2.16,
+  "root": 7
+ },
+ "chime": {
+  "file": "chime.flac",
+  "dur": 3.5747,
+  "hit": 0.0055,
+  "tags": [
+   "chime",
+   "magic",
+   "reveal",
+   "arpegio",
+   "magia"
+  ],
+  "variants": [
+   {
+    "file": "chime.flac",
+    "dur": 3.5747,
+    "hit": 0.0055,
+    "root": 4
+   }
+  ],
+  "category": "tonal",
+  "desc": "Arpegio de celesta (revelaciones)",
+  "lufs_100ms": -10.0,
+  "peak_db": -5.87,
+  "root": 4
+ },
+ "sparkle": {
+  "file": "sparkle.flac",
+  "dur": 1.6709,
+  "hit": 0.0045,
+  "tags": [
+   "sparkle",
+   "shine",
+   "clean",
+   "new",
+   "brillo",
+   "limpio"
+  ],
+  "variants": [
+   {
+    "file": "sparkle.flac",
+    "dur": 1.6709,
+    "hit": 0.0045,
+    "root": 4
+   },
+   {
+    "file": "sparkle_2.flac",
+    "dur": 1.7854,
+    "hit": 0.0045,
+    "root": 4
+   }
+  ],
+  "category": "tonal",
+  "desc": "Destellos agudos (brillo, limpio, nuevo)",
+  "lufs_100ms": -10.0,
+  "peak_db": -5.84,
+  "root": 4
+ },
+ "success": {
+  "file": "success.flac",
+  "dur": 2.682,
+  "hit": 0.0055,
+  "tags": [
+   "success",
+   "check",
+   "done",
+   "exito",
+   "listo"
+  ],
+  "variants": [
+   {
+    "file": "success.flac",
+    "dur": 2.682,
+    "hit": 0.0055,
+    "root": 0
+   }
+  ],
+  "category": "tonal",
+  "desc": "Exito (arpegio mayor)",
+  "lufs_100ms": -10.0,
+  "peak_db": -6.08,
+  "root": 0
+ },
+ "cash": {
+  "file": "cash.flac",
+  "dur": 1.8228,
+  "hit": 0.0795,
+  "tags": [
+   "cash",
+   "money",
+   "price",
+   "register",
+   "dinero",
+   "precio"
+  ],
+  "variants": [
+   {
+    "file": "cash.flac",
+    "dur": 1.8228,
+    "hit": 0.0795,
+    "root": 0
+   }
+  ],
+  "category": "tonal",
+  "desc": "Caja registradora: palanca, campana, monedas y cajon",
+  "lufs_100ms": -8.0,
+  "peak_db": -4.63,
+  "root": 0
+ },
+ "coin": {
+  "file": "coin.flac",
+  "dur": 1.2773,
+  "hit": 0.0026,
+  "tags": [
+   "coin",
+   "money",
+   "price",
+   "moneda",
+   "costo"
+  ],
+  "variants": [
+   {
+    "file": "coin.flac",
+    "dur": 1.2773,
+    "hit": 0.0026
+   }
+  ],
+  "category": "tonal",
+  "desc": "Moneda que cae y vibra",
+  "lufs_100ms": -10.0,
+  "peak_db": -6.83
+ },
+ "riser_short": {
+  "file": "riser_short.flac",
+  "dur": 2.7515,
+  "hit": 1.59,
+  "tags": [
+   "riser",
+   "build",
+   "tension",
+   "tension",
+   "sube"
+  ],
+  "variants": [
+   {
+    "file": "riser_short.flac",
+    "dur": 2.7515,
+    "hit": 1.59
+   }
+  ],
+  "category": "riser",
+  "desc": "Riser corto (1.6 s) que culmina en el golpe",
+  "lufs_100ms": -7.1,
+  "peak_db": -1.05
+ },
+ "riser_long": {
+  "file": "riser_long.flac",
+  "dur": 5.1687,
+  "hit": 3.99,
+  "tags": [
+   "riser",
+   "build",
+   "tension",
+   "intro",
+   "sube"
+  ],
+  "variants": [
+   {
+    "file": "riser_long.flac",
+    "dur": 5.1687,
+    "hit": 3.99
+   }
+  ],
+  "category": "riser",
+  "desc": "Riser largo (4 s) que culmina en el golpe",
+  "lufs_100ms": -7.52,
+  "peak_db": -1.05
+ },
+ "impact_soft": {
+  "file": "impact_soft.flac",
+  "dur": 0.8566,
+  "hit": 0.0025,
+  "tags": [
+   "impact",
+   "hit",
+   "thud",
+   "golpe",
+   "enfasis"
+  ],
+  "variants": [
+   {
+    "file": "impact_soft.flac",
+    "dur": 0.8566,
+    "hit": 0.0025
+   },
+   {
+    "file": "impact_soft_2.flac",
+    "dur": 0.9419,
+    "hit": 0.0025
+   }
+  ],
+  "category": "impact",
+  "desc": "Golpe suave con cuerpo",
+  "lufs_100ms": -7.0,
+  "peak_db": -1.92
+ },
+ "impact_boom": {
+  "file": "impact_boom.flac",
+  "dur": 2.3277,
+  "hit": 0.0034,
+  "tags": [
+   "impact",
+   "boom",
+   "cinematic",
+   "drop",
+   "golpe",
+   "dramatico"
+  ],
+  "variants": [
+   {
+    "file": "impact_boom.flac",
+    "dur": 2.3277,
+    "hit": 0.0034
+   }
+  ],
+  "category": "impact",
+  "desc": "Impacto cinematografico con sub y cola",
+  "lufs_100ms": -10.33,
+  "peak_db": -1.05
+ },
+ "sub_drop": {
+  "file": "sub_drop.flac",
+  "dur": 2.673,
+  "hit": 0.0104,
+  "tags": [
+   "sub",
+   "drop",
+   "bass",
+   "grave",
+   "caida"
+  ],
+  "variants": [
+   {
+    "file": "sub_drop.flac",
+    "dur": 2.673,
+    "hit": 0.0104
+   }
+  ],
+  "category": "impact",
+  "desc": "Caida de sub grave",
+  "lufs_100ms": -8.0,
+  "peak_db": -3.74
+ },
+ "heartbeat": {
+  "file": "heartbeat.flac",
+  "dur": 1.7431,
+  "hit": 0.0051,
+  "tags": [
+   "heartbeat",
+   "tension",
+   "suspense",
+   "corazon",
+   "latido"
+  ],
+  "variants": [
+   {
+    "file": "heartbeat.flac",
+    "dur": 1.7431,
+    "hit": 0.0051,
+    "loop": [
+     0.7,
+     1.606
+    ]
+   }
+  ],
+  "category": "impact",
+  "desc": "Latido doble",
+  "lufs_100ms": -9.0,
+  "peak_db": -1.51,
+  "loop": [
+   0.7,
+   1.606
+  ]
+ },
+ "glitch": {
+  "file": "glitch.flac",
+  "dur": 0.7051,
+  "hit": 0.0035,
+  "tags": [
+   "glitch",
+   "digital",
+   "error",
+   "tech",
+   "falla"
+  ],
+  "variants": [
+   {
+    "file": "glitch.flac",
+    "dur": 0.7051,
+    "hit": 0.0035,
+    "loop": [
+     0.03,
+     0.4
+    ]
+   },
+   {
+    "file": "glitch_2.flac",
+    "dur": 0.6805,
+    "hit": 0.0035,
+    "loop": [
+     0.03,
+     0.4
+    ]
+   },
+   {
+    "file": "glitch_3.flac",
+    "dur": 0.7206,
+    "hit": 0.0035,
+    "loop": [
+     0.03,
+     0.4
+    ]
+   }
+  ],
+  "category": "texture",
+  "desc": "Glitch digital (stutter, bitcrush)",
+  "lufs_100ms": -10.68,
+  "peak_db": -1.05,
+  "loop": [
+   0.03,
+   0.4
+  ]
+ },
+ "scratch": {
+  "file": "scratch.flac",
+  "dur": 0.7248,
+  "hit": 0.06,
+  "tags": [
+   "scratch",
+   "vinyl",
+   "dj",
+   "stop",
+   "rayon"
+  ],
+  "variants": [
+   {
+    "file": "scratch.flac",
+    "dur": 0.7248,
+    "hit": 0.06
+   }
+  ],
+  "category": "texture",
+  "desc": "Scratch de vinilo",
+  "lufs_100ms": -9.0,
+  "peak_db": -2.29
+ },
+ "paper_rip": {
+  "file": "paper_rip.flac",
+  "dur": 0.8101,
+  "hit": 0.012,
+  "tags": [
+   "paper",
+   "rip",
+   "tear",
+   "papel",
+   "rasgar"
+  ],
+  "variants": [
+   {
+    "file": "paper_rip.flac",
+    "dur": 0.8101,
+    "hit": 0.012,
+    "loop": [
+     0.06,
+     0.5
+    ]
+   }
+  ],
+  "category": "texture",
+  "desc": "Papel que se rasga",
+  "lufs_100ms": -11.22,
+  "peak_db": -1.05,
+  "loop": [
+   0.06,
+   0.5
+  ]
+ },
+ "pen_scribble": {
+  "file": "pen_scribble.flac",
+  "dur": 1.3022,
+  "hit": 0.02,
+  "tags": [
+   "pen",
+   "scribble",
+   "write",
+   "draw",
+   "plumon",
+   "dibujar"
+  ],
+  "variants": [
+   {
+    "file": "pen_scribble.flac",
+    "dur": 1.3022,
+    "hit": 0.02,
+    "loop": [
+     0.15,
+     1.05
+    ]
+   }
+  ],
+  "category": "texture",
+  "desc": "Plumon sobre papel (garabatos que se dibujan)",
+  "lufs_100ms": -12.0,
+  "peak_db": -3.21,
+  "loop": [
+   0.15,
+   1.05
+  ]
+ },
+ "record_stop": {
+  "file": "record_stop.flac",
+  "dur": 1.0435,
+  "hit": 0.05,
+  "tags": [
+   "record",
+   "stop",
+   "tape",
+   "freeze",
+   "alto",
+   "disco"
+  ],
+  "variants": [
+   {
+    "file": "record_stop.flac",
+    "dur": 1.0435,
+    "hit": 0.05,
+    "root": 0
+   }
+  ],
+  "category": "texture",
+  "desc": "Disco que se frena (corte dramatico de musica)",
+  "lufs_100ms": -8.27,
+  "peak_db": -1.05,
+  "root": 0
+ }
+}
