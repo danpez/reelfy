@@ -224,3 +224,20 @@ def test_status_aplana_musica_pendiente_de_la_vista_previa(store):
     assert st["preview_music_pending"] is True and st["preview_file"] == "a.mp4"
     store.side_update("p1", "proxy", state="done", url="/source/p1?proxy=1")
     assert store.status("p1")["proxy_url"] == "/source/p1?proxy=1"
+
+
+def test_plan_y_su_aviso_se_guardan_juntos(store):
+    """La foto del perfil llega en segundo plano: el plan nuevo y la tarea lateral que lo anuncia
+    (profile_media) se escriben en la MISMA transaccion (antes, dos escrituras: un /status entre
+    ambas veia el plan nuevo sin su aviso). Si otro escritor gano la revision, no se escribe nada."""
+    store.create("j1", "analyze", ".mp4", plan={"version": 2, "fx": {}})
+    rev = store.get("j1")["plan_rev"]
+    ok, rev2 = store.update_plan("j1", {"version": 2, "fx": {"a": 1}}, rev,
+                                 side=("profile_media", lambda r2: {"state": "applied", "plan_rev": r2}))
+    assert ok and rev2 == rev + 1
+    assert store.side_get("j1", "profile_media")["plan_rev"] == rev2 == store.get("j1")["plan_rev"]
+    ok, cur = store.update_plan("j1", {"version": 2, "fx": {"a": 2}}, rev,       # revision vieja
+                                side=("profile_media", lambda r2: {"state": "otro", "plan_rev": r2}))
+    assert not ok and cur == rev2
+    assert store.side_get("j1", "profile_media")["state"] == "applied"
+    assert store.get("j1")["plan"]["fx"] == {"a": 1}

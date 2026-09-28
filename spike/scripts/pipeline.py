@@ -749,7 +749,7 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
     if broll_sugg:
         print(f"   broll: {[b['query'] for b in broll_sugg]}")
     step(84, "Detectando silencios y muletillas…")
-    keeps, src_len = edit_mod.keep_segments(str(wav))
+    keeps, src_len = edit_mod.keep_segments(str(wav), words)   # + pausas entre palabras
     cuts, t_prev = [], 0.0                 # complement of keeps = editable cut track
     for a, b in keeps:
         if a - t_prev > 0.05:
@@ -864,7 +864,8 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
             if src_dur - t > 0.05:
                 keeps.append((t, src_dur))
         elif "cuts" not in plan:                            # older plans: detect now
-            keeps, src_dur = edit_mod.keep_segments(plan["wav"])
+            pw = [w for ph in plan.get("phrases") or [] for w in ph]
+            keeps, src_dur = edit_mod.keep_segments(plan["wav"], pw)
         removed = src_dur - sum(b - a for a, b in keeps) if keeps else 0.0
         if removed < 0.2:
             keeps = None                                    # nothing worth trimming

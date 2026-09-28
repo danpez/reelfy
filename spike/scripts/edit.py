@@ -42,10 +42,94 @@ def _silences(video):
     return list(zip(s, e))
 
 
-def keep_segments(video):
-    """Speech segments to keep (complement of padded silences). Returns (keeps, dur)."""
+# Pausas ENTRE PALABRAS. silencedetect usa un umbral absoluto por muestra (-32 dB): una pausa con
+# ruido de fondo o chasquidos (p. ej. el arranque de un clip de iPhone, ~-38 dB con picos) no
+# cuenta como silencio y quedaba ~1 s muerto. Con las marcas de las palabras la pausa se reconoce
+# por energia RELATIVA a la voz de esa persona: voz no transcrita suena fuerte y nunca se corta.
+GAP_MIN = 0.40        # pausa entre palabras que se recorta (s)
+GAP_PAD_OUT = 0.10    # aire que queda tras la palabra anterior
+GAP_PAD_IN = 0.08     # aire que queda antes de la siguiente
+GAP_REL_DB = -10.0    # p90 de la pausa (ventanas de 50 ms) al menos 10 dB bajo la mediana de la voz
+_WIN = 0.05
+
+
+def _mono16k(path):
+    """Audio mono 16 kHz float32 (wav directo con soundfile; video via ffmpeg)."""
+    import numpy as np
+    p = str(path)
+    if p.lower().endswith(".wav"):
+        import soundfile as sf
+        y, sr = sf.read(p, dtype="float32", always_2d=True)
+        y = y.mean(axis=1)
+        if sr != 16000:
+            idx = (np.arange(int(len(y) * 16000 / sr)) * sr / 16000).astype(int)
+            y = y[np.clip(idx, 0, len(y) - 1)]
+        return y
+    raw = subprocess.run([FFMPEG, "-v", "error", "-i", p, "-ac", "1", "-ar", "16000", "-f", "f32le", "-"],
+                         capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.float32)
+
+
+def word_gap_silences(audio, words, dur):
+    """Pausas [(a, b)] entre palabras (y antes de la primera / tras la ultima) de al menos GAP_MIN
+    cuya energia queda GAP_REL_DB bajo la voz. Devueltas en el formato de _silences (keep_segments
+    les aplica PAD), de modo que quedan GAP_PAD_OUT / GAP_PAD_IN de aire junto a las palabras."""
+    import numpy as np
+    ws = sorted((w for w in (words or []) if w.get("end", 0) > w.get("start", 0)), key=lambda w: w["start"])
+    if len(ws) < 2:
+        return []
+    y = audio if not isinstance(audio, (str, Path)) else _mono16k(audio)
+    sr, hop = 16000, int(16000 * _WIN)
+    n = len(y) // hop
+    if n < 4:
+        return []
+    rms = np.sqrt(np.mean(y[:n * hop].reshape(n, hop) ** 2, axis=1) + 1e-12)
+    db = 20 * np.log10(rms + 1e-9)
+    speech = np.zeros(n, bool)
+    for w in ws:
+        speech[int(w["start"] / _WIN):int(np.ceil(w["end"] / _WIN))] = True
+    if not speech.any():
+        return []
+    ref = float(np.median(db[speech]))
+    out = []
+    bounds = [(0.0, ws[0]["start"])] + [(a["end"], b["start"]) for a, b in zip(ws, ws[1:])] + \
+        [(ws[-1]["end"], dur)]
+    for a, b in bounds:
+        if b - a < GAP_MIN:
+            continue
+        i0, i1 = int(np.ceil((a + 0.02) / _WIN)), int((b - 0.02) / _WIN)
+        if i1 - i0 < 2:
+            continue
+        if float(np.percentile(db[i0:i1], 90)) > ref + GAP_REL_DB:
+            continue                                   # suena (musica, risa, voz no transcrita)
+        s = max(0.0, a + GAP_PAD_OUT - PAD) if a > 0 else 0.0
+        e = min(dur, b - GAP_PAD_IN + PAD) if b < dur else dur
+        if e - s > 0.2:
+            out.append((s, e))
+    return out
+
+
+def _merge(iv):
+    out = []
+    for s, e in sorted(iv):
+        if out and s <= out[-1][1] + 0.02:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def keep_segments(video, words=None):
+    """Speech segments to keep (complement of padded silences). Returns (keeps, dur).
+    Con `words` (marcas de la transcripcion) tambien se recortan las pausas entre palabras que
+    silencedetect no ve por ruido de fondo (word_gap_silences)."""
     dur = _duration(video)
     sil = _silences(video)
+    if words:
+        try:
+            sil = _merge(sil + word_gap_silences(video, words, dur))
+        except Exception as e:  # noqa: sin audio legible -> solo silencedetect
+            print(f"   pausas entre palabras no disponibles ({e})")
     keeps, t = [], 0.0
     for s, e in sil:
         a, b = min(s + PAD, dur), max(e - PAD, 0)

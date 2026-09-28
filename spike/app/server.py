@@ -4048,12 +4048,12 @@ def _lm_apply_job(jid, urls):
         return "done"
     from motion import director
     out, ids = director.apply_profile_media(plan, new)
-    ok, rev2 = jobstore.update_plan(jid, out, rev)
+    fh = jobstore.plan_hash(plan)
+    ok, rev2 = jobstore.update_plan(jid, out, rev, side=("profile_media", lambda r2: dict(
+        state="applied", plan_rev=r2, from_rev=rev, from_hash=fh, items=ids[:40],
+        message="Foto y logo del perfil listos")))
     if not ok:
         return "busy"
-    jobstore.side_update(jid, "profile_media", replace=True, state="applied", plan_rev=rev2, from_rev=rev,
-                         from_hash=jobstore.plan_hash(plan), items=ids[:40],
-                         message="Foto y logo del perfil listos")
     print(f"   perfil: foto/logo en el proyecto {jid} (rev {rev} -> {rev2}; {len(ids)} elementos)")
     return "done"
 
@@ -4130,12 +4130,12 @@ def _lm_stored(job_id, plan, rev):
         j = jobstore.get_light(job_id)
         if not j or j.get("state") in ("queued", "running") or _side_running(job_id, "direct"):
             return plan, rev
-        ok, rev2 = jobstore.update_plan(job_id, out, rev)
+        fh = jobstore.plan_hash(plan)
+        ok, rev2 = jobstore.update_plan(job_id, out, rev, side=("profile_media", lambda r2: dict(
+            state="applied", plan_rev=r2, from_rev=rev, from_hash=fh,
+            message="Foto y logo del perfil listos")))
         if not ok:
             return jobstore.get_plan(job_id)
-        jobstore.side_update(job_id, "profile_media", replace=True, state="applied", plan_rev=rev2,
-                             from_rev=rev, from_hash=jobstore.plan_hash(plan),
-                             message="Foto y logo del perfil listos")
         return out, rev2
     except Exception:  # noqa: la foto es un extra
         traceback.print_exc()

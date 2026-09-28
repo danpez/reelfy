@@ -283,16 +283,22 @@ def update(job_id, **kw):
     cx.commit()
 
 
-def update_plan(job_id, plan, base_rev=None):
+import contextlib as _ctx
+_nolock = _ctx.nullcontext()
+
+
+def update_plan(job_id, plan, base_rev=None, side=None):
     """Guarda el plan con concurrencia OPTIMISTA: con `base_rev`, solo si el plan guardado
     sigue en esa revision (si no, otro escritor -re-dirigir, otra pestaña- gano: no se pisa).
+    `side` = (nombre, callable(rev_nueva) -> dict): la tarea lateral que anuncia el cambio se
+    escribe en la MISMA transaccion (nadie ve el plan nuevo sin su aviso, ni el aviso sin el plan).
     -> (ok, plan_rev actual)."""
     h = plan_hash(plan)
     raw = json.dumps(plan)
     cx = _cx()
-    with cx:                     # BEGIN IMMEDIATE: leer y escribir la revision es atomico
+    with _side_lock if side else _nolock, cx:   # BEGIN IMMEDIATE: leer y escribir es atomico
         cx.execute("BEGIN IMMEDIATE")
-        row = cx.execute("SELECT plan_rev, plan_hash FROM jobs WHERE id=?", (job_id,)).fetchone()
+        row = cx.execute("SELECT plan_rev, plan_hash, side FROM jobs WHERE id=?", (job_id,)).fetchone()
         if not row:
             return False, 0
         rev = int(row["plan_rev"] or 0)
@@ -300,8 +306,17 @@ def update_plan(job_id, plan, base_rev=None):
             return False, rev
         if row["plan_hash"] == h:
             return True, rev
-        cx.execute("UPDATE jobs SET plan=?, plan_hash=?, plan_rev=?, meta=?, updated=? WHERE id=?",
-                   (raw, h, rev + 1, json.dumps(plan_meta(plan)), time.time(), job_id))
+        sets, vals = "plan=?, plan_hash=?, plan_rev=?, meta=?, updated=?", \
+            [raw, h, rev + 1, json.dumps(plan_meta(plan)), time.time()]
+        if side:
+            name, build = side
+            sd = json.loads(row["side"]) if row["side"] else {}
+            t = dict(build(rev + 1))
+            t["updated"] = round(time.time(), 3)
+            sd[name] = t
+            sets += ", side=?"
+            vals.append(json.dumps(sd))
+        cx.execute(f"UPDATE jobs SET {sets} WHERE id=?", (*vals, job_id))
     return True, rev + 1
 
 
