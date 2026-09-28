@@ -48,7 +48,7 @@ SPIKE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SPIKE / "scripts"))
 import paths  # noqa: E402
 
-ENGINE_VERSION = "0.5.0"
+ENGINE_VERSION = "0.5.1"
 
 # ---- LLM embebido: si el binario de ollama viene en el bundle, corre en un
 # puerto propio con modelos en DATA. El pipeline (highlights/translate) y el director

@@ -219,6 +219,29 @@ def logo_cfg(v: Any) -> dict | None:
             "opacity": min(1.0, max(0.0, _num_or(d.get("opacity"), 0.9)))}
 
 
+def _ram_gb() -> float:
+    """RAM fisica en GB (0 si no se puede leer)."""
+    try:
+        if sys.platform == "darwin":
+            return int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
+                                      timeout=3).stdout.strip()) / 2 ** 30
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2 ** 30
+    except Exception:  # noqa: Windows u otro -> sin limite por RAM
+        return 0.0
+
+
+def default_workers(cpus: int | None = None, ram_gb: float | None = None) -> int:
+    """Procesos del compositor: hasta 4, uno por cada 3 nucleos y ~2.5 GB de RAM libres para ellos
+    (medido: ~2 GB por proceso a 1080x1920; se reservan ~4 GB para la app, la IA local y el sistema).
+    En una Mac de 8 GB 4 procesos hacian swap; con 16 GB o mas no cambia nada."""
+    cpus = cpus if cpus is not None else (os.cpu_count() or 4)
+    ram = _ram_gb() if ram_gb is None else ram_gb
+    n = min(4, cpus // 3)
+    if ram > 0:
+        n = min(n, int((ram - 4.0) // 2.5))
+    return max(1, n)
+
+
 def _resolve_opts(opts: dict | None, src_info: dict | None = None) -> dict:
     o = dict(opts or {})
     fmt = o.get("fmt") or "9:16"
@@ -252,7 +275,7 @@ def _resolve_opts(opts: dict | None, src_info: dict | None = None) -> dict:
     o.setdefault("sys_path", [])
     o.setdefault("dither", 1.0)
     if "workers" not in o:
-        o["workers"] = max(1, min(4, (os.cpu_count() or 4) // 3))
+        o["workers"] = default_workers()
     return o
 
 

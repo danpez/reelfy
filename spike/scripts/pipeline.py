@@ -26,6 +26,9 @@ import edit as edit_mod
 import thumbnail as thumb_mod
 import translate as translate_mod
 import broll as broll_mod
+# select/aselect por tramos y sumas largas que av_expr acepta (cientos de cortes/beats: una
+# suma de >100 terminos no parsea y el export reventaba con videos largos)
+from motion.video_io import select_chain, sum_expr
 
 from paths import SPIKE, DATA, WORK, WCLI, FFMPEG, FFPROBE  # noqa: E402
 import paths as paths_mod  # noqa: E402
@@ -509,7 +512,7 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
         fg = [f"scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase", f"crop={fg_w}:{fg_h}"]
     fg = fg + [f"fps={fps}"] + tm   # sendcmd MUST precede fps or its crop-x cmds don't land
     if beats and zoom_amt > 0.004:   # hard-cut punch-in on the fg CONTENT (display size fixed)
-        win = "+".join(f"between(t,{b:.3f},{b + ZOOM_HOLD:.3f})" for b in beats)
+        win = sum_expr(f"between(t,{b:.3f},{b + ZOOM_HOLD:.3f})" for b in beats)
         z = f"(1+{zoom_amt}*({win}))"
         fg += [f"scale=w='ceil({fg_w}*{z}/2)*2':h='ceil({fg_h}*{z}/2)*2':eval=frame",
                f"crop={fg_w}:{fg_h}"]
@@ -564,9 +567,10 @@ def reframe_and_burn(video, ass_path, out, fps=30, track=True, cmds_path=None, b
     af_parts = [AUDIO_STUDIO] if enhance_audio else []
     total = preview_secs or probe_duration(video)
     if keeps:
-        sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keeps)
-        vf += f",select='{sel}',setpts=N/FRAME_RATE/TB"
-        af_parts.append(f"aselect='{sel}',asetpts=N/SR/TB,adeclick")
+        # un select/aselect si son pocos keeps; con muchos, varios encadenados por tramos
+        vf += "," + ",".join(select_chain(keeps, "select", digits=3)) + ",setpts=N/FRAME_RATE/TB"
+        af_parts.append(",".join(select_chain(keeps, "aselect", digits=3))
+                        + ",asetpts=N/SR/TB,adeclick")
         if not preview_secs:
             total = sum(b - a for a, b in keeps)
     bitrate = "12M"
@@ -690,9 +694,8 @@ def finish_short(clip_in, clip_out, dynamic, hook_title, w, h):
     if dynamic:
         keeps, dur = edit_mod.keep_segments(clip_in)
         if keeps and sum(b - a for a, b in keeps) < dur - 0.2:
-            sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keeps)
-            vf += [f"select='{sel}'", "setpts=N/FRAME_RATE/TB"]
-            af = f"aselect='{sel}',asetpts=N/SR/TB"
+            vf += select_chain(keeps, "select", digits=3) + ["setpts=N/FRAME_RATE/TB"]
+            af = ",".join(select_chain(keeps, "aselect", digits=3) + ["asetpts=N/SR/TB"])
     if hook_title:
         ass = Path(clip_out).with_suffix(".hook.ass")
         make_hook_ass(hook_title, w, h, ass)

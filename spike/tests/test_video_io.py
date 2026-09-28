@@ -84,6 +84,60 @@ def test_videotoolbox_disponible_en_mac():
     assert V.hwaccel_args() == ["-hwaccel", "videotoolbox"]
 
 
+def test_hwaccel_por_codec(monkeypatch):
+    """H.264 se decodifica por software (en Apple Silicon es mas rapido que VideoToolbox y da
+    los mismos cuadros); HEVC/ProRes y fuentes sin probe siguen con VideoToolbox; fuera de Mac
+    nunca hay -hwaccel."""
+    vt = ["-hwaccel", "videotoolbox"]
+    monkeypatch.setattr(V, "IS_MAC", True)
+    assert V.hwaccel_args() == vt
+    assert V.hwaccel_args({}) == vt
+    assert V.hwaccel_args({"codec": None}) == vt
+    assert V.hwaccel_args({"codec": "h264"}) == []
+    assert V.hwaccel_args({"codec": "H264"}) == []
+    assert V.hwaccel_args({"codec": "hevc"}) == vt
+    assert V.hwaccel_args({"codec": "prores"}) == vt
+    monkeypatch.setattr(V, "IS_MAC", False)
+    for info in (None, {"codec": "h264"}, {"codec": "hevc"}):
+        assert V.hwaccel_args(info) == []
+
+
+@pytest.mark.skipif(not paths.IS_MAC, reason="solo Mac")
+def test_base_pass_h264_por_software_mismos_cuadros(work, monkeypatch):
+    """El base pass de una fuente H.264 decodifica por software (sin -hwaccel) y sale con los
+    MISMOS cuadros que decodificando con VideoToolbox (por eso la clave del base no cambia)."""
+    src = _synthetic_source(work / "synthetic_src.mp4")
+    assert V.probe(src)["codec"] == "h264"
+    plan = {"video": str(src), "duration": 6.0,
+            "cuts": [{"start": 0.4, "end": 1.2, "enabled": True},
+                     {"start": 3.0, "end": 3.9, "enabled": True}]}
+    tl = Timeline.from_plan(plan, fps=30)
+    cmds = []
+    real = V.run_ffmpeg_fallback
+
+    def spy(cmd, **kw):
+        cmds.append(list(cmd))
+        return real(cmd, **kw)
+    monkeypatch.setattr(V, "run_ffmpeg_fallback", spy)
+
+    def build(name):
+        cache = work / name
+        shutil.rmtree(cache, ignore_errors=True)
+        bv, bw = V.base_paths(cache, plan, 180, 320, 30, tl, enhance_audio=False)
+        V.base_pass(plan, bv, bw, 180, 320, 30, tl, enhance_audio=False)
+        with V.FrameReader(bv, 180, 320, 0, None, 30) as r:
+            return bv, np.stack(list(r))
+    bv_sw, f_sw = build("cache_sw_decode")
+    assert cmds and "-hwaccel" not in cmds[-1]
+    monkeypatch.setattr(V, "SW_DECODE", ())                 # forzar VideoToolbox (lo de antes)
+    bv_vt, f_vt = build("cache_vt_decode")
+    i = cmds[-1].index("-hwaccel")
+    assert cmds[-1][i + 1] == "videotoolbox"
+    assert bv_sw.name == bv_vt.name                         # misma clave de cache
+    assert f_sw.shape == f_vt.shape == (tl.n_frames(), 320, 180, 4)
+    assert np.array_equal(f_sw, f_vt)
+
+
 # ------------------------------------------------------------------ pipes exactos
 def _code_frame(i, W=320, H=240):
     """Cuadro con el indice codificado en 10 barras binarias + nivel de gris."""

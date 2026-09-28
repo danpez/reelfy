@@ -7,9 +7,11 @@ Decisiones clave (docs/MOTION-ENGINE.md, seccion 1):
   - base_pass() produce UNA vez por (fuente, cortes, formato, fps) el video base ya
     reencuadrado + cortado + tonemapeado (intermedio de alta calidad, GOP corto para buscar
     rapido) y la voz de estudio cortada con microfundidos; se cachea por hash.
-  - Los cortes se aplican por INDICE de cuadro sobre la reticula de salida (fps con
-    start_time=0) y la voz por MUESTRA con los mismos limites cuantizados del Timeline:
-    video y audio quedan en sincronia exacta.
+  - Los cortes se aplican por CUADRO sobre la reticula de salida (fps con start_time=0: t =
+    k/fps, con medio cuadro de margen) y la voz por MUESTRA con los mismos limites cuantizados
+    del Timeline: video y audio quedan en sincronia exacta. Cientos de keeps (video largo) se
+    reparten en varios select encadenados por tramos (select_filters): av_expr no acepta una
+    suma de mas de ~100 terminos.
   - Color: todo intermedio va etiquetado bt709/tv (primaries, transfer, matriz y rango: con
     setparams, porque el filtro scale fija las propiedades del cuadro y el encoder ignora
     -color_primaries/-color_trc) y las conversiones RGB<->YUV usan bt709 explicito. Fuentes
@@ -17,7 +19,8 @@ Decisiones clave (docs/MOTION-ENGINE.md, seccion 1):
   - Concurrencia: el base y la voz se generan bajo un lock por clave (flock) con temporales
     unicos: ensure_base en segundo plano + export simultaneo nunca corrompen la cache.
   - Encoders: h264_videotoolbox en Mac (hardware), libx264 fuera. Nunca -hwaccel
-    videotoolbox fuera de Mac.
+    videotoolbox fuera de Mac; en Mac el base pass decodifica H.264 por software (mas rapido
+    que VideoToolbox y mismos cuadros: SW_DECODE) y el resto con VideoToolbox.
 """
 from __future__ import annotations
 
@@ -248,9 +251,21 @@ def h264_level(W: int, H: int, fps: float) -> str | None:
     return None
 
 
-def hwaccel_args() -> list[str]:
-    """Decodificacion por hardware SOLO en Mac."""
-    return ["-hwaccel", "videotoolbox"] if IS_MAC else []
+# codecs que decodifican MAS RAPIDO por software que con VideoToolbox (Apple Silicon). H.264 4K30
+# real (19 min, base pass con recorte+escala): 90 s de fuente en 11.4 s por software vs 29.8 s con
+# VideoToolbox, con cuadros identicos bit a bit (framemd5). HEVC/ProRes siguen en VideoToolbox
+# (ahi el software es ~2.5x mas lento). Misma politica que el escaneo del director (SW_FIRST).
+SW_DECODE = ("h264",)
+
+
+def hwaccel_args(info: dict | None = None) -> list[str]:
+    """Decodificacion por hardware SOLO en Mac. Con `info` (probe de la fuente) de un codec de
+    SW_DECODE -> [] (software: mas rapido y mismos cuadros)."""
+    if not IS_MAC:
+        return []
+    if info and str(info.get("codec") or "").lower() in SW_DECODE:
+        return []
+    return ["-hwaccel", "videotoolbox"]
 
 
 def hq_bitrate(W: int, H: int, fps: float) -> str:
@@ -418,8 +433,85 @@ class FileLock:
             self._tl.release()
 
 
-def _select_expr(frame_ranges: list[tuple[int, int]]) -> str:
-    return "+".join(f"between(n,{a},{b - 1})" for a, b in frame_ranges if b > a)
+# ---------------------------------------------------------------- seleccion de cortes (select/aselect)
+# av_expr (el evaluador de expresiones de ffmpeg) rechaza arboles de mas de ~100 niveles: la suma
+# 'between(..)+between(..)+...' anida un nivel por termino y con 101 terminos ya no parsea ("Error
+# while parsing expression ... Cannot allocate memory"). Un video largo (o las pausas entre palabras)
+# da cientos de keeps y el select unico reventaba el export. Medido con ffmpeg 9: 100 terminos OK,
+# 101 fallan; if(tramo, 99 terminos, 1) OK; una suma agrupada entre parentesis cuenta la profundidad.
+SELECT_MAX_TERMS = 60        # terminos between() por filtro select/aselect (margen bajo el limite)
+SUM_LEAF = 40                # terminos por hoja de sum_expr (arbol balanceado)
+
+
+def _merge_closed(intervals, digits: int) -> list[tuple[float, float]]:
+    """Intervalos cerrados [a, b] redondeados a `digits`, ordenados y fundidos si se tocan."""
+    out: list[list[float]] = []
+    for a, b in sorted((round(float(a), digits), round(float(b), digits)) for a, b in intervals):
+        if b < a:
+            continue
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def select_chain(intervals, filt: str = "select", max_terms: int = SELECT_MAX_TERMS,
+                 digits: int = 6) -> list[str]:
+    """Filtros select/aselect ENCADENADOS que conservan los cuadros con t dentro de algun intervalo
+    cerrado [a, b] (segundos), para CUALQUIER numero de intervalos.
+
+    - Hasta `max_terms` intervalos: UN filtro 'between(t,a,b)+...' (lo de siempre, mismo costo).
+    - Con mas: un filtro por grupo de intervalos consecutivos (<= max_terms cada uno). Cada filtro
+      responde solo de su TRAMO [c_i, c_i+1) (c_i = inicio de su primer intervalo; el primero desde
+      -inf y el ultimo hasta +inf: los tramos cubren toda la linea sin huecos ni solapes) y deja
+      pasar intacto lo de fuera: if(tramo, between(t,..)+..., 1). Un cuadro sobrevive solo si el
+      filtro de su tramo lo conserva: lo previo al primer keep y la cola tras el ultimo se descartan.
+    - Se usa t y no n: los select encadenados preservan los PTS, pero n se renumera despues del
+      primero. Un solo recorrido del stream y sin memoria extra (cada filtro decide cuadro a cuadro).
+    Los limites se redondean a `digits` decimales ANTES de fundir y partir (tramos y terminos usan
+    los mismos numeros). Sin intervalos -> descarta todo."""
+    iv = _merge_closed(intervals, digits)
+    if not iv:
+        return [f"{filt}=0"]
+
+    def num(x: float) -> str:
+        return f"{x:.{digits}f}"
+
+    terms = [f"between(t,{num(a)},{num(b)})" for a, b in iv]
+    if len(terms) <= max(1, int(max_terms)):
+        return [f"{filt}='{'+'.join(terms)}'"]
+    k = -(-len(terms) // max(1, int(max_terms)))
+    edges = [len(terms) * i // k for i in range(k + 1)]          # grupos parejos (211 -> 53,53,52,53)
+    out = []
+    for j in range(k):
+        span = []
+        if j > 0:
+            span.append(f"gte(t,{num(iv[edges[j]][0])})")
+        if j < k - 1:
+            span.append(f"lt(t,{num(iv[edges[j + 1]][0])})")
+        out.append(f"{filt}='if({'*'.join(span)},{'+'.join(terms[edges[j]:edges[j + 1]])},1)'")
+    return out
+
+
+def select_filters(frame_ranges, fps: float, max_terms: int = SELECT_MAX_TERMS) -> list[str]:
+    """select de los rangos [ka, kb) de cuadros de la reticula t = k/fps (la salida del filtro fps
+    con start_time=0). Cada limite lleva medio cuadro de margen ([ka - 0.5, kb - 0.5] / fps): exacto
+    por cuadro aunque t sea flotante (29.97, 23.976...). Pocos keeps -> un solo select."""
+    f = float(fps)
+    return select_chain((((a - 0.5) / f, (b - 0.5) / f) for a, b in frame_ranges if b > a),
+                        "select", max_terms, digits=6)
+
+
+def sum_expr(terms, leaf: int = SUM_LEAF) -> str:
+    """'a+b+...' con CUALQUIER numero de terminos que av_expr acepta, para expresiones que no se
+    pueden partir en varios filtros (crop/scale evaluados por cuadro). Hasta `leaf` terminos, la
+    suma plana de siempre; con mas, arbol balanceado entre parentesis (profundidad ~ leaf + log2 n)."""
+    terms = [str(t) for t in terms]
+    if len(terms) <= max(2, int(leaf)):
+        return "+".join(terms)
+    m = len(terms) // 2
+    return f"({sum_expr(terms[:m], leaf)})+({sum_expr(terms[m:], leaf)})"
 
 
 # ---------------------------------------------------------------- rostro en la fuente (recorte vertical)
@@ -586,7 +678,7 @@ def reframe_filters(info: dict, W: int, H: int, plan: dict | None = None,
                     acc += kb - ka
                 terms = [str(ys[0])] + [f"({ys[i] - ys[i - 1]})*gte(n,{starts[i]})"
                                         for i in range(1, len(ys)) if ys[i] != ys[i - 1]]
-                yexpr = "+".join(terms)
+                yexpr = sum_expr(terms)          # cientos de keeps: arbol que av_expr acepta
         meta.update(mode="vfollow", y=ys, faces=len(samples))
         return [f"scale={W}:{hs}:flags=lanczos", f"crop={W}:{H}:0:'{yexpr}'"], meta
     # fuente mas ANCHA: seguimiento horizontal (tiempo original: van antes del select)
@@ -731,18 +823,18 @@ def _video_pass(src: Path, info: dict, plan: dict, out: Path, W: int, H: int, fp
     n = timeline.n_frames(fps)
     ranges = timeline.frame_ranges(fps)
     reframe, meta = reframe_filters(info, W, H, plan, air, out.parent, timeline=timeline)
-    sel = _select_expr(ranges)
     # reticula de salida con t0=0 -> cola clonada (el ultimo keep puede pasar del ultimo
-    # cuadro real) -> cortes por indice -> reencuadre (antes si depende del tiempo original)
-    # -> tonemap HDR / normalizacion de color y recien entonces 8 bits.
+    # cuadro real) -> cortes por cuadro de la reticula (t = k/fps; con muchos keeps, varios
+    # select encadenados por tramos: select_filters) -> reencuadre (antes si depende del tiempo
+    # original) -> tonemap HDR / normalizacion de color y recien entonces 8 bits.
     tail = max(1.0, 2.0 / fps)
-    cut = [f"fps=fps={fps}:start_time=0:round=near",
-           f"tpad=stop_mode=clone:stop_duration={tail:.3f}",
-           f"select='{sel}'", f"setpts=N/({fps}*TB)"]
+    cut = ([f"fps=fps={fps}:start_time=0:round=near",
+            f"tpad=stop_mode=clone:stop_duration={tail:.3f}"]
+           + select_filters(ranges, fps) + [f"setpts=N/({fps}*TB)"])
     chain = (cut + reframe) if meta.get("order") == "post" else (reframe + cut)
     graph = ",".join(chain + tonemap_filters(info))
     tmp = _tmp_path(out)
-    cmd = ([FFMPEG, "-y", "-v", "error"] + hwaccel_args()
+    cmd = ([FFMPEG, "-y", "-v", "error"] + hwaccel_args(info)
            + ["-i", str(src), "-filter_complex", f"[0:v:0]{graph}[v]", "-map", "[v]",
               "-frames:v", str(n), "-an", "-sn", "-dn", "-r", str(fps)]
            + encoder_args(W, H, fps, kind) + ["-movflags", "+faststart", str(tmp)])

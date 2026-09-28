@@ -121,6 +121,17 @@ icono propio. apply_profile_media(plan, perfil) las pone sin mover nada (misma g
 Efectos de recorte (bg_replace, color_pop, subject_outline): el director NO los propone solo (AUTO_MATTE_FX: el borde
 del recorte deja halos); siguen disponibles a mano en el Studio y un plan que ya los traia los
 conserva al aplicar el perfil (redirect keep_rev).
+Videos LARGOS (> LONG_S; caso real: 19 min 4K H.264, 2541 palabras, antes 8 min y todo
+'heuristico'): presupuesto sub-lineal (director_budget: raiz de la duracion, tope 4.5x); escaneo
+con el decodificador mas rapido por codec (H.264 por software, HEVC con VideoToolbox), cadencia de
+cuadros medianos acotada (MED_MAX) y avance real en la barra; guion por TRAMOS de oraciones
+completas (llm_windows, ~LLM_WIN_WORDS palabras) desde el segundo 0 en paralelo al escaneo, cada
+uno con prompt/num_predict/timeout acotados y cache propia, unidos de forma determinista
+(merge_windows; un tramo que falla deja solo SUS frases con heuristicas y los ya hechos se usan
+aunque el resto no llegue); VLM por GRUPOS de tomas casi iguales (shot_groups: b-roll primero, una
+descripcion por grupo reusada en sus tomas, tope vlm_max_calls y piso VLM_LONG_MIN tras un escaneo
+largo); turno FIFO del modelo (_ModelTurn) entre tramos y VLM. director.timings dice lo hecho
+(budget_s, scan_ms/decoder, faces_ms, vlm_groups/calls/reused/missing, llm_windows/ok/cached).
 Opcional (`trim=True`): el director propone recortes `cuts` con src "ai" (b-roll mudo largo,
 silencios > SILENCE_MAX, aire muerto inicial > LEAD_MAX, cola `tail`); el Studio puede
 desactivarlos con `enabled: false`.
@@ -720,6 +731,24 @@ def _lerp(a: float, b: float, p: float) -> float:
     return a + (b - a) * p
 
 
+# ---------------------------------------------------------------- videos largos
+# Un video corto (<= LONG_S) se dirige EXACTAMENTE como siempre. En uno largo (19 min, 4K) el
+# presupuesto crece sub-lineal con la duracion, el guion va por tramos desde el segundo 0 (en
+# paralelo al escaneo) y el VLM describe tomas representativas (agrupa las casi iguales).
+LONG_S = 150.0            # s de video desde los que el director entra en modo largo
+BUDGET_MAX_X = 4.5        # tope del presupuesto largo (x el presupuesto base)
+
+
+def director_budget(dur: float) -> float:
+    """Presupuesto (s) del director: REELFY_DIRECTOR_BUDGET (50 s) en videos cortos; en largos
+    crece con la RAIZ de la duracion (5 min ~91 s, 10 min ~129 s, 19 min ~178 s, tope 4.5x)."""
+    base = float(os.environ.get("REELFY_DIRECTOR_BUDGET", "50"))
+    if dur <= LONG_S:
+        return base
+    return min(base * BUDGET_MAX_X, base * math.sqrt(dur / 90.0))
+
+
+
 # ---------------------------------------------------------------- ollama (LLM / VLM locales)
 def _ollama_url() -> str:
     return (os.environ.get("REELFY_OLLAMA_URL") or "http://127.0.0.1:11498").rstrip("/")
@@ -868,25 +897,118 @@ def _probe_duration(video: str) -> float:
         return 0.0
 
 
-def scan_video(video: str, duration: float | None = None) -> dict:
+def _probe_codec(video: str) -> str:
+    """Codec del primer stream de video ('h264', 'hevc'...) o '' si no se pudo leer."""
+    try:
+        return subprocess.run([_ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
+                               "stream=codec_name", "-of", "csv=p=0", str(video)], capture_output=True,
+                              text=True, timeout=20).stdout.strip().split("\n")[0].split(",")[0].strip().lower()
+    except Exception:
+        return ""
+
+
+# cuadros medianos (rostro, fondo, VLM) que guarda el escaneo como maximo: 2 fps hasta ~12 min; en
+# videos mas largos baja la cadencia (19 min a 2 fps serian ~1.6 GB de cuadros en memoria)
+MED_MAX = 1500
+# codecs que el decodificador por software de ffmpeg (multinucleo) lee MAS rapido que VideoToolbox:
+# H.264 4K 30 fps (74 Mb/s) a ~10x tiempo real contra ~2.4x con VT (salida identica bit a bit). HEVC
+# (iPhone, 10 bits) sigue con VT: por software es ~2.5x mas lento que VT
+SW_FIRST = ("h264",)
+
+
+def _scan_decoders(video: str) -> list[list[str]]:
+    vt = ["-hwaccel", "videotoolbox"] if (_paths and getattr(_paths, "IS_MAC", False)) else []
+    if not vt:
+        return [[]]
+    return [[], vt] if _probe_codec(video) in SW_FIRST else [vt, []]
+
+
+def _frame_diffs(small: np.ndarray, chunk: int = 4096) -> np.ndarray:
+    """Diferencia media entre cuadros consecutivos (uint8 -> float32 por bloques: mismo
+    resultado que sobre todo el arreglo, sin tener el video entero en float32)."""
+    n = len(small)
+    if n < 2:
+        return np.zeros(0, np.float32)
+    out = []
+    for a in range(0, n - 1, chunk):
+        blk = small[a:min(n, a + chunk + 1)].astype(np.float32)
+        out.append(np.abs(np.diff(blk, axis=0)).mean(axis=(1, 2)))
+    return np.concatenate(out)
+
+
+def _run_scan(cmd: list[str], timeout: float, on_progress: Callable | None = None,
+              dur: float = 0.0) -> tuple[int, bytes]:
+    """Corre el ffmpeg del escaneo -> (codigo, stdout). Con `on_progress(frac)` (video largo: el
+    escaneo tarda minutos y la barra no debe parecer congelada) lee el avance de `-progress` en
+    stderr en otro hilo mientras drena stdout por bloques; un temporizador mata ffmpeg al pasar
+    `timeout`."""
+    if on_progress is None:
+        res = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        return res.returncode, res.stdout
+    proc = subprocess.Popen(cmd[:1] + ["-progress", "pipe:2", "-nostats"] + cmd[1:],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    state = {"t": 0.0}
+
+    def _err():
+        for line in proc.stderr:
+            if line.startswith((b"out_time_us=", b"out_time_ms=")):
+                try:
+                    state["t"] = int(line.split(b"=", 1)[1]) / 1e6
+                except ValueError:
+                    pass
+    th = threading.Thread(target=_err, name="director-scan-progress", daemon=True)
+    th.start()
+    killer = threading.Timer(timeout, proc.kill)
+    killer.start()
+    chunks, last = [], -1.0
+    try:
+        while True:
+            b = proc.stdout.read(1 << 20)
+            if not b:
+                break
+            chunks.append(b)
+            frac = min(1.0, state["t"] / dur) if dur > 0 else 0.0
+            if frac - last >= 0.02:
+                last = frac
+                try:
+                    on_progress(frac)
+                except Exception:
+                    pass
+        proc.wait()
+    finally:
+        killer.cancel()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        th.join(2.0)
+    return proc.returncode, b"".join(chunks)
+
+
+def scan_video(video: str, duration: float | None = None, on_progress: Callable | None = None) -> dict:
     """UNA pasada de decodificacion: cuadros diminutos a 30 fps (cortes, movimiento) y
-    cuadros medianos a 2 fps (rostro y VLM). Usa VideoToolbox si esta disponible."""
+    cuadros medianos a 2 fps (rostro y VLM; menos en videos de mas de MED_MAX / 2 s).
+    Decodifica con VideoToolbox o por software segun el codec (_scan_decoders).
+    `on_progress(frac)`: avance 0..1 de la decodificacion (opcional)."""
     import cv2
     t0 = _now()
     video = str(video)
     dur = float(duration or 0.0) or _probe_duration(video)
+    med_fps = 2.0 if dur <= MED_MAX / 2.0 else MED_MAX / dur
+    med_f = "2" if med_fps == 2.0 else f"{med_fps:.6f}"
     tmpd = Path(tempfile.mkdtemp(prefix="reelfy_dir_", dir=str(_work_dir())))
     small = None
+    used = ""
     try:
-        for hw in (["-hwaccel", "videotoolbox"] if (_paths and getattr(_paths, "IS_MAC", False)) else [], []):
+        for hw in _scan_decoders(video):
             cmd = [_ffmpeg(), "-v", "error", "-y", *hw, "-i", video, "-filter_complex",
                    "[0:v]split=2[a][b];[a]fps=30,scale=48:48:flags=area,format=gray[s];"
-                   "[b]fps=2,scale='if(gt(iw,ih),640,-2)':'if(gt(iw,ih),-2,640)',format=yuvj420p[m]",
+                   f"[b]fps={med_f},scale='if(gt(iw,ih),640,-2)':'if(gt(iw,ih),-2,640)',format=yuvj420p[m]",
                    "-map", "[s]", "-f", "rawvideo", "pipe:1",
                    "-map", "[m]", "-q:v", "3", str(tmpd / "m_%04d.jpg")]
-            res = subprocess.run(cmd, capture_output=True, timeout=600)
-            if res.returncode == 0 and res.stdout:
-                small = np.frombuffer(res.stdout, np.uint8).reshape(-1, 48, 48).astype(np.float32)
+            code, raw = _run_scan(cmd, max(600.0, dur * 1.5), on_progress, dur)
+            if code == 0 and raw:
+                small = np.frombuffer(raw, np.uint8).reshape(-1, 48, 48)
+                used = "videotoolbox" if hw else "software"
                 break
             for f in tmpd.glob("m_*.jpg"):
                 f.unlink()
@@ -896,11 +1018,11 @@ def scan_video(video: str, duration: float | None = None) -> dict:
         med = [cv2.cvtColor(cv2.imread(str(f)), cv2.COLOR_BGR2RGB) for f in files]
     finally:
         shutil.rmtree(tmpd, ignore_errors=True)
-    diffs = np.abs(np.diff(small, axis=0)).mean(axis=(1, 2)) if len(small) > 1 else np.zeros(0)
+    diffs = _frame_diffs(small)
     if dur <= 0:
         dur = len(small) / 30.0
-    return {"diff": diffs, "fps": 30.0, "med": med, "med_t": [j * 0.5 for j in range(len(med))],
-            "duration": dur, "ms": (_now() - t0) * 1000}
+    return {"diff": diffs, "fps": 30.0, "med": med, "med_t": [j / med_fps for j in range(len(med))],
+            "duration": dur, "ms": (_now() - t0) * 1000, "decoder": used, "med_fps": _r(med_fps, 4)}
 
 
 def _cuts_from_diff(d: np.ndarray, fps: float, dur: float, min_len: float = 0.6) -> list[float]:
@@ -1193,15 +1315,116 @@ def _matte_quality(video: str, s: dict) -> float | None:
 
 _VLM_STATUS: dict[str, str] = {}     # video -> causa por la que el VLM no describio todas las tomas
 
+# ---- tomas de un video largo: el VLM describe UNA toma por grupo de tomas casi iguales
+SIM_ROWS = 14.0      # diferencia media de color (0-255) del perfil de fondo bajo la que dos tomas son "la misma"
+MATTE_LONG_S = 20.0  # s maximos midiendo la calidad del recorte en un video largo (una medicion por grupo)
+VLM_LONG_MIN = 25.0  # s de VLM garantizados tras el escaneo de un video largo (aunque se pase del presupuesto)
+
+
+def _similar(a: dict, b: dict) -> bool:
+    """Dos tomas casi iguales (mismo lugar y encuadre): mismo si/no de rostro, rostro en el mismo
+    sitio y de tamano parecido, y perfil de color del fondo (rows) a menos de SIM_ROWS."""
+    fa, fb = a.get("face"), b.get("face")
+    if bool(fa) != bool(fb):
+        return False
+    if fa and fb and (abs(fa[0] - fb[0]) > 0.08 or abs(fa[1] - fb[1]) > 0.08
+                      or abs(fa[3] - fb[3]) > 0.25 * max(fa[3], fb[3])):
+        return False
+    ra, rb = a.get("rows"), b.get("rows")
+    if not ra or not rb or len(ra) != len(rb):
+        return False
+    return float(np.abs(np.asarray(ra, np.float32) - np.asarray(rb, np.float32)).mean()) < SIM_ROWS
+
+
+def shot_groups(out: list[dict]) -> list[list[int]]:
+    """Grupos de tomas casi iguales (_similar) en orden de prioridad para el VLM: primero el b-roll
+    (sus letreros y lugar alimentan el guion), luego lo mas largo. El primero de cada grupo es su
+    representante (la toma que se describe)."""
+    order = sorted(range(len(out)), key=lambda i: (bool(out[i].get("face")),
+                                                   -(float(out[i]["end"]) - float(out[i]["start"])), i))
+    groups: list[list[int]] = []
+    for i in order:
+        for g in groups:
+            if _similar(out[g[0]], out[i]):
+                g.append(i)
+                break
+        else:
+            groups.append([i])
+    return groups
+
+
+def vlm_max_calls(dur: float) -> int:
+    """Tope de descripciones del VLM en un video largo: crece con la raiz de la duracion
+    (5 min ~25, 19 min ~38)."""
+    return int(12 + 6 * math.sqrt(max(0.0, dur) / 60.0))
+
+
+def _vlm_groups(video: str, sc: dict, shots: list[dict], faces: list[dict], groups: list[list[int]],
+                deadline: float | None, turn: "_ModelTurn | None", on_step, dur: float,
+                st: dict) -> tuple[list, str]:
+    """VLM de un video largo: describe el representante de cada grupo (b-roll primero, luego lo
+    mas largo) y copia la descripcion a sus tomas casi iguales. Tope de llamadas (vlm_max_calls),
+    de tiempo (12 s por grupo, raiz de la duracion, `deadline`) y corte tras 2 fallos seguidos.
+    Lo que no alcanza queda con heuristicas (parcial > nada)."""
+    vlm: list[dict | None] = [None] * len(shots)
+    reps = groups[:vlm_max_calls(dur)]
+    # 12 s por grupo + la espera del turno (un tramo del guion en curso), tope por la raiz de la
+    # duracion; el `deadline` del director manda, pero si el escaneo ya se lo comio queda un piso
+    # (VLM_LONG_MIN) para los grupos mas importantes: parcial > todo heuristico
+    vdead = _now() + min(45.0 * math.sqrt(dur / 90.0), 12.0 * max(1, len(reps)) + 30.0)
+    if deadline is not None:
+        vdead = min(vdead, max(deadline, _now() + VLM_LONG_MIN))
+    fails, described, cause = 0, 0, ""
+    calls = [0]
+
+    def _describe(img_, to):
+        calls[0] += 1
+        return _vlm_describe(img_, timeout=to)
+    for gi, g in enumerate(reps):
+        if vdead - _now() < 5.0:
+            cause = f"tiempo agotado en el grupo {gi + 1}/{len(reps)} de tomas"
+            break
+        i = g[0]
+        s = shots[i]
+        mid = (s["start"] + s["end"]) / 2
+        j = min(range(len(sc["med_t"])), key=lambda k: abs(sc["med_t"][k] - mid))
+        img = sc["med"][j]
+        if faces[i]["face_ratio"] < 0.3:      # b-roll: letreros -> mas resolucion para leer
+            hi = _grab_frame(video, s["start"] + (s["end"] - s["start"]) * 0.35, 960)
+            img = hi if hi is not None else img
+        res = _turn_call(turn, vdead, max(5.0, min(30.0, vdead - _now())),
+                         lambda to, im=img: _describe(im, to), min_s=5.0)
+        _step(on_step, "tomas", 0.2 + 0.7 * (gi + 1) / len(reps), f"grupo {gi + 1}/{len(reps)}")
+        if res is not None:
+            described += 1
+            for k in g:
+                vlm[k] = res if k == i else dict(res, text_seen=list(res.get("text_seen") or []))
+        fails = 0 if res is not None else fails + 1
+        if fails >= 2 and gi + 1 < len(reps):
+            cause = f"{fails} fallos seguidos (servidor ocupado) en el grupo {gi + 1}/{len(reps)} de tomas"
+            break
+    missing = sum(1 for v in vlm if v is None)
+    if not cause and missing:
+        cause = f"sin descripcion en {missing}/{len(shots)} tomas"
+    st.update({"vlm_groups": len(groups), "vlm_calls": calls[0], "vlm_described": described,
+               "vlm_reused": sum(1 for v in vlm if v is not None) - described, "vlm_missing": missing})
+    return vlm, cause
+
 
 def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | None = None,
-                  deadline: float | None = None, on_basic: Callable | None = None) -> list[dict]:
+                  deadline: float | None = None, on_basic: Callable | None = None,
+                  turn: "_ModelTurn | None" = None, stats: dict | None = None) -> list[dict]:
     """Tomas con campos del contrato (+ face/motion/rows). Nunca lanza: sin video -> una toma.
     `deadline` (time.perf_counter) limita el VLM: las tomas que no alcancen quedan con
     los campos heuristicos (rostro/encuadre), para que el director nunca pase de ~60 s.
     `on_basic(shots)` se llama en cuanto se conocen limites + rostro (antes del VLM): el
-    director lanza ahi el LLM del guion con las tomas, en paralelo al VLM."""
+    director lanza ahi el LLM del guion con las tomas, en paralelo al VLM.
+    Video largo (> LONG_S): el VLM describe una toma por GRUPO de tomas casi iguales (shot_groups;
+    el resto reusa la descripcion), con tope de llamadas y turno del modelo (`turn`) compartido con
+    el guion; la calidad del recorte se mide por grupo con tope de tiempo. `stats` recibe lo hecho
+    (escaneo, rostros, VLM, recorte) para director.timings."""
     dur = _plan_duration(plan)
+    stx = stats if stats is not None else {}
     video = plan.get("video")
 
     def basic(shots_):
@@ -1245,9 +1468,18 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
             basic(hit)
             return hit
     _step(on_step, "tomas", 0.05, "analizando cortes")
-    sc = scan or scan_video(str(video), dur)
+    t = _now()
+    # video largo: la decodificacion tarda minutos -> avance real en la barra (0.05 .. 0.18)
+    prog = (lambda f: _step(on_step, "tomas", 0.05 + 0.13 * f, f"analizando el video {int(f * 100)}%")) \
+        if (on_step and dur > LONG_S) else None
+    sc = scan or scan_video(str(video), dur, on_progress=prog)
+    stx["scan_ms"] = round((_now() - t) * 1000)
+    if sc.get("decoder"):
+        stx["scan_decoder"] = sc["decoder"]
     shots = shots_in or detect_shots(str(video), dur, sc)
+    t = _now()
     faces = _shot_faces(sc, shots)
+    stx["faces_ms"] = round((_now() - t) * 1000)
     yunet_ok = bool(sc.get("med")) and _yunet(*sc["med"][0].shape[1::-1]) is not None
     fps = sc["fps"]
     out = []
@@ -1268,7 +1500,13 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
     use_vlm = use_llm and llm_available(_vlm_model())
     vlm: list[dict | None] = [None] * len(shots)
     cause = ""
-    if use_vlm and sc["med"]:
+    long_mode = dur > LONG_S
+    groups = shot_groups(out) if long_mode else [[i] for i in range(len(out))]
+    t = _now()
+    if use_vlm and sc["med"] and long_mode:
+        _step(on_step, "tomas", 0.2, "describiendo tomas representativas (VLM)")
+        vlm, cause = _vlm_groups(str(video), sc, shots, faces, groups, deadline, turn, on_step, dur, stx)
+    elif use_vlm and sc["med"]:
         _step(on_step, "tomas", 0.2, "describiendo tomas (VLM)")
         # tope propio del VLM: 12 s por toma (maximo 45 s) y se corta tras 2 fallos seguidos (un
         # servidor saturado no gasta 2 minutos para acabar en heuristicas igual)
@@ -1300,9 +1538,26 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
         if len(_VLM_STATUS) > 64:
             _VLM_STATUS.clear()
         _VLM_STATUS[str(video)] = cause
+    if use_vlm and sc["med"]:
+        stx["vlm_ms"] = round((_now() - t) * 1000)
     _step(on_step, "tomas", 0.93, "midiendo el recorte del sujeto")
-    for o in out:
-        o["matte_q"] = _matte_quality(str(video), o) if o["face"] else None
+    t = _now()
+    if long_mode:
+        # una medicion por grupo (tomas casi iguales = mismo recorte) y tope de tiempo: sin medir =
+        # None (como sin modelos: se permite)
+        mdead = _now() + MATTE_LONG_S
+        measured = 0
+        for g in groups:
+            o0 = out[g[0]]
+            q = _matte_quality(str(video), o0) if o0["face"] and _now() < mdead else None
+            measured += bool(o0["face"] and q is not None)
+            for i in g:
+                out[i]["matte_q"] = q if out[i]["face"] else None
+        stx["matte_measured"] = measured
+    else:
+        for o in out:
+            o["matte_q"] = _matte_quality(str(video), o) if o["face"] else None
+    stx["matte_ms"] = round((_now() - t) * 1000)
     for i, o in enumerate(out):
         fa = faces[i]
         v = vlm[i] or {}
@@ -1949,7 +2204,9 @@ _LLM_SYS = ("Eres director creativo de videos verticales cortos (TikTok/Reels) e
             "Analizas el guion hablado y decides la edicion. Responde SOLO JSON.")
 
 
-def _llm_prompt(sents: list[dict], shots: list[dict] | None) -> str:
+def _llm_prompt(sents: list[dict], shots: list[dict] | None, part: tuple[int, int] | None = None) -> str:
+    """Prompt del guion. `part` = (k, n): tramo k de n de un guion largo (_llm_script_windows);
+    sin `part` es el prompt de siempre (videos cortos, una sola llamada)."""
     lines = [f"{s['id']} | {s['t0']:.1f}-{s['t1']:.1f} | {s['text']}" for s in sents]
     sh = ""
     if shots:
@@ -1966,8 +2223,16 @@ def _llm_prompt(sents: list[dict], shots: list[dict] | None) -> str:
                 d += "; textos: " + ", ".join(s["text_seen"][:4])
             desc.append(d)
         sh = "\nTomas:\n" + "\n".join(desc) + "\n"
+    head, tail = "Frases del video (id | segundos | texto):\n", ""
+    if part is not None:
+        k, n = part
+        head = (f"Tramo {k + 1} de {n} de un video largo (ids globales; 'ent' y 'topic' solo con lo "
+                "que se dice en ESTE tramo). Frases del tramo (id | segundos | texto):\n")
+        tail = ("\nUna entrada en \"f\" por CADA frase del tramo, con su id tal cual."
+                + ("" if k == 0 else " Este tramo continua el video: su primera frase NO es el hook.")
+                + " Escribe el JSON compacto en UNA sola linea (sin sangrias ni saltos de linea).")
     return (
-        "Frases del video (id | segundos | texto):\n" + "\n".join(lines) + "\n" + sh +
+        head + "\n".join(lines) + "\n" + sh +
         "\nDevuelve:\n"
         "\"topic\": tema (2-4 palabras en espanol);\n"
         "\"ent\": {\"name\": nombre propio de quien habla SOLO si se dice en el audio o \"\", "
@@ -1979,21 +2244,133 @@ def _llm_prompt(sents: list[dict], shots: list[dict] | None) -> str:
         "de la frase para titulo grande, \"emph\": 1-2 palabras COPIADAS de la frase, \"fx\": tratamiento "
         "visual, \"icon\": 1-2 palabras en ingles para buscar icono, \"nrg\": energia, \"tone\": tono}.\n"
         "Reglas: solo UNA frase corta y punzante -> fx \"dramatico\". Precio, direccion, horario o link -> "
-        "fx \"tarjeta\". La primera frase es \"hook\". Frase con chiste -> tone \"humor\".")
+        "fx \"tarjeta\". " + ("La primera frase es \"hook\". " if part is None or part[0] == 0 else "") +
+        "Frase con chiste -> tone \"humor\"." + tail)
 
 
-def _llm_script(sents: list[dict], shots: list[dict] | None, timeout: float = 55.0) -> dict | None:
+def _sh_key(shots: list[dict] | None) -> list:
+    return [(round(float(x["start"]), 1), round(float(x["end"]), 1), bool(x.get("person")),
+             x.get("use", "")) for x in shots or []]
+
+
+# ---------------------------------------------------------------- guion largo (por tramos)
+# Un guion largo (19 min, 2500 palabras) no cabe en UNA llamada: ~80 frases x ~95 tokens de salida
+# no caben en el contexto de 8192 junto al prompt (JSON cortado = todo a heuristicas) y a ~50
+# tokens/s no terminan en el presupuesto. Se parte en TRAMOS de oraciones completas, cada uno con
+# su prompt acotado, su num_predict proporcional y su timeout segun los tokens esperados; se unen
+# de forma determinista y un tramo que falla solo deja SUS frases con heuristicas.
+LLM_SINGLE_MAX = 400      # palabras: hasta aqui el guion va en UNA llamada (prompt de siempre)
+LLM_WIN_WORDS = 300       # palabras por tramo de un guion largo (~800-1000 tokens de prompt)
+LLM_TOK_S = 40.0          # tokens/s de salida del LLM local con la Mac ocupada (libre ~70)
+LLM_TOK_SENT = 95         # tokens de salida por frase (JSON con sangria; compacto ~50)
+LLM_ENT_KEYS = ("name", "role", "price", "address", "landmark", "schedule", "cta", "link_label", "handle")
+
+
+def _n_words(sents: list[dict]) -> int:
+    return sum(int(s["w1"]) - int(s["w0"]) + 1 for s in sents)
+
+
+def llm_timeout(prompt: str, n_sents: int) -> float:
+    """Timeout (s) de una llamada del guion segun los tokens esperados (prompt ~3.2 caracteres por
+    token a ~300 tok/s; salida LLM_TOK_SENT por frase a LLM_TOK_S con 30 % de holgura)."""
+    return 8.0 + len(prompt) / 3.2 / 300.0 + 1.3 * (60 + LLM_TOK_SENT * max(1, n_sents)) / LLM_TOK_S
+
+
+def llm_windows(sents: list[dict], max_words: int = LLM_WIN_WORDS) -> list[list[dict]]:
+    """Tramos de ORACIONES COMPLETAS de ~max_words palabras, equilibrados (mismo tamano objetivo) y
+    deterministas. Una oracion mas larga que el tramo va sola."""
+    if not sents:
+        return []
+    total = _n_words(sents)
+    k = max(1, math.ceil(total / max(1, max_words)))
+    target = total / k
+    out, cur, n = [], [], 0
+    for s in sents:
+        m = int(s["w1"]) - int(s["w0"]) + 1
+        over = n + m - target
+        # cierra el tramo si agregar la oracion lo aleja MAS del objetivo que dejarla (o lo pasa
+        # de 1.3x el maximo): tramos parejos cerca del objetivo
+        if cur and over > 0 and (over > target - n or n + m > 1.3 * max_words):
+            out.append(cur)
+            cur, n = [], 0
+        cur.append(s)
+        n += m
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _shots_between(shots: list[dict] | None, t0: float, t1: float) -> list[dict] | None:
+    """Tomas que se traslapan con [t0, t1] (las del tramo)."""
+    if not shots:
+        return None
+    return [x for x in shots if float(x["end"]) > t0 and float(x["start"]) < t1] or None
+
+
+class _ModelTurn:
+    """Turno FIFO para el modelo local. ollama (OLLAMA_NUM_PARALLEL=1) atiende UNA peticion a la vez:
+    sin turno, el tiempo en la cola del servidor se come el timeout de cada llamada (los tramos del
+    guion y el VLM se cortan entre si). Con turno, cada llamada mide su timeout desde que empieza de
+    verdad y el VLM no espera a que acaben TODOS los tramos (FIFO: se alternan)."""
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._busy = False
+        self._q: list = []
+
+    def acquire(self, timeout: float) -> bool:
+        with self._cv:
+            tk = object()
+            self._q.append(tk)
+            end = _now() + max(0.0, timeout)
+            while self._busy or self._q[0] is not tk:
+                rem = end - _now()
+                if rem <= 0:
+                    self._q.remove(tk)
+                    self._cv.notify_all()
+                    return False
+                self._cv.wait(rem)
+            self._q.pop(0)
+            self._busy = True
+            return True
+
+    def release(self) -> None:
+        with self._cv:
+            self._busy = False
+            self._cv.notify_all()
+
+
+def _turn_call(turn: "_ModelTurn | None", deadline: float | None, need: float, fn: Callable,
+               min_s: float = 4.0):
+    """fn(timeout) con turno del modelo. El timeout es `need` recortado al `deadline`; si al tocar
+    el turno ya no queda ni `min_s`, no se llama (None)."""
+    wait = (deadline - _now()) if deadline is not None else need * 4
+    if turn is not None and not turn.acquire(max(0.0, wait)):
+        return None
+    try:
+        to = need if deadline is None else min(need, deadline - _now())
+        if to < min_s:
+            return None
+        return fn(to)
+    finally:
+        if turn is not None:
+            turn.release()
+
+
+def _llm_script(sents: list[dict], shots: list[dict] | None, timeout: float | None = None) -> dict | None:
     if not sents:
         return None
-    sh_key = [(round(float(x["start"]), 1), round(float(x["end"]), 1), bool(x.get("person")),
-               x.get("use", "")) for x in shots or []]
-    key = _hkey([s["text"] for s in sents], sh_key, PROMPT_VERSION, _llm_model())
+    key = _hkey([s["text"] for s in sents], _sh_key(shots), PROMPT_VERSION, _llm_model())
     hit = _cache_get("script", key)
     if hit:
         return hit
+    prompt = _llm_prompt(sents, shots)
+    if timeout is None:
+        # 55 s de siempre; mas solo si los tokens esperados lo piden (un guion de ~400 palabras)
+        timeout = max(55.0, llm_timeout(prompt, len(sents)))
     try:
         raw = _ollama_chat([{"role": "system", "content": _LLM_SYS},
-                            {"role": "user", "content": _llm_prompt(sents, shots)}],
+                            {"role": "user", "content": prompt}],
                            fmt=_LLM_SCHEMA, num_ctx=8192, temperature=0.2,
                            num_predict=160 + 90 * len(sents), timeout=timeout)
     except Exception:
@@ -2003,6 +2380,102 @@ def _llm_script(sents: list[dict], shots: list[dict] | None, timeout: float = 55
         return None
     _cache_put("script", key, d)
     return d
+
+
+def _window_result(d: dict | None, win: list[dict]) -> dict | None:
+    """Respuesta de un tramo saneada: solo entradas con ids del tramo (si el modelo numero el
+    tramo desde 0, se mapea por posicion). None si no trae ninguna frase del tramo."""
+    if not d or not isinstance(d.get("f"), list):
+        return None
+    ids = [s["id"] for s in win]
+    f = [e for e in d["f"] if isinstance(e, dict)]
+    got = []
+    for e in f:
+        try:
+            got.append(int(e.get("id")))
+        except (TypeError, ValueError):
+            got.append(None)
+    if f and not any(g in ids for g in got) and all(g is not None and 0 <= g < len(win) for g in got):
+        for e, g in zip(f, got):
+            e["id"] = ids[g]
+        got = [e["id"] for e in f]
+    keep = [e for e, g in zip(f, got) if g in ids]
+    if not keep:
+        return None
+    return {"topic": str(d.get("topic") or ""), "ent": d.get("ent") if isinstance(d.get("ent"), dict) else {},
+            "f": keep}
+
+
+def merge_windows(parts: list[dict | None]) -> dict | None:
+    """Une los tramos (orden del video, determinista): frases de todos los tramos que respondieron,
+    tema del primero con tema, entidades = primer valor no vacio (cta/link_label: el ULTIMO, el
+    llamado a la accion va al final). None si ningun tramo respondio."""
+    ok = [x for x in parts if x]
+    if not ok:
+        return None
+    f, seen = [], set()
+    for x in ok:
+        for e in x.get("f") or []:
+            try:
+                i = int(e.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if i not in seen:
+                seen.add(i)
+                f.append(e)
+    ent = {}
+    for k in LLM_ENT_KEYS:
+        vals = [str((x.get("ent") or {}).get(k) or "").strip() for x in ok]
+        vals = [v for v in vals if v]
+        ent[k] = (vals[-1] if k in ("cta", "link_label") else vals[0]) if vals else ""
+    topic = next((str(x.get("topic")).strip() for x in ok if str(x.get("topic") or "").strip()), "")
+    return {"topic": topic, "ent": ent, "f": f}
+
+
+def _llm_script_windows(sents: list[dict], shots: list[dict] | None, deadline: float | None = None,
+                        box: dict | None = None, turn: "_ModelTurn | None" = None) -> dict | None:
+    """Guion largo por tramos (llm_windows) en orden: el del hook primero. Cada tramo con su
+    prompt (`part`), num_predict proporcional y timeout por tokens esperados (llm_timeout), con
+    cache propia. `deadline`: los tramos que no alcanzan quedan con heuristicas. `box` recibe el
+    avance EN VIVO (parts/stat): si el director deja de esperar, usa los tramos ya hechos."""
+    wins = llm_windows(sents)
+    n = len(wins)
+    parts: list[dict | None] = [None] * n
+    stat = {"n": n, "ok": 0, "cached": 0, "failed": 0, "skipped": 0, "ms": 0}
+    if box is not None:
+        box["parts"], box["wins"], box["stat"] = parts, wins, stat
+    t_all = _now()
+    for k, w in enumerate(wins):
+        wsh = _shots_between(shots, float(w[0]["t0"]), float(w[-1]["t1"]))
+        key = _hkey([s["text"] for s in w], _sh_key(wsh), PROMPT_VERSION, _llm_model(), "tramo", k, n)
+        hit = _cache_get("script", key)
+        if hit:
+            parts[k] = _window_result(hit, w)
+            stat["cached"] += 1
+            stat["ok"] += parts[k] is not None
+            continue
+        prompt = _llm_prompt(w, wsh, part=(k, n))
+        need = llm_timeout(prompt, len(w))
+        if deadline is not None and deadline - _now() < min(need, 12.0):
+            stat["skipped"] += n - k       # no alcanza ni un tramo corto: el resto va con heuristicas
+            break
+        msgs = [{"role": "system", "content": _LLM_SYS}, {"role": "user", "content": prompt}]
+        try:
+            raw = _turn_call(turn, deadline, need, lambda to: _ollama_chat(
+                msgs, fmt=_LLM_SCHEMA, num_ctx=8192, temperature=0.2,
+                num_predict=200 + 130 * len(w), timeout=to), min_s=min(need, 12.0))
+        except Exception:
+            raw = None
+        d = _json_loose(raw) if raw else None
+        res = _window_result(d, w)
+        if res is None:
+            stat["failed"] += 1
+            continue
+        _cache_put("script", key, d)
+        parts[k] = res
+        stat["ok"] += 1
+    stat["ms"] = round((_now() - t_all) * 1000)
+    return merge_windows(parts)
 
 
 def _match_span(words: list[dict], w0: int, w1: int, phrase: str) -> tuple[int, int] | None:
@@ -2134,7 +2607,10 @@ def analyze_script(plan: dict, shots: list[dict] | None = None, use_llm: bool = 
         s["info"]["fx"] = "titulo"
     llm = llm_result
     if llm is None and use_llm and sents and llm_available():
-        llm = _llm_script(sents, shots)
+        if _n_words(sents) > LLM_SINGLE_MAX:
+            llm = _llm_script_windows(sents, shots, deadline=_now() + director_budget(_plan_duration(plan)))
+        else:
+            llm = _llm_script(sents, shots)
     if llm:
         _merge_llm(script, llm, words)
         script["llm"] = True
@@ -8957,6 +9433,20 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
     words = _flatten_words(p)
     sents = _sentences(words)
     can_llm = use_llm and bool(sents) and llm_available()
+    # video/guion largo: presupuesto sub-lineal, guion por tramos desde el segundo 0 y turno FIFO del
+    # modelo entre tramos y VLM. Corto: todo como siempre (budget 50 s, una llamada, sin turno)
+    budget = director_budget(p["duration"])
+    long_script = _n_words(sents) > LLM_SINGLE_MAX
+    turn = _ModelTurn() if (long_script or p["duration"] > LONG_S) else None
+    # tomas que ya describio el VLM en una direccion anterior (vienen completas en el plan): al
+    # re-dirigir se conserva la etiqueta del VLM (no se vuelve 'heuristico' por no repetirlo)
+    sh_in = [x for x in plan.get("shots") or [] if isinstance(x, dict)]
+    shots_known = bool(sh_in) and all(k in x for x in sh_in for k in ("person", "use", "framing", "face"))
+
+    def _start_llm(fn):
+        th = threading.Thread(target=fn, name="director-llm", daemon=True)
+        llm_box["th"] = th
+        th.start()
 
     def on_basic(shots_basic):
         if not can_llm or "th" in llm_box:
@@ -8967,30 +9457,54 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
             t = _now()
             llm_box["r"] = _llm_script(sents, sb)
             llm_box["ms"] = (_now() - t) * 1000
-        th = threading.Thread(target=_run, daemon=True)
-        llm_box["th"] = th
-        th.start()
+        _start_llm(_run)
+
+    if can_llm and long_script:
+        # el escaneo de un video largo tarda minutos (decodificar 4K) y el guion no lo necesita: los
+        # tramos arrancan YA, con las tomas solo si el plan ya las trae descritas
+        sk = [dict(x) for x in sh_in] if shots_known else None
+
+        def _run_long():
+            t = _now()
+            llm_box["r"] = _llm_script_windows(sents, sk, deadline=t_start + budget, box=llm_box, turn=turn)
+            llm_box["ms"] = (_now() - t) * 1000
+        _start_llm(_run_long)
 
     _step(on_step, "tomas", 0.0, "detectando tomas")
     t = _now()
-    # tomas que ya describio el VLM en una direccion anterior (vienen completas en el plan): al
-    # re-dirigir se conserva la etiqueta del VLM (no se vuelve 'heuristico' por no repetirlo)
-    sh_in = [x for x in plan.get("shots") or [] if isinstance(x, dict)]
-    shots_known = bool(sh_in) and all(k in x for x in sh_in for k in ("person", "use", "framing", "face"))
-    budget = float(os.environ.get("REELFY_DIRECTOR_BUDGET", "50"))
     _VLM_STATUS.pop(str(p.get("video")), None)
+    shot_st: dict = {}
     shots = analyze_shots(p, use_llm=use_llm, on_step=on_step, deadline=t_start + budget - 8.0,
-                          on_basic=on_basic)
+                          on_basic=on_basic, turn=turn, stats=shot_st)
     vlm_cause = _VLM_STATUS.pop(str(p.get("video")), "")
     on_basic(shots)
     timings["shots_ms"] = round((_now() - t) * 1000)
     _step(on_step, "guion", 0.0, "entendiendo el guion")
+    llm_r = None
     if llm_box.get("th") is not None:
         llm_box["th"].join(timeout=max(1.0, t_start + budget - _now()))
         timings["llm_ms"] = round(llm_box.get("ms", 0))
+        llm_r = llm_box.get("r")
+        if llm_r is None and llm_box.get("parts") is not None:
+            # el guion por tramos no termino a tiempo: se usan los tramos que ya respondieron
+            llm_r = merge_windows(list(llm_box["parts"]))
+            timings["llm_ms"] = round((_now() - t_start) * 1000)
+    if p["duration"] > LONG_S or long_script:
+        timings["budget_s"] = round(budget, 1)
+        timings.update(shot_st)
+        wst = llm_box.get("stat")
+        if wst:
+            timings.update({"llm_windows": wst["n"], "llm_windows_ok": sum(1 for x in list(llm_box["parts"]) if x),
+                            "llm_windows_cached": wst["cached"]})
     t = _now()
-    script = analyze_script(p, shots, use_llm=False, llm_result=llm_box.get("r"))
+    script = analyze_script(p, shots, use_llm=False, llm_result=llm_r)
     notes: list[str] = []
+    wst = llm_box.get("stat")
+    if wst and script.get("llm"):
+        n_ok = sum(1 for x in list(llm_box["parts"]) if x)
+        if n_ok < wst["n"]:
+            miss = sum(1 for x, w in zip(list(llm_box["parts"]), llm_box["wins"]) if not x for _ in w)
+            notes.append(f"guion largo: {n_ok}/{wst['n']} tramos con IA; {miss} frases con heuristicas")
     ent0 = script["entities"]
     if ent0.get("name"):
         ent0["name_src"] = "voz"

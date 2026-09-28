@@ -1060,3 +1060,15 @@ def test_sfx_con_nombre_desconocido_se_reporta(tmp_path):
     assert "sfx:s3:dato_invalido" in pr["skipped"]
     assert not any(s.startswith("sfx:s1") for s in pr["skipped"])
     assert [it["name"] for it in pr["plan"]["fx"]["sfx"]] == ["riser_short"]
+
+
+def test_procesos_del_render_segun_ram_y_nucleos():
+    """8 GB -> 1 proceso (4 hacian swap); 16 GB o mas -> hasta 4; sin dato de RAM -> por nucleos."""
+    from motion import render as R
+    assert R.default_workers(cpus=8, ram_gb=8) == 1
+    assert R.default_workers(cpus=10, ram_gb=16) == 3
+    assert R.default_workers(cpus=12, ram_gb=16) == 4
+    assert R.default_workers(cpus=12, ram_gb=32) == 4
+    assert R.default_workers(cpus=4, ram_gb=64) == 1
+    assert R.default_workers(cpus=12, ram_gb=0) == 4
+    assert R.default_workers() >= 1

@@ -177,7 +177,9 @@ def test_setup_opcionales_y_musica_opcional(srv):
     assert {"aligner", "matte", "music"} <= set(st["optional"])
     assert st["optional"]["music"]["optional"] is True
     assert st["optional"]["music"]["fallback"] == "procedural"
-    assert st["engine"]["version"] == "0.5.0" and st["engine"]["pro"] is True
+    ver = __import__("re").search(r'^ENGINE_VERSION = "([^"]+)"', (Path(__file__).parent.parent / "app" / "server.py")
+                              .read_text(), __import__("re").M).group(1)
+    assert st["engine"]["version"] == ver and st["engine"]["pro"] is True
     # la UI legacy llama /setup/start sin cuerpo (solo si ya esta listo: si no, bajaria modelos)
     if st["state"] == "ready":
         req = urllib.request.Request(api.base + "/setup/start", method="POST")

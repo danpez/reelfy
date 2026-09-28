@@ -2,6 +2,26 @@
 
 Formato: cada versión = un tag `reelfy-v*` que dispara el build de los 3 instaladores.
 
+## v0.5.1 — 2026-09-28
+
+**Videos largos y cortes más rigurosos.**
+
+### Correcciones
+- **Exportar videos largos ya no falla**: con más de ~100 cortes (p. ej. 19 min con 211 cortes) ffmpeg
+  no podía interpretar la selección de tramos ("Cannot allocate memory"). Ahora se encadenan varios
+  filtros cortos: exacto al cuadro, para cualquier número de cortes (también en shorts y el modo clásico).
+- **Director en videos largos**: el guion se analiza en bloques en paralelo y el análisis visual tiene un
+  presupuesto de tiempo que crece con la duración; un video de 19 min recibe dirección de la IA en
+  ~3.5 min (antes 8 min y terminaba en modo básico).
+- El video base decodifica H.264 por software (más rápido que VideoToolbox en 4K H.264).
+- El render usa tantos procesos como permite la RAM (una Mac de 8 GB ya no hace swap).
+
+### Cortes de silencio
+- Las pausas entre palabras de 0.4 s o más se recortan aunque haya ruido de fondo (antes solo con
+  silencio "digital"), dejando un respiro corto; la voz nunca se corta.
+
+---
+
 ## v0.5.0 — 2026-09-28
 
 **Motion Engine: edición profesional automática, 100% local.** De clips crudos a un video

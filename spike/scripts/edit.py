@@ -146,12 +146,16 @@ def keep_segments(video, words=None):
 def tighten(video_in, video_out):
     """Concatenate speech segments (drop silences) in one re-encode pass. Jump-cuts.
     Audio at 192k to limit cascaded-AAC generation loss."""
+    from motion.video_io import select_chain
     keeps, dur = keep_segments(video_in)
-    sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keeps)
     kept = sum(b - a for a, b in keeps)
+    # un select/aselect si son pocos keeps; con muchos (video largo), varios encadenados por
+    # tramos: av_expr no acepta una suma de mas de ~100 terminos
+    vsel = ",".join(select_chain(keeps, "select", digits=3))
+    asel = ",".join(select_chain(keeps, "aselect", digits=3))
     subprocess.run([FFMPEG, "-y", "-i", str(video_in),
-                    "-vf", f"select='{sel}',setpts=N/FRAME_RATE/TB",
-                    "-af", f"aselect='{sel}',asetpts=N/SR/TB",
+                    "-vf", f"{vsel},setpts=N/FRAME_RATE/TB",
+                    "-af", f"{asel},asetpts=N/SR/TB",
                     "-c:v", "h264_videotoolbox", "-b:v", "12M",
                     "-c:a", "aac", "-b:a", "192k", str(video_out)],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -179,8 +183,10 @@ def punch_zoom(video_in, video_out):
     beats, dur = emphasis_beats(video_in)
     if not beats:
         Path(video_in).replace(video_out); return 0
+    from motion.video_io import sum_expr
     # zoom(t) = 1 + ZOOM_IN while t in any [b, b+HOLD], else 1  (step function -> hard cuts)
-    windows = "+".join(f"between(t,{b:.3f},{b + HOLD:.3f})" for b in beats)
+    # sum_expr: un video largo da >100 beats y la suma plana ya no parsea en av_expr
+    windows = sum_expr(f"between(t,{b:.3f},{b + HOLD:.3f})" for b in beats)
     z = f"(1+{ZOOM_IN}*({windows}))"
     vf = (f"scale=w='ceil({W}*{z}/2)*2':h='ceil({H}*{z}/2)*2':eval=frame,"
           f"crop={W}:{H}")
