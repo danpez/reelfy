@@ -33,6 +33,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -115,20 +116,151 @@ from jobstore import Progress, JobCanceled  # noqa: E402
 
 # ---- ciclo de vida del ollama embebido ----
 _ollama_proc = None
+OLLAMA_PID_F = paths.DATA / "ollama.pid"
+
+
+def _pids_listening(port: int) -> list[int]:
+    """PIDs que escuchan en 127.0.0.1:`port` (lsof en Mac/Linux, netstat en Windows)."""
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True,
+                                 timeout=5).stdout
+            return sorted({int(c[-1]) for c in (ln.split() for ln in out.splitlines())
+                           if len(c) >= 5 and c[3].upper() == "LISTENING"
+                           and c[1].rsplit(":", 1)[-1] == str(port) and c[-1].isdigit()})
+        out = subprocess.run(["lsof", "-nP", f"-tiTCP:{port}", "-sTCP:LISTEN"], capture_output=True,
+                             text=True, timeout=5).stdout
+        return sorted({int(x) for x in out.split() if x.isdigit()})
+    except Exception:  # noqa: sin lsof/netstat -> nada que limpiar
+        return []
+
+
+def _proc_cmd(pid: int) -> str:
+    """Linea de comando (Mac/Linux) o nombre de imagen (Windows) de un PID ('' si no existe)."""
+    try:
+        if os.name == "nt":
+            return subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                                  capture_output=True, text=True, timeout=5).stdout
+        return subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True,
+                              text=True, timeout=5).stdout.strip()
+    except Exception:  # noqa
+        return ""
+
+
+def _is_our_ollama(cmd: str) -> bool:
+    c = cmd.replace("\\", "/").lower()
+    return "ollama-runtime" in c or (os.name == "nt" and "ollama.exe" in c)
+
+
+def _stop_pid(pid: int, wait: float = 3.0) -> None:
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10)
+            return
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(int(wait * 10)):
+            time.sleep(0.1)
+            os.kill(pid, 0)
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _kill_stale_ollama() -> list[int]:
+    """Un ollama EMBEBIDO de una sesion anterior que quedo vivo (la app se cerro sin apagarlo o el
+    motor murio de golpe) ocupa el puerto y respondia con binario y modelos viejos. Se termina el de
+    la pidfile y cualquier 'ollama-runtime' escuchando en OLLAMA_PORT; nunca el ollama del sistema
+    (otro binario y otro puerto). -> PIDs terminados."""
+    cand = set(_pids_listening(OLLAMA_PORT))
+    try:
+        cand.add(int(OLLAMA_PID_F.read_text().strip()))
+    except (OSError, ValueError):
+        pass
+    done = []
+    for pid in sorted(cand):
+        if pid != os.getpid() and _is_our_ollama(_proc_cmd(pid)):
+            _stop_pid(pid)
+            done.append(pid)
+    if done:
+        print(f"ollama huerfano de una sesion anterior terminado: {done}")
+    return done
+
+
+def _stop_ollama():
+    p = _ollama_proc
+    if p is not None and p.poll() is None:
+        p.terminate()
+        try:
+            p.wait(timeout=5)
+        except Exception:  # noqa
+            p.kill()
+    try:
+        OLLAMA_PID_F.unlink()
+    except OSError:
+        pass
 
 
 def _start_ollama():
     global _ollama_proc
     if not BUNDLED_OLLAMA:
         return
+    _kill_stale_ollama()
     env = dict(os.environ, OLLAMA_HOST=f"127.0.0.1:{OLLAMA_PORT}",
                OLLAMA_MODELS=str(paths.OLLAMA_MODELS))
     try:
         _ollama_proc = subprocess.Popen([paths.OLLAMA_BIN, "serve"], env=env,
                                         stdout=_logf, stderr=_logf)
-        atexit.register(lambda: _ollama_proc and _ollama_proc.terminate())
+        try:
+            OLLAMA_PID_F.write_text(str(_ollama_proc.pid))
+        except OSError:
+            pass
+        atexit.register(_stop_ollama)
     except Exception as e:  # noqa
         print(f"ollama no arrancó: {e}")
+
+
+def _parent_alive(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+        k = ctypes.windll.kernel32                                          # type: ignore[attr-defined]
+        h = k.OpenProcess(0x00100000, False, pid)                           # SYNCHRONIZE
+        if not h:
+            return False
+        try:
+            return k.WaitForSingleObject(h, 0) != 0                          # 0 = ya termino
+        finally:
+            k.CloseHandle(h)
+    if os.getppid() != pid:                                                 # re-emparentado: murio
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _watch_parent(pid: int, on_orphan, every: float = 2.0) -> threading.Thread:
+    """Si la app de escritorio (REELFY_PARENT_PID) muere sin apagar al motor, el motor se apaga
+    solo y con el su ollama: nada queda corriendo ni ocupando puertos."""
+    def loop():
+        while _parent_alive(pid):
+            time.sleep(every)
+        print("la app de escritorio ya no existe: apagando el motor")
+        on_orphan()
+    th = threading.Thread(target=loop, name="reelfy-parent-watch", daemon=True)
+    th.start()
+    return th
+
+
+def _orphan_exit():
+    _stop_ollama()
+    os._exit(0)
+
+
+if os.environ.get("REELFY_PARENT_PID", "").isdigit() and not _CHILD:
+    _watch_parent(int(os.environ["REELFY_PARENT_PID"]), _orphan_exit)
 
 
 def _ollama_url():

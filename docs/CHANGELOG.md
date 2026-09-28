@@ -2,6 +2,46 @@
 
 Formato: cada versión = un tag `reelfy-v*` que dispara el build de los 3 instaladores.
 
+## v0.5.0 — 2026-09-28
+
+**Motion Engine: edición profesional automática, 100% local.** De clips crudos a un video
+editado como un editor pro de TikTok/Reels, y todo se puede ajustar en el Studio.
+
+### Director IA (Qwen3.5-4B, local, con visión)
+- Entiende el guion y las tomas (lee letreros) y decide títulos cinéticos sincronizados a la voz,
+  garabatos e íconos que se dibujan, tarjetas (precio con contador, ubicación, horarios),
+  escenas a pantalla completa, blanco y negro dramático, transiciones (whip, zoom blur, fuga de
+  luz, flash, papel rasgado), cortes de silencios y color igualado entre tomas.
+- Estilos (dinámico, elegante, minimal, energético) e intensidad; regenerar, bloquear y re-dirigir.
+- **Simetría**: todo lo que entra a pantalla deja el mismo espacio a izquierda y derecha
+  (centrado o en par espejo).
+- Look de color natural por defecto; los efectos que dependen del recorte de la persona
+  (fondo reemplazado, sujeto a color, contorno) ya no se agregan solos.
+
+### Audio
+- Efectos de sonido propios (sintetizados, sin licencias) y música instrumental generada en tu
+  equipo con ACE-Step (descarga opcional de ~3.7 GB en segundo plano), cortada al video.
+- Mezcla a -14 LUFS con la voz siempre al frente.
+
+### Perfil
+- Pegas "soy la Dra. X, odontóloga, mi instagram es @x y mi página es ..." y Reelfy integra
+  rótulo con nombre, botón Seguir con @usuario, "Agenda en <página>" y tarjeta final.
+- Obtiene solo la foto de cada enlace (Instagram: foto de perfil; otras páginas: su foto y el
+  logo del sitio) para el botón Seguir, la pastilla de reservas y las tarjetas.
+
+### Studio
+- Pistas de texto, gráficos, escenas, efectos, transiciones, SFX y música; inspector de
+  parámetros; cuadro exacto al pausar y vista previa real con audio; imán al centro al arrastrar.
+
+### Correcciones
+- Clips de iPhone rotados y en HDR se montan bien; la música ya no baja el volumen de la voz.
+- La app ya no escribe `.pyc` dentro del bundle (rompía la firma de macOS).
+- Al salir con Cmd+Q el motor y su ollama se apagan; un ollama huérfano de una sesión anterior se
+  termina al arrancar, y el motor se apaga solo si la app muere.
+- Primer arranque con los tamaños reales (~5.5 GB + música opcional ~3.7 GB).
+
+---
+
 ## v0.4.0 — 2026-07-28
 
 **Editor de video profesional + Reelfy Studio renovado.** El montaje en línea de tiempo

@@ -135,11 +135,16 @@ fn spawn_engine(app: &tauri::AppHandle) -> Option<Child> {
     let mut cmd = Command::new(&py);
     cmd.arg("-u").arg(&server);
     cmd.env("REELFY_PORT", PORT.to_string());
+    // el motor se apaga solo (y su ollama) si esta app muere sin cerrarlo (server._watch_parent)
+    cmd.env("REELFY_PARENT_PID", std::process::id().to_string());
     if let Some(home) = &bundled_home {
         // app distribuible: datos del usuario en app_data_dir (escribible)
         cmd.env("REELFY_HOME", home);
         if let Ok(data) = app.path().app_data_dir() {
             let _ = std::fs::create_dir_all(&data);
+            // bytecode (.pyc) FUERA del bundle: escribirlo dentro rompia la firma de la app
+            // (codesign: "a sealed resource is missing or invalid"); aqui sigue acelerando el arranque
+            cmd.env("PYTHONPYCACHEPREFIX", data.join("pycache"));
             cmd.env("REELFY_DATA", data);
         }
         cmd.current_dir(home);
@@ -284,26 +289,39 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                let state: tauri::State<Engine> = window.state();
-                let child = state.0.lock().unwrap().take();
-                if let Some(mut c) = child {
-                    // SIGTERM primero: así uvicorn sale limpio y su atexit
-                    // TERMINA el ollama embebido. Con kill() directo (SIGKILL)
-                    // el ollama quedaba huérfano comiendo RAM tras cerrar la app.
-                    #[cfg(unix)]
-                    {
-                        unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
-                        for _ in 0..30 {
-                            if matches!(c.try_wait(), Ok(Some(_))) {
-                                return;
-                            }
-                            std::thread::sleep(Duration::from_millis(100));
-                        }
-                    }
-                    let _ = c.kill(); // no salió a la buena (o Windows): forzar
-                }
+                stop_engine(window.app_handle());
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // Cmd+Q / "Salir" cierran el proceso SIN garantizar WindowEvent::Destroyed: ahi el
+            // motor (y su ollama) quedaban huerfanos ocupando el puerto de la siguiente sesion
+            if let tauri::RunEvent::Exit = event {
+                stop_engine(app);
+            }
+        });
+}
+
+/// Apaga el motor una sola vez (ventana destruida o salida de la app).
+fn stop_engine(app: &tauri::AppHandle) {
+    let state: tauri::State<Engine> = app.state();
+    let child = state.0.lock().unwrap().take();
+    if let Some(mut c) = child {
+        // SIGTERM primero: así uvicorn sale limpio y su atexit
+        // TERMINA el ollama embebido. Con kill() directo (SIGKILL)
+        // el ollama quedaba huérfano comiendo RAM tras cerrar la app.
+        #[cfg(unix)]
+        {
+            unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+            for _ in 0..50 {
+                if matches!(c.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let _ = c.kill(); // no salió a la buena (o Windows): forzar
+        let _ = c.wait();
+    }
 }
