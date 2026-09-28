@@ -691,7 +691,12 @@ def detail_luma(arr: np.ndarray, sharpen: float, clarity: float, grain: float, W
     if s > 0:
         parts = []
         if A > 0:
-            parts.append((cv2.GaussianBlur(Y, (3, 3), 0), A))
+            # 3x3 (sigma ~0.71 px) en 1080; arriba se escala para que el realce tenga el mismo
+            # ancho en px de referencia (en 4K el 3x3 fijo afinaba la mitad de lo esperado)
+            ks = ctx.px(1.0) if ctx is not None else W / 1080.0
+            b3 = cv2.GaussianBlur(Y, (3, 3), 0) if ks <= 1.0 + 1e-3 else \
+                cv2.GaussianBlur(Y, (0, 0), 0.7071 * ks)
+            parts.append((b3, A))
         if c > 0:
             ds = 4
             small = cv2.resize(Y, (max(8, W // ds), max(8, H // ds)), interpolation=cv2.INTER_AREA)

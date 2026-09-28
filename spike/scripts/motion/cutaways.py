@@ -234,8 +234,15 @@ def grain(canvas, ctx, amount: float = 0.05):
     img = _grain_image(ctx)
     rng = ctx.rng(f"bg:grain:{ctx.n}")
     ox, oy = rng.integers(0, 256, 2)
-    m = skia.Matrix.Translate(float(ox), float(oy))
-    sh = img.makeShader(skia.TileMode.kRepeat, skia.TileMode.kRepeat, C.SAMPLING_FAST, m)
+    s = ctx.s
+    if abs(s - 1.0) < 1e-3:
+        m, samp = skia.Matrix.Translate(float(ox), float(oy)), C.SAMPLING_FAST
+    else:
+        # cada celda de ruido mide 1 px de REFERENCIA (s x s px reales): mismo grano en 4K
+        m = skia.Matrix.Scale(s, s)
+        m.postTranslate(float(ox) * s, float(oy) * s)
+        samp = skia.SamplingOptions(skia.FilterMode.kNearest)
+    sh = img.makeShader(skia.TileMode.kRepeat, skia.TileMode.kRepeat, samp, m)
     p = skia.Paint(Shader=sh)
     p.setAlphaf(min(1.0, amount * 2.5))
     canvas.drawPaint(p)
@@ -424,12 +431,22 @@ def _paper_array(w: int, h: int, rng: np.random.Generator, pad: int) -> np.ndarr
     nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
     facet = cv2.GaussianBlur((nrm[idx[:, 0]] @ lvec - lvec[2]).reshape(hh, hw).astype(np.float32) * 3.0,
                              (0, 0), 7.0 * s_ref)
-    height = cv2.GaussianBlur(height, (0, 0), 0.7)
+    # k = escala contra 1080 de ancho. Las fibras se sortean a tamano de referencia y se
+    # amplian: mismo patron y MISMO estado del rng despues (las manchas de field() no se mueven
+    # entre 1080, borrador y 4K). En k == 1 es exactamente el calculo original.
+    k = w / 1080.0
+    height = cv2.GaussianBlur(height, (0, 0), 0.7 * k)
     gxs = cv2.Sobel(height, cv2.CV_32F, 1, 0, ksize=3)
     gys = cv2.Sobel(height, cv2.CV_32F, 0, 1, ksize=3)
     wr = -(gxs * lvec[0] + gys * lvec[1])
     wr = np.tanh(wr / (np.percentile(np.abs(wr), 99.0) + 1e-6) * 1.1)
-    fib = cv2.GaussianBlur(rng.normal(0, 1, (hh, hw)).astype(np.float32), (0, 0), 0.5)
+    if abs(k - 1.0) < 1e-6:
+        fib = cv2.GaussianBlur(rng.normal(0, 1, (hh, hw)).astype(np.float32), (0, 0), 0.5)
+    else:
+        rh, rw = max(2, int(round(hh / k))), max(2, int(round(hw / k)))
+        fib = cv2.resize(rng.normal(0, 1, (rh, rw)).astype(np.float32), (hw, hh),
+                         interpolation=cv2.INTER_LINEAR)
+        fib = cv2.GaussianBlur(fib, (0, 0), 0.5 * k)
     v = 0.965 + 0.085 * wr + 0.035 * np.tanh(facet) + 0.03 * field(260) + 0.012 * field(70) + 0.008 * fib
     return cv2.resize(v, (w + 2 * pad, h + 2 * pad), interpolation=cv2.INTER_LINEAR)
 
@@ -614,8 +631,12 @@ def _bg_blur_self(canvas, colors, lt, ctx):
     if img is None:
         _bg_gradient(canvas, None, lt, ctx)
         return
-    div = 8
-    w, h = max(8, W // div), max(8, H // div)
+    # lienzo chico a tamano de REFERENCIA (1080/8 = 135 px de ancho a cualquier resolucion):
+    # el sigma fijo de 3.2 px sobre el lienzo chico da el mismo desenfoque en 1080 y en 4K
+    s = ctx.s
+    div = 8 * s
+    w, h = max(8, int(W // div)), max(8, int(H // div))
+    steps = max(0, 2 + int(round(math.log2(s)))) if s > 0 else 2
     small = C.offscreen(w, h)
     sc = small.getCanvas()
     p = skia.Paint(ImageFilter=skia.ImageFilters.Blur(3.2, 3.2, skia.TileMode.kClamp))
@@ -625,7 +646,7 @@ def _bg_blur_self(canvas, colors, lt, ctx):
     sc.translate(w / 2, h / 2)
     sc.scale(z, z)
     sc.translate(-w / 2, -h / 2)
-    sc.drawImageRect(downsample(img, 2), skia.Rect.MakeWH(w, h), C.SAMPLING_FAST, p)
+    sc.drawImageRect(downsample(img, steps), skia.Rect.MakeWH(w, h), C.SAMPLING_FAST, p)
     sc.restore()
     col = _cols(colors, 1, default_colors("blur_self", ctx))[0]
     sc.drawColor(C.color(col, 0.38))

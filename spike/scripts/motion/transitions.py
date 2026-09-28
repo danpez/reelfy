@@ -910,8 +910,13 @@ def zoom_blur(img, prev, item, p, ctx):
     c.restore()
 
     div = 4 if not ctx.draft else 3
+    d0 = float(div)                      # nucleo nitido / arranque de la estela (px reales)
+    if not ctx.draft and ctx.s > 1.0:
+        # arriba de 1080: la misma estela en px de REFERENCIA (y el mismo lienzo chico)
+        div = max(4, int(round(4 * ctx.s)))
+        d0 = 4.0 * ctx.s
     rmax = math.hypot(max(cx, w - cx), max(cy, h - cy))
-    if smear * rmax > 1.5 * div:
+    if smear * rmax > 1.5 * d0:
         lw, lh = _lowres(w, h, div)
         small = cv2.resize(_arr(img), (lw, lh), interpolation=cv2.INTER_AREA)
         scx, scy = cx * lw / w, cy * lh / h
@@ -930,7 +935,7 @@ def zoom_blur(img, prev, item, p, ctx):
         # mascara radial: nitido en el centro, estela completa hacia las orillas
         yy, xx = np.mgrid[0:lh, 0:lw].astype(np.float32)
         r = np.sqrt(((xx - scx) * (w / lw)) ** 2 + ((yy - scy) * (h / lh)) ** 2)
-        a = np.clip((smear * r - div) / (3.0 * div), 0.0, 1.0)
+        a = np.clip((smear * r - d0) / (3.0 * d0), 0.0, 1.0)
         acc *= a[..., None]
         acc[..., 3] = a * 255.0
         over = _up(np.clip(acc, 0, 255).astype(np.uint8), w, h)
@@ -1064,7 +1069,7 @@ def _scanline_shader(ctx) -> skia.Shader:
 
     def make():
         a = np.full((period, 4, 4), 255, np.uint8)
-        a[0, :, :3] = 170
+        a[:max(1, period // 4), :, :3] = 170     # 1/4 del periodo: misma linea en 1080 y 4K
         return C.image_from_rgba(a)
     img = _CACHE.get_or(("scan", period), make)
     return img.makeShader(skia.TileMode.kRepeat, skia.TileMode.kRepeat, C.SAMPLING_FAST)
