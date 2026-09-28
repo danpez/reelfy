@@ -195,15 +195,17 @@ def layout_box(W: int, H: int) -> tuple[int, int, int, int]:
 # opciones del proyecto (fuera del plan) que render_pro, render_draft y render_frame aplican:
 # el servidor las anuncia en GET /settings (pro_opts) y el Studio habilita sus controles
 PRO_OPTS = ("logo", "air", "enhance_audio")
-LOGO_POS = {"tl": "tl", "tr": "tr", "bl": "bl", "br": "br", "top-left": "tl", "top-right": "tr",
-            "bottom-left": "bl", "bottom-right": "br"}
+# tc / bc = arriba / abajo al centro (regla de simetria: mismo margen a izquierda y derecha)
+LOGO_POS = {"tl": "tl", "tr": "tr", "bl": "bl", "br": "br", "tc": "tc", "bc": "bc", "top-left": "tl",
+            "top-right": "tr", "bottom-left": "bl", "bottom-right": "br", "top-center": "tc",
+            "bottom-center": "bc", "top": "tc", "bottom": "bc"}
 
 
 def logo_cfg(v: Any) -> dict | None:
     """Marca de agua del proyecto -> {path, pos, size, opacity} saneado, o None.
 
     Acepta None/False (sin logo), True (logo de la marca con los defaults) o un dict como el
-    del Studio {pos: tl|tr|bl|br, size: fraccion del ancho de la caja, opacity}. `path`
+    del Studio {pos: tl|tr|bl|br|tc|bc, size: fraccion del ancho de la caja, opacity}. `path`
     default = la marca del usuario (paths.BRAND/logo.png). Misma geometria que el legado: margen
     del 3 % de la caja de layout."""
     if not v:
@@ -1486,7 +1488,8 @@ class _MediaFrames:
 
 # ---------------------------------------------------------------- colocacion automatica del PiP
 PIP_MARGIN = 0.015                  # separacion minima (fraccion de la caja)
-PIP_SCALES = (1.0, 0.85, 0.72, 0.6)  # si no cabe sin tapar la cara, la tarjeta se achica
+# si no cabe centrado sin tapar la cara, la tarjeta se achica (antes de rendirse)
+PIP_SCALES = (1.0, 0.85, 0.72, 0.6, 0.5, 0.4)
 CAPTION_HALF = 0.05                 # media altura de la franja de subtitulos (fraccion de H)
 
 
@@ -1497,25 +1500,42 @@ def _overlap(a, b) -> float:
 def media_auto_place(face, w: float, h: float, cap_top: float | None = None,
                      avoid=()) -> tuple[float, float, float]:
     """Centro (x, y) y escala de un PiP SIN posicion (x/y null), en fracciones de la caja de
-    layout. Contrato compartido con la vista en vivo del Studio (doc 4.2b):
+    layout. Regla de simetria: el PiP automatico SIEMPRE va centrado en x = 0.5 (mismo aire a
+    izquierda y derecha); para librar la cara se mueve en y o se achica, nunca de lado.
+    Contrato compartido con la vista en vivo del Studio (fxcore.mediaAutoPlace, doc 4.2b); el
+    algoritmo EXACTO (el port JS debe ser identico paso a paso):
+
+      S = ctx.SAFE (0.12..0.88, simetrica); m = PIP_MARGIN = 0.015; mid = 0.5
+      PIP_SCALES = (1.0, 0.85, 0.72, 0.6, 0.5, 0.4)
+      bottom = min(S.bottom, cap_top) si cap_top else S.bottom
+      fit(cx, cy, ww, hh):
+        lo_x, hi_x = S.left + ww/2 + m, S.right - ww/2 - m
+        lo_y, hi_y = S.top + hh/2 + m, bottom - hh/2 - m
+        cx = mid si lo_x > hi_x, si no clamp(cx, lo_x, hi_x)
+        cy = (S.top + bottom)/2 si lo_y > hi_y, si no clamp(cy, lo_y, hi_y)
+      con cara [fx, fy, fw, fh]:
+        zone = (fx - fw/2 - 0.03, fy - fh/2 - 0.05, fx + fw/2 + 0.03, fy + fh/2 + 0.03)
+        candidatos(ww, hh) = [(mid, zone[3] + m + hh/2),     # pecho (bajo la barbilla)
+                              (mid, zone[1] - m - hh/2)]     # arriba de la cabeza
+      sin cara: zone = None; candidatos = [(mid, 0.0), (mid, 1.0)]  # arriba, abajo (fit acota)
+      for s in PIP_SCALES: ww, hh = w*s, h*s
+        for (cx, cy) in candidatos(ww, hh): cx, cy = fit(cx, cy, ww, hh)
+          r = (cx - ww/2, cy - hh/2, cx + ww/2, cy + hh/2)
+          fo = overlap(r, zone) (0 sin cara); ao = suma de overlap(r, a) para a en avoid
+          fo <= 1e-9 y ao <= 1e-9 -> return (round(cx, 4), round(cy, 4), s)
+          fo <= 1e-9 y (free es None o ao < free.ao - 1e-9) -> free = (ao, cx, cy, s)
+          best_face es None o fo < best_face.fo - 1e-9 -> best_face = (fo, cx, cy, s)
+      pick = free o best_face -> (round(cx, 4), round(cy, 4), s)
 
     - `face` = [cx, cy, w, h] de la cara (mediana en el rango del item) o None; `w`, `h` = la
       tarjeta; `cap_top` = borde superior de la franja de subtitulos (y - 0.06) o None;
       `avoid` = rectangulos [x0, y0, x1, y1] de otros overlays activos (textos, graficos).
     - Zona prohibida = la cara ampliada (0.03 a los lados, 0.05 arriba por el cabello, 0.03
-      abajo); zona util = SAFE (sin la columna de botones) y arriba de los subtitulos.
-    - Candidatos en orden, con escala 1, 0.85, 0.72 y 0.6: al lado contrario de la cara (la
-      cara a la derecha del centro de SAFE -> a la izquierda) alineado arriba con la cara; al
-      otro lado; en el pecho (entre la cara y los subtitulos); arriba de la cabeza. Cada uno se
-      acota a la zona util. Gana el primero que no toca ni la cara ni `avoid`; si no hay, el
-      primero que no toca la cara con el menor cruce con `avoid`; si ninguno libra la cara, el
-      de menor cruce con ella.
-    - Sin cara: arriba a la derecha dentro de SAFE (la persona suele ir al centro), con la
-      misma busqueda contra `avoid` (esquina derecha, izquierda, abajo)."""
+      abajo); zona util = SAFE y arriba de los subtitulos."""
     S = C.SAFE
     m = PIP_MARGIN
     bottom = min(S["bottom"], cap_top) if cap_top else S["bottom"]
-    mid = (S["left"] + S["right"]) / 2
+    mid = C.XC
     avoid = [tuple(float(v) for v in r[:4]) for r in avoid or ()]
 
     def fit(cx, cy, ww, hh):
@@ -1527,17 +1547,13 @@ def media_auto_place(face, w: float, h: float, cap_top: float | None = None,
 
     if face is None:
         zone = None
-        order = lambda ww, hh: [(1.0, 0.0), (0.0, 0.0), (1.0, 1.0)]  # noqa: E731
+        order = lambda ww, hh: [(mid, 0.0), (mid, 1.0)]  # noqa: E731
     else:
         fx, fy, fw, fh = (float(v) for v in face[:4])
         zone = (fx - fw / 2 - 0.03, fy - fh / 2 - 0.05, fx + fw / 2 + 0.03, fy + fh / 2 + 0.03)
-        first = -1 if fx >= mid else 1                  # -1 = a la izquierda de la cara
 
         def order(ww, hh):
-            side = [zone[0] - m - ww / 2, zone[2] + m + ww / 2]
-            a, b = (side[0], side[1]) if first < 0 else (side[1], side[0])
-            return [(a, zone[1] + hh / 2), (b, zone[1] + hh / 2),
-                    (fx, zone[3] + m + hh / 2), (fx, zone[1] - m - hh / 2)]
+            return [(mid, zone[3] + m + hh / 2), (mid, zone[1] - m - hh / 2)]
     free, best_face = None, None
     for s in PIP_SCALES:
         ww, hh = w * s, h * s
@@ -1891,8 +1907,11 @@ class Compositor:
         s.getCanvas().drawImageRect(img, skia.Rect.MakeWH(lw, lh), C.SAMPLING_CUBIC)
         mx, my = round(bw * 0.03), round(bh * 0.03)
         pos = cfg.get("pos", "br")
-        x = bx + (mx if pos in ("tl", "bl") else bw - lw - mx)
-        y = by + (my if pos in ("tl", "tr") else bh - lh - my)
+        if pos in ("tc", "bc"):
+            x = bx + (bw - lw) // 2                 # centrado: mismo margen a cada lado
+        else:
+            x = bx + (mx if pos in ("tl", "bl") else bw - lw - mx)
+        y = by + (my if pos in ("tl", "tr", "tc") else bh - lh - my)
         return s.makeImageSnapshot(), x, y, float(cfg.get("opacity", 0.9))
 
     def shot_idx(self, t: float) -> int | None:

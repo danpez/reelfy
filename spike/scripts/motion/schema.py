@@ -16,6 +16,12 @@ el tipo, `min`/`max`/`step`, `opts`, `default`. Extensiones:
   - `roles`        (bg_colors) papel de cada indice de la lista por fondo (cutaways.BG_COLOR_ROLES).
   - num `nullable` con default null = "automatico" (el renderer decide; p. ej. punch.hold,
     graphics x/y con `anchor`, grade.clarity = la del look).
+  - `nofill: true` ausente tiene significado propio (modo legacy): ni fill=True lo completa
+    (p. ej. lower_third.align: sin clave = rotulo anclado por el borde izquierdo).
+
+SIMETRIA (regla de la marca): todo overlay nace centrado en x = XC (0.5) y con ancho <= SYM_W
+(0.76), el espejo de ctx.XC/ctx.SYM_W (este modulo es puro: sin skia). Los defaults de x y
+alineacion los decide este esquema, no los modulos.
 
 normalize() solo completa campos comunes y los `req`; los parametros opcionales ausentes se
 dejan asi para que cada renderer aplique su propio default de preset (el `default` del
@@ -31,6 +37,8 @@ from typing import Any
 from . import profile as _profile
 
 VERSION = 2
+XC = 0.5                  # espejo de ctx.XC: centro horizontal de todo overlay centrado
+SYM_W = 0.76              # espejo de ctx.SYM_W: ancho maximo de un overlay centrado
 
 # ---------------------------------------------------------------- defaults (seccion 3)
 DEFAULT_ENTITIES = {"name": "", "role": "", "price": "", "address": "", "landmark": "",
@@ -221,7 +229,9 @@ TEXT_COMMON = [
     P("color", "color", "Color", "#FFFFFF"),
     P("accent", "color", "Color de acento", "#FFD23F"),
     P("accent_words", "text", "Palabras en acento", [], list=True),
-    sel("align", "Alineación", ["left", "center", "right"], "center", seg=True),
+    # x es el CENTRO del bloque con cualquier alineacion (text._place, simetria)
+    sel("align", "Alineación", ["left", "center", "right"], "center", seg=True,
+        hint="Justifica las líneas dentro del bloque; el bloque va centrado en X"),
     num("stroke", "Contorno", 0.0, 0.0, 24.0, 0.5, unit="px"),
     num("shadow", "Sombra", 0.35, 0.0, 1.0, 0.05),
     sel("anim_in", "Animación de entrada", TEXT_ANIM_IN, "pop"),
@@ -241,8 +251,9 @@ TEXT_PRESET_DEFAULTS = {
                          "anim_in": "pop"},
     "stack":            {"label": "Apilado bold", "font": "Anton", "size": 0.11, "y": 0.28,
                          "anim_in": "word_stagger"},
+    # la escalera va DENTRO del bloque; el bloque entero se centra en x (simetria)
     "cascade":          {"label": "Cascada", "font": "Poppins-ExtraBold", "size": 0.07, "y": 0.22,
-                         "align": "left", "x": 0.1, "anim_in": "word_stagger"},
+                         "align": "center", "x": XC, "anim_in": "word_stagger"},
     "serif_elegant":    {"label": "Serif elegante", "font": "DMSerifDisplay", "size": 0.075,
                          "y": 0.24, "anim_in": "rise"},
     "script_accent":    {"label": "Manuscrita", "font": "Caveat-Bold", "size": 0.08, "y": 0.3,
@@ -263,7 +274,8 @@ TEXT_PRESET_EXTRA = {
                 P("prefix", "text", "Prefijo", "$"), P("suffix", "text", "Sufijo", ""),
                 num("decimals", "Decimales", 0, 0, 3, 1),
                 P("sep", "text", "Separador de miles", ","),
-                sel("anchor", "Crece desde", ["right", "center", "left"], "right", seg=True),
+                # centro: el numero crece hacia ambos lados (simetrico en cada cuadro)
+                sel("anchor", "Crece desde", ["right", "center", "left"], "center", seg=True),
                 # text._counter_state: vacio = min(1.3, max(0.4, 0.55 * duracion del item))
                 num("count_dur", "Duración del conteo", None, 0.1, 5.0, 0.05, unit="s",
                     nullable=True, hint="Vacío = automático (según la duración)")],
@@ -350,7 +362,11 @@ GRAPHIC_KIND_PARAMS = {
     "lower_third": {"label": "Rótulo (lower third)", "params": [
         P("title", "text", "Título", "", req=True), P("subtitle", "text", "Subtítulo", ""),
         sel("theme", "Tema", ["dark", "light"], "dark", seg=True),
-        P("accent", "color", "Color de acento", None, nullable=True)]},
+        P("accent", "color", "Color de acento", None, nullable=True),
+        # centrado (default) = x es el CENTRO del panel; izquierda = x es el borde izquierdo.
+        # Sin la clave = rotulo de un plan viejo (izquierda): normalize no la rellena
+        sel("align", "Alineación", ["center", "left"], "center", seg=True, nofill=True,
+            hint="Centrado = simétrico (X es el centro); izquierda = X es el borde izquierdo")]},
     "cta": {"label": "Llamada a la acción", "params": [
         sel("variant", "Tipo", CTA_VARIANTS, "follow", req=True),
         P("title", "text", "Nombre", "", hint="Seguir: nombre arriba y la red + @usuario abajo"),
@@ -367,7 +383,7 @@ GRAPHIC_KIND_PARAMS = {
         P("initials", "text", "Iniciales", "", hint="Vacío = del nombre"),
         P("media", "media", "Foto de perfil", None, nullable=True, accept=["image"],
           hint="Imagen de perfil (si no, iniciales)"),
-        num("width", "Ancho de la pastilla", None, 0.3, 0.82, 0.01, nullable=True,
+        num("width", "Ancho de la pastilla", None, 0.3, SYM_W, 0.01, nullable=True,
             hint="Seguir y Link abajo: ancho común de la tarjeta final (vacío = el natural)")]},
     "progress": {"label": "Barra de progreso", "params": [
         num("thickness", "Grosor", 8.0, 2.0, 30.0, 0.5, unit="px"),
@@ -387,7 +403,7 @@ GRAPHIC_KIND_PARAMS = {
         sel("layout", "Disposición", ["column", "row", "grid"], "column", seg=True,
             hint="grid = rejilla de chips del mismo ancho"),
         num("cols", "Columnas (rejilla)", 2, 1, 4, 1),
-        num("width", "Ancho de la rejilla", None, 0.3, 0.82, 0.01, nullable=True,
+        num("width", "Ancho de la rejilla", None, 0.3, SYM_W, 0.01, nullable=True,
             hint="Vacío = el del chip más ancho"),
         sel("variant", "Tipo", ["chips", "watermark"], "chips", seg=True,
             hint="watermark = marca de agua sutil con el usuario"),
@@ -426,9 +442,13 @@ GRAPHIC_KIND_PARAMS["media"]["params"] += MEDIA_FIT + [
     num("shadow", "Sombra", 0.55, 0.0, 1.0, 0.05)] + MEDIA_CLIP
 # defaults de los parametros comunes por kind. El PiP nace sin posicion (x/y null): render lo
 # coloca solo lejos de la cara y de los subtitulos (render.media_auto_place, doc 4.2b) y lo
-# achica si no cabe; con x/y el usuario manda.
-GRAPHIC_KIND_DEFAULTS = {"media": {"x": None, "y": None, "size": 0.36}}
-GRAPHIC_KIND_HINTS = {"media": {
+# achica si no cabe; con x/y el usuario manda. Los demas nacen CENTRADOS (x = XC, simetria):
+# estas claves no se adoptan de graphics.DEFAULTS (red de seguridad si el modulo cambia).
+GRAPHIC_KIND_DEFAULTS = {"media": {"x": None, "y": None, "size": 0.36},
+                         **{k: {"x": XC} for k in ("doodle", "icon", "card", "lower_third", "cta",
+                                                   "sticker_text", "socials")}}
+GRAPHIC_KIND_HINTS = {"lower_third": {"x": "Centrado: centro del rótulo; izquierda: su borde izquierdo"},
+                      "media": {
     "x": "Vacío = automático: lejos de la cara y de los subtítulos",
     "y": "Vacío = automático: lejos de la cara y de los subtítulos",
     "size": "Ancho máximo de la tarjeta (en automático puede achicarse para no tapar la cara)"}}
@@ -778,7 +798,8 @@ def _adopt_modules(kinds: dict) -> list[str]:
                     prm["opts"] = list(dict.fromkeys(prm["opts"] + ain))
                 if prm["k"] == "anim_out":
                     prm["opts"] = list(dict.fromkeys(prm["opts"] + aout))
-                if prm["k"] in ("x", "y", "align", "anim_in", "anim_out", "font", "behind",
+                # x/align no se adoptan: el bloque nace centrado en x = XC (simetria)
+                if prm["k"] in ("y", "anim_in", "anim_out", "font", "behind",
                                 "shadow", "color") and pd.get(prm["k"]) is not None:
                     _set_default(prm, pd[prm["k"]])
         return True
@@ -1024,7 +1045,7 @@ def _fix_param(item: dict, p: dict, fill: bool) -> None:
     k, typ = p["k"], p["type"]
     present = _has(item, k)
     if not present:
-        if (p.get("req") or fill) and p.get("default") is not None:
+        if (p.get("req") or fill) and p.get("default") is not None and not p.get("nofill"):
             _set(item, k, copy.deepcopy(p["default"]))
         return
     v = _get(item, k)
@@ -1400,8 +1421,11 @@ def normalize(plan: dict, fill: bool = False) -> dict:
             elif not _norm_times(it, dur):
                 continue
             _norm_common(it, event)
+            # rotulo de un plan viejo (sin `align`): su x es el borde izquierdo; fill no le pone
+            # el x centrado del catalogo (el renderer usa su default legacy)
+            legacy_lt = track == "graphics" and kind == "lower_third" and "align" not in it
             for prm in _kind_params(track, kind):
-                _fix_param(it, prm, fill)
+                _fix_param(it, prm, fill and not (legacy_lt and prm["k"] == "x"))
             if track == "transitions":
                 dv = _num(it.get("dur"))
                 if dv is None:

@@ -144,6 +144,11 @@ def _check_zones(plan):
                 pytest.fail(f"escena completa encimada con {i1['id']} / {i2['id']}")
             if z1 != z2:
                 continue
+            if i2["id"] == i1["id"] + "_m" or i1["id"] == i2["id"] + "_m":
+                # par espejo (simetria): misma y, x y 1-x, separados >= ACCENT_SEP
+                assert abs(i1["x"] + i2["x"] - 1.0) < 2e-3 and i1["y"] == i2["y"], (i1["id"], i2["id"])
+                assert abs(i1["x"] - i2["x"]) >= D.ACCENT_SEP - 1e-6, (i1["id"], i2["id"])
+                continue
             # piezas de una misma composicion (contador de precio + etiqueta del servicio; seguir +
             # link del remate; frase + palabra gigante del fondo reemplazado): apiladas sin encimarse
             r1, r2 = i1["id"].split("_")[1], i2["id"].split("_")[1]
@@ -1508,6 +1513,11 @@ def test_regenerate_proposes_real_variant_same_id(synth, track):
                     continue
                 if track == "text" and tr == "graphics" and D._anchor_of(a["id"]) == D._anchor_of(it["id"]):
                     continue                    # acento ligado al titulo: se mueve con el
+                if a["id"] == it["id"] + "_m" or a["id"] + "_m" == it["id"]:
+                    # par espejo: base y gemelo se regeneran juntos (espejo exacto)
+                    assert b["name"] == new["name"] and b["size"] == new["size"] and b["y"] == new["y"]
+                    assert abs(b["x"] + new["x"] - 1.0) < 2e-3 and b["rotation"] == -new["rotation"]
+                    continue
                 assert a == b, (tr, a["id"])
         assert _visual(new) != _visual(it), (track, it["id"])
         for k in ("start", "end", "at"):
@@ -1560,7 +1570,8 @@ def test_ids_stable_by_phrase_across_restyles(synth):
     import re as _re
     ids_a = {it["id"] for tr in D.TRACKS for it in synth["fx"][tr]}
     for i_ in ids_a:
-        assert _re.fullmatch(r"(tx|gr|cw|fx|tr|sf)_[a-z_0-9]+_(s\d+|j\d+|t\d+)[a-z0-9]*", i_), i_
+        # '_m': gemelo espejo de un par simetrico (misma frase que su base)
+        assert _re.fullmatch(r"(tx|gr|cw|fx|tr|sf)_[a-z_0-9]+_(s\d+|j\d+|t\d+)[a-z0-9]*(_m)?", i_), i_
     q = D.redirect(copy.deepcopy(synth), style="energetico")
     ids_b = {it["id"] for tr in D.TRACKS for it in q["fx"][tr]}
     for key in ("tx_hook_s0", "tx_drama_s1", "tr_cut_j1"):

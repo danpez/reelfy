@@ -19,7 +19,11 @@ import skia
 from . import assets
 
 REF_W = 1080.0
-SAFE = {"top": 0.09, "bottom": 0.80, "left": 0.06, "right": 0.88}
+# Zona segura SIMETRICA en x (regla de la marca: todo overlay deja el mismo espacio a la izquierda
+# y a la derecha). El margen de 0.12 por lado viene del riel derecho de TikTok (likes/comentarios).
+SAFE = {"top": 0.09, "bottom": 0.80, "left": 0.12, "right": 0.88}
+XC = 0.5                                   # centro horizontal de todo overlay centrado
+SYM_W = SAFE["right"] - SAFE["left"]       # ancho maximo de un overlay centrado (0.76)
 
 
 # ---------------------------------------------------------------- color

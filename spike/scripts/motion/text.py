@@ -15,9 +15,11 @@ Principios de calidad (referencia: ejemplo_objetivo.mp4):
     la voz cuando el item trae `_words`.
   - Nunca fuera de SAFE en reposo (se reduce y desplaza); nunca se cortan palabras.
 
-Coordenadas: `x` es el ancla horizontal (centro, borde izq. o der. segun `align`), `y` es el
-centro vertical del bloque. `size` = tamano de fuente de la linea base como fraccion de W;
-sin `size` el bloque se autoajusta al ancho util de SAFE.
+Coordenadas: `x` es el CENTRO horizontal del bloque (default 0.5) para todo `align`: regla de
+simetria, la tinta en reposo deja el mismo aire a izquierda y derecha; `align` solo alinea las
+lineas DENTRO del bloque (y la escalera de cascade queda interna). `y` es el centro vertical
+del bloque. `size` = tamano de fuente de la linea base como fraccion de W; sin `size` el bloque
+se autoajusta al ancho util (a lo mas SYM_W = 0.76 de W centrado en 0.5).
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import skia
 
 from . import assets, ease
@@ -59,7 +62,7 @@ PRESETS: dict[str, dict] = {
     "stack": dict(role="title", align="center", y=0.62, anim_in="word_stagger", anim_out="slide_up",
                   shadow=0.8, max_size=0.24, min_size=0.05, cpl=12, max_lines=4, gap=0.13, step=0.13,
                   space=1.1),
-    "cascade": dict(role="caption", align="left", y=0.20, anim_in="slide_left", anim_out="fade",
+    "cascade": dict(role="caption", align="center", y=0.20, anim_in="slide_left", anim_out="fade",
                     shadow=0.8, max_size=0.095, min_size=0.05, cpl=12, max_lines=4, gap=0.10,
                     step=0.13, last_scale=1.22, cascade_step=0.13),
     "serif_elegant": dict(role="serif", align="center", y=0.15, anim_in="fade", anim_out="fade",
@@ -649,7 +652,7 @@ def _params(item: dict, preset: str, ctx) -> dict:
     if P.get("align") not in ("left", "center", "right"):
         P["align"] = "center"
     if P.get("x") is None:
-        P["x"] = {"left": SAFE["left"] + 0.02, "right": SAFE["right"] - 0.02}.get(P["align"], 0.5)
+        P["x"] = C.XC                      # el bloque se ancla por su centro con cualquier align
     if P.get("anim_in") not in ANIM_IN:
         P["anim_in"] = PRESETS.get(preset, {}).get("anim_in", "pop")
     if P.get("anim_out") not in ANIM_OUT:
@@ -967,14 +970,10 @@ def _wf(spec: _Spec, accent: bool, size: float) -> tuple:
 
 
 def _usable(P: dict, ctx) -> tuple[float, float]:
-    """(ancho util px, alto util px) para el ancla del item."""
+    """(ancho util px, alto util px) para el ancla del item. x es el centro del bloque (con
+    cualquier align): el ancho es simetrico alrededor de x dentro de SAFE (0.76 en x = 0.5)."""
     x = ease.clamp(float(P["x"]), SAFE["left"], SAFE["right"])
-    if P["align"] == "left":
-        w = (SAFE["right"] - x)
-    elif P["align"] == "right":
-        w = (x - SAFE["left"])
-    else:
-        w = 2 * min(x - SAFE["left"], SAFE["right"] - x)
+    w = 2 * min(x - SAFE["left"], SAFE["right"] - x)
     w = max(0.3, w) * float(P.get("width", 1.0) or 1.0)
     grow = 1.0 + max(0.0, float(P.get("drift", 0.0) or 0.0))   # el empuje lento no debe salir de SAFE
     return w * ctx.W / grow, (SAFE["bottom"] - SAFE["top"]) * ctx.H / grow
@@ -1148,33 +1147,100 @@ def _xform_half(w: float, h: float, rot: float, grow: float) -> tuple[float, flo
     return (w * c + h * s) * 0.5 * grow, (w * s + h * c) * 0.5 * grow
 
 
-def _place(lines: list[_L], words: list[_W], P: dict, ctx, bw: float) -> tuple[skia.Rect, skia.Rect]:
-    """Ancla el bloque (x/align, y=centro vertical) y lo mete en SAFE contando la rotacion y el
-    empuje (drift) del bloque. -> (tinta en reposo sin transformar, caja transformada)."""
+def _glyph_x(ln: _L) -> tuple[float, float] | None:
+    """Extremos x de la tinta REAL de los glifos de una linea (paths al tamano de dibujo). La
+    tinta de _run (getBounds a 400 px, escalada) es conservadora y no simetrica: 'cafe' a 250 px
+    sobra 5 px a la izquierda y 7 a la derecha."""
+    xs = []
+    for w in ln.words:
+        for j in range(len(w.run.glyphs)):
+            pth = w.run.glyph_path(j)
+            if pth.isEmpty():
+                continue
+            b = pth.computeTightBounds()
+            x0 = w.ox + w.run.xpos[j]
+            xs += [x0 + b.left(), x0 + b.right()]
+    return (min(xs), max(xs)) if xs else None
+
+
+def _rest_extents(lines: list[_L], words: list[_W], P: dict, preset: str | None) -> list[tuple[float, float]]:
+    """Extremos x (l, r) de lo que se PINTA en reposo por linea, para centrar el bloque en x:
+    glifos reales; pastilla (kicker) o caja por linea (`box`) = su rect (simetrico a ln.ink);
+    typewriter: + el cursor tras el ultimo glifo; highlight_marker: + las bandas del marcador."""
+    boxed = bool(P.get("box")) and preset not in ("highlight_marker", "kicker")
+    boxed = boxed or (preset == "kicker" and bool(P.get("box")) and not any(l.kind == "pill" for l in lines))
+    out = []
+    for ln in lines:
+        g = None if (ln.kind == "pill" or boxed) else _glyph_x(ln)
+        out.append(list(g) if g else [ln.ink[0], ln.ink[2]])
+    if preset == "typewriter" and P.get("anim_in") == "type" and lines and lines[-1].words:
+        ln, w = lines[-1], lines[-1].words[-1]
+        if w.run.glyphs:
+            j = len(w.run.glyphs) - 1
+            out[-1][1] = max(out[-1][1], w.ox + w.run.xpos[j] + w.run.gink[j][2] + 0.07 * ln.size
+                             + max(3.0, 0.12 * ln.size))
+    if preset == "highlight_marker" and words:
+        full = C.luminance(P["color"]) < 0.4 and not any(w.accent for w in words)
+        for ln, w0, w1 in _marker_bands(_B(lines, words, skia.Rect.MakeEmpty(), 0.0, (0.0, 0.0)), full):
+            li = lines.index(ln)
+            out[li][0] = min(out[li][0], w0.ox + w0.run.ink[0] - 0.13 * ln.size - 0.02 * ln.size)
+            out[li][1] = max(out[li][1], w1.ox + w1.run.ink[2] + 0.13 * ln.size + 0.02 * ln.size)
+    return [tuple(e) for e in out]
+
+
+def _rot_ink_x(lines: list[_L], ext: list, rot: float, cx: float, cy: float, grow: float) -> tuple[float, float]:
+    """(centro, semiancho) en x, relativos a cx, de la tinta de las lineas (extremos `ext`)
+    rotada `rot` grados y escalada `grow` alrededor de (cx, cy): con lineas de distinto ancho la
+    tinta rotada no queda centrada en el centro del rect (stack girado -6 grados: 34 px)."""
+    c, s = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+    xs = []
+    for ln, (l, r) in zip(lines, ext):
+        t, b = ln.ink[1], ln.ink[3]
+        for px, py in ((l, t), (r, t), (l, b), (r, b)):
+            xs.append(((px - cx) * c - (py - cy) * s) * grow)
+    lo, hi = min(xs), max(xs)
+    return (lo + hi) / 2, (hi - lo) / 2
+
+
+def _place(lines: list[_L], words: list[_W], P: dict, ctx, bw: float,
+           ext: list | None = None) -> tuple[skia.Rect, skia.Rect]:
+    """Ancla el bloque (x = centro horizontal de la tinta con cualquier align, y = centro
+    vertical) y lo mete en SAFE contando la rotacion y el empuje (drift) del bloque. El acotado
+    horizontal es simetrico (SAFE 0.12..0.88): lo que no cabe se centra en 0.5, nunca se empuja
+    de lado. Bloques girados: se centra la tinta rotada real (no el rect sin girar). `ext` =
+    extremos x de lo que se pinta por linea (_rest_extents); sin el, la tinta de layout.
+    -> (tinta en reposo sin transformar, caja transformada)."""
     top = min(l.ink[1] for l in lines)
     bot = max(l.ink[3] for l in lines)
     left = min(l.ink[0] for l in lines)
     right = max(l.ink[2] for l in lines)
     ax = float(P["x"]) * ctx.W
-    if P["align"] == "left":
-        tx = ax - left
-    elif P["align"] == "right":
-        tx = ax - right
-    else:
-        tx = ax - (left + right) / 2
+    tx = ax - (left + right) / 2
     ty = float(P["y"]) * ctx.H - (top + bot) / 2
     rot = float(P.get("rotation", 0.0) or 0.0)
     grow = 1.0 + max(0.0, float(P.get("drift", 0.0) or 0.0))
     hw, hh = _xform_half(right - left, bot - top, rot, grow)
-    cx, cy = (left + right) / 2 + tx, (top + bot) / 2 + ty
+    # centro de lo que se pinta (la rotacion es alrededor del centro del rect: tinta girada)
+    ext = ext or [(ln.ink[0], ln.ink[2]) for ln in lines]
+    if rot:
+        dxr, hwx = _rot_ink_x(lines, ext, rot, (left + right) / 2, (top + bot) / 2, grow)
+    else:
+        el, er = min(e[0] for e in ext), max(e[1] for e in ext)
+        dxr = ((el + er) / 2 - (left + right) / 2) * grow
+        hwx = (er - el) / 2 * grow
+    tx -= dxr
+    cx, cy = (left + right) / 2 + tx + dxr, (top + bot) / 2 + ty    # centro de lo que se pinta
+    rcx = (left + right) / 2 + tx                                      # centro del rect (pivote)
+    # acotado: la tinta pintada Y la caja conservadora (la que reporta measure) dentro de SAFE
+    lo_e, hi_e = min(cx - hwx, rcx - hw), max(cx + hwx, rcx + hw)
     sl, sr = SAFE["left"] * ctx.W, SAFE["right"] * ctx.W
     st, sb = SAFE["top"] * ctx.H, SAFE["bottom"] * ctx.H
-    if 2 * hw >= sr - sl:
-        tx += (sl + sr) / 2 - cx
-    elif cx - hw < sl:
-        tx += sl - (cx - hw)
-    elif cx + hw > sr:
-        tx -= cx + hw - sr
+    if hi_e - lo_e >= sr - sl:
+        tx += C.XC * ctx.W - cx
+    elif lo_e < sl:
+        tx += sl - lo_e
+    elif hi_e > sr:
+        tx -= hi_e - sr
     if 2 * hh >= sb - st:
         ty += (st + sb) / 2 - cy
     elif cy - hh < st:
@@ -1339,7 +1405,7 @@ def _build_block(item: dict, P: dict, ctx, preset: str) -> _B:
         specs = [_kicker_spec(label, item, P, fs, ctx, maxw, label_only)] + specs
     rot = float(P.get("rotation", 0.0) or 0.0)
     grow = 1.0 + max(0.0, float(P.get("drift", 0.0) or 0.0))
-    safe_w = (SAFE["right"] - SAFE["left"]) * ctx.W / grow
+    safe_w = C.SYM_W * ctx.W / grow          # lo mas ancho que cabe centrado (0.76 de W)
     # serif_elegant: el acento es la italica real, en el color del texto (la referencia usa
     # serif blanca); solo con `accent` explicito cambia de color
     acc_col = P["color"] if preset == "serif_elegant" and not item.get("accent") else P["accent"]
@@ -1363,7 +1429,7 @@ def _build_block(item: dict, P: dict, ctx, preset: str) -> _B:
         if k >= 0.999:
             break
         fs *= k * 0.985
-    rect, bbox = _place(lines, words, P, ctx, bw)
+    rect, bbox = _place(lines, words, P, ctx, bw, _rest_extents(lines, words, P, preset))
     B = _B(lines, words, rect, fs, (rect.centerX(), rect.centerY()))
     B.extra["bbox"] = bbox
     B.extra["rooms"] = _rooms([[w for w in ln.words] for ln in lines if ln.kind != "pill"])
@@ -1772,6 +1838,71 @@ def _behind_fallback(fn, canvas, item, lt, dur, ctx) -> None:
     canvas.restore()
 
 
+def _shift_block(B: _B, dx: float) -> None:
+    """Recorre el bloque colocado dx px en x (palabras, lineas, rect, pivote y caja)."""
+    for w in B.words:
+        w.ox += dx
+    for ln in B.lines:
+        l, t, r, b = ln.ink
+        ln.ink = (l + dx, t, r + dx, b)
+    B.rect = B.rect.makeOffset(dx, 0.0)
+    B.center = (B.center[0] + dx, B.center[1])
+    bb = B.extra.get("bbox")
+    if bb is not None:
+        B.extra["bbox"] = bb.makeOffset(dx, 0.0)
+
+
+def _centered(preset: str, fn):
+    """Envuelve un renderer de bloque: la PRIMERA vez que se dibuja un bloque (por llave de layout)
+    se pinta una vez en reposo en una superficie aparte (sin sujeto ni cuadro base) y se mide su
+    columna de tinta (alpha > 24, igual que el QA de simetria): la sombra difusa, el cursor, las
+    bandas del marcador y la forma de los glifos de los bordes dejan hasta ~7 px de lado que el
+    layout no ve. El bloque cacheado se recorre para que esa tinta quede centrada en su x (regla
+    de simetria). measure() antes del primer dibujo no incluye ese ajuste (<= ~7 px)."""
+    def wrapped(canvas, item, lt, dur, ctx):
+        if not item.get("_ink_probe") and dur > 0:
+            try:
+                _probe_center(preset, fn, item, dur, ctx)
+            except Exception:  # noqa: el ajuste fino nunca debe tumbar el render
+                pass
+        fn(canvas, item, lt, dur, ctx)
+    wrapped.__name__ = fn.__name__
+    wrapped.__doc__ = fn.__doc__
+    return wrapped
+
+
+def _probe_center(preset: str, fn, item: dict, dur: float, ctx) -> None:
+    P, B = _get_block(item, preset, ctx)
+    if B.extra.get("probed") or not B.words:
+        return
+    B.extra["probed"] = True
+    # reposo real aunque el item sea corto (el bloque cacheado lo comparten items con otros
+    # tiempos): duracion larga, todo revelado y antes de la salida
+    dur = max(float(dur), 6.0)
+    tout = min(_TOUT.get(P["anim_out"], 0.28), dur * 0.3)
+    lt = max(0.0, dur - tout - 0.02)
+    bb = B.extra.get("bbox") or B.rect
+    m = 0.7 * B.fs + ctx.px(40)
+    x0, y0 = int(math.floor(bb.left() - m)), int(math.floor(bb.top() - m))
+    w, h = int(math.ceil(bb.width() + 2 * m)) + 1, int(math.ceil(bb.height() + 2 * m)) + 1
+    if w <= 2 or h <= 2 or w * h > 4.2e7:
+        return
+    pc = C.FrameCtx(W=ctx.W, H=ctx.H, fps=ctx.fps, n=ctx.n, t=ctx.t, t_orig=ctx.t_orig,
+                    quality=ctx.quality, seed=ctx.seed, style=ctx.style, words=ctx.words,
+                    entities=ctx.entities)
+    arr, surf = C.new_frame(w, h)
+    cv = surf.getCanvas()
+    cv.translate(-x0, -y0)
+    fn(cv, dict(item, _ink_probe=True), lt, dur, pc)
+    cols = np.where(arr[..., 3].max(axis=0) > 24)[0]
+    if not len(cols):
+        return
+    ink_c = x0 + (float(cols[0]) + float(cols[-1]) + 1.0) / 2.0
+    dx = float(P["x"]) * ctx.W - ink_c
+    if 0.25 < abs(dx) < 0.05 * ctx.W:
+        _shift_block(B, dx)
+
+
 def _behind_aware(fn):
     """Envuelve un renderer: si el item va detras del sujeto y no hay sujeto recortado,
     degrada con `_behind_fallback` en vez de tapar la cara."""
@@ -1992,8 +2123,12 @@ def highlight_marker(canvas, item, lt, dur, ctx):
 
     def pre(canvas, B, P, lt, dur, ctx, times, pout):
         clips = []
+        tout = min(_TOUT.get(P["anim_out"], 0.28), dur * 0.3)
         for ln, path, x0, x1, y0, y1, rot, t0 in geo(times):
-            p = ease.out_cubic((lt - t0) / 0.42)
+            # el barrido termina antes de la salida aunque el item sea corto (en reposo la banda
+            # queda completa: bloque simetrico)
+            sw = min(0.42, max(0.15, dur - tout - t0 - 0.08))
+            p = ease.out_cubic((lt - t0) / sw)
             if p <= 0:
                 continue
             li = B.lines.index(ln)
@@ -2272,9 +2407,11 @@ def _counter_layout(item: dict, ctx):
     wp = _run(final, fname, fs).adv              # valor final en espaciado proporcional
     digits = _run("0123456789", fname, fs)
     cap = digits.cap
-    anchor = str(item.get("anchor") or "right")
+    # center (default): el valor crece simetrico mientras cuenta (regla de simetria); right/left
+    # (odometro) solo si el usuario lo pide
+    anchor = str(item.get("anchor") or "center")
     if anchor not in ("right", "center", "left"):
-        anchor = "right"
+        anchor = "center"
     # etiqueta opcional
     label = None
     lab_h = 0.0
@@ -2376,7 +2513,7 @@ def kicker(canvas, item, lt, dur, ctx):
     _render_block(canvas, item, lt, dur, ctx, "kicker", {"pill": pill, "no_line_box": has_pill})
 
 
-RENDERERS = {name: _behind_aware(fn) for name, fn in (
+RENDERERS = {name: _behind_aware(fn if name == "counter" else _centered(name, fn)) for name, fn in (
     ("title_pop", title_pop),
     ("stack", stack),
     ("cascade", cascade),

@@ -72,7 +72,10 @@ DEFAULTS = {
     "self_broll": {"zoom_from": 1.0, "zoom_to": 1.18, "anim_in": "cut", "anim_out": "cut"},
 }
 TAU = math.tau
-XC = graphics.XC
+# regla de simetria: todo lo que la escena pone (texto, tarjeta, foto) va centrado en x = 0.5 y a
+# lo mas SYM_W (0.76 de W) de ancho: el mismo aire a izquierda y derecha
+XC = C.XC
+SYM_W = C.SYM_W
 
 _clamp = graphics._clamp
 _num = graphics._num
@@ -930,7 +933,7 @@ def fallback_title(canvas, ti: dict, lt: float, dur: float, ctx) -> None:
     col = ti.get("color") or "#FFFFFF"
     acc = ti.get("accent") or pal["accent"]
     accent_words = {str(w).lower().strip(".,!?") for w in (ti.get("accent_words") or [])}
-    maxw = W * (graphics.SAFE_W - 0.04)  # ancho de SAFE menos margen
+    maxw = W * (SYM_W - 0.04)  # ancho centrado maximo menos margen (cabe en x = 0.5 sin moverse)
     raw = ti.get("lines")
     if raw:
         lines = [(str(ln.get("text", "")), _num(ln, "scale", 1.0), ln.get("font") or fname,
@@ -1023,7 +1026,7 @@ def _card_from(item: dict) -> dict:
                                   "accent", "map_label", "days", "cursor") if k in item}
     c.setdefault("id", f"{item.get('id', 'cut')}:card")
     c.setdefault("kind", "card")
-    c.setdefault("size", 0.8)
+    c.setdefault("size", SYM_W)
     c.setdefault("x", XC)
     c.setdefault("y", 0.52)
     c.setdefault("anim_in", "pop")
@@ -1098,7 +1101,7 @@ def draw_photo(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> N
         rot = tilt + (1 - sp) * 14.0
         dy = (1 - sp) * H * 0.55
         s = (0.92 + 0.08 * sp) * (1.0 + 0.025 * ease.in_out_quad(_clamp(lt / max(0.5, dur))))
-        cx, cy = W * XC, H * _num(item, "y", 0.46)
+        cx, cy = W * _num(item, "x", XC), H * _num(item, "y", 0.46)
         cv.save()
         cv.translate(cx, cy + dy)
         cv.rotate(rot)

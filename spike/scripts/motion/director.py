@@ -46,18 +46,28 @@ API:
   analyze_script(plan, shots, use_llm=True) -> dict
   propose_trims(plan, shots, words, keep) -> list[cut] (src "ai")
   choreograph(plan, shots, script, style, intensity, seed, fixed=None, windows=None) -> (fx, _Choreo)
+  symmetrize(plan) -> plan v2 (copia) : regla de SIMETRIA sobre un plan existente (sin LLM,
+      determinista; mismos ids, tiempos y contenido): todo lo de la IA centrado en x = 0.5 con
+      ancho <= SYM_W, glifos simetricos en par espejo ('<id>' y '<id>_m'), glifos con mano e
+      iconos solo centrados, flechas verticales centradas; lo que no cabe simetrico sin tapar la
+      cara u otra tinta se quita. Nunca mueve lo del usuario ni lo bloqueado.
   zone_of(track, item) -> str | None ; edit_table(plan) -> str ; stats(plan) ; STYLES ; TYPE_KIT
   contrast(a, b) / rel_lum(c) (WCAG) ; box_text_color(item) ; tone_icon(tag, role)
 
 Convenciones de coordenadas que emite el director (para los renderers):
-  - text: (x, y) = centro del bloque de texto (x = 0.5; cascade: borde izquierdo); `size` =
-    tamano de fuente / W; `lines[].scale` multiplica `size`. Los bloques se ajustan (ancho
-    medido con las fuentes reales, <= 0.76 W) para caber en SAFE y no tapar la cara (la camara
-    hace zoom anclado en el rostro). Un bloque = una clausula hablada (2-4 lineas que se
-    revelan al ritmo de la voz), nunca menos de ~0.9 s en pantalla.
+  - SIMETRIA (regla de la marca): todo overlay deja el MISMO aire a izquierda y derecha. Lo
+    centrado va en x = 0.5 con ancho <= SYM_W (0.76 W, banda 0.12..0.88); nada se recorre de
+    lado (si no cabe, se achica). Los acentos van centrados o en PAR ESPEJO (x y 1-x).
+  - text: (x, y) = centro del bloque de texto (x = 0.5, align center; cascade tambien: la
+    escalera va dentro de su caja centrada); `size` = tamano de fuente / W; `lines[].scale`
+    multiplica `size`. Los bloques se ajustan (ancho medido con las fuentes reales, <= 0.76 W)
+    para caber en SAFE y no tapar la cara (la camara hace zoom anclado en el rostro). Un bloque =
+    una clausula hablada (2-4 lineas que se revelan al ritmo de la voz), nunca menos de ~0.9 s.
   - graphics card/cta: (x, y) = centro; `size` = ancho / W. sticker_text/lower_third: `size` =
-    tamano de fuente / W (lower_third: x = borde izquierdo).
-  - doodle/icon: (x, y) = centro; `size` = lado de la caja / W.
+    tamano de fuente / W (lower_third: align 'center', x = CENTRO del panel).
+  - doodle/icon: (x, y) = centro; `size` = lado de la caja / W. Par espejo: ids '<id>' y
+    '<id>_m' (mismo nombre, tamano, y, tiempos y animacion; rotacion invertida; un solo SFX).
+    Flechas que senalan: verticales y centradas (x = path_to x = 0.5, bend 0).
   - cutaways info_card: la tarjeta va en `card` (item de graphics.card), no en graphics[].
 Tipografia: un "kit" por estilo y video (display + sans en 2-3 pesos + un acento serif o
 manuscrito): como maximo 4 fuentes y 3 familias. El color de tinta se elige contra el fondo
@@ -134,6 +144,11 @@ from . import assets
 from . import profile as PR
 from .ctx import SAFE, FrameCtx
 
+try:  # regla de simetria (ctx.XC / ctx.SYM_W)
+    from .ctx import SYM_W, XC as SYM_X
+except ImportError:  # pragma: no cover
+    SYM_X, SYM_W = 0.5, 2 * (SAFE["right"] - 0.5)
+
 try:  # dentro del motor (scripts/ en sys.path)
     import paths as _paths
 except Exception:  # pragma: no cover
@@ -194,7 +209,7 @@ FIELDS = {
                            "button_color", "avatar", "style", "media", "radius", "border",
                            "border_color", "fit", "caption", "platform", "display", "initials",
                            "links", "layout", "icon_style", "stagger", "opacity", "width", "cols",
-                           "backdrop"},
+                           "backdrop", "align"},
     "cutaways": _COMMON | {"kind", "background", "bg_colors", "text", "graphics", "src_t",
                            "zoom_from", "zoom_to", "card", "anim_in", "anim_out", "media", "caption",
                            "tilt", "size", "pan", "in_dur", "out_dur"},
@@ -2148,6 +2163,16 @@ def _zone_y(y: float) -> str:
 
 ACCENT_SEP = 0.2
 
+# ---------------------------------------------------------------- simetria (regla de la marca)
+# todo overlay deja el MISMO aire a la izquierda y a la derecha de su tinta: lo centrado va en
+# x = 0.5 con ancho <= SYM_W; los glifos simetricos pueden ir en PAR ESPEJO (x y 1-x); los glifos
+# con mano (?, !, rayo, espiral...) y los iconos solo centrados; lo que no cabe simetrico se quita
+SYM_L, SYM_R = SYM_X - SYM_W / 2, SYM_X + SYM_W / 2      # banda simetrica (0.12..0.88)
+SYM_TOL = 0.003                   # |x - 0.5| que ya cuenta como centrado
+SYM_GLYPHS = ("sparkle", "star4", "star5", "burst", "rays", "heart")    # admiten par espejo
+MARK_GLYPHS = ("underline", "circle_scribble", "squiggle")               # marcas sobre una linea
+TWIN = "_m"                       # sufijo del gemelo espejo de un par ('<id>' y '<id>_m')
+
 
 _MCTX: dict = {}
 
@@ -2203,17 +2228,49 @@ def card_height(item: dict, style: str = "dinamico") -> float:
         return _CARD_H_EST.get(item.get("variant", "generic"), 0.18) * float(item.get("size", 0.74)) * 1080 / 1920
 
 
-def lt_sub_fits(sub: str, size: float, style: str = "dinamico", x: float = 0.07, min_k: float = 0.8) -> bool:
+def lt_sub_fits(sub: str, size: float, style: str = "dinamico", x: float | None = None,
+                min_k: float = 0.8) -> bool:
     """El subtitulo del rotulo (versalitas con tracking, graphics.draw_lower_third) cabe a >=
-    `min_k` de su tamano nominal en el ancho hasta SAFE.right."""
+    `min_k` de su tamano nominal en el ancho del rotulo CENTRADO (SYM_W - 2*padx). Con `x`, el
+    rotulo legado anclado a la izquierda en x (hasta SAFE.right)."""
     try:
         from . import graphics as G
         c = _measure_ctx(style)
-        avail = (SAFE["right"] - x) * c.W - c.px(10) - 2 * c.px(28)
+        if x is None:
+            avail = SYM_W * c.W - 2 * c.px(28)
+        else:
+            avail = (SAFE["right"] - x) * c.W - c.px(10) - 2 * c.px(28)
         fs = G.font(G._fonts(c)["label"], size * c.W * 0.5 * min_k)
         return G.text_w(fs, str(sub).upper(), fs.getSize() * 0.14) <= avail
     except Exception:
         return len(str(sub)) <= 30
+
+
+def lt_width(title: str, sub: str, size: float = 0.064, style: str = "dinamico") -> float:
+    """Ancho (fraccion de W) del panel del rotulo CENTRADO (graphics.draw_lower_third, align
+    'center'): titulo con fit_font y rol en versalitas con tracking hasta SYM_W - 2*padx, mas el
+    padding. El panel va centrado en su x y nunca pasa de SYM_W."""
+    try:
+        from . import graphics as G
+        c = _measure_ctx(style)
+        F = G._fonts(c)
+        padx = c.px(28)
+        avail = max(c.px(120), SYM_W * c.W - 2 * padx)
+        title = str(title or "")
+        ft = G.fit_font(F["title"], title, size * c.W, avail, min_px=size * c.W * 0.55)
+        title = G.ellipsize(ft, title, avail)
+        sub_u = str(sub or "").upper()
+        fs_px = size * c.W * 0.5
+        fs = G.font(F["label"], fs_px)
+        trk = fs.getSize() * 0.14
+        while sub_u and G.text_w(fs, sub_u, trk) > avail and fs.getSize() > fs_px * 0.7:
+            fs = G.font(F["label"], fs.getSize() * 0.94)
+            trk = fs.getSize() * 0.14
+        sub_u = G.ellipsize(fs, sub_u, avail, trk)
+        w = max(ft.measureText(title), G.text_w(fs, sub_u, trk) if sub_u else 0.0) + 2 * padx
+        return min(SYM_W, w / c.W)
+    except Exception:
+        return SYM_W
 
 
 def cta_natural_width(item: dict, style: str = "dinamico") -> float:
@@ -2459,9 +2516,8 @@ class _Choreo:
     """Coreografo determinista. Trabaja en tiempo original para emitir y en tiempo final para
     las reglas de ritmo y de no encimar."""
 
-    MAXW = 0.76                     # ancho maximo de un bloque de texto (fraccion de W)
-    XC = 0.5                        # centro horizontal de los bloques (0.12..0.88 con MAXW)
-    XS = (SAFE["left"] + SAFE["right"]) / 2     # centro de SAFE: pila alineada de la tarjeta final
+    MAXW = SYM_W                    # ancho maximo de un bloque centrado (fraccion de W)
+    XC = SYM_X                      # centro horizontal de TODO overlay (0.12..0.88 con MAXW)
 
     def __init__(self, plan: dict, shots: list[dict], script: dict, style: str, intensity: float,
                  seed: int, fixed: dict | None = None, windows: list | None = None, rev: int = 0):
@@ -2561,6 +2617,7 @@ class _Choreo:
         self.cap_ranges = None                  # captions.y_ranges (tomas de cuerpo completo)
         self.last_word = max(self.words, key=lambda w: w["f1"]) if self.words else None
         self.fixed_titles: list[tuple[float, float]] = []      # (inicio, fin) originales
+        self._sym_old: dict = {}                # cajas previas al pase de simetria (por id)
         for tr, items in self.fixed.items():
             for it in items:
                 self.ids.add(str(it.get("id")))
@@ -2585,7 +2642,9 @@ class _Choreo:
                 if z:
                     self.occ[z].append((a, b, str(it.get("id"))))
                     if z == "accent":
-                        self.acc_pos[str(it.get("id"))] = (float(it.get("x", 0.5)), float(it.get("y", 0.5)))
+                        # anclado a la cara (face_*: x/y null): se cuenta en el centro
+                        self.acc_pos[str(it.get("id"))] = (float(it["x"]) if it.get("x") is not None else 0.5,
+                                                           float(it["y"]) if it.get("y") is not None else 0.5)
                 if tr == "text":
                     r = measure_text(it, self.style)
                     if r is not None:
@@ -2990,14 +3049,17 @@ class _Choreo:
                 return False
         return True
 
-    def free_accent(self, x: float, y: float, fa: float, fb: float) -> bool:
+    def free_accent(self, x: float, y: float, fa: float, fb: float, skip=()) -> bool:
         """Acentos (garabatos/iconos pequenos): no se enciman en el tiempo si estan a menos de
-        ACCENT_SEP (distancia en unidades de W) ni caen sobre una escena o el CTA final."""
+        ACCENT_SEP (distancia en unidades de W) ni caen sobre una escena o el CTA final. `skip`:
+        ids que no cuentan (el propio acento y su gemelo al re-colocarlos)."""
         if not self.free("accent", fa, fb):
             return False
         if any(a < fb and fa < b for a, b in self.reserved):
             return False
         for a, b, iid in self.occ["accent"]:
+            if iid in skip:
+                continue
             if fa < b - 1e-6 and a < fb - 1e-6:
                 px, py = self.acc_pos.get(iid, (0.5, 0.5))
                 if math.hypot(px - x, (py - y) * self.aspect) < ACCENT_SEP:
@@ -3013,29 +3075,35 @@ class _Choreo:
             y0, y1 = y0 - 0.25 * s / self.aspect, y1 + 0.25 * s / self.aspect
         return x0, y0, x1, y1
 
-    def clear_of_ink(self, rect: tuple, fa: float, fb: float, skip: str | None = None,
+    def clear_of_ink(self, rect: tuple, fa: float, fb: float, skip=None,
                      margin: float = 0.008) -> bool:
+        """`skip`: id (o ids) cuya tinta no cuenta (el titulo dueno del acento)."""
         x0, y0, x1, y1 = rect
+        skips = {skip} if isinstance(skip, str) else set(skip or ())
         for a, b, rx0, ry0, rx1, ry1, iid in self.ink:
-            if iid == skip or not (a < fb - 1e-6 and fa < b - 1e-6):
+            if iid in skips or not (a < fb - 1e-6 and fa < b - 1e-6):
                 continue
             if x0 < rx1 + margin and rx0 - margin < x1 and y0 < ry1 + margin and ry0 - margin < y1:
                 return False
         return True
 
     def accent_ok(self, x: float, y: float, sz: float, fa: float, fb: float, shot: dict,
-                  t0: float, t1: float, skip: str | None = None, extra: float = 1.0) -> bool:
+                  t0: float, t1: float, skip=None, extra: float = 1.0, own=()) -> bool:
+        """Un acento de lado ~sz en (x, y) cabe: dentro de la banda SIMETRICA (un lugar y su espejo
+        pasan o fallan igual), sin tocar la cabeza ni otra tinta, separado de los otros acentos.
+        `own`: ids propios (el acento y su gemelo) que no cuentan al re-colocarlo."""
         hw, hh = sz / 2 * extra, sz / 2 / self.aspect * extra
         rect = (x - hw, y - hh, x + hw, y + hh)
-        if rect[0] < SAFE["left"] - 0.01 or rect[2] > SAFE["right"] + 0.01 or \
+        if rect[0] < SYM_L - 0.01 or rect[2] > SYM_R + 0.01 or \
                 rect[1] < SAFE["top"] - 0.005 or rect[3] > SAFE["bottom"]:
             return False
         fr = self.face_rect(shot, t0, t1)
         if fr is not None and rect[0] < fr[2] and fr[0] < rect[2] and rect[1] < fr[3] and fr[1] < rect[3]:
             return False
-        if not self.clear_of_ink(rect, fa, fb, skip):
+        skips = ({skip} if isinstance(skip, str) else set(skip or ())) | set(own or ())
+        if not self.clear_of_ink(rect, fa, fb, skips):
             return False
-        return self.free_accent(x, y, fa, fb)
+        return self.free_accent(x, y, fa, fb, skip=set(own or ()))
 
     # ---------------------------------------------------------- variedad determinista
     def rand(self, key: str) -> float:
@@ -3168,18 +3236,77 @@ class _Choreo:
         self.fx[track].append(it)
         return it
 
-    def _unplace(self, it: dict) -> None:
-        """Quita un item recien colocado (pista, franjas, tinta, eventos y sus SFX pedidos)."""
-        iid = it.get("id")
+    def _unplace(self, it: dict, pair: bool = True) -> None:
+        """Quita un item recien colocado (pista, franjas, tinta, eventos y sus SFX pedidos). Un
+        miembro de un par espejo se lleva a su gemelo (el par entra completo o no entra)."""
+        iid = str(it.get("id"))
+        gone = {iid}
+        if pair and it.get("kind") == "doodle":
+            base = iid[:-len(TWIN)] if iid.endswith(TWIN) else iid
+            gone = {base, base + TWIN}
         for tr in TRACKS:
-            if it in self.fx[tr]:
-                self.fx[tr].remove(it)
+            self.fx[tr][:] = [x for x in self.fx[tr] if x is not it and str(x.get("id")) not in gone]
         for z in list(self.occ):
-            self.occ[z] = [e for e in self.occ[z] if e[2] != iid]
-        self.ink = [r for r in self.ink if r[6] != iid]
-        self.events = [e for e in self.events if e[1] != iid]
-        self.sfx_req = [r for r in self.sfx_req if not str(r.get("src", "")).startswith(str(iid))]
-        self.ids.discard(iid)
+            self.occ[z] = [e for e in self.occ[z] if e[2] not in gone]
+        self.ink = [r for r in self.ink if r[6] not in gone]
+        self.events = [e for e in self.events if e[1] not in gone]
+        self.sfx_req = [r for r in self.sfx_req if not any(str(r.get("src", "")).startswith(g) for g in gone)]
+        for g in gone:
+            self.ids.discard(g)
+            self.acc_pos.pop(g, None)
+
+    def add_pair(self, role: str, fields: dict, xr: float, rot: float = 0.0, event: bool = True) -> dict | None:
+        """PAR ESPEJO de un glifo simetrico (SYM_GLYPHS): el mismo garabato en x_r y 1-x_r (mismo
+        nombre, tamano, y, tiempos, color y animacion; rotacion invertida). Ids '<id>' y
+        '<id>_m': graphics dibuja el gemelo reflejado (espejo exacto). Entra completo o no entra;
+        el que llama ya comprobo ambos lugares con accent_ok. -> el item base (o None)."""
+        xr = max(float(xr), 2 * self.XC - float(xr))
+        if xr - self.XC < ACCENT_SEP / 2 - 1e-6:
+            return None
+        y = float(fields.get("y", 0.5))
+        col = fields.get("color")
+        if col is None:
+            col = self.pair_color(float(fields["start"]), float(fields["end"]), xr, y)
+        f = dict(fields, x=_r(xr, 3), rotation=_r(rot, 1), color=col)
+        a = self.add("graphics", role, f, zone="accent", event=event)
+        if not a:
+            return None
+        xl = 2 * self.XC - xr
+        tw = dict(a, id=a["id"] + TWIN, x=_r(xl, 3), rotation=_r(-float(a.get("rotation", 0.0)), 1) + 0.0)
+        if tw["id"] in self.ids:
+            self._unplace(a, pair=False)
+            return None
+        if a.get("kind") == "doodle" and _luma(a.get("color") or "#000000") > 0.85 and not a.get("border_color"):
+            # trazo blanco: si el lado espejo necesita contorno, lo llevan los dos (espejo exacto)
+            bg_ = self._bg_at(self.shot_at(float(a["start"]) + 0.02), y - 0.03, y + 0.03, float(a["start"]),
+                              float(a["end"]), xl - 0.06, xl + 0.06)
+            if bg_ is None or contrast("#FFFFFF", bg_["rgb"]) < 4.5:
+                a["border_color"] = tw["border_color"] = "#161616"
+        fa, fb = self.f(float(a["start"])), self.f(float(a["end"]))
+        self.ids.add(tw["id"])
+        self.occ["accent"].append((fa, fb, tw["id"]))
+        self.acc_pos[tw["id"]] = (xl, y)
+        self.fx["graphics"].append(tw)
+        return a
+
+    def _scene_pair(self, g: dict) -> list[dict]:
+        """Par espejo EXACTO de un garabato decorativo dentro de una escena (mismo glifo, tamano,
+        y, color, entrada y offset; x y 1-x; giro invertido). Ids '<id>' y '<id>_m': graphics
+        dibuja el gemelo reflejado (misma forma)."""
+        k = self.used["scene_pair"]
+        self.used["scene_pair"] += 1
+        x = float(g.get("x", 0.78))
+        x = max(x, 2 * self.XC - x)
+        base = dict(g, id=f"pair{k}", x=_r(x, 3), rotation=_r(float(g.get("rotation", 0.0) or 0.0), 1))
+        twin = dict(base, id=base["id"] + TWIN, x=_r(2 * self.XC - x, 3), rotation=_r(-base["rotation"], 1) + 0.0)
+        return [base, twin]
+
+    def pair_color(self, t0: float, t1: float, xr: float, y: float) -> str:
+        """Color comun del par espejo: el que se lee de los DOS lados (si cada lado pide otro, el
+        blanco, que add() contornea donde haga falta)."""
+        c1 = self.doodle_color(t0, t1, xr, y)
+        c2 = self.doodle_color(t0, t1, 2 * self.XC - xr, y)
+        return c1 if c1 == c2 else "#FFFFFF"
 
     def _line_floor(self, it: dict) -> None:
         """Ninguna linea de un titulo por debajo de MIN_LINE (fraccion de W): sube la escala de
@@ -3194,8 +3321,9 @@ class _Choreo:
                 ln["scale"] = _r(min(1.0, MIN_LINE / max(1e-3, size) + 0.002), 3)
             widest = max(_text_w(ln.get("font") or it.get("font"), size * float(ln.get("scale", 1.0)),
                                  str(ln.get("text", ""))) for ln in lines)
-            if widest > self.MAXW + 0.04:
-                it["size"] = _r(size * (self.MAXW + 0.04) / widest, 4)
+            if widest > self.MAXW:
+                # centrado en x = 0.5 nada pasa de SYM_W (el renderer lo empujaria de lado)
+                it["size"] = _r(size * self.MAXW / widest, 4)
 
     BEHIND_SIZE = (0.12, 0.46)        # rango de tamano del preset behind_giant (text.PRESETS)
 
@@ -3216,16 +3344,18 @@ class _Choreo:
                 break
 
     def sfx(self, at: float, name: str, prio: int = 5, gain: float | None = None, pan: float = 0.0,
-            src_id: str = "", vary: bool = False, dur: float | None = None) -> None:
+            src_id: str = "", vary: bool = False, dur: float | None = None, fixed_pan: bool = False) -> None:
         """Pide un SFX. `dur` (s): tiempo de revelado (typing), de trazo (pen_scribble) o
-        anticipacion (riser_*): audio.py estira/recorta el sonido a esa duracion."""
+        anticipacion (riser_*): audio.py estira/recorta el sonido a esa duracion. `fixed_pan`: el
+        paneo no varia (un par espejo suena al centro)."""
         if name not in SFX_NAMES or at is None:
             return
         g = SFX_GAIN.get(name, -6) if gain is None else gain
         if vary:
             key = f"sfxv:{src_id}:{name}"
             g += (self.rc.rand(key + "g") - 0.5) * 4.0
-            pan = pan + (self.rc.rand(key + "p") - 0.5) * 0.5
+            if not fixed_pan:
+                pan = pan + (self.rc.rand(key + "p") - 0.5) * 0.5
         g += self.S["sfx_db"]
         if name == "pen_scribble":
             g = min(g, -2.0)            # el lapiz acompana, nunca tapa la voz
@@ -3736,7 +3866,9 @@ class _Choreo:
             if len(lines) > 1:
                 lines[-1]["scale"] = 1.15
             size = self._fit_lines(lines, max(0.082, self.title_floor * 1.04), 0.62)
-            spec.update({"lines": lines, "size": size, "anim_in": "word_stagger", "align": "left",
+            # la escalera va DENTRO de su caja y la caja se centra en x = 0.5 (simetria): text.py
+            # arma las lineas a la izquierda con sus pasos y ancla el bloque por su centro
+            spec.update({"lines": lines, "size": size, "anim_in": "word_stagger", "align": "center",
                          "accent_words": emw})
         else:
             base = {"title_pop": 0.085, "serif_elegant": 0.1, "script_accent": 0.11,
@@ -3856,7 +3988,8 @@ class _Choreo:
         return None
 
     def _x_for(self, spec: dict) -> float:
-        return SAFE["left"] + 0.04 if spec.get("align") == "left" else self.XC
+        """x de un bloque de texto: SIEMPRE el centro (regla de simetria; cascade incluida)."""
+        return self.XC
 
     COUNT_DUR = 0.45                 # s de conteo del precio (text.counter count_dur)
 
@@ -3969,8 +4102,7 @@ class _Choreo:
         if r is None:
             bw = max(_text_w(ln["font"], size * ln.get("scale", 1.0), ln["text"]) for ln in lines)
             bh = self._block_h(lines, size)
-            x0 = x if spec.get("align") == "left" else x - bw / 2
-            r = (x0, y - bh / 2, x0 + bw, y + bh / 2)
+            r = (x - bw / 2, y - bh / 2, x + bw / 2, y + bh / 2)
         self._apply_ink(spec, self._bg_at(shot, r[1], r[3], t0, t1))
         mode = spec.pop("_mode", "dark")
         it = self.add("text", role, spec, zone=zone)
@@ -3999,16 +4131,18 @@ class _Choreo:
                 return ic
         return None
 
-    def _doodle_sfx(self, name: str, t: float, x: float, src: str) -> None:
+    def _doodle_sfx(self, name: str, t: float, x: float, src: str, pair: bool = False) -> None:
+        """SFX de un garabato (paneo segun su x). Un par espejo lleva UN solo SFX, al centro."""
+        pan = 0.0 if pair else (x - 0.5) * 0.8
+        kw = {"prio": 3, "pan": pan, "src_id": src, "vary": True, "fixed_pan": pair}
         if name in ("sparkle", "star4", "star5", "burst", "rays"):
-            self.sfx(t, "sparkle", prio=3, pan=(x - 0.5) * 0.8, src_id=src, vary=True)
+            self.sfx(t, "sparkle", **kw)
         elif name in ("question", "exclaim", "heart", "check"):
-            self.sfx(t, "pop_soft", prio=3, pan=(x - 0.5) * 0.8, src_id=src, vary=True)
+            self.sfx(t, "pop_soft", **kw)
         elif name == "lightning":
-            self.sfx(t, "impact_soft", prio=3, pan=(x - 0.5) * 0.8, src_id=src, vary=True)
+            self.sfx(t, "impact_soft", **kw)
         else:        # trazos largos: subrayado, circulo, flechas, garabatos
-            self.sfx(t, "pen_scribble", prio=3, pan=(x - 0.5) * 0.8, src_id=src, vary=True,
-                     dur=_draw_time(name))
+            self.sfx(t, "pen_scribble", dur=_draw_time(name), **kw)
 
     def accent_for(self, it: dict, ws: list[dict], emph: set, key: str, t0: float, t1: float,
                    icons: list[str] | None = None, force: str | None = None,
@@ -4032,19 +4166,20 @@ class _Choreo:
                 # las flechas se reservan para senalar algo (CTA); junto a un titulo apuntarian
                 # a la persona sin decir nada
                 dd = [d_ for d_ in self.S["doodles"] if not d_.startswith("arrow")] or ["sparkle"]
-                if it.get("box") or it.get("preset") in ("highlight_marker", "kicker") or len(lines) > 2:
+                # la escalera (cascade) no tiene su ultima linea centrada: sin subrayado ni circulo
+                if it.get("box") or it.get("preset") in ("highlight_marker", "kicker", "cascade") or len(lines) > 2:
                     dd = [d_ for d_ in dd if d_ not in ("underline", "circle_scribble")] or ["sparkle"]
                 choice = self.pick("doodle", dd)
-        face_x = shot.get("face_x")
-        away = 1 if (face_x is None or face_x < 0.5) else -1       # lado contrario a la cara
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        rect = (x0, y0, x1, y1)
         acc_col = self.acc_light if mode == "light" else self.pal["accent"]
         if choice == "icon" and icon:
             if fb - fa < 0.9:
                 return None
-            spot = self.accent_spot((x0, y0, x1, y1), 0.12, fa, fb, shot, t0, t1, away)
+            # un icono tiene mano (y duplicado se lee mal): solo centrado, arriba / abajo del titulo
+            # o sobre la cabeza
+            spot = self.accent_spot(rect, 0.12, fa, fb, shot, t0, t1)
             if spot is not None:
-                ix, iy, sz = spot
+                ix, iy, sz = spot[0]
                 bcol = self.pal["accent"] if mode == "dark" else self.pal["dark"]
                 fields = {"start": t0, "end": t1, "kind": "icon", "name": icon, "variant": "outline",
                           "badge": "circle", "badge_color": bcol,
@@ -4065,6 +4200,9 @@ class _Choreo:
                                           if d not in ("underline", "circle_scribble") and not d.startswith("arrow")]
                                or ["sparkle"])
         name = choice if choice in DOODLES else "sparkle"
+        if name.startswith("arrow") or name == "circle_scribble":
+            # las flechas senalan algo (arrow_to); el circulo va en la linea protagonista (hero_mark)
+            name = "sparkle"
         sz = {"sparkle": 0.1, "star4": 0.09, "burst": 0.15, "question": 0.11, "cross": 0.1,
               "exclaim": 0.1, "lightning": 0.1, "star5": 0.09, "rays": 0.16, "swirl": 0.12,
               "loop": 0.13, "heart": 0.1, "check": 0.1, "squiggle": 0.14}.get(name, 0.12)
@@ -4078,32 +4216,35 @@ class _Choreo:
             uy = min(y1 + 0.01, SAFE["bottom"] - 0.012)
             if uy < y1 - 0.004:
                 return None               # no cabe bajo el texto: nunca un subrayado que lo tacha
-            ux = (x0 + x1) / 2 if it.get("align") != "left" else x0 + lw / 2
+            ux = self.XC                  # el bloque (y su ultima linea) va centrado en x = 0.5
             rect = (ux - lw / 2, uy - 0.012, ux + lw / 2, uy + 0.012)
             if not (self.clear_of_ink(rect, fa, fb, skip=own) and self.free_accent(ux, uy, fa, fb)):
                 return None
-            fields.update({"x": _r(ux, 3), "y": _r(uy, 4), "size": _r(min(0.76, lw), 3)})
-        elif name in ("arrow_curve", "arrow_straight"):
-            ax = _clamp(x1 + 0.06 if away > 0 else x0 - 0.06, SAFE["left"] + 0.07, SAFE["right"] - 0.07)
-            ay = _clamp(y1 + 0.045, SAFE["top"] + 0.04, SAFE["bottom"] - 0.08)
-            if not self.accent_ok(ax, ay, 0.13, fa, fb, shot, t0, t1):
-                return None
-            tx = face_x if face_x is not None else 0.5
-            ty = min(SAFE["bottom"] - 0.05, (self.geom(shot, t0, t1)["chin"] or 0.5) + 0.08)
-            fields.update({"x": _r(ax, 3), "y": _r(ay, 4), "size": 0.13,
-                           "path_to": [_r(_clamp(tx, 0.1, 0.85), 3), _r(ty, 3)]})
-        else:
-            if name == "circle_scribble":
-                name = "sparkle"
-                sz = 0.1
-                fields["name"] = name
-            spot = self.accent_spot((x0, y0, x1, y1), sz, fa, fb, shot, t0, t1, away)
-            if spot is None:
-                return None
-            pos = spot[:2]
-            sz = spot[2]
-            fields.update({"x": _r(pos[0], 3), "y": _r(pos[1], 4), "size": sz,
-                           "rotation": _r((self.rand(key + "r") - 0.5) * 24, 1)})
+            fields.update({"x": _r(ux, 3), "y": _r(uy, 4), "size": _r(min(self.MAXW, lw), 3)})
+            g = self.add("graphics", "doodle", fields, zone="accent")
+            if g:
+                self.last["accent_kind"] = "doodle"
+                self._doodle_sfx(name, t0 + 0.03, fields["x"], g["id"])
+            return g
+        # glifo simetrico: par espejo a los lados del titulo (o de la cabeza); si no, uno centrado.
+        # Glifo con mano (?, !, rayo, espiral...): solo centrado. Si nada cabe, sin acento
+        spots = self.accent_spot(rect, sz, fa, fb, shot, t0, t1, pair=name in SYM_GLYPHS)
+        if spots is None:
+            return None
+        px, py, sz = spots[0]
+        fields.update({"y": _r(py, 4), "size": sz})
+        if len(spots) == 2:
+            rot = _r((self.rand(key + "r") - 0.5) * 24, 1)
+            fields["color"] = acc_col
+            g = self.add_pair("doodle", fields, px, rot)
+            if g:
+                self.last["accent_kind"] = "doodle"
+                self._doodle_sfx(name, t0 + 0.03, self.XC, g["id"], pair=True)
+            return g
+        # centrado: un glifo simetrico conserva su giro; uno con mano va derecho (girado, su tinta
+        # se cargaria a un lado)
+        rot = _r((self.rand(key + "r") - 0.5) * 24, 1) if name in SYM_GLYPHS else 0.0
+        fields.update({"x": _r(px, 3), "rotation": rot})
         g = self.add("graphics", "doodle", fields, zone="accent")
         if g:
             self.last["accent_kind"] = "question" if name == "question" else "doodle"
@@ -4242,7 +4383,9 @@ class _Choreo:
         """Garabato de enfasis SOBRE la palabra protagonista (como un editor a mano): subrayado
         bajo SU linea o circulo alrededor de un numero / palabra corta. Se dibuja cuando se
         pronuncia (nunca antes de que aparezca su linea), con SFX de lapiz."""
-        if it.get("preset") not in ("stack", "title_pop", "cascade", "serif_elegant") or it.get("box"):
+        # solo bloques CENTRADOS (cada linea centrada en x = 0.5): en la escalera (cascade) la
+        # linea no esta centrada y la marca romperia la simetria
+        if it.get("preset") not in ("stack", "title_pop", "serif_elegant") or it.get("box"):
             return None
         rows = measure_lines(it, self.style, with_text=True)
         spec_lines = it.get("lines") or [{"text": t_} for t_ in str(it.get("text", "")).split("\n")]
@@ -4286,7 +4429,7 @@ class _Choreo:
         below = min([ln[1] for i, ln in enumerate(lines) if i != k and ln[1] >= y1 - 0.002] + [2.0])
         if name == "circle_scribble":
             w_, h_ = (x1 - x0) * 1.28 + 0.03, (y1 - y0) * 1.7 + 0.02
-            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            cx, cy = self.XC, (y0 + y1) / 2            # la linea va centrada: la marca tambien
             room = min(cy - above, below - cy) - 0.006
             h_ = min(h_, 2 * room)
             if h_ < (y1 - y0) * 1.18:
@@ -4300,12 +4443,12 @@ class _Choreo:
             # sobre los subtitulos no baja; un titulo que YA ocupa su franja (primer plano, los
             # subtitulos se ocultan) solo respeta SAFE. Nunca tacha la linea
             lim = self.cap_top - 0.02 if y1 < self.cap_top - 0.01 else SAFE["bottom"] - 0.012
-            cx, cy = (x0 + x1) / 2, min(y1 + 0.012, lim)
+            cx, cy = self.XC, min(y1 + 0.012, lim)
             if cy + 0.014 > below - 0.004 or cy < y1 - 0.004:
                 return None
             rect = (cx - w_ / 2, cy - 0.012, cx + w_ / 2, cy + 0.014)
             fields = {"x": _r(cx, 3), "y": _r(cy, 4), "size": _r(w_, 3)}
-        if rect[0] < SAFE["left"] - 0.02 or rect[2] > SAFE["right"] + 0.04 or rect[1] < SAFE["top"] - 0.01:
+        if rect[0] < SYM_L - 0.02 or rect[2] > SYM_R + 0.02 or rect[1] < SAFE["top"] - 0.01:
             return None
         fr = self.face_rect(shot, t_hero, t1)
         if fr is not None and rect[0] < fr[2] and fr[0] < rect[2] and rect[1] < fr[3] and fr[1] < rect[3]:
@@ -4324,70 +4467,82 @@ class _Choreo:
         return g
 
     def arrow_to(self, rect: tuple, t0: float, t1: float, shot: dict, own: str) -> dict | None:
-        """Flecha dibujada a mano que senala una tarjeta/CTA desde un hueco libre (nunca
-        cruza la cara ni otra tinta)."""
+        """Flecha dibujada a mano que senala una tarjeta/CTA: UNA flecha VERTICAL centrada (x =
+        path_to x = 0.5, bend 0) que llega por arriba o por abajo desde un hueco libre (nunca
+        cruza la cara ni otra tinta). Una flecha de lado rompe la simetria: si no cabe centrada,
+        no hay flecha."""
         fa, fb = self.f(t0), self.f(t1)
         if fb - fa < 1.2:              # la flecha tarda ~0.5 s en dibujarse
             return None
         x0, y0, x1, y1 = rect
-        face_x = shot.get("face_x") if shot.get("talk") else None
-        sides = (1, -1) if (face_x is None or face_x < 0.5) else (-1, 1)
-        cands = []
-        for side in sides:
-            ex = (x1 - 0.12) if side > 0 else (x0 + 0.12)
-            cands.append((ex + side * 0.11, y0 - 0.1, ex, y0 - 0.012))        # llega por arriba
-            cands.append((ex + side * 0.11, y1 + 0.09, ex, y1 + 0.012))       # llega por abajo
+        cx = self.XC
+        cands = [(y0 - 0.1, y0 - 0.012),        # llega por arriba
+                 (y1 + 0.09, y1 + 0.012)]       # llega por abajo
         fr = self.face_rect(shot, t0, t1)
-        for sx, sy, ex, ey in cands:
-            sx = _clamp(sx, SAFE["left"] + 0.04, SAFE["right"] - 0.03)
-            box = (min(sx, ex) - 0.03, min(sy, ey) - 0.015, max(sx, ex) + 0.03, max(sy, ey) + 0.015)
+        for sy, ey in cands:
+            box = (cx - 0.03, min(sy, ey) - 0.015, cx + 0.03, max(sy, ey) + 0.015)
             if box[1] < SAFE["top"] or box[3] > min(SAFE["bottom"], self.cap_top - 0.005):
                 continue
             if fr is not None and box[0] < fr[2] and fr[0] < box[2] and box[1] < fr[3] and fr[1] < box[3]:
                 continue
             if not self.clear_of_ink(box, fa, fb, skip=own, margin=0.0):
                 continue
-            if not self.free_accent(sx, sy, fa, fb):
+            if not self.free_accent(cx, sy, fa, fb):
                 continue
             ta = self.o(fa + (0.3 if fb - fa < 1.8 else 0.4))
             g = self.add("graphics", "arrow", {
-                "start": ta, "end": t1, "kind": "doodle", "name": "arrow_curve", "x": _r(sx, 3), "y": _r(sy, 4),
-                "size": 0.14, "path_to": [_r(ex, 3), _r(ey, 4)],
-                "color": self.doodle_color(ta, t1, sx, sy), "draw": True, "wiggle": 0.3,
+                "start": ta, "end": t1, "kind": "doodle", "name": "arrow_straight", "x": _r(cx, 3),
+                "y": _r(sy, 4), "size": 0.14, "path_to": [_r(cx, 3), _r(ey, 4)], "bend": 0.0,
+                "color": self.doodle_color(ta, t1, cx, (sy + ey) / 2), "draw": True, "wiggle": 0.2,
                 "anim_in": "draw", "anim_out": "fade", "rotation": 0.0}, zone="accent")
             if g:
                 self.ink.append((self.f(ta), fb, *box, g["id"]))
-                self._doodle_sfx("arrow_curve", ta + 0.02, sx, g["id"])
+                self._doodle_sfx("arrow_straight", ta + 0.02, cx, g["id"])
             return g
         return None
 
     def accent_spot(self, rect: tuple, sz: float, fa: float, fb: float, shot: dict, t0: float, t1: float,
-                    away: int = 1) -> tuple[float, float, float] | None:
-        """Primer lugar libre para un acento de tamano ~sz junto a un titulo: esquinas y lados del
-        bloque (del lado contrario a la cara primero), luego junto a la cabeza (como los destellos
-        de un editor), achicando hasta 70% si no cabe. Nunca sobre la cara ni otra tinta."""
+                    pair: bool = False, own=()) -> list[tuple[float, float, float]] | None:
+        """Lugar SIMETRICO para un acento de tamano ~sz junto a un titulo (centrado en x = 0.5):
+        [(x, y, s)] (uno, centrado: arriba o abajo del bloque, o sobre la cabeza) o, con `pair`
+        (solo glifos simetricos), [(x_r, y, s), (1-x_r, y, s)] (par espejo a los lados o en las
+        esquinas del bloque, o a los lados de la cabeza), achicando hasta 70% si no cabe. Cada
+        miembro pasa accent_ok (banda simetrica, cara, tinta, separacion); None = no cabe
+        simetrico (sin acento). `own`: ids propios que no cuentan (re-colocar uno existente)."""
         x0, y0, x1, y1 = rect
         cy = (y0 + y1) / 2
+        xc = self.XC
         fr = self.face_rect(shot, t0, t1)
+
+        def ok(px, py, s_):
+            return self.accent_ok(px, py, s_, fa, fb, shot, t0, t1, own=own)
+        if pair:
+            half = max(xc - x0, x1 - xc)        # medio ancho del bloque medido desde el centro
+            for k in (1.0, 0.85, 0.7):
+                s_ = sz * k
+                hw, hh = s_ / 2, s_ / 2 / self.aspect
+                c = [(xc + half + hw + 0.03, cy),                    # a los lados del bloque
+                     (xc + half - hw * 0.4, y0 - hh * 0.9),           # esquinas de arriba
+                     (xc + half - hw * 0.4, y1 + hh * 0.9)]           # esquinas de abajo
+                if fr is not None:
+                    fx0, fy0, fx1, fy1 = fr
+                    fh = max(xc - fx0, fx1 - xc)
+                    c += [(xc + fh + hw + 0.02, (fy0 + fy1) / 2 - 0.02),   # a los lados de la cabeza
+                          (xc + fh + hw + 0.01, fy0 - hh * 0.6)]
+                for px, py in c:
+                    if px - xc < ACCENT_SEP / 2 + 1e-3:
+                        continue            # tan juntos se leen como uno (y se enciman)
+                    if ok(px, py, s_) and ok(2 * xc - px, py, s_):
+                        return [(px, py, s_), (2 * xc - px, py, s_)]
         for k in (1.0, 0.85, 0.7):
             s_ = sz * k
-            hw, hh = s_ / 2, s_ / 2 / self.aspect
-            c = [(x1 - hw * 0.4, y0 - hh * 0.9), (x0 + hw * 0.4, y0 - hh * 0.9),     # esquinas de arriba
-                 (x1 + hw + 0.03, cy), (x0 - hw - 0.03, cy),                           # lados
-                 (x1 - hw * 0.4, y1 + hh * 0.9), (x0 + hw * 0.4, y1 + hh * 0.9)]      # esquinas de abajo
-            if away < 0:
-                c = [c[1], c[0], c[3], c[2], c[5], c[4]]
+            hh = s_ / 2 / self.aspect
+            c = [(xc, y0 - hh - 0.012), (xc, y1 + hh + 0.012)]
             if fr is not None:
-                fx0, fy0, fx1, fy1 = fr
-                fy = (fy0 + fy1) / 2
-                side = [(fx1 + hw + 0.02, fy - 0.02), (fx0 - hw - 0.02, fy - 0.02),
-                        (fx1 + hw + 0.01, fy0 - hh * 0.6), (fx0 - hw - 0.01, fy0 - hh * 0.6)]
-                if away < 0:
-                    side = [side[1], side[0], side[3], side[2]]
-                c += side
+                c.append((xc, fr[1] - hh - 0.01))                     # sobre la cabeza
             for px, py in c:
-                if self.accent_ok(px, py, s_, fa, fb, shot, t0, t1):
-                    return px, py, s_
+                if ok(px, py, s_):
+                    return [(px, py, s_)]
         return None
 
     def punch_at(self, t: float, amount: float, hold: float, role: str = "punch",
@@ -4853,7 +5008,7 @@ class _Choreo:
         self.sfx(tg + 0.04, "impact_soft", prio=6, src_id=gi["id"])
         self.protect.append((self.f(tg) + 0.25, self.f(tg) + 0.9))
         self._bghero_left = (left, t0) if left else None
-        # destello junto a la palabra gigante (lado contrario a la cara)
+        # destellos junto a la palabra gigante (par espejo o uno centrado)
         if rg is not None:
             gi["_geom"] = ((rg[0], rg[1], rg[2], rg[3]), "top", gfields["lines"], "light" if light else "dark")
             self.accent_for(gi, ws, emph, f"bh{hero['i']}", max(tg, hero["t0"] - 0.05), t1, force="sparkle")
@@ -5202,10 +5357,10 @@ class _Choreo:
                 font = self.K["display"]
                 size = min(0.24, 0.72 / max(1.0, _text_w(font, 1.0, "$" + amount)))
                 ny = 0.47
-                gr = [{"kind": "doodle", "name": "sparkle", "x": 0.8, "y": _r(ny - size * 0.62 / self.aspect, 4),
-                       "size": 0.1, "color": self.pal["accent"], "draw": True, "anim_in": "draw"},
-                      {"kind": "doodle", "name": "star4", "x": 0.19, "y": _r(ny + size * 0.35 / self.aspect, 4),
-                       "size": 0.07, "color": "#FFFFFF", "draw": True, "anim_in": "draw"}]
+                # destellos en PAR ESPEJO exacto (mismo glifo, tamano, y, color; x y 1-x)
+                gr = self._scene_pair({"kind": "doodle", "name": "sparkle", "x": 0.8,
+                                       "y": _r(ny - size * 0.62 / self.aspect, 4), "size": 0.1,
+                                       "color": self.pal["accent"], "draw": True, "anim_in": "draw"})
                 if service:
                     gr.insert(0, {"kind": "sticker_text", "text": service, "x": 0.5,
                                   "y": _r(ny - size * 0.5 / self.aspect - 0.06, 4), "size": 0.055,
@@ -5219,7 +5374,8 @@ class _Choreo:
                              "prefix": "$", "suffix": "", "decimals": 0 if val == int(val) else 2,
                              "text": cur, "x": 0.5, "y": ny, "size": _r(size, 4), "font": font,
                              "color": "#FFFFFF", "accent": self.pal["accent"], "align": "center",
-                             "anim_in": "pop", "shadow": 0.4, "count_dur": self.COUNT_DUR},
+                             "anchor": "center", "anim_in": "pop", "shadow": 0.4,
+                             "count_dur": self.COUNT_DUR},
                     "graphics": gr}, zone="full")
                 if cw:
                     done = True
@@ -5473,7 +5629,7 @@ class _Choreo:
         t_c = self.o(self.f(land) + 0.05)
         if self.f(end) - self.f(t_c) >= 0.8 and self.S.get("marks", 0) > 0:
             cw_, ch_ = (r[2] - r[0]) * 1.16 + 0.04, (r[3] - r[1]) * 1.55 + 0.02
-            cx_, cy_ = (r[0] + r[2]) / 2, (r[1] + r[3]) / 2
+            cx_, cy_ = self.XC, (r[1] + r[3]) / 2        # el contador va centrado (anchor center)
             if tag_top is not None and cy_ - ch_ / 2 > tag_top - 0.012:
                 # el circulo abraza TAMBIEN la etiqueta: al alto del numero su trazo cruzaba la
                 # pastilla del servicio y parecia tacharla ('LIMPIEZA' tachada)
@@ -5484,7 +5640,7 @@ class _Choreo:
             # nunca sobre ojos/nariz/boca (puede rozar barbilla o cabello, como los titulos)
             core = None if fr is None else (fr[0] + 0.12 * (fr[2] - fr[0]), fr[1] + 0.2 * (fr[3] - fr[1]),
                                             fr[2] - 0.12 * (fr[2] - fr[0]), fr[3] - 0.15 * (fr[3] - fr[1]))
-            inside = rect[0] >= SAFE["left"] - 0.02 and rect[2] <= SAFE["right"] + 0.04 and rect[1] >= SAFE["top"] - 0.01
+            inside = rect[0] >= SYM_L - 0.02 and rect[2] <= SYM_R + 0.02 and rect[1] >= SAFE["top"] - 0.01
             if inside and (core is None or not (rect[0] < core[2] and core[0] < rect[2] and rect[1] < core[3] and core[1] < rect[3])):
                 mk = self.add("graphics", "price_mark", {
                     "start": t_c, "end": end, "kind": "doodle", "name": "circle_scribble",
@@ -5499,18 +5655,27 @@ class _Choreo:
                     self.ink.append((self.f(t_c), fb, *rect, mk["id"]))
                     self._doodle_sfx("circle_scribble", t_c + 0.02, cx_, mk["id"])
         ta = max(t0 + 0.2, min(w0["t0"], self.o(self.f(end) - 1.05)))
-        for k, (dx, dy, nm, sz) in enumerate(((1, -0.2, "sparkle", 0.11), (-1, 0.35, "star4", 0.075))):
-            px = _clamp((r[2] + sz / 2 + 0.012 if dx > 0 else r[0] - sz / 2 - 0.012),
-                        SAFE["left"] + sz / 2, SAFE["right"] - sz / 2)
-            py = _clamp(y + dy * h, SAFE["top"] + 0.04, SAFE["bottom"] - 0.05)
-            if self.f(end) - self.f(ta + 0.12 * k) >= 0.9 and self.accent_ok(px, py, sz, fa, fb, shot, t0, end):
-                d = self.add("graphics", "price_spark", {
-                    "start": ta + 0.12 * k, "end": end, "kind": "doodle", "name": nm, "x": _r(px, 3),
-                    "y": _r(py, 4), "size": sz, "color": self.pal["accent"] if k == 0 else "#FFFFFF",
-                    "draw": True, "wiggle": 0.3, "anim_in": "draw", "anim_out": "fade",
-                    "rotation": _r((self.rand(f"ps{k}") - 0.5) * 20, 1)}, zone="accent", event=k == 0)
-                if d and k == 0:
-                    self._doodle_sfx(nm, ta + 0.03, px, d["id"])
+        # destellos en PAR ESPEJO a los lados del numero (mismo glifo, tamano, y y tiempos): entran
+        # los dos o ninguno
+        if self.f(end) - self.f(ta) >= 0.9:
+            for sz in (0.1, 0.085):
+                px = max(min(r[2] + sz / 2 + 0.012, SYM_R - sz / 2), self.XC + ACCENT_SEP / 2 + 1e-3)
+                done_ = False
+                for dy in (-0.2, 0.35):
+                    py = _clamp(y + dy * h, SAFE["top"] + 0.04, SAFE["bottom"] - 0.05)
+                    if not (self.accent_ok(px, py, sz, fa, fb, shot, t0, end)
+                            and self.accent_ok(2 * self.XC - px, py, sz, fa, fb, shot, t0, end)):
+                        continue
+                    d = self.add_pair("price_spark", {
+                        "start": ta, "end": end, "kind": "doodle", "name": "sparkle", "y": _r(py, 4),
+                        "size": sz, "color": self.pal["accent"], "draw": True, "wiggle": 0.3,
+                        "anim_in": "draw", "anim_out": "fade"}, px, (self.rand("ps0") - 0.5) * 20)
+                    if d:
+                        self._doodle_sfx("sparkle", ta + 0.03, self.XC, d["id"], pair=True)
+                        done_ = True
+                        break
+                if done_:
+                    break
         self.sfx(w0["t0"] + 0.12, "cash", prio=9, src_id=it["id"])
         self.sfx(t0 + 0.03, "whoosh_fast", prio=6, src_id=it["id"] + "in")
         self.punch_at(w0["t0"], 0.1 + 0.05 * self.I, 0.5, role="price_punch", min_gap=0.8)
@@ -5908,10 +6073,9 @@ class _Choreo:
                "color": self.pal["dark"] if _luma(bcol) > 0.55 else "#FFFFFF", "draw": True,
                "x": 0.5, "y": _r(ty - size * 0.95 / self.aspect - 0.1, 4), "size": 0.2, "anim_in": "pop",
                "offset": 0.04},
-              {"kind": "doodle", "name": "sparkle", "x": 0.78, "y": _r(ty - size * 0.55 / self.aspect, 4),
-               "size": 0.1, "color": self.pal["accent"], "draw": True, "anim_in": "draw", "offset": 0.12},
-              {"kind": "doodle", "name": "star4", "x": 0.22, "y": _r(ty + size * 0.45 / self.aspect, 4),
-               "size": 0.07, "color": "#FFFFFF", "draw": True, "anim_in": "draw", "offset": 0.2}]
+              *self._scene_pair({"kind": "doodle", "name": "sparkle", "x": 0.78,
+                                 "y": _r(ty - size * 0.55 / self.aspect, 4), "size": 0.1,
+                                 "color": self.pal["accent"], "draw": True, "anim_in": "draw", "offset": 0.12})]
         cw = self.add("cutaways", "flash", {
             "start": a, "end": b, "kind": "title_card", "background": bg,
             "bg_colors": [self.pal["dark"], self.pal["accent2"]],
@@ -6048,21 +6212,24 @@ class _Choreo:
         # el panel (~0.085 H) deja >= 0.04 H de aire sobre los subtitulos: no se leen
         # como un solo bloque
         y = _clamp(max(g["low"][0] + 0.02, 0.6), 0.5, self.cap_top - 0.07)
-        rect = (0.07, y - 0.045, 0.8, y + 0.045)
+        size = 0.064                 # un nombre largo lo ajusta el renderer (fit_font) a SYM_W
+        # rotulo CENTRADO (align 'center'): el panel mide lo que su texto y va centrado en x = 0.5
+        hw = lt_width(title, sub, size, self.style) / 2
+        rect = (self.XC - hw, y - 0.045, self.XC + hw, y + 0.045)
         fr = self.face_rect(sh, t0, t1)
         hide = False
         if fr is not None and rect[1] < fr[3] and g.get("under") and g.get("chin") is not None:
             # primer plano: el rotulo va en la franja de los subtitulos (se ocultan)
             y = SAFE["bottom"] - 0.012 - 0.045
-            rect = (0.07, y - 0.045, 0.8, y + 0.045)
+            rect = (self.XC - hw, y - 0.045, self.XC + hw, y + 0.045)
             hide = rect[1] >= g["chin"] + 0.004
         if (fr is not None and rect[1] < fr[3] and not hide) or not self.clear_of_ink(rect, fa, fb):
             return False
-        size = 0.064                 # un nombre largo lo ajusta el renderer (fit_font) a SAFE
         it = self.add("graphics", "name", {
             "start": t0, "end": t1, "kind": "lower_third", "title": title, "subtitle": sub,
-            "x": 0.07, "y": _r(y, 4), "size": size, "color": self.pal["accent"], "theme": "dark",
-            "anim_in": "draw", "anim_out": "undraw", "rotation": 0.0}, zone="low")
+            "align": "center", "x": _r(self.XC, 3), "y": _r(y, 4), "size": size,
+            "color": self.pal["accent"], "theme": "dark", "anim_in": "draw", "anim_out": "undraw",
+            "rotation": 0.0}, zone="low")
         if not it:
             return False
         self.occ["center"].append((fa, fb, it["id"]))
@@ -6383,16 +6550,17 @@ class _Choreo:
                  for c in out[self.SOC_MAX:]]
         return out[:self.SOC_MAX], extra
 
-    def _stack_width(self, ff: dict | None, bf: dict, fs: float = 0.78, ls: float = 0.66) -> float:
+    def _stack_width(self, ff: dict | None, bf: dict, fs: float = 0.76, ls: float = 0.66) -> float:
         """Ancho COMUN (fraccion de W) de la pila del cierre: el mayor ancho natural del Seguir y
-        de la pastilla de reservas (>= 0.72), acotado a SAFE. Todo se centra en XC con ese ancho:
-        los bordes quedan alineados (tarjeta de ubicacion, Seguir, chips y reservas)."""
+        de la pastilla de reservas (>= 0.72), acotado a SYM_W. Todo se centra en XC (0.5) con ese
+        ancho: los bordes quedan alineados (tarjeta de ubicacion, Seguir, chips y reservas) y el
+        aire a los lados es el mismo."""
         ws = [0.72]
         if ff is not None:
             ws.append(cta_natural_width(dict(ff, kind="cta", variant="follow", size=fs), self.style))
         if bf:
             ws.append(cta_natural_width(dict(bf, kind="cta", variant="link_below", size=ls), self.style))
-        return _r(min(SAFE["right"] - SAFE["left"] - 0.02, max(ws)), 3)
+        return _r(min(SYM_W, max(ws)), 3)
 
     def _soc_opts(self, socials: list[dict], width: float) -> list[tuple[str, float, float]]:
         """Opciones de maquetacion de los chips con el ancho comun -> [(layout, size, alto)], de
@@ -6435,7 +6603,7 @@ class _Choreo:
         gap = self.STACK_GAP
         soc = self._soc_opts(socials, width) if "socials" in elems else [("column", 0.0, 0.0)]
         loc_sizes = (1.0, 0.9) if loc is not None and "location" in elems else (1.0,)
-        for fs, ls, ar in ((0.78, 0.66, 1.0), (0.74, 0.64, 0.6), (0.78, 0.66, 0.0), (0.72, 0.6, 0.0),
+        for fs, ls, ar in ((0.76, 0.66, 1.0), (0.74, 0.64, 0.6), (0.76, 0.66, 0.0), (0.72, 0.6, 0.0),
                            (0.68, 0.56, 0.0)):
             if not arrow_ok and ar > 0:
                 continue
@@ -6503,7 +6671,7 @@ class _Choreo:
         bf = self._book_fields(force=book_end)
         two = bool(bf.get("display"))
         talk = bool(shot["talk"])
-        loc = self._loc_card(0.78) if not talk else None
+        loc = self._loc_card(SYM_W) if not talk else None
         socials, extra_soc = self._end_socials(ff, link or ext is not None, place=talk)
         lo = max(g["center"][0], SAFE["top"] + 0.05) if talk else SAFE["top"] + 0.012
         # palabras dentro del cierre: los subtitulos siguen visibles y el CTA no los pisa
@@ -6520,7 +6688,7 @@ class _Choreo:
             # subtitulos (anclado al fondo de SAFE, nunca sobre la barbilla) y los subtitulos se
             # ocultan desde que entra
             chin = float(g.get("chin") or 0.0)
-            for fs in (0.78, 0.72, 0.66, 0.6):
+            for fs in (0.76, 0.72, 0.66, 0.6):
                 hf = fs * 0.17 * 1080 / 1920
                 yy = SAFE["bottom"] - 0.012 - hf / 2
                 if yy - hf / 2 >= chin + 0.004:
@@ -6534,7 +6702,7 @@ class _Choreo:
             top_link = ly - self._link_h(float(ext["size"]), bool(ext.get("display"))) / 2
             if self.prof is not None:
                 ext["width"] = width
-                ext["x"] = _r(self.XS, 3)
+                ext["x"] = _r(self.XC, 3)
             elems = (["location"] if loc is not None else []) + (["follow"] if ff is not None else []) + \
                 (["socials"] if socials else [])
             hi = top_link - self.STACK_GAP
@@ -6543,7 +6711,7 @@ class _Choreo:
                        [e for e in elems if e == "follow"]):
                 if not el:
                     continue
-                res = self._layout_stack(el, lo, hi, width or 0.78, socials, two, loc, anchor="bottom")
+                res = self._layout_stack(el, lo, hi, width or SYM_W, socials, two, loc, anchor="bottom")
                 if res is not None:
                     break
             placed = res or []
@@ -6568,7 +6736,7 @@ class _Choreo:
                 for el in cands:
                     if not el:
                         continue
-                    res = self._layout_stack(el, lo, hi, width or 0.78, socials, two, loc, anchor=anchor,
+                    res = self._layout_stack(el, lo, hi, width or SYM_W, socials, two, loc, anchor=anchor,
                                              arrow_ok=not (talk and spoken))
                     if res is not None:
                         break
@@ -6594,7 +6762,7 @@ class _Choreo:
         if socials and not any(v == "socials" for v, *_x in placed) and talk and g.get("head_top"):
             # no cupieron en la pila: arriba de la cabeza (fila, rejilla o columna)
             top0, top1 = max(g["top"][0], SAFE["top"] + 0.01), g["top"][1] - 0.012
-            for lay, ss, sh_ in self._soc_opts(socials, width or 0.78):
+            for lay, ss, sh_ in self._soc_opts(socials, width or SYM_W):
                 if sh_ <= top1 - top0:
                     placed.append(("socials", (top0 + top1) / 2, ss, sh_, lay))
                     break
@@ -6679,7 +6847,7 @@ class _Choreo:
             fields = self._stack_fields(v, sz, ex, ff, bf, socials, width)
             if not fields:
                 continue
-            fields.update({"start": st, "end": t1, "x": _r(self.XS if width else self.XC, 3), "y": _r(yy, 4)})
+            fields.update({"start": st, "end": t1, "x": _r(self.XC, 3), "y": _r(yy, 4)})
             role = {"socials": "socials", "location": "end_place"}.get(v, "cta")
             # la pila ya se midio contra si misma y contra el link sostenido: entra como 'edge' y
             # ocupa su franja a mano (lo que se coloque despues la respeta)
@@ -6691,8 +6859,8 @@ class _Choreo:
                 self.occ[zn].append((self.f(st), self.D, it["id"]))
             first = first or it
             h = hh * 2.6 if v == "link_below" and fields.get("arrow_scale", 1.0) > 0 else hh
-            ww = width or (sz if v not in ("socials", "location") else min(SAFE["right"] - SAFE["left"], 0.8))
-            xc = self.XS if width else self.XC
+            ww = width or (sz if v not in ("socials", "location") else SYM_W)
+            xc = self.XC
             self.ink.append((fa, fb, xc - ww / 2, yy - h / 2, xc + ww / 2, yy + h / 2, it["id"]))
             if v == "location":
                 self.occ["top"].append((self.f(st), self.D, it["id"]))
@@ -6744,7 +6912,7 @@ class _Choreo:
                 f["y"] = _r(yy + sz * 1080 / 1920 * 0.26, 4)     # la cabecera sube el grupo
             else:
                 f["y"] = _r(yy, 4)
-            f.update({"x": _r(self.XS, 3), "offset": _r(0.2 + 0.28 * k, 2)})
+            f.update({"x": _r(self.XC, 3), "offset": _r(0.2 + 0.28 * k, 2)})
             gr.append(f)
         if not any(v == "socials" for v, *_x in res) and socials:
             missing += [f"{PR.PLATFORMS.get(c['platform'], {}).get('label', '')} {c['text']}".strip()
@@ -6823,9 +6991,9 @@ class _Choreo:
 
     def watermark(self) -> None:
         """Marca de agua sutil con el @usuario de la red principal del perfil (apagada por
-        defecto: `profile.use.handle_watermark`), arriba a la izquierda de SAFE, hasta el cierre.
-        Con pastilla translucida (se lee sobre fondos claros) y SOLO en los tramos donde esa
-        esquina esta libre: se aparta cuando un titulo o una escena ocupan la esquina."""
+        defecto: `profile.use.handle_watermark`), CENTRADA arriba de SAFE (simetria), hasta el
+        cierre. Con pastilla translucida (se lee sobre fondos claros) y SOLO en los tramos donde
+        ese lugar esta libre: se aparta cuando un titulo, una escena o la cabeza lo ocupan."""
         if self.prof is None or not PR.uses(self.prof, "handle_watermark") or self.windows is not None:
             return
         ps = self.psocial or PR.primary_social(self.prof)
@@ -6837,27 +7005,24 @@ class _Choreo:
                 "layout": "row", "anim_in": "fade", "anim_out": "fade", "opacity": 0.8, "backdrop": 0.34,
                 "rotation": 0.0, "color": "#FFFFFF"}
         w, h = socials_size(item, self.style)
-        scenes = [(self.f(c["start"]), self.f(c["end"])) for c in self.fx["cutaways"]]
-
-        def free_of(x: float, y: float) -> tuple[float, list, tuple]:
-            box = (x - w / 2 - 0.02, y - h / 2 - 0.012, x + w / 2 + 0.02, y + h / 2 + 0.012)
-            busy = [(a, b) for a, b, x0, y0, x1, y1, _i in self.ink
-                    if x0 < box[2] and box[0] < x1 and y0 < box[3] and box[1] < y1] + scenes
-            busy.sort()
-            free, cur = [], 0.0
-            for a, b in busy:
-                if a - 0.3 > cur:
-                    free.append((cur, a - 0.3))
-                cur = max(cur, b + 0.3)
-            if cur < end_f:
-                free.append((cur, end_f))
-            free = [(max(0.0, a), min(end_f, b)) for a, b in free if min(end_f, b) - max(0.0, a) >= 2.0]
-            return sum(b - a for a, b in free) - 0.8 * len(free), free, box
-        # la esquina superior (izquierda o derecha de SAFE) que mas tiempo queda libre
-        opts = [free_of(SAFE["left"] + w / 2 + 0.012, SAFE["top"] + h / 2 + 0.008) + (SAFE["left"] + w / 2 + 0.012,),
-                free_of(SAFE["right"] - w / 2 - 0.012, SAFE["top"] + h / 2 + 0.008) + (SAFE["right"] - w / 2 - 0.012,)]
-        _score, free, box, x = max(opts, key=lambda o: o[0])
-        y = SAFE["top"] + h / 2 + 0.008
+        x, y = self.XC, SAFE["top"] + h / 2 + 0.008
+        box = (x - w / 2 - 0.02, y - h / 2 - 0.012, x + w / 2 + 0.02, y + h / 2 + 0.012)
+        busy = [(a, b) for a, b, x0, y0, x1, y1, _i in self.ink
+                if x0 < box[2] and box[0] < x1 and y0 < box[3] and box[1] < y1]
+        busy += [(self.f(c["start"]), self.f(c["end"])) for c in self.fx["cutaways"]]
+        for sh in self.shots:
+            # la cabeza (primer plano) tambien ocupa el centro de arriba
+            fr = self.face_rect(sh, sh["start"], sh["end"])
+            if fr is not None and fr[0] < box[2] and box[0] < fr[2] and fr[1] < box[3] and box[1] < fr[3]:
+                busy.append((sh["f0"], sh["f1"]))
+        busy.sort()
+        free, cur = [], 0.0
+        for a, b in busy:
+            if a - 0.3 > cur:
+                free.append((cur, a - 0.3))
+            cur = max(cur, b + 0.3)
+        if cur < end_f:
+            free.append((cur, end_f))
         for a, b in free:
             a, b = max(0.0, a), min(end_f, b)
             if b - a < 2.0:
@@ -7005,8 +7170,9 @@ class _Choreo:
             "text": {"preset": "stack", "lines": lines, "text": txt, "x": 0.5, "y": 0.46, "size": _r(size, 4),
                      "font": font, "color": "#FFFFFF", "accent": self.pal["accent"],
                      "anim_in": "word_stagger", "align": "center"},
-            "graphics": [{"kind": "doodle", "name": "sparkle", "x": 0.78, "y": 0.38, "size": 0.1,
-                          "color": self.pal["accent"], "draw": True, "anim_in": "draw"}]}, zone="full")
+            "graphics": self._scene_pair({"kind": "doodle", "name": "sparkle", "x": 0.78, "y": 0.38, "size": 0.1,
+                                          "color": self.pal["accent"], "draw": True, "anim_in": "draw"})},
+            zone="full")
         if cw:
             self.scene_transitions(a, b)
             self.music_swells.append({"start": _r(a), "end": _r(b), "db": 2.5})
@@ -7102,7 +7268,8 @@ class _Choreo:
         cols = n if n <= 3 else 2
         rows = (n + cols - 1) // cols
         sz = {1: 0.28, 2: 0.26, 3: 0.22}.get(cols, 0.22)
-        xs = [0.47 + (c - (cols - 1) / 2) * (0.28 if cols == 3 else 0.34) for c in range(cols)]
+        # columnas SIMETRICAS respecto a x = 0.5 (3: 0.23 / 0.5 / 0.77 -> caja 0.12..0.88)
+        xs = [self.XC + (c - (cols - 1) / 2) * (0.27 if cols == 3 else 0.34) for c in range(cols)]
         dy_row = 0.25
         y0 = 0.45 - (rows - 1) * dy_row / 2
         gr = []
@@ -7127,12 +7294,13 @@ class _Choreo:
                            "path_to": [_r(x - 0.09, 3), _r(y - sz * 0.62 / self.aspect, 4)],
                            "size": 0.2, "color": "#FFFFFF", "draw": True, "anim_in": "draw",
                            "offset": _r(max(0.0, off - 0.2), 3), "bend": 0.5})
+        self._center_group(gr)
         label = self._enum_label(s, first)
         text = None
         if label:
             box = self.pal["accent"]
             text = {"preset": "kicker", "text": label,
-                    "x": 0.47, "y": _r(max(SAFE["top"] + 0.05, y0 - sz * 0.5 / self.aspect - 0.09), 4), "size": 0.058,
+                    "x": 0.5, "y": _r(max(SAFE["top"] + 0.05, y0 - sz * 0.5 / self.aspect - 0.09), 4), "size": 0.058,
                     "font": self.K["text"], "box": box, "color": "#141414" if _luma(box) > 0.55 else "#FFFFFF",
                     "anim_in": "slide_left"}
         bg = self.pick("bg", [b_ for b_ in self.S["backgrounds"] if b_ in ("grid_warp", "dark_stars")] or ["dark_stars"])
@@ -7151,6 +7319,43 @@ class _Choreo:
             if a <= w["t0"] <= b:
                 self.titled_words.add(w["i"])
         return True
+
+    @staticmethod
+    def _nested_span(g: dict) -> tuple[float, float] | None:
+        """Extension horizontal (x0, x1) estimada de un grafico dentro de una escena: icono y
+        garabato por su caja, etiqueta por su pastilla (texto + relleno + borde, inclinada),
+        punteado de x a path_to."""
+        k = g.get("kind")
+        x = float(g.get("x", 0.5))
+        sz = float(g.get("size", 0.1))
+        if k == "sticker_text":
+            txt = str(g.get("text") or "")
+            ph = sz * 1.45
+            pw = _text_w(g.get("font") or "Poppins-Black", sz, txt) + sz
+            ang = math.radians(abs(float(g.get("rotation", 0.0) or 0.0)) + 1.4)
+            half = (pw / 2 + 8 / 1080) * math.cos(ang) + (ph / 2 + 8 / 1080) * math.sin(ang)
+            return x - half, x + half
+        pt = g.get("path_to")
+        if pt:
+            return min(x, float(pt[0])) - 0.02, max(x, float(pt[0])) + 0.02
+        if k in ("icon", "doodle"):
+            return x - sz / 2, x + sz / 2
+        return None
+
+    def _center_group(self, gr: list[dict]) -> None:
+        """Centra en x = 0.5 la caja comun de los graficos de una escena de lista (las etiquetas
+        de distinto ancho la cargaban a un lado): mismo aire a la izquierda y a la derecha."""
+        spans = [sp for sp in (self._nested_span(g) for g in gr) if sp is not None]
+        if not spans:
+            return
+        lo, hi = min(a for a, _ in spans), max(b for _, b in spans)
+        dx = self.XC - (lo + hi) / 2
+        if abs(dx) < 0.001:
+            return
+        for g in gr:
+            g["x"] = _r(float(g.get("x", 0.5)) + dx, 3)
+            if g.get("path_to"):
+                g["path_to"] = [_r(float(g["path_to"][0]) + dx, 3), g["path_to"][1]]
 
     def _enum_label(self, s: dict, first: dict) -> str:
         """Etiqueta de la escena de lista: el sintagma que la introduce, completo y corto
@@ -7218,20 +7423,28 @@ class _Choreo:
                 if ok:
                     self.used["fill"] += 1
                     return True
-        # sin palabras (b-roll mudo): un destello decorativo a mitad del hueco
+        # sin palabras (b-roll mudo): un destello decorativo a mitad del hueco, centrado o en par
+        # espejo (0.22 / 0.78)
         t = self.o(mid)
         shot = self.shot_at(t)
-        x = 0.78 if (shot.get("face_x") or 0.4) < 0.5 else 0.2
-        if self.accent_ok(x, 0.2, 0.1, mid, mid + 1.2, shot, t, self.o(mid + 1.2)):
+        t1 = self.o(mid + 1.2)
+        for x in (self.XC, 0.78):
+            ok = self.accent_ok(x, 0.2, 0.1, mid, mid + 1.2, shot, t, t1)
+            if ok and x != self.XC:
+                ok = self.accent_ok(2 * self.XC - x, 0.2, 0.1, mid, mid + 1.2, shot, t, t1)
+            if not ok:
+                continue
             name = self.pick("doodle", ["sparkle", "star4"])
-            g = self.add("graphics", "beat", {"start": t, "end": self.o(min(self.D, mid + 1.3)),
-                                               "kind": "doodle", "name": name, "x": x, "y": 0.2, "size": 0.1,
-                                               "color": self.doodle_color(t, self.o(mid + 1.2), x, 0.2),
-                                               "draw": True, "wiggle": 0.3,
-                                               "anim_in": "draw", "anim_out": "fade", "rotation": 0.0},
-                         zone="accent")
+            fields = {"start": t, "end": self.o(min(self.D, mid + 1.3)), "kind": "doodle", "name": name,
+                      "y": 0.2, "size": 0.1, "draw": True, "wiggle": 0.3, "anim_in": "draw",
+                      "anim_out": "fade"}
+            if x == self.XC:
+                g = self.add("graphics", "beat", dict(fields, x=x, rotation=0.0,
+                                                      color=self.doodle_color(t, t1, x, 0.2)), zone="accent")
+            else:
+                g = self.add_pair("beat", dict(fields, color=self.pair_color(t, t1, x, 0.2)), x)
             if g:
-                self._doodle_sfx(name, t + 0.03, x, g["id"])
+                self._doodle_sfx(name, t + 0.03, x, g["id"], pair=x != self.XC)
                 return True
         return False
 
@@ -7244,6 +7457,9 @@ class _Choreo:
         return out
 
     def _float_accent(self, w: dict, shot: dict, icon_only: bool = False, icon: str | None = None) -> dict | None:
+        """Acento de ritmo sobre la cabeza: un icono (siempre centrado: tiene mano) o un garabato
+        (glifo simetrico en par espejo a los lados de la cabeza, o uno centrado). Si nada cabe
+        simetrico (la cabeza ocupa el centro), no hay acento."""
         t0 = w["t0"] - 0.05
         t1 = min(w["t1"] + 1.2, shot["end"] - 0.03)
         fa, fb = self.f(t0), self.f(t1)
@@ -7251,17 +7467,13 @@ class _Choreo:
             return None
         ht = self.geom(shot, t0, t1)["head_top"]
         base_y = _clamp((ht - 0.02) if ht else 0.3, SAFE["top"] + 0.06, 0.45)
-        side = 0.78 if (shot.get("face_x") or 0.4) < 0.5 else 0.2
-        pos = None
-        for x, y in ((side, base_y), (side, base_y + 0.08), (1.0 - side, base_y), (side, base_y - 0.06)):
-            if self.accent_ok(x, y, 0.12, fa, fb, shot, t0, t1):
-                pos = (x, y)
-                break
-        if pos is None:
-            return None
-        x, y = pos
+        single = next(((self.XC, y) for y in (base_y, base_y - 0.06)
+                       if self.accent_ok(self.XC, y, 0.12, fa, fb, shot, t0, t1)), None)
         icon = icon or tone_icon(w["n"], self.role, self.used["topic_icon"])
         if icon:
+            if single is None:
+                return None
+            x, y = single
             dark_bg = self._bg_at(shot, y - 0.03, y + 0.03, t0, t1)
             light = dark_bg is not None and contrast("#FFFFFF", dark_bg["rgb"]) < 2.4
             bcol = self.pal["dark"] if light else self.pal["accent"]
@@ -7269,7 +7481,7 @@ class _Choreo:
                 "start": t0, "end": t1, "kind": "icon", "name": icon, "variant": "outline",
                 "badge": "circle", "badge_color": bcol,
                 "color": self.pal["dark"] if _luma(bcol) > 0.55 else "#FFFFFF", "draw": True,
-                "x": x, "y": _r(y, 4), "size": 0.12, "anim_in": "pop", "anim_out": "pop_out",
+                "x": _r(x, 3), "y": _r(y, 4), "size": 0.12, "anim_in": "pop", "anim_out": "pop_out",
                 "rotation": _r((self.rand("bi" + str(w["i"])) - 0.5) * 14, 1)}, zone="accent")
             if g:
                 self.used["topic_icon"] += 1
@@ -7277,12 +7489,29 @@ class _Choreo:
             return g
         if icon_only:
             return None
-        name = self.pick("doodle", [d for d in self.S["doodles"] if d not in ("underline", "circle_scribble", "arrow_curve")] or ["sparkle"])
-        g = self.add("graphics", "beat_doodle", {
-            "start": t0, "end": t1, "kind": "doodle", "name": name, "x": x, "y": _r(y, 4),
-            "size": 0.11, "color": self.doodle_color(t0, t1, x, y), "draw": True, "wiggle": 0.35,
-            "anim_in": "draw", "anim_out": "fade",
-            "rotation": _r((self.rand("bd" + str(w["i"])) - 0.5) * 20, 1)}, zone="accent")
+        pair = next(((self.XC + d, base_y) for d in (0.28, 0.24)
+                     if self.accent_ok(self.XC + d, base_y, 0.12, fa, fb, shot, t0, t1)
+                     and self.accent_ok(self.XC - d, base_y, 0.12, fa, fb, shot, t0, t1)), None)
+        if single is None and pair is None:
+            return None
+        pool = [d for d in self.S["doodles"] if d not in ("underline", "circle_scribble", "arrow_curve")
+                and not d.startswith("arrow")] or ["sparkle"]
+        if single is None:
+            pool = [d for d in pool if d in SYM_GLYPHS] or ["sparkle"]     # solo cabe el par
+        name = self.pick("doodle", pool)
+        rot = _r((self.rand("bd" + str(w["i"])) - 0.5) * 20, 1)
+        fields = {"start": t0, "end": t1, "kind": "doodle", "name": name, "size": 0.11, "draw": True,
+                  "wiggle": 0.35, "anim_in": "draw", "anim_out": "fade"}
+        if name in SYM_GLYPHS and pair is not None:
+            x, y = pair
+            g = self.add_pair("beat_doodle", dict(fields, y=_r(y, 4), color=self.pair_color(t0, t1, x, y)), x, rot)
+            if g:
+                self._doodle_sfx(name, t0 + 0.03, self.XC, g["id"], pair=True)
+            return g
+        x, y = single
+        g = self.add("graphics", "beat_doodle", dict(
+            fields, x=_r(x, 3), y=_r(y, 4), color=self.doodle_color(t0, t1, x, y),
+            rotation=rot if name in SYM_GLYPHS else 0.0), zone="accent")
         if g:
             self._doodle_sfx(name, t0 + 0.03, x, g["id"])
         return g
@@ -7354,6 +7583,590 @@ class _Choreo:
                 fields["dur"] = r["dur"]
             self.add("sfx", r["name"], fields)
 
+    # ---------------------------------------------------------- 13. simetria (regla de la marca)
+    # red de seguridad al final de run() y nucleo de symmetrize(plan): lo centrado a x = 0.5 (ancho
+    # <= SYM_W), glifos simetricos en par espejo exacto, glifos con mano e iconos centrados,
+    # flechas verticales centradas; lo que no cabe simetrico (cara, tinta, separacion) se quita
+    _TWIN_KEYS = ("kind", "name", "size", "y", "start", "end", "anim_in", "anim_out", "color", "draw", "wiggle",
+                  "border_color", "aspect", "double", "stroke", "enabled", "intensity", "z", "offset", "length",
+                  "shadow", "glow", "style")
+
+    def _sym_rect(self, tr: str, it: dict) -> tuple | None:
+        """Caja (x0, y0, x1, y1) normalizada de un item en reposo: texto medido con text.py (con el
+        relleno de su caja); graficos estimados con las medidas de graphics."""
+        if tr == "text":
+            r = measure_text(it, self.style)
+            return None if r is None else self._pad_rect(it, r)
+        k = it.get("kind")
+        if it.get("x") is None:
+            return None
+        x, y = float(it.get("x")), float(it.get("y", 0.5) if it.get("y") is not None else 0.5)
+        sz = float(it.get("size", 0.1) or 0.1)
+        if k in ("doodle", "icon"):
+            pt = it.get("path_to")
+            if pt:
+                return (min(x, float(pt[0])) - 0.03, min(y, float(pt[1])) - 0.015,
+                        max(x, float(pt[0])) + 0.03, max(y, float(pt[1])) + 0.015)
+            return _accent_rect(self, it)
+        if k == "card":
+            w, h = sz, card_height(it, self.style)
+        elif k == "cta":
+            w = float(it.get("width") or 0.0) or min(SYM_W, cta_natural_width(it, self.style))
+            if it.get("variant") == "link_below":
+                h = self._link_h(sz, bool(it.get("display")))
+                return (x - w / 2, y - h / 2, x + w / 2, y + (0.8 + 1.66 * float(it.get("arrow_scale", 1.0))) * h)
+            h = sz * 0.17 * 1080 / 1920
+        elif k == "sticker_text":
+            w = min(SYM_W, _text_w(it.get("font") or "Poppins-Black", sz, str(it.get("text") or "")) + sz * 1.3)
+            h = sz * 1.6 * 1080 / 1920
+        elif k == "lower_third":
+            if it.get("align") != "center":
+                return (x, y - 0.045, SAFE["right"], y + 0.045)
+            w, h = lt_width(it.get("title", ""), it.get("subtitle", ""), sz, self.style), 0.09
+        elif k == "socials":
+            w, h = socials_size(it, self.style)
+        elif k == "media":
+            w, h = sz, sz * 1080 / 1920
+        else:
+            return None
+        return (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+
+    def _sym_set_ink(self, it: dict, rect: tuple | None) -> None:
+        """La tinta registrada de un item pasa a `rect` (mismos tramos de tiempo)."""
+        iid = str(it.get("id"))
+        spans = sorted({(r[0], r[1]) for r in self.ink if r[6] == iid})
+        self.ink = [r for r in self.ink if r[6] != iid]
+        if rect is None:
+            return
+        if not spans:
+            spans = [(self.f(float(it["start"])), self.f(float(it["end"])))]
+        for a, b in spans:
+            self.ink.append((a, b, *rect, iid))
+
+    def _sym_seat(self, g: dict, x: float, y: float | None = None) -> None:
+        """Mueve un acento (x, y) y su registro (franja 'accent' y posicion)."""
+        g["x"] = _r(x, 3)
+        if y is not None:
+            g["y"] = _r(y, 4)
+        iid = str(g["id"])
+        self.acc_pos[iid] = (float(g["x"]), float(g.get("y", 0.5)))
+        if not any(e[2] == iid for e in self.occ["accent"]):
+            self.occ["accent"].append((self.f(float(g["start"])), self.f(float(g["end"])), iid))
+
+    def _sym_sync(self, g: dict, tw: dict) -> bool:
+        """El gemelo '<id>_m' queda como espejo EXACTO de su base. -> cambio algo."""
+        before = json.dumps(tw, sort_keys=True, default=str)
+        for k in self._TWIN_KEYS:
+            if k in g:
+                tw[k] = copy.deepcopy(g[k])
+            else:
+                tw.pop(k, None)
+        tw.pop("path_to", None)
+        tw["x"] = _r(2 * self.XC - float(g["x"]), 3)
+        tw["rotation"] = _r(-float(g.get("rotation", 0.0) or 0.0), 1) + 0.0
+        if json.dumps(tw, sort_keys=True, default=str) == before:
+            return False
+        self._sym_seat(tw, float(tw["x"]), float(tw["y"]))
+        return True
+
+    def _sym_twin(self, g: dict, fx: dict) -> dict:
+        """Crea el gemelo espejo exacto '<id>_m' de un glifo simetrico (en fx y en el registro)."""
+        tid = str(g["id"]) + TWIN
+        tw = {k: copy.deepcopy(v) for k, v in g.items() if not str(k).startswith("_")}
+        tw["id"] = tid
+        lst = fx.setdefault("graphics", [])
+        idx = next((i for i, x in enumerate(lst) if x is g), None)
+        if idx is None:
+            lst.append(tw)
+        else:
+            lst.insert(idx + 1, tw)
+        self.ids.add(tid)
+        self._sym_sync(g, tw)
+        self._sym_seat(tw, float(tw["x"]), float(tw["y"]))
+        return tw
+
+    def _sym_legible(self, g: dict, tw: dict | None) -> None:
+        """Un garabato movido (o su par) se sigue leyendo contra el fondo de CADA lado (el que se
+        conoce): un trazo blanco lleva contorno oscuro donde no le sobra contraste; un color que no
+        se lee pasa a blanco con contorno (los dos miembros igual: espejo exacto)."""
+        col = g.get("color")
+        if g.get("kind") != "doodle" or not col or g.get("border_color"):
+            return
+        white = _luma(col) > 0.85
+        t0, t1 = float(g["start"]), float(g["end"])
+        shot = self.shot_at(t0 + 0.02)
+        swap = border = False
+        for m in [g] + ([tw] if tw is not None else []):
+            mx, my = float(m["x"]), float(m.get("y", 0.5))
+            bg = self._bg_at(shot, my - 0.03, my + 0.03, t0, t1, mx - 0.06, mx + 0.06)
+            if bg is None:
+                border = border or white
+            elif contrast(col, bg["rgb"]) < (4.5 if white else 3.0):
+                border = True
+                swap = swap or not white
+        for m in [g] + ([tw] if tw is not None else []):
+            if swap:
+                m["color"] = "#FFFFFF"
+            if border:
+                m["border_color"] = "#161616"
+
+    def _sym_sfx_of(self, g: dict, fx: dict, mv) -> dict | None:
+        """SFX (del plan) que acompana la entrada de un acento: mismo sonido a <= 0.12 s."""
+        names = _accent_sfx_names(g)
+        t = float(g.get("start", 0.0)) + 0.03
+        best = None
+        for sx in fx.get("sfx") or []:
+            if not isinstance(sx, dict) or sx.get("name") not in names or not mv(sx):
+                continue
+            d = abs(float(sx.get("at", -9.0)) - t)
+            if d <= 0.12 and (best is None or d < best[0]):
+                best = (d, sx)
+        return best[1] if best else None
+
+    def _sym_pan0(self, g: dict, fx: dict, mv, plan_mode: bool) -> None:
+        """El SFX de un par espejo suena al centro (uno solo, pan 0)."""
+        iid = str(g["id"])
+        for r in self.sfx_req:
+            if str(r.get("src", "")) == iid:
+                r["pan"] = 0.0
+        if plan_mode:
+            sx = self._sym_sfx_of(g, fx, mv)
+            if sx is not None:
+                sx["pan"] = 0.0
+
+    def _sym_drop(self, g: dict, fx: dict, mv, plan_mode: bool, pair: bool = True) -> list[str]:
+        """Quita un acento que no cabe simetrico (y a su gemelo, si es de la IA) con su SFX."""
+        iid = str(g.get("id"))
+        gone = {iid}
+        if pair and g.get("kind") == "doodle":
+            base = iid[:-len(TWIN)] if iid.endswith(TWIN) else iid
+            gone |= {x_ for x_ in (base, base + TWIN)
+                     if any(str(o.get("id")) == x_ and mv(o) for o in fx.get("graphics") or [])}
+        if not plan_mode:
+            for o in [o for o in fx.get("graphics") or [] if str(o.get("id")) in gone]:
+                self._unplace(o, pair=False)
+            return sorted(gone)
+        # el SFX es de la base (un par lleva uno solo): se va si se va la base
+        sx = self._sym_sfx_of(g, fx, mv) if g.get("kind") in ("doodle", "icon") and \
+            any(not x_.endswith(TWIN) for x_ in gone) else None
+        fx["graphics"][:] = [o for o in fx.get("graphics") or [] if str(o.get("id")) not in gone]
+        if sx is not None and sx in (fx.get("sfx") or []):
+            fx["sfx"].remove(sx)
+        for z in list(self.occ):
+            self.occ[z] = [e for e in self.occ[z] if e[2] not in gone]
+        self.ink = [r for r in self.ink if r[6] not in gone]
+        for x_ in gone:
+            self.acc_pos.pop(x_, None)
+        return sorted(gone)
+
+    def _sym_owner(self, g: dict, fx: dict, tracks: tuple = ("text",)) -> tuple[dict, tuple] | None:
+        """(item, caja NUEVA) del titulo (o grafico) al que acompana un acento: se cruza en el tiempo
+        y su caja (la de antes del pase) queda a <= 0.1 W / 0.08 H del acento; a igualdad, el de
+        la misma frase y el que mas tiempo comparte."""
+        if g.get("path_to"):
+            px, py = float(g["path_to"][0]), float(g["path_to"][1])
+            gr = (px - 0.06, py - 0.04, px + 0.06, py + 0.04)
+        else:
+            gr = _accent_rect(self, g)
+        a, b = float(g["start"]), float(g["end"])
+        anc = _anchor_of(str(g.get("id", "")))
+        best = None
+        for tr in tracks:
+            for it in fx.get(tr) or []:
+                if it is g or not isinstance(it, dict) or it.get("enabled") is False:
+                    continue
+                if tr == "graphics" and it.get("kind") in ("doodle", "icon", "progress", "media"):
+                    continue
+                if not (float(it.get("start", 0)) < b and a < float(it.get("end", 0))):
+                    continue
+                r0 = self._sym_old.get(str(it.get("id"))) or self._sym_rect(tr, it)
+                if r0 is None:
+                    continue
+                if not (gr[0] < r0[2] + 0.1 and r0[0] - 0.1 < gr[2] and gr[1] < r0[3] + 0.08 and r0[1] - 0.08 < gr[3]):
+                    continue
+                key = (_anchor_of(str(it.get("id", ""))) == anc,
+                       min(b, float(it["end"])) - max(a, float(it["start"])))
+                if best is None or key > best[0]:
+                    best = (key, it, tr)
+        if best is None:
+            return None
+        r1 = self._sym_rect(best[2], best[1])
+        return (best[1], r1) if r1 is not None else None
+
+    def _sym_arrow(self, g: dict, fx: dict, mv, plan_mode: bool, rep: dict) -> None:
+        """Flecha que senala: vertical y centrada (x = path_to x = 0.5, bend 0), por arriba o por
+        abajo de lo que senala; si no cabe asi, se quita."""
+        iid = str(g["id"])
+        xc = self.XC
+        pt = [float(g["path_to"][0]), float(g["path_to"][1])]
+        x = float(g["x"])
+        arrow = str(g.get("name", "")).startswith("arrow")
+        if abs(x - xc) <= SYM_TOL and abs(pt[0] - xc) <= SYM_TOL:
+            ch_ = abs(x - xc) > 1e-6 or abs(pt[0] - xc) > 1e-6 or float(g.get("rotation", 0.0) or 0.0) != 0.0 \
+                or (arrow and float(g.get("bend", 1.0) or 0.0) != 0.0)
+            if ch_:
+                g["path_to"] = [_r(xc, 3), g["path_to"][1]]
+                g["rotation"] = 0.0
+                if arrow:
+                    g["bend"] = 0.0
+                self._sym_seat(g, xc)
+                self._sym_set_ink(g, self._sym_rect("graphics", g))
+                rep["moved"].append(iid)
+            return
+        t0, t1 = float(g["start"]), float(g["end"])
+        fa, fb = self.f(t0), self.f(t1)
+        shot = self.shot_at(t0 + 0.02)
+        own = {iid, iid + TWIN}
+        tgt = self._sym_owner(g, fx, ("graphics", "text"))
+        if tgt is not None:
+            _it, rect = tgt
+            fr = self.face_rect(shot, t0, t1)
+            for sy, ey in ((rect[1] - 0.1, rect[1] - 0.012), (rect[3] + 0.09, rect[3] + 0.012)):
+                box = (xc - 0.03, min(sy, ey) - 0.015, xc + 0.03, max(sy, ey) + 0.015)
+                if box[1] < SAFE["top"] or box[3] > min(SAFE["bottom"], self.cap_top - 0.005):
+                    continue
+                if fr is not None and box[0] < fr[2] and fr[0] < box[2] and box[1] < fr[3] and fr[1] < box[3]:
+                    continue
+                if not self.clear_of_ink(box, fa, fb, skip=own | {str(_it.get("id"))}, margin=0.0) or \
+                        not self.free_accent(xc, sy, fa, fb, skip=own):
+                    continue
+                if arrow:
+                    g["name"] = "arrow_straight"
+                    g["bend"] = 0.0
+                g["path_to"] = [_r(xc, 3), _r(ey, 4)]
+                g["rotation"] = 0.0
+                self._sym_seat(g, xc, sy)
+                self._sym_set_ink(g, box)
+                # la flecha cae sobre otro fondo (p. ej. la ropa, al centro): el color elegido para
+                # su lugar viejo puede no leerse -> contraste contra el fondo de su tramo nuevo
+                probe = dict(g, y=(sy + ey) / 2)
+                self._sym_legible(probe, None)
+                g.update({k_: probe[k_] for k_ in ("color", "border_color") if k_ in probe})
+                rep["moved"].append(iid)
+                return
+        rep["dropped"] += self._sym_drop(g, fx, mv, plan_mode)
+
+    def _sym_accent(self, g: dict, fx: dict, mv, plan_mode: bool, rep: dict) -> None:
+        """Un acento (garabato / icono) de la IA queda simetrico: centrado, en par espejo exacto
+        (glifos simetricos) o fuera."""
+        iid = str(g.get("id"))
+        byid = {str(o.get("id")): o for o in fx.get("graphics") or []}
+        if iid.endswith(TWIN) and iid[:-len(TWIN)] in byid:
+            base = byid[iid[:-len(TWIN)]]
+            if mv(base) and base.get("enabled", True) is not False:
+                return                              # el gemelo va con su base
+            # base fijada por el usuario (o apagada): el gemelo la sigue en espejo, o se va
+            if base.get("kind") == "doodle" and base.get("name") in SYM_GLYPHS and base.get("x") is not None \
+                    and abs(float(base["x"]) - self.XC) >= ACCENT_SEP / 2 - 1e-6:
+                if self._sym_sync(base, g):
+                    rep["moved"].append(iid)
+            else:
+                rep["dropped"] += self._sym_drop(g, fx, mv, plan_mode, pair=False)
+            return
+        if g.get("x") is None:
+            return                                  # anclado a la cara por el usuario (face_*)
+        if g.get("path_to"):
+            self._sym_arrow(g, fx, mv, plan_mode, rep)
+            return
+        xc = self.XC
+        doodle = g.get("kind") == "doodle"
+        name = g.get("name") if doodle else None
+        tw = byid.get(iid + TWIN) if doodle else None
+        x, y = float(g["x"]), float(g.get("y", 0.5))
+        sz = float(g.get("size") or _default_size(g))
+        if name in MARK_GLYPHS:
+            # marca sobre una linea (subrayado, circulo): centrada en su linea, que va centrada
+            if abs(x - xc) <= 0.03:
+                if abs(x - xc) > 1e-6:
+                    self._sym_seat(g, xc)
+                    rep["moved"].append(iid)
+                if tw is not None and mv(tw):
+                    rep["dropped"] += self._sym_drop(tw, fx, mv, plan_mode, pair=False)
+            else:
+                rep["dropped"] += self._sym_drop(g, fx, mv, plan_mode)
+            return
+        pairable = name in SYM_GLYPHS
+        if tw is not None:
+            if not mv(tw):
+                return                              # el usuario fijo el gemelo: el par se queda
+            if pairable and abs(x - xc) >= ACCENT_SEP / 2 - 1e-6:
+                if self._sym_sync(g, tw):
+                    self._sym_legible(g, tw)
+                    tw.update({k_: g[k_] for k_ in ("color", "border_color") if k_ in g})
+                    rep["moved"].append(tw["id"])
+                return
+            rep["dropped"] += self._sym_drop(tw, fx, mv, plan_mode, pair=False)
+            tw = None
+        if abs(x - xc) <= SYM_TOL:
+            if abs(x - xc) > 1e-6:
+                self._sym_seat(g, xc)
+                rep["moved"].append(iid)
+            return
+        t0, t1 = float(g["start"]), float(g["end"])
+        fa, fb = self.f(t0), self.f(t1)
+        shot = self.shot_at(t0 + 0.02)
+        own = {iid, iid + TWIN}
+        # a) glifo simetrico: el gemelo en el lugar espejo (el acento se queda donde estaba)
+        if pairable and abs(x - xc) >= ACCENT_SEP / 2 and \
+                self.accent_ok(x, y, sz, fa, fb, shot, t0, t1, own=own) and \
+                self.accent_ok(2 * xc - x, y, sz, fa, fb, shot, t0, t1, own=own):
+            tw = self._sym_twin(g, fx)
+            self._sym_legible(g, tw)
+            self._sym_pan0(g, fx, mv, plan_mode)
+            rep["twins"].append(tw["id"])
+            return
+        # b) junto a su titulo: par espejo o centrado arriba / abajo (o sobre la cabeza); sin
+        #    titulo (acento de ritmo): a los lados de la cabeza, centrado cerca de su altura o
+        #    sobre la cabeza
+        own_it = self._sym_owner(g, fx)
+        rect = own_it[1] if own_it is not None else (xc, y, xc, y)
+        spots = self.accent_spot(rect, sz, fa, fb, shot, t0, t1, pair=pairable, own=own)
+        if spots:
+            px, py, s_ = spots[0]
+            if "size" in g or abs(s_ - sz) > 1e-6:
+                g["size"] = _r(s_, 3)
+            if len(spots) == 2:
+                self._sym_seat(g, px, py)
+                tw = self._sym_twin(g, fx)
+                self._sym_legible(g, tw)
+                self._sym_pan0(g, fx, mv, plan_mode)
+                rep["twins"].append(tw["id"])
+            else:
+                self._sym_seat(g, xc, py)
+                if doodle and not pairable:
+                    g["rotation"] = 0.0
+                self._sym_legible(g, None)
+            rep["moved"].append(iid)
+            return
+        # c) centrado a la misma altura
+        if self.accent_ok(xc, y, sz, fa, fb, shot, t0, t1, own=own):
+            self._sym_seat(g, xc)
+            if doodle and not pairable:
+                g["rotation"] = 0.0
+            self._sym_legible(g, None)
+            rep["moved"].append(iid)
+            return
+        # d) no cabe simetrico sin tapar la cara u otra tinta: fuera
+        rep["dropped"] += self._sym_drop(g, fx, mv, plan_mode)
+
+    def _sym_center_graphic(self, g: dict) -> bool:
+        """Grafico estructural (tarjeta, CTA, etiqueta, chips, rotulo): centrado en x = 0.5 y con
+        ancho <= SYM_W; un PiP con x propia pasa al colocador automatico. -> cambio algo."""
+        k = g.get("kind")
+        ch_ = False
+        if k == "media":
+            # PiP: al colocador automatico (render.media_auto_place, simetrico y sin tapar la cara)
+            if g.get("x") is None or abs(float(g["x"]) - self.XC) <= 1e-6:
+                return False
+            g["x"] = g["y"] = None
+            return True
+        if k == "lower_third" and g.get("align") != "center":
+            g["align"] = "center"
+            ch_ = True
+        if g.get("x") is None or abs(float(g["x"]) - self.XC) > 1e-6:
+            g["x"] = _r(self.XC, 3)
+            ch_ = True
+        if g.get("width") and float(g["width"]) > SYM_W + 1e-6:
+            g["width"] = _r(SYM_W, 3)
+            ch_ = True
+        if k in ("card", "cta") and float(g.get("size", 0.0) or 0.0) > SYM_W + 1e-6:
+            g["size"] = _r(SYM_W, 3)
+            ch_ = True
+        return ch_
+
+    def _sym_watermark(self, g: dict, fx: dict, mv, plan_mode: bool, rep: dict) -> None:
+        """Marca de agua: centrada arriba y solo en el tramo libre mas largo (>= 2 s) de ese lugar;
+        si no hay, fuera."""
+        iid = str(g["id"])
+        moved = self._sym_center_graphic(g)
+        if not moved:
+            return
+        w, h = socials_size(g, self.style)
+        x, y = self.XC, float(g.get("y", SAFE["top"] + h / 2 + 0.008))
+        box = (x - w / 2 - 0.02, y - h / 2 - 0.012, x + w / 2 + 0.02, y + h / 2 + 0.012)
+        fa, fb = self.f(float(g["start"])), self.f(float(g["end"]))
+        busy = [(a, b) for a, b, x0, y0, x1, y1, i_ in self.ink
+                if i_ != iid and x0 < box[2] and box[0] < x1 and y0 < box[3] and box[1] < y1]
+        busy += [(a, b) for a, b, _i in self.occ["full"]]
+        for sh in self.shots:
+            fr = self.face_rect(sh, sh["start"], sh["end"])
+            if fr is not None and fr[0] < box[2] and box[0] < fr[2] and fr[1] < box[3] and box[1] < fr[3]:
+                busy.append((sh["f0"], sh["f1"]))
+        free, cur = [], fa
+        for a, b in sorted(busy):
+            if b <= fa or a >= fb:
+                continue
+            if a - 0.3 > cur:
+                free.append((cur, a - 0.3))
+            cur = max(cur, b + 0.3)
+        if cur < fb:
+            free.append((cur, fb))
+        free = [(a, b) for a, b in free if b - a >= 2.0]
+        if not free:
+            rep["dropped"] += self._sym_drop(g, fx, mv, plan_mode, pair=False)
+            return
+        a, b = max(free, key=lambda ab: ab[1] - ab[0])
+        if a > fa + 1e-6:
+            g["start"] = _r(self.o(a))
+        if b < fb - 1e-6:
+            g["end"] = _r(self.o(b))
+        self._sym_set_ink(g, box)
+        rep["moved"].append(iid)
+
+    def _sym_cutaway(self, c: dict) -> bool:
+        """Escena: texto, tarjeta y graficos embebidos centrados; decorados en par espejo EXACTO
+        (mismo glifo y tamano, x y 1-x); la lista (cw_list) centra la caja comun. -> cambio algo."""
+        xc = self.XC
+        ch_ = False
+        t = c.get("text")
+        if isinstance(t, dict):
+            if t.get("x") is not None and abs(float(t["x"]) - xc) > 1e-6:
+                t["x"] = _r(xc, 3)
+                ch_ = True
+            if t.get("align") in ("left", "right"):
+                t["align"] = "center"
+                ch_ = True
+            if t.get("preset") == "counter" and t.get("anchor") not in (None, "center"):
+                t["anchor"] = "center"
+                ch_ = True
+        cd = c.get("card")
+        if isinstance(cd, dict):
+            if cd.get("x") is not None and abs(float(cd["x"]) - xc) > 1e-6:
+                cd["x"] = _r(xc, 3)
+                ch_ = True
+            if float(cd.get("size", 0.0) or 0.0) > SYM_W + 1e-6:
+                cd["size"] = _r(SYM_W, 3)
+                ch_ = True
+        gr = c.get("graphics")
+        if not isinstance(gr, list) or not gr:
+            return ch_
+        gr = [g for g in gr if isinstance(g, dict)]
+        if str(c.get("id", "")).startswith("cw_list"):
+            before = [(g.get("x"), g.get("path_to")) for g in gr]
+            self._center_group(gr)
+            c["graphics"] = gr
+            return ch_ or before != [(g.get("x"), g.get("path_to")) for g in gr]
+        out: list[dict] = []
+        used: set = set()
+        cid = str(c.get("id", "cut"))
+        for i, g in enumerate(gr):
+            if i in used:
+                continue
+            k = g.get("kind")
+            if g.get("x") is None:
+                out.append(g)
+                continue
+            x = float(g["x"])
+            if k not in ("doodle", "icon"):
+                ch_ = self._sym_center_graphic(g) or ch_
+                out.append(g)
+                continue
+            if g.get("path_to"):
+                if abs(x - xc) > SYM_TOL or abs(float(g["path_to"][0]) - xc) > SYM_TOL:
+                    g["x"], g["path_to"] = _r(xc, 3), [_r(xc, 3), g["path_to"][1]]
+                    g["bend"] = 0.0
+                    ch_ = True
+                out.append(g)
+                continue
+            if abs(x - xc) <= SYM_TOL:
+                if abs(x - xc) > 1e-6:
+                    g["x"] = _r(xc, 3)
+                    ch_ = True
+                out.append(g)
+                continue
+            gid = str(g.get("id") or "")
+            j = next((j for j, h in enumerate(gr) if j != i and j not in used and gid and
+                      str(h.get("id") or "") == gid + TWIN), None)
+            if j is None:
+                j = next((j for j, h in enumerate(gr) if j != i and j not in used and h.get("kind") == k
+                          and not h.get("path_to") and h.get("x") is not None
+                          and abs(float(h["x"]) + x - 2 * xc) <= 0.05 and abs(float(h["x"]) - xc) > SYM_TOL), None)
+            pairable = k == "doodle" and (g.get("name") in SYM_GLYPHS or (
+                j is not None and gr[j].get("name") in SYM_GLYPHS))
+            if not pairable:
+                g["x"] = _r(xc, 3)                  # icono / glifo con mano: centrado
+                ch_ = True
+                out.append(g)
+                continue
+            base = g if (j is None or x > xc) else gr[j]
+            if base.get("name") not in SYM_GLYPHS:
+                base["name"] = "sparkle"
+            if not base.get("id") or str(base.get("id")).endswith(TWIN):
+                base["id"] = f"{cid}:p{i}"
+            tw = gr[j] if j is not None and base is g else (g if j is not None else None)
+            used |= {i} | ({j} if j is not None else set())
+            before = json.dumps(tw, sort_keys=True, default=str) if tw is not None else None
+            if tw is None:
+                tw = {}
+            for kk in self._TWIN_KEYS:
+                if kk in base:
+                    tw[kk] = copy.deepcopy(base[kk])
+                else:
+                    tw.pop(kk, None)
+            tw.update(id=str(base["id"]) + TWIN, x=_r(2 * xc - float(base["x"]), 3),
+                      rotation=_r(-float(base.get("rotation", 0.0) or 0.0), 1) + 0.0)
+            if before is None or json.dumps(tw, sort_keys=True, default=str) != before:
+                ch_ = True
+            out += [base, tw]
+        c["graphics"] = out
+        return ch_
+
+    def symmetry(self, fx: dict | None = None, mv=None, plan_mode: bool = False) -> dict:
+        """Regla de SIMETRIA sobre `fx` (por defecto lo que coloco esta coreografia): texto y
+        graficos centrados en x = 0.5 (ancho <= SYM_W), rotulo centrado, escenas con decorados en
+        par espejo exacto, acentos centrados o en par espejo (glifos simetricos) y flechas
+        verticales centradas; lo que no cabe simetrico sin tapar la cara u otra tinta se quita.
+        `mv(item)`: lo que se puede mover (lo del usuario y lo bloqueado nunca). -> resumen
+        {moved, twins, dropped} (ids)."""
+        fx = self.fx if fx is None else fx
+        mv = mv or (lambda it: True)
+        rep: dict = {"moved": [], "twins": [], "dropped": []}
+        self._sym_old = {}
+        for it in fx.get("text") or []:
+            if not isinstance(it, dict) or not mv(it):
+                continue
+            ch_ = False
+            if it.get("align") in ("left", "right"):
+                it["align"] = "center"
+                ch_ = True
+            if it.get("preset") == "counter" and it.get("anchor") not in (None, "center"):
+                it["anchor"] = "center"
+                ch_ = True
+            if it.get("x") is None or abs(float(it["x"]) - self.XC) > 1e-6:
+                ch_ = True
+            if ch_:
+                old = next((r[2:6] for r in self.ink if r[6] == it.get("id")), None)
+                if old is not None:
+                    self._sym_old[str(it["id"])] = tuple(old)
+                it["x"] = _r(self.XC, 3)
+                self._sym_set_ink(it, self._sym_rect("text", it))
+                rep["moved"].append(str(it.get("id")))
+        for g in list(fx.get("graphics") or []):
+            if not isinstance(g, dict) or not mv(g) or g.get("kind") in ("doodle", "icon", "progress"):
+                continue
+            if g.get("kind") == "socials" and g.get("variant") == "watermark":
+                self._sym_watermark(g, fx, mv, plan_mode, rep)
+                continue
+            if not self._sym_center_graphic(copy.deepcopy(g)):
+                continue
+            old = self._sym_rect("graphics", g)
+            self._sym_center_graphic(g)
+            if old is not None:
+                self._sym_old[str(g["id"])] = old
+            self._sym_set_ink(g, self._sym_rect("graphics", g))
+            rep["moved"].append(str(g.get("id")))
+        for c in fx.get("cutaways") or []:
+            if isinstance(c, dict) and mv(c) and self._sym_cutaway(c):
+                rep["moved"].append(str(c.get("id")))
+        acc = [g for g in fx.get("graphics") or [] if isinstance(g, dict) and mv(g)
+               and g.get("kind") in ("doodle", "icon") and g.get("enabled", True) is not False]
+        for g in sorted(acc, key=lambda g_: (float(g_.get("start", 0)), str(g_.get("id")))):
+            if not any(o is g for o in fx.get("graphics") or []):
+                continue                            # se fue con su par
+            self._sym_accent(g, fx, mv, plan_mode, rep)
+        self._sym_old = {}
+        return rep
+
     # ---------------------------------------------------------- orquestacion
     def run(self) -> dict:
         self.camera()
@@ -7379,6 +8192,9 @@ class _Choreo:
         self.assign_transitions()
         self.rhythm()
         self.watermark()
+        # red de seguridad: todo lo que coloco esta coreografia queda simetrico (lo del usuario y
+        # lo bloqueado viven en self.fixed y no se tocan)
+        self.symmetry()
         if self.S["progress"] and self.windows is None:
             self.add("graphics", "progress", {"start": 0.0, "end": self.tl.duration, "kind": "progress",
                                               "x": 0.5, "y": 0.0, "size": 1.0, "color": self.pal["accent"],
@@ -8195,7 +9011,7 @@ def _visual_fallback(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict | Non
             probe = {k: v for k, v in out.items() if not k.startswith("_")}
             r2 = measure_text(probe, ch.style)
             if float(out["size"]) < ch.min_size(str(out.get("preset"))) * 0.97 or (r2 is not None and (
-                    r2[0] < SAFE["left"] - 0.01 or r2[2] > SAFE["right"] + 0.01 or r2[3] > SAFE["bottom"] + 0.01)):
+                    r2[0] < SYM_L - 0.01 or r2[2] > SYM_R + 0.01 or r2[3] > SAFE["bottom"] + 0.01)):
                 out["font"], out["size"] = it.get("font"), it.get("size")
                 for ln, ln0 in zip(out.get("lines") or [], it.get("lines") or []):
                     ln["font"] = ln0.get("font")
@@ -8292,6 +9108,10 @@ def _graphic_variant(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict:
     bg = _item_bg(ch, it) if k in ("doodle", "icon", "sticker_text") else None
     if k == "doodle":
         fam = next((f for f in _DOODLE_FAM if it.get("name") in f), ("sparkle", "star4", "burst"))
+        x_ = float(it["x"]) if it.get("x") is not None else 0.5
+        if abs(x_ - 0.5) > SYM_TOL and it.get("name") in SYM_GLYPHS:
+            # miembro de un par espejo: sigue siendo un glifo simetrico (su gemelo lo refleja)
+            fam = tuple(n for n in fam if n in SYM_GLYPHS) or ("sparkle", "star4", "star5", "burst")
         out["name"] = _pick_other(list(fam), it.get("name"), seed, rev, iid, "name")
         cols = _legible([pal["accent"], "#FFFFFF", pal["accent2"], ch.acc_light, pal["dark"]], bg) or \
             [ch.doodle_color(float(it["start"]), float(it["end"]), float(it.get("x", 0.5)), float(it.get("y", 0.5)))]
@@ -8300,8 +9120,11 @@ def _graphic_variant(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict:
             # el trazo sigue en su sitio: cambia su caracter (doble trazo / marcador hueco)
             out["double"] = not bool(it.get("double"))
             out["rotation"] = it.get("rotation", 0.0)
-        else:
+        elif out["name"] in SYM_GLYPHS:
             out["rotation"] = _r((_vr(seed, rev, iid, "rot") - 0.5) * 30, 1)
+        else:
+            # flecha vertical / glifo con mano centrado: derecho (girado cargaria su tinta a un lado)
+            out["rotation"] = 0.0
         if out["name"] not in ("underline", "arrow_curve", "arrow_straight"):
             out.pop("path_to", None)
         if _luma(out["color"]) > 0.85 and (bg is None or contrast("#FFFFFF", bg["rgb"]) < 4.5):
@@ -8478,7 +9301,7 @@ def _sfx_variant(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict:
     return out
 
 
-_ANCHOR_RX = re.compile(r"_([sjt]\d+)[a-z]?\d*$")
+_ANCHOR_RX = re.compile(r"_([sjt]\d+)[a-z]?\d*(?:_m)?$")     # '_m': gemelo espejo de un par
 
 
 def _anchor_of(iid: str) -> str | None:
@@ -8486,9 +9309,33 @@ def _anchor_of(iid: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _default_size(g: dict) -> float:
+    """`size` con que el renderer dibuja un grafico que no lo trae (graphics.DEFAULTS)."""
+    try:
+        from . import graphics as G
+        return float((G.DEFAULTS.get(g.get("kind")) or {}).get("size") or 0.1)
+    except Exception:
+        return 0.1
+
+
+def _accent_sfx_names(g: dict) -> tuple:
+    """Nombres del SFX con que entra un acento (_doodle_sfx / icono de accent_for)."""
+    if g.get("kind") == "icon":
+        return ("bubble", "pop")
+    n = g.get("name")
+    if n in ("sparkle", "star4", "star5", "burst", "rays"):
+        return ("sparkle",)
+    if n in ("question", "exclaim", "heart", "check"):
+        return ("pop_soft",)
+    if n == "lightning":
+        return ("impact_soft",)
+    return ("pen_scribble",)
+
+
 def _accent_rect(ch: "_Choreo", g: dict) -> tuple:
-    x, y = float(g.get("x", 0.5)), float(g.get("y", 0.5))
-    sz = float(g.get("size", 0.1))
+    x = float(g["x"]) if g.get("x") is not None else 0.5
+    y = float(g["y"]) if g.get("y") is not None else 0.5
+    sz = float(g.get("size") or _default_size(g))
     asp = float(g.get("aspect", 1.0) or 1.0) if g.get("name") == "circle_scribble" else 1.0
     hh = (0.014 if g.get("name") in ("underline", "squiggle") else sz * asp / 2 / ch.aspect)
     return (x - sz / 2, y - hh, x + sz / 2, y + hh)
@@ -8496,55 +9343,82 @@ def _accent_rect(ch: "_Choreo", g: dict) -> tuple:
 
 def _reanchor_accents(ch: "_Choreo", fx: dict, old: dict, new: dict, only: set) -> list[str]:
     """Acentos LIGADOS a un titulo que cambio de lugar (garabato / icono de la misma frase cuyo
-    rectangulo tocaba la tinta vieja): se mueven con el titulo (subrayado bajo la tinta nueva,
-    circulo alrededor, el resto con el mismo desplazamiento relativo). Si ya no caben (SAFE,
-    cara, otra tinta), se apagan. -> ids tocados."""
+    rectangulo tocaba la tinta vieja): se mueven con el titulo, SIMETRICOS (subrayado bajo la
+    tinta nueva y circulo alrededor, centrados; el resto en un lugar simetrico junto a la tinta
+    nueva: par espejo o centrado, con el gemelo '<id>_m' si queda en par). Si ya no caben (banda
+    simetrica, cara, otra tinta), se apagan. -> ids tocados."""
     r0, r1 = measure_text(old, ch.style), measure_text(new, ch.style)
     if r0 is None or r1 is None:
         return []
     anc = _anchor_of(old.get("id", ""))
     a, b = float(old["start"]), float(old["end"])
     touched = []
-    for g in fx.get("graphics") or []:
+    gl = fx.get("graphics") or []
+    for g in list(gl):
         if g.get("id") in only or g.get("kind") not in ("doodle", "icon") or g.get("locked"):
             continue
-        if _anchor_of(g.get("id", "")) != anc or not (float(g["start"]) < b and a < float(g["end"])):
+        gid = str(g.get("id", ""))
+        if gid.endswith(TWIN) and any(str(o.get("id")) == gid[:-len(TWIN)] for o in gl):
+            continue                                # el gemelo se mueve con su base
+        if _anchor_of(gid) != anc or not (float(g["start"]) < b and a < float(g["end"])):
             continue
         gr = _accent_rect(ch, g)
         if not (gr[0] < r0[2] + 0.08 and r0[0] - 0.08 < gr[2] and gr[1] < r0[3] + 0.06 and r0[1] - 0.06 < gr[3]):
             continue
         name = g.get("name")
         w1, h1 = r1[2] - r1[0], r1[3] - r1[1]
+        twin = next((o for o in gl if str(o.get("id")) == gid + TWIN), None)
         if name in ("underline", "squiggle"):
-            g.update({"x": _r((r1[0] + r1[2]) / 2, 3), "y": _r(min(r1[3] + 0.012, SAFE["bottom"] - 0.012), 4),
+            g.update({"x": _r(ch.XC, 3), "y": _r(min(r1[3] + 0.012, SAFE["bottom"] - 0.012), 4),
                       "size": _r(min(ch.MAXW, w1 * 1.02), 3)})
         elif name == "circle_scribble":
-            g.update({"x": _r((r1[0] + r1[2]) / 2, 3), "y": _r((r1[1] + r1[3]) / 2, 4),
+            g.update({"x": _r(ch.XC, 3), "y": _r((r1[1] + r1[3]) / 2, 4),
                       "size": _r(min(0.9, w1 * 1.2 + 0.03), 3),
                       "aspect": _r(_clamp((h1 * 1.6 + 0.02) * ch.aspect / max(1e-3, w1 * 1.2 + 0.03), 0.3, 1.0), 3)})
         else:
-            # mismo lugar relativo a la tinta (proporcional dentro, mismo margen fuera)
-            x, y = float(g.get("x", 0.5)), float(g.get("y", 0.5))
-
-            def rel(v, lo0, hi0, lo1, hi1):
-                if v < lo0:
-                    return lo1 - (lo0 - v)
-                if v > hi0:
-                    return hi1 + (v - hi0)
-                return lo1 + (v - lo0) / max(1e-3, hi0 - lo0) * (hi1 - lo1)
-            g.update({"x": _r(rel(x, r0[0], r0[2], r1[0], r1[2]), 3), "y": _r(rel(y, r0[1], r0[3], r1[1], r1[3]), 4)})
+            # lugar SIMETRICO junto a la tinta nueva (la tinta nueva cuenta como ocupada)
+            t0, t1 = float(g["start"]), float(g["end"])
+            fa, fb = ch.f(t0), ch.f(t1)
+            tmp = (ch.f(float(new["start"])), ch.f(float(new["end"])), *ch._pad_rect(new, r1), "__reanchor__")
+            ch.ink.append(tmp)
+            spots = ch.accent_spot(ch._pad_rect(new, r1), float(g.get("size", 0.1) or 0.1), fa, fb,
+                                   ch.shot_at(t0 + 0.02), t0, t1,
+                                   pair=g.get("kind") == "doodle" and name in SYM_GLYPHS,
+                                   own={gid, gid + TWIN})
+            ch.ink.remove(tmp)
+            if not spots:
+                g["enabled"] = False
+                if twin is not None:
+                    twin["enabled"] = False
+                touched.append(gid)
+                continue
+            px, py, s_ = spots[0]
+            g.update({"x": _r(px, 3), "y": _r(py, 4), "size": _r(s_, 3)})
+            if len(spots) == 2:
+                if twin is None:
+                    twin = {k: copy.deepcopy(v) for k, v in g.items()}
+                    gl.insert(gl.index(g) + 1, twin)
+                twin.update({k: copy.deepcopy(g[k]) for k in ch._TWIN_KEYS if k in g})
+                twin.update({"id": gid + TWIN, "x": _r(2 * ch.XC - px, 3),
+                             "rotation": _r(-float(g.get("rotation", 0.0) or 0.0), 1)})
+                touched.append(gid + TWIN)
+            else:
+                if twin is not None:
+                    gl.remove(twin)
+                    touched.append(gid + TWIN)
+                if g.get("kind") == "doodle" and name not in SYM_GLYPHS:
+                    g["rotation"] = 0.0
+            touched.append(gid)
+            continue
         nr = _accent_rect(ch, g)
         shot = ch.shot_at(float(g["start"]) + 0.02)
         core = ch.face_core(shot, float(g["start"]), float(g["end"]))
-        bad = nr[0] < SAFE["left"] - 0.03 or nr[2] > SAFE["right"] + 0.05 or nr[1] < SAFE["top"] - 0.01 \
+        bad = nr[0] < SYM_L - 0.02 or nr[2] > SYM_R + 0.02 or nr[1] < SAFE["top"] - 0.01 \
             or nr[3] > SAFE["bottom"] + 0.005 or (core is not None and nr[0] < core[2] and core[0] < nr[2]
                                                   and nr[1] < core[3] and core[1] < nr[3])
-        if name not in ("underline", "squiggle", "circle_scribble") and \
-                nr[0] < r1[2] and r1[0] < nr[2] and nr[1] < r1[3] and r1[1] < nr[3]:
-            bad = True                         # un icono / destello sobre la tinta nueva
         if bad:
             g["enabled"] = False
-        touched.append(str(g.get("id")))
+        touched.append(gid)
     return touched
 
 
@@ -8554,9 +9428,14 @@ def _variants(plan: dict, shots: list[dict], script: dict, style: str, intensity
     momento y el mismo contenido (otro preset / kind / posicion / parametros), decidida por
     (semilla, rev). No agrega items; solo mueve los acentos ligados al titulo que cambio de
     lugar y el SFX emparejado de una transicion. Un item bloqueado (locked o director.locked)
-    NO se regenera aunque se pida. -> (fx, ids_sin_variante, ids_bloqueados)."""
+    NO se regenera aunque se pida. Un par espejo se regenera junto (pedir el gemelo '<id>_m'
+    regenera su base y el gemelo la sigue en espejo; symmetrize al final). -> (fx,
+    ids_sin_variante, ids_bloqueados)."""
     old = plan.get("fx") or {}
     fx = {tr: [copy.deepcopy(it) for it in old.get(tr) or [] if isinstance(it, dict)] for tr in TRACKS}
+    gids = {str(o.get("id")) for o in fx["graphics"]}
+    twins = {str(i) for i in only if str(i).endswith(TWIN) and str(i)[:-len(TWIN)] in gids}
+    only = set(only) | {i[:-len(TWIN)] for i in twins}
     others = {tr: [it for it in fx[tr] if it.get("id") not in only] for tr in TRACKS}
     sc = dict(script)
     sc["sents"] = [dict(s_, info={k: v for k, v in s_["info"].items() if not k.startswith("_")})
@@ -8572,6 +9451,8 @@ def _variants(plan: dict, shots: list[dict], script: dict, style: str, intensity
             if it.get("locked") or iid in locked_ids:
                 locked.append(str(iid))
                 continue
+            if tr == "graphics" and str(iid).endswith(TWIN) and str(iid)[:-len(TWIN)] in gids:
+                continue                    # el gemelo sigue a su base (espejo exacto)
             fn = {"text": _text_variant, "graphics": _graphic_variant, "cutaways": _cutaway_variant,
                   "effects": _effect_variant, "transitions": _transition_variant, "sfx": _sfx_variant}[tr]
             try:
@@ -8672,6 +9553,74 @@ def _reink_orphans(ch: "_Choreo", fixed: dict) -> list[str]:
                 ln["color"] = it.get("color")
         out.append(str(it.get("id")))
     return out
+
+
+def _sym_choreo(p: dict) -> "_Choreo":
+    """Coreografo con el plan COMPLETO ya colocado (todo como fijo: ocupacion, acentos y tinta de
+    textos) mas la tinta estimada de los graficos, para medir contra lo que hay."""
+    fx = p.get("fx") or {}
+    d = p.get("director") or {}
+    style = d.get("style") if d.get("style") in STYLES else "dinamico"
+    shots = [s_ for s_ in p.get("shots") or [] if isinstance(s_, dict) and "start" in s_ and "end" in s_]
+    fixed = {tr: [copy.deepcopy(it) for it in fx.get(tr) or [] if isinstance(it, dict)] for tr in TRACKS}
+    try:
+        pub = d.get("script")
+        script = _script_from_public(p, pub, shots) if pub else analyze_script(p, shots, use_llm=False)
+        ch = _Choreo(p, shots, script, style, float(d.get("intensity", 0.75)), int(d.get("seed", 7)),
+                     fixed=fixed, rev=int(d.get("rev", 0)))
+    except Exception:
+        # plan sin palabras o sin guion guardado: sin frases (la geometria de tomas y cara basta)
+        ch = _Choreo(p, shots, {"words": [], "sents": [], "entities": {}, "anchors": {}}, style,
+                     float(d.get("intensity", 0.75)), int(d.get("seed", 7)), fixed=fixed, rev=int(d.get("rev", 0)))
+    for g in fx.get("graphics") or []:
+        if not isinstance(g, dict) or g.get("enabled") is False or g.get("kind") in ("progress",):
+            continue
+        if g.get("kind") in ("doodle", "icon") and not g.get("path_to"):
+            continue                    # los acentos se miden por su posicion (franja 'accent')
+        try:
+            r = ch._sym_rect("graphics", g)
+        except Exception:
+            r = None
+        if r is not None:
+            ch.ink.append((ch.f(float(g["start"])), ch.f(float(g["end"])), *r, str(g.get("id"))))
+    return ch
+
+
+def symmetrize(plan: dict) -> dict:
+    """Regla de SIMETRIA sobre un plan EXISTENTE (sin LLM, determinista; mismos ids, tiempos y
+    contenido) -> plan (copia). Solo lo de la IA (src 'ai', sin `locked`, fuera de
+    director.locked y de sus composiciones bloqueadas): textos y graficos centrados en x = 0.5 con
+    ancho <= SYM_W (cascade centrada, rotulo align 'center', contador anchor 'center'), escenas
+    con decorados en par espejo exacto, acentos centrados o en par espejo ('<id>' y '<id>_m')
+    junto a su titulo, flechas verticales centradas; lo que no cabe simetrico sin tapar la cara
+    (rostro de shots) u otra tinta se quita (con su SFX). Lo del usuario nunca se mueve."""
+    p = copy.deepcopy(plan)
+    fx = p.get("fx")
+    if not isinstance(fx, dict):
+        return p
+    d = p.get("director") if isinstance(p.get("director"), dict) else {}
+    locked_ids = set(d.get("locked") or [])
+    frozen = locked_ids | _lock_groups(fx, locked_ids)
+
+    def mv(it) -> bool:
+        return isinstance(it, dict) and it.get("src", "ai") == "ai" and not it.get("locked") \
+            and str(it.get("id")) not in frozen
+    ch = _sym_choreo(p)
+    rep = ch.symmetry(fx, mv=mv, plan_mode=True)
+    cap = fx.get("captions")
+    if isinstance(cap, dict) and "captions" not in locked_ids and cap.get("x") is not None \
+            and abs(float(cap["x"]) - 0.5) > 1e-6:
+        cap["x"] = 0.5
+    if rep["twins"] or rep["dropped"]:
+        notes = [n for n in d.get("notes") or [] if not (isinstance(n, str) and n.startswith("simetria:"))]
+        parts = []
+        if rep["twins"]:
+            parts.append(f"{len(rep['twins'])} acento(s) en par espejo")
+        if rep["dropped"]:
+            parts.append(f"quitado (sin lugar simetrico): {', '.join(rep['dropped'])[:160]}")
+        d["notes"] = notes + ["simetria: " + "; ".join(parts)]
+        p["director"] = d
+    return p
 
 
 def redirect(plan: dict, style: str | None = None, intensity: float | None = None,
@@ -8939,7 +9888,8 @@ def _redirect_only(p: dict, d: dict, shots: list[dict], script: dict, style: str
             ["musica nueva: sin sincronia de beats hasta re-dirigir"]
     d.update({"style": style, "intensity": intensity, "seed": plan_seed, "rev": rev, "notes": notes})
     p["director"] = d
-    return _finalize(p)
+    # lo regenerado (y lo que se movio con ello) tambien cumple la regla de simetria
+    return _finalize(symmetrize(p))
 
 
 # ---------------------------------------------------------------- lectura humana

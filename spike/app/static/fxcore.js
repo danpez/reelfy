@@ -221,6 +221,7 @@
       it.start = round3(s); it.end = round3(Math.min(dur, s + L)); it.intensity = 1;
     }
     fillDefaults(schema, track, it);
+    symDefaults(track, it);
     if (track === "text" && !it.text && !(it.lines && it.lines.length)) it.text = "Tu texto";
     if (track === "graphics" && it.kind === "sticker_text" && !it.text) it.text = "NUEVO";
     if (track === "graphics" && it.kind === "cta" && !it.label) it.label = "Sigueme";
@@ -229,6 +230,31 @@
     if (track === "graphics" && it.kind === "icon" && !it.name) it.name = "star";
     if (track === "cutaways" && !getPath(it, "text.text")) setPath(it, "text.text", "Titulo");
     if (track === "transitions" && !it.dur) it.dur = 0.4;
+    return it;
+  }
+
+  /** Red de seguridad de la SIMETRIA (regla de la marca) para lo que agrega el usuario: todo nace
+      centrado en x = XC aunque el catalogo traiga otro default (el PiP sin posicion y la barra de
+      progreso no usan x). Las posiciones explicitas que pasa quien llama (`extra`) se aplican
+      despues y mandan. */
+  function symDefaults(track, it) {
+    if (track === "text") { it.x = XC; it.align = "center"; if (it.preset === "counter") it.anchor = "center"; }
+    else if (track === "graphics" && it.kind !== "media" && it.kind !== "progress") {
+      it.x = XC;
+      if (it.kind === "lower_third") it.align = "center";
+    }
+    return it;
+  }
+  /** lower_third: con align "center" x es el CENTRO del panel; con "left" o sin align (planes
+      viejos) es su borde izquierdo. */
+  const ltCentered = it => !!it && it.kind === "lower_third" && it.align === "center";
+  /** Cambia la alineacion de un rotulo: al cambiar el significado de x se recoloca simetrico
+      (centrado en XC; a la izquierda en el borde de SAFE, el espejo de la columna de botones). */
+  function setLowerThirdAlign(it, align) {
+    const was = ltCentered(it);
+    it.align = align === "left" ? "left" : "center";
+    const now = ltCentered(it);
+    if (was !== now) it.x = now ? XC : SAFE.left;
     return it;
   }
 
@@ -253,7 +279,12 @@
     const key = kindKey(schema, track);
     const oldP = new Set(kindParams(schema, track, item[key]).map(p => p.k.split(".")[0]));
     const newP = new Set(kindParams(schema, track, kind).map(p => p.k.split(".")[0]));
+    // x cambia de significado con un rotulo anclado a la izquierda (borde izquierdo vs centro):
+    // se recentra; un rotulo nuevo nace centrado (x sigue siendo un centro)
+    const wasEdge = item.kind === "lower_third" && !ltCentered(item);
     oldP.forEach(k => { if (!newP.has(k) && !["x", "y", "size", "color", "text"].includes(k)) delete item[k]; });
+    if (track === "graphics" && kind === "lower_third" && item.kind !== "lower_third") item.align = "center";
+    if (track === "graphics" && wasEdge && kind !== "lower_third") { item.x = XC; delete item.align; }
     item[key] = kind;
     return fillDefaults(schema, track, item);
   }
@@ -514,7 +545,7 @@
   const TEXT_PRESETS = {
     title_pop: { y: 0.2, align: "center", space: 1.12, gap: 0.13, max_size: 0.125, min_size: 0.06, cpl: 13, max_lines: 3 },
     stack: { y: 0.62, align: "center", space: 1.1, gap: 0.13, max_size: 0.24, min_size: 0.05, cpl: 12, max_lines: 4 },
-    cascade: { y: 0.2, align: "left", space: 1.0, gap: 0.1, max_size: 0.095, min_size: 0.05, cpl: 12, max_lines: 4 },
+    cascade: { y: 0.2, align: "center", space: 1.0, gap: 0.1, max_size: 0.095, min_size: 0.05, cpl: 12, max_lines: 4 },
     serif_elegant: { y: 0.15, align: "center", space: 1.0, gap: 0.06, max_size: 0.135, min_size: 0.06, cpl: 15, max_lines: 3 },
     script_accent: { y: 0.5, align: "center", space: 1.0, gap: 0.02, max_size: 0.24, min_size: 0.08, cpl: 14, max_lines: 2 },
     behind_giant: { y: 0.3, align: "center", space: 1.0, gap: 0.035, max_size: 0.46, min_size: 0.12, cpl: 9, max_lines: 2, drift: 0.04, case: "upper" },
@@ -534,10 +565,12 @@
     if (/Italic$/.test(f)) return { font: f, synth: false };
     return { font: f, synth: true };
   }
-  /** Ancho util de un titulo (text._usable): segun x, alineacion, `width` y la deriva del preset. */
+  /** Ancho util de un titulo (text._usable): segun x, `width` y la deriva del preset. x es el
+      CENTRO del bloque con cualquier alineacion (simetria: `align` solo alinea las lineas dentro
+      del bloque), asi que el ancho es simetrico alrededor de x (`align` se ignora). */
   function textUsable(x, align, width, drift) {
     const xc = Math.min(Math.max(+x, SAFE.left), SAFE.right);
-    const w = align === "left" ? SAFE.right - xc : align === "right" ? xc - SAFE.left : 2 * Math.min(xc - SAFE.left, SAFE.right - xc);
+    const w = 2 * Math.min(xc - SAFE.left, SAFE.right - xc);
     return Math.max(0.3, w) * (width != null && +width > 0 ? +width : 1) / (1 + Math.max(0, +drift || 0));
   }
 
@@ -585,6 +618,7 @@
     in_cubic: p => p * p * p, out_cubic: p => 1 - Math.pow(1 - p, 3),
     in_out_cubic: p => (p < .5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2),
     out_quart: p => 1 - Math.pow(1 - p, 4), smoothstep: p => p * p * (3 - 2 * p),
+    out_expo: p => (p >= 1 ? 1 : 1 - Math.pow(2, -10 * p)),
     out_back: p => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2); },
   };
   function ease(name, p) { p = Math.max(0, Math.min(1, p)); return (EASE[name] || EASE.in_out_cubic)(p); }
@@ -969,11 +1003,64 @@
   }
 
   // ------------------------------------------------------------------ geometria (espejo del render)
-  const SAFE = { top: 0.09, bottom: 0.80, left: 0.06, right: 0.88 };
+  const SAFE = { top: 0.09, bottom: 0.80, left: 0.12, right: 0.88 };  // simetrica en x (ctx.SAFE)
+  const XC = 0.5, SYM_W = SAFE.right - SAFE.left;   // ctx.XC / ctx.SYM_W: centro y ancho max centrado
+  const SNAP_X = 0.012;
+  /** Revelacion del rotulo (graphics.draw_lower_third): la barra de acento crece, el panel se
+      despliega y entran titulo y rol; con anim_out 'undraw' (default) se pliega al final.
+      -> {bar, pan, te, se} en 0..1. */
+  function lowerThirdReveal(it, lt, L) {
+    const ain = it.anim_in || "draw", aout = it.anim_out || "undraw";
+    const t0 = it.out_dur != null ? +it.out_dur : 0.4;
+    const tout = Math.max(1e-3, L > 0 ? Math.min(t0, L * 0.5) : t0);
+    const pout = Math.max(0, Math.min(1, (lt - (L - tout)) / tout));
+    const lin = ain !== "none" ? lt : 10, pf = aout === "undraw" ? pout : 0, out = ease("in_cubic", pf);
+    return {
+      bar: ease("out_expo", lin / 0.32) * (1 - ease("in_cubic", (pf - 0.55) / 0.45)),
+      pan: ease("out_expo", (lin - 0.12) / 0.5) * (1 - ease("in_out_cubic", pf / 0.7)),
+      te: ease("out_cubic", (lin - 0.28) / 0.45) * (1 - out),
+      se: ease("out_cubic", (lin - 0.42) / 0.45) * (1 - out),
+    };
+  }
+  /** Colocacion horizontal del rotulo en px (graphics.draw_lower_third). Centrado: el centro es
+      safe_cx(x*W, pw/2) (dentro de [SAFE.left, SAFE.right]; si no cabe, el centro del cuadro) y el
+      ancho util del texto es SYM_W*W - 2*padx. Legado (sin align o 'left'): x0 = borde izquierdo
+      (x o 0.07, hasta SAFE.right - 0.2) y el texto llega hasta SAFE.right. `pw` = panel (texto +
+      2*padx), `barw` = barra vertical del legado. -> {centered, cx, x0, left, right, avail}. */
+  function lowerThirdX(it, W, pw, barw, padx, minAvail) {
+    const pad2 = 2 * (+padx || 0), mn = +minAvail || 0;
+    if (ltCentered(it)) {
+      const lo = SAFE.left * W + pw / 2, hi = SAFE.right * W - pw / 2, x = (it.x != null ? +it.x : XC) * W;
+      const cx = lo > hi ? XC * W : Math.min(Math.max(x, lo), hi);
+      return { centered: true, cx, x0: cx - pw / 2, left: cx - pw / 2, right: cx + pw / 2, avail: Math.max(mn, SYM_W * W - pad2) };
+    }
+    const x0 = Math.min(Math.max(it.x != null ? +it.x : 0.07, 0), SAFE.right - 0.2) * W, bw = +barw || 0;
+    return { centered: false, cx: x0 + (bw + pw) / 2, x0, left: x0, right: x0 + bw + pw, avail: Math.max(mn, SAFE.right * W - x0 - bw - pad2) };
+  }
+  /** Iman al centro al arrastrar en el canvas: `nx` = x propuesto del ancla, `bcx` = centro de la
+      caja VISIBLE en la misma posicion (fracciones del ancho). Si la caja queda a < tol del centro
+      se corre el ancla lo que falta para que la caja quede exactamente centrada (un rotulo
+      anclado a la izquierda, un texto alineado, una pila de redes...). -> [x, iman?]. */
+  function snapCenterX(nx, bcx, tol) {
+    const d = XC - +bcx;
+    if (Math.abs(d) < (tol == null ? SNAP_X : tol)) return [Math.round((+nx + d) * 1e3) / 1e3, true];
+    return [+nx, false];
+  }
   /** graphics.draw_icon: el badge mide `size` de diametro y el icono 0.56*size; sin badge, size. */
   function iconGeom(sizePx, badge) {
     const b = badge && badge !== "none";
     return { badge: b ? sizePx : 0, icon: b ? sizePx * 0.56 : sizePx, box: sizePx };
+  }
+  /** graphics.icon_ink_dx: desfase x del centro de la tinta de un glifo respecto al centro de su
+      caja de 24 (unidades de la caja). `cols` = alfa maximo por columna del glifo rasterizado en
+      `cols.length` px (umbral 24 como el QA de simetria). Sin tinta: 0. El icono se dibuja
+      corrido -dx*caja/24 para que su tinta quede centrada en x (phone, sparkles, globe). */
+  function iconInkDx(cols) {
+    const n = cols ? cols.length : 0;
+    let a = -1, b = -1;
+    for (let i = 0; i < n; i++) if (cols[i] > 24) { if (a < 0) a = i; b = i; }
+    if (a < 0 || !n) return 0;
+    return Math.round(((a + b + 1) / 2 * 24 / n - 12) * 1e3) / 1e3;
   }
   /** text._kicker_split: etiqueta del kicker (explicita, primera linea, o el texto corto entero). */
   function kickerSplit(item, lines) {
@@ -1005,8 +1092,9 @@
 
   // ------------------------------------------------------------------ PiP (graphics.media) automatico
   /* Contrato compartido con render.media_auto_place (doc 4.2b): un PiP con x/y vacios se coloca
-     lejos de la cara, dentro de SAFE, arriba de los subtitulos y esquivando textos y graficos. */
-  const PIP_MARGIN = 0.015, PIP_SCALES = [1.0, 0.85, 0.72, 0.6];
+     CENTRADO en x (simetria), lejos de la cara (en el pecho o arriba de la cabeza, achicandose),
+     dentro de SAFE, arriba de los subtitulos y esquivando textos y graficos. */
+  const PIP_MARGIN = 0.015, PIP_SCALES = [1.0, 0.85, 0.72, 0.6, 0.5, 0.4];
   /** Tarjeta del PiP en px (graphics.media_box / render._pip_card): ancho max size*W, alto max
       1.78x ese ancho; sin `aspect` toma la proporcion del medio (cw x ch). */
   function pipCard(size, aspect, cw, ch, W) {
@@ -1018,27 +1106,24 @@
     return [iw * k, ih * k];
   }
   function ovl(a, b) { return Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) * Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1])); }
-  /** Port exacto de render.media_auto_place -> [cx, cy, escala] (fracciones de la caja). */
+  /** Port exacto de render.media_auto_place -> [cx, cy, escala] (fracciones de la caja). Siempre
+      centrado en x = XC: para librar la cara baja al pecho, sube arriba de la cabeza o se achica,
+      nunca se va de lado. */
   function mediaAutoPlace(face, w, h, capTop, avoid) {
     const S = SAFE, m = PIP_MARGIN;
     const bottom = capTop ? Math.min(S.bottom, capTop) : S.bottom;
-    const mid = (S.left + S.right) / 2;
+    const mid = XC;
     const av = (avoid || []).map(r => r.slice(0, 4).map(Number));
     const fit = (cx, cy, ww, hh) => {
       const lx = S.left + ww / 2 + m, hx = S.right - ww / 2 - m, ly = S.top + hh / 2 + m, hy = bottom - hh / 2 - m;
       return [lx > hx ? mid : Math.min(Math.max(cx, lx), hx), ly > hy ? (S.top + bottom) / 2 : Math.min(Math.max(cy, ly), hy)];
     };
     let zone = null, order;
-    if (!face) order = () => [[1.0, 0.0], [0.0, 0.0], [1.0, 1.0]];
+    if (!face) order = () => [[mid, 0.0], [mid, 1.0]];                       // arriba, abajo (fit acota)
     else {
       const [fx, fy, fw, fh] = face.map(Number);
       zone = [fx - fw / 2 - 0.03, fy - fh / 2 - 0.05, fx + fw / 2 + 0.03, fy + fh / 2 + 0.03];
-      const first = fx >= mid ? -1 : 1;
-      order = (ww, hh) => {
-        const side = [zone[0] - m - ww / 2, zone[2] + m + ww / 2];
-        const [a, b] = first < 0 ? [side[0], side[1]] : [side[1], side[0]];
-        return [[a, zone[1] + hh / 2], [b, zone[1] + hh / 2], [fx, zone[3] + m + hh / 2], [fx, zone[1] - m - hh / 2]];
-      };
+      order = (ww, hh) => [[mid, zone[3] + m + hh / 2], [mid, zone[1] - m - hh / 2]];   // pecho, arriba de la cabeza
     }
     let free = null, bestFace = null;
     const r4 = v => Math.round(v * 1e4) / 1e4;
@@ -1321,7 +1406,8 @@
   }
 
   return {
-    MIN_KEEP, MIN_FRAG, SNAP_S, TRACKS, EVENT_TRACKS, RULER_STEPS, SAFE, PRO_LANGS, MIXERS,
+    MIN_KEEP, MIN_FRAG, SNAP_S, TRACKS, EVENT_TRACKS, RULER_STEPS, SAFE, XC, SYM_W, SNAP_X, PRO_LANGS, MIXERS,
+    symDefaults, ltCentered, setLowerThirdAlign, snapCenterX, lowerThirdReveal, lowerThirdX,
     keepsFromCuts, Timeline, timelineFromPlan,
     getPath, setPath, clone, isEvent, kindKey, itemKind, kindParams, commonParams, kinds, kindLabel,
     fillDefaults, newId, allIds, newItem, duplicateItem, changeKind, itemStart, itemEnd, eventSpan,
@@ -1330,7 +1416,7 @@
     captionGroups, ease, cameraAt, normWord, wordMatch, unitTimes,
     accentEs, hasLines, titleText, setTitleText, clearLineStyles, captionsHiddenAt, captionGroupSuppressed, captionY, snapTargets,
     captionRangeAlpha, capGroupAt, photoCaptionY, photoCaptionRows, captionYAt,
-    sameVisual, regenCompanions, mergeRegenerate, normText, contentSig, dedupeFx, iconGeom, kickerSplit, anchorXY,
+    sameVisual, regenCompanions, mergeRegenerate, normText, contentSig, dedupeFx, iconGeom, iconInkDx, kickerSplit, anchorXY,
     pipCard, mediaAutoPlace, overlayBoxes, pipPlace, faceMedian,
     transitionOffJoin, setProLangs, planForLang, fxTexts, applyFxTexts, musicSig, mediaParam, mediaKinds, mediaKindFor,
     humanSkip,

@@ -968,8 +968,9 @@ def test_counter_thousands_dot_separator():
 
 
 def test_counter_suffix_does_not_slide_while_counting(monkeypatch):
+    """anchor right (odometro, a pedido): los digitos crecen a la izquierda y el sufijo no se mueve."""
     cap = _Capture(monkeypatch)
-    item = _item("counter", text="")
+    item = _item("counter", text="", anchor="right")
     xs = []
     for lt in np.linspace(0.13, 1.3, 25):
         cap.reset()

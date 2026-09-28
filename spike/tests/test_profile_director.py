@@ -720,21 +720,23 @@ def test_socials_grid_and_common_width_render():
     ctx = C.FrameCtx(W=1080, H=1920, style="dinamico")
     links = [{"platform": p_, "text": t_} for p_, t_ in (("tiktok", "@a.demo"), ("facebook", "@b.demo"),
                                                            ("whatsapp", "+52 33 1234 5678"), ("youtube", "@c.demo"))]
-    it = {"kind": "socials", "links": links, "layout": "grid", "cols": 2, "size": 0.058, "width": 0.8}
+    # ancho comun = lo mas ancho que cabe centrado (SYM_W, 0.76): el mismo aire a los dos lados
+    wc = C.SYM_W
+    it = {"kind": "socials", "links": links, "layout": "grid", "cols": 2, "size": 0.058, "width": wc}
     chips, rows, h, gap, tw, th, head = G._socials_layout(G.sanitize(it), ctx)
     assert [len(r) for r in rows] == [2, 2] and len({c[3] for c in chips}) == 1
-    assert abs(tw - 0.8 * 1080) < 2.0
+    assert abs(tw - wc * 1080) < 2.0
     link = {"kind": "cta", "variant": "link_below", "label": "Agenda en PaseoClub", "display": "paseo.club/dra-demo",
-            "size": 0.66, "width": 0.8}
-    assert abs(G.cta_extent(link, ctx) * 2 - 0.8 * 1080) < 1.0
-    fol = {"kind": "cta", "variant": "follow", "title": "Dra. Demo", "handle": "@dra.demo", "size": 0.78, "width": 0.8}
-    assert abs(G.cta_extent(fol, ctx) * 2 - 0.8 * 1080) < 1.0
+            "size": 0.66, "width": wc}
+    assert abs(G.cta_extent(link, ctx) * 2 - wc * 1080) < 1.0
+    fol = {"kind": "cta", "variant": "follow", "title": "Dra. Demo", "handle": "@dra.demo", "size": 0.76, "width": wc}
+    assert abs(G.cta_extent(fol, ctx) * 2 - wc * 1080) < 1.0
     arr, surf = C.new_frame(1080, 1920)
     cv = surf.getCanvas()
     for kind, x in (("socials", it), ("cta", link), ("cta", fol),
                     ("socials", {"kind": "socials", "variant": "watermark", "links": links[:1], "size": 0.03,
-                                 "backdrop": 0.34, "x": 0.2, "y": 0.1})):
-        G.RENDERERS[kind](cv, dict(x, id="z", x=x.get("x", 0.47), y=x.get("y", 0.5)), 1.5, 4.0, ctx)
+                                 "backdrop": 0.34, "x": 0.5, "y": 0.1})):
+        G.RENDERERS[kind](cv, dict(x, id="z", x=x.get("x", 0.5), y=x.get("y", 0.5)), 1.5, 4.0, ctx)
     assert arr[..., 3].max() > 0
 
 

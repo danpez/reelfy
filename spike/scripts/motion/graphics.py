@@ -4,8 +4,13 @@ llamadas a la accion, barra de progreso y stickers de texto.
 Contrato (docs/MOTION-ENGINE.md 3.1 y 4.2):
     RENDERERS[kind](canvas, item, lt, dur, ctx) -> None
   - `lt`: segundos desde el inicio del item (tiempo final); `dur`: duracion final del item.
-  - Campos comunes: x, y (centro normalizado, salvo lower_third/progress), size (fraccion de W),
-    color, anim_in, anim_out, rotation (grados), intensity (0..1).
+  - Campos comunes: x, y (centro normalizado, salvo lower_third legado/progress), size (fraccion
+    de W), color, anim_in, anim_out, rotation (grados), intensity (0..1).
+  - Regla de simetria: todo overlay centrado va por defecto en x = 0.5 con ancho <= SYM_W (0.76)
+    y su TINTA visible queda centrada en x (mismo aire a izquierda y derecha); lo que no cabe se
+    achica o se centra en 0.5, nunca se empuja de lado. lower_third: `align` center (x = centro)
+    o left / sin align (legado: x = borde izquierdo). Garabatos: el gemelo espejo '<id>_m' de un
+    glifo simetrico se dibuja reflejado (pares del director en x y 1-x).
 
 Lenguaje visual (referencia: ejemplo_objetivo.mp4):
   - Garabatos con trazo de pincel real (ancho variable con punta afilada), "boil" a 12 fps
@@ -290,8 +295,11 @@ def fit_font(name: str, s: str, size_px: float, max_w: float, min_px: float = 8.
     return f
 
 
-XC = (C.SAFE["left"] + C.SAFE["right"]) / 2.0  # centro horizontal de SAFE (0.47)
-SAFE_W = C.SAFE["right"] - C.SAFE["left"]       # ancho util (0.82 de W)
+# regla de simetria: todo overlay centrado va en x = 0.5 y mide a lo mas SYM_W (0.76 de W), asi
+# deja el mismo aire a izquierda y derecha (ctx.SAFE es simetrica: 0.12..0.88)
+XC = C.XC                                       # centro horizontal de todo overlay centrado (0.5)
+SAFE_W = C.SYM_W                                # ancho maximo de un overlay centrado (0.76 de W)
+SYM_W = C.SYM_W
 ANCHORS = ("face", "face_left", "face_right", "face_top")
 
 
@@ -331,11 +339,13 @@ def center_of(item: dict, ctx, dx: float = XC, dy: float = 0.5) -> tuple[float, 
 
 
 def safe_cx(cx: float, half_w: float, ctx) -> float:
-    """Recorre el centro horizontal para que [cx-half_w, cx+half_w] quede dentro de SAFE
-    (columna de botones de TikTok a la derecha). Si no cabe, lo centra en SAFE."""
+    """Recorre el centro horizontal para que [cx-half_w, cx+half_w] quede dentro de la banda
+    SIMETRICA [SAFE.left, SAFE.right] (0.12..0.88: columna de botones de TikTok a la derecha y
+    el mismo margen a la izquierda). Si no cabe, lo centra en el cuadro (x = 0.5): nunca se
+    empuja de lado. Un item en x = 0.5 con half_w <= SYM_W/2 nunca se mueve."""
     lo, hi = C.SAFE["left"] * ctx.W + half_w, C.SAFE["right"] * ctx.W - half_w
     if lo > hi:
-        return XC * ctx.W
+        return C.XC * ctx.W
     return _clamp(cx, lo, hi)
 
 
@@ -355,8 +365,10 @@ DEFAULTS = {
     "icon": {"x": XC, "y": 0.4, "size": 0.16, "anim_in": "pop", "anim_out": "pop_out", "draw": True,
              "badge": "none", "style": "clean"},
     "card": {"x": XC, "y": 0.62, "size": 0.74, "anim_in": "slide_up", "anim_out": "slide_down", "theme": "light"},
-    "lower_third": {"x": 0.07, "y": 0.70, "size": 0.056, "theme": "dark", "anim_in": "draw",
-                    "anim_out": "undraw"},
+    # align center (default nuevo): x = CENTRO del panel, que se despliega desde el centro;
+    # sin `align` (planes viejos) x = borde izquierdo (modo legado)
+    "lower_third": {"x": XC, "align": "center", "y": 0.70, "size": 0.056, "theme": "dark",
+                    "anim_in": "draw", "anim_out": "undraw"},
     "cta": {"x": XC, "y": 0.70, "size": 0.62, "anim_in": "pop", "anim_out": "pop_out"},
     # la barra usa su propia clave `bar_y` (borde superior, fraccion de H); x/y/size comunes no aplican
     "progress": {"thickness": 8.0, "bar_y": 0.0, "y": 0.0, "anim_in": "fade", "anim_out": "none"},
@@ -375,9 +387,11 @@ DEFAULTS = {
 MEDIA_FIT = ("cover", "contain")
 CTA_SIZE = {"follow": 0.72, "link_below": 0.56, "comment": 0.62, "save": 0.62, "share": 0.62}
 # rango legible por kind/variante (fraccion de W): un valor fuera de rango (p. ej. el size=0.18
-# generico del esquema) se acota en vez de dibujar algo ilegible o que se sale de SAFE
-SIZE_RANGE = {"card": (0.5, SAFE_W), "follow": (0.56, SAFE_W), "link_below": (0.4, 0.74),
-              "cta": (0.45, SAFE_W), "sticker_text": (0.035, 0.16), "lower_third": (0.03, 0.09),
+# generico del esquema) se acota en vez de dibujar algo ilegible o que se sale de SAFE. Los
+# anchos topan en SYM_W (0.76): lo mas ancho que cabe centrado en x = 0.5 dentro de SAFE.
+# media: size > SYM_W se permite (PiP casi a sangre) y safe_cx lo centra en x = 0.5.
+SIZE_RANGE = {"card": (0.5, SYM_W), "follow": (0.56, SYM_W), "link_below": (0.4, 0.74),
+              "cta": (0.45, SYM_W), "sticker_text": (0.035, 0.16), "lower_third": (0.03, 0.09),
               "media": (0.05, 1.0), "socials": (0.035, 0.14), "watermark": (0.022, 0.07)}
 
 
@@ -857,10 +871,12 @@ def _doodle_spec(name: str, item: dict, rnd: float) -> list[dict]:
     return _doodle_spec("sparkle", item, rnd)
 
 
-def _arrow_elems(ctrl: np.ndarray, scale: float) -> list[dict]:
+def _arrow_elems(ctrl: np.ndarray, scale: float, hl_min: float = 0.0) -> list[dict]:
+    """Trazo + cabeza. `hl_min` (unidades): ala minima de la cabeza (una flecha corta con path_to
+    no queda con una cabeza del grosor del trazo, que no se lee como flecha)."""
     dense = _catmull(ctrl, 10)
     L = _plen(dense)
-    hl = min(0.34 * scale, 0.22 * L)
+    hl = min(max(0.34 * scale, hl_min), 0.22 * L)
     head = _arrow_head(dense[-1], dense[-4], hl, 32.0)
     return [_E("brush", [ctrl], t=(0.0, 0.78), taper=(0.1, 0.06), wmin=0.3, double=True, shaft=True),
             _E("brush", head, t=(0.74, 1.0), w=0.95, taper=(0.25, 0.25), wmin=0.35)]
@@ -872,11 +888,113 @@ def _dotted_elems(ctrl: np.ndarray) -> list[dict]:
             _E("head_fill", end=dense[-1].copy(), prev=dense[-4].copy(), t=(0.86, 1.0))]
 
 
+# glifos simetricos: el director los pone en PAR ESPEJO (x y 1-x, ids '<id>' y '<id>_m'); el
+# gemelo '_m' se dibuja reflejado en x (misma geometria, boil e inclinacion, en espejo exacto)
+DOODLE_SYM = ("sparkle", "star4", "star5", "burst", "rays", "heart")
+
+
+def doodle_twin(item: dict) -> tuple[str, bool]:
+    """(llave aleatoria, es_gemelo). El gemelo espejo '<id>_m' usa la llave del original: misma
+    forma, boil e inclinacion aleatoria (con signo invertido) -> el par es un espejo exacto."""
+    iid = str(item.get("id", "") or "")
+    if len(iid) > 2 and iid.endswith("_m"):
+        return iid[:-2], True
+    return iid or str(item.get("name") or ""), False
+
+
+def _elem_xs(e: dict) -> list[float]:
+    """Extremos x (espacio unitario) de un elemento de garabato, para centrar su tinta."""
+    k = e["kind"]
+    if k in ("brush", "dash"):
+        xs = []
+        for sg in e["segs"]:
+            if len(sg):
+                d = _catmull(np.asarray(sg, np.float64), 8)
+                xs += [float(d[:, 0].min()), float(d[:, 0].max())]
+        return xs
+    if k == "qstar":
+        return [e["c"][0] - e["r"][0], e["c"][0] + e["r"][0]]
+    if k == "dot":
+        return [e["c"][0] - e["r"], e["c"][0] + e["r"]]
+    if k == "bolt":
+        return [float(e["poly"][:, 0].min()), float(e["poly"][:, 0].max())]
+    if k == "head_fill":
+        return [float(e["end"][0])]
+    return []
+
+
+def _elem_map_x(e: dict, fn) -> dict:
+    """Copia del elemento con fn(x) aplicado a toda coordenada x."""
+    e = dict(e)
+    k = e["kind"]
+
+    def arr(a):
+        a = np.array(a, np.float64)
+        a[..., 0] = fn(a[..., 0])
+        return a
+    if k in ("brush", "dash"):
+        e["segs"] = [arr(sg) for sg in e["segs"]]
+    elif k in ("qstar", "dot"):
+        e["c"] = (float(fn(np.float64(e["c"][0]))), e["c"][1])
+    elif k == "bolt":
+        e["poly"] = arr(e["poly"])
+    elif k == "head_fill":
+        e["end"], e["prev"] = arr(e["end"]), arr(e["prev"])
+    return e
+
+
+def center_spec(elems: list[dict]) -> list[dict]:
+    """Centra la geometria unitaria en el punto medio de su extension en x (sparkle, swirl,
+    circle_scribble o burst no eran simetricos en [-1,1] y su tinta caia 11-20 px de lado): la
+    tinta de todo garabato queda centrada en el x del item."""
+    xs = [v for e in elems for v in _elem_xs(e)]
+    if not xs:
+        return elems
+    mid = (min(xs) + max(xs)) / 2
+    if abs(mid) > 1e-6:
+        elems = [_elem_map_x(e, lambda a, m=mid: a - m) for e in elems]
+    return elems
+
+
+# llaves del item que NO cambian la tinta en reposo (posicion y tiempos): fuera de la llave de cache
+_INK_SKIP = ("x", "y", "start", "end", "offset", "length", "enabled", "src", "locked", "z", "anchor",
+             "anim_in", "anim_out", "in_dur", "out_dur", "draw_time")
+_INK_DX = _LRU(512)
+_PATH_NAMES = ("arrow_curve", "arrow_straight", "arrow_down", "dotted_path", "squiggle")
+
+
+def doodle_ink_dx(item: dict, cx: float, cy: float, S: float, ctx) -> float:
+    """Desfase horizontal (px) del centro de la tinta EN REPOSO de un garabato respecto a su x.
+    center_spec centra la geometria unitaria, pero el grosor variable del pincel (punta afilada
+    en un extremo, cuerpo en el otro), las cabezas de flecha, los guiones y la inclinacion de mano
+    dejan hasta ~11 px de lado: se dibuja el garabato una vez (reposo, sin salida) en una
+    superficie aparte, se mide su columna de tinta (alpha > 24, igual que el QA de simetria) y se
+    cachea por item y tamano de cuadro. draw_doodle resta el desfase -> la tinta queda centrada."""
+    k = (ctx.W, ctx.H, ctx.quality, ctx.seed, ctx.style,
+         repr(sorted((a, repr(b)) for a, b in item.items() if a not in _INK_SKIP and not str(a).startswith("_"))))
+
+    def probe():
+        stroke = ctx.px(_num(item, "stroke", 12.0)) * (2.4 if item.get("style") == "sketch" else 1.0)
+        # alcance: glifo en [-1.3, 1.3]*S (girado y con boil) o flecha de 0 a 2S con curva
+        R = int(S * (2.8 if item.get("path_to") else 1.8) + stroke * 3 + ctx.px(60)) + 4
+        if not math.isfinite(R) or R > 2 * max(ctx.W, ctx.H):
+            return 0.0                              # tamano absurdo (basura del plan): sin ajuste
+        arr, surf = C.new_frame(2 * R, 2 * R)
+        cv = surf.getCanvas()
+        cv.translate(R - cx, R - cy)
+        it = dict(item, x=cx / ctx.W, y=cy / ctx.H, anchor=None, _ink_probe=True)
+        draw_doodle(cv, it, 10.0, 100.0, ctx)
+        cols = np.where(arr[..., 3].max(axis=0) > 24)[0]
+        return 0.0 if not len(cols) else float(cols[0] + cols[-1] + 1) / 2.0 - R
+    return _INK_DX.get_or(k, probe)
+
+
 def _doodle_geometry(name: str, item: dict, ctx, S: float, cx: float, cy: float):
-    """(elementos, S, cx, cy). Con `path_to` las flechas/punteados van de (x,y) a path_to."""
-    rnd = ctx.rand(f"dd:{item.get('id', name)}")
+    """(elementos, S, cx, cy). Con `path_to` las flechas/punteados van de (x,y) a path_to; sin
+    el, la geometria se centra en x (su tinta queda centrada en el x del item)."""
+    rnd = ctx.rand(f"dd:{doodle_twin(item)[0] or name}")
     pt = item.get("path_to")
-    if pt and name in ("arrow_curve", "arrow_straight", "arrow_down", "dotted_path", "squiggle"):
+    if pt and name in _PATH_NAMES:
         a = np.array([cx, cy])
         b = np.array([float(pt[0]) * ctx.W, float(pt[1]) * ctx.H])
         d = b - a
@@ -896,8 +1014,11 @@ def _doodle_geometry(name: str, item: dict, ctx, S: float, cx: float, cy: float)
                              ub])
             if name == "dotted_path":
                 return _dotted_elems(ctrl), S, cx, cy
-            return _arrow_elems(ctrl, 0.5), S, cx, cy
-    return _doodle_spec(name, item, rnd), S, cx, cy
+            # ala de la cabeza >= ~2.8 trazos (en px, no proporcional al largo): la flecha corta
+            # que apunta a una tarjeta sigue leyendose como flecha y no como una raya
+            stroke_px = ctx.px(_num(item, "stroke", STROKE.get(name, 12.0)))
+            return _arrow_elems(ctrl, 0.5, 2.8 * stroke_px / S), S, cx, cy
+    return center_spec(_doodle_spec(name, item, rnd)), S, cx, cy
 
 
 def _dd_color(name: str, item: dict, ctx) -> int:
@@ -950,7 +1071,15 @@ def draw_doodle(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> 
         return
     cx, cy = c
     elems, S, cx, cy = _doodle_geometry(name, item, ctx, S0, cx, cy)
-    rnd = ctx.rand(f"dd:{item.get('id', name)}")
+    pt = item.get("path_to") if name in _PATH_NAMES else None
+    # tinta centrada en x; flechas con path_to solo si son verticales (la flecha centrada que
+    # apunta a una tarjeta/CTA: x = path_to.x), las diagonales van de la cola a la punta
+    center_ink = not item.get("_ink_probe") and (not pt or abs(float(pt[0]) * ctx.W - cx) < 0.02 * ctx.W)
+    cx0 = cx                                        # x pedido: ahi va el centro de la tinta
+    if center_ink:
+        cx -= doodle_ink_dx(item, cx, cy, S, ctx)   # tinta en reposo centrada en x (regla de simetria)
+    key, twin = doodle_twin(item)
+    rnd = ctx.rand(f"dd:{key or name}")
     col = _dd_color(name, item, ctx)
 
     draw_on = bool(_g(item, "draw", True))
@@ -972,7 +1101,10 @@ def draw_doodle(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> 
     kboil = round(ease.hold_steps(lt, 12.0) * 12.0)  # boil a 12 fps (animacion a doces)
     idle = _idle(name, lt - tdraw, kboil, inten)
     st = st * _St(s=idle.s, r=idle.r, a=idle.a)
-    rot = _num(item, "rotation", 0.0) + (rnd - 0.5) * 8.0 * inten
+    if twin:
+        st.r = -st.r  # gemelo espejo: el giro de la animacion (pop, idle) tambien se refleja
+    # inclinacion de mano aleatoria; el gemelo espejo la invierte (el director ya invierte `rotation`)
+    rot = _num(item, "rotation", 0.0) + (rnd - 0.5) * 8.0 * inten * (-1.0 if twin else 1.0)
     st.r += rot
     if not _visible(st):
         return
@@ -1084,9 +1216,19 @@ def draw_doodle(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> 
             else:
                 _add_poly(path, poly)
 
+    flip = twin and name in DOODLE_SYM and not item.get("path_to")
+    if center_ink and lt > tdraw:
+        # ya dibujado: la tinta de ESTE cuadro (con boil e inclinacion) se centra exacta en x;
+        # se mezcla desde el desfase medido en reposo para que no brinque al terminar de dibujarse
+        wgt = _clamp((lt - tdraw) / 0.25) * (1.0 - _clamp(undraw * 5.0))
+        ex = _ink_center_x(path, dash_paths, stroke_px, st, flip) if wgt > 0 else None
+        if ex is not None:
+            cx += ((cx0 - ex) - cx) * wgt
     shadow = _clamp(_num(item, "shadow", 0.55))
     glow = _clamp(_num(item, "glow", 0.0))
     with group(canvas, cx, cy + idle_dy, st):
+        if flip:
+            canvas.scale(-1.0, 1.0)  # gemelo espejo del par simetrico
         a = st.a
         if sketch and not path.isEmpty():
             _draw_sketch(canvas, path, col, a, shadow, kboil, ctx)
@@ -1119,6 +1261,31 @@ def draw_doodle(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> 
             canvas.drawPath(path, p)
         for segs, prog, u0 in dash_paths:
             _draw_dashes(canvas, segs, prog, u0, stroke_px, col, a, lt, shadow, ctx)
+
+
+def _ink_center_x(path: skia.Path, dash_paths: list, stroke_px: float, st: _St, flip: bool) -> float | None:
+    """Centro x (px, relativo al origen del grupo) de la tinta del garabato tal como la pinta
+    group(): rotacion, escala y espejo del gemelo. None si no hay tinta."""
+    m = skia.Matrix()
+    m.setRotate(st.r)
+    m.preScale(st.s, st.s * st.sy)
+    if flip:
+        m.preScale(-1.0, 1.0)
+    xs = []
+    if not path.isEmpty():
+        tp = skia.Path(path)
+        tp.transform(m)
+        b = tp.computeTightBounds()
+        xs += [b.left(), b.right()]
+    for segs, _prog, _u0 in dash_paths:
+        for sg in segs:
+            if len(sg):
+                pts = m.mapPoints([skia.Point(float(a), float(b)) for a, b in sg])
+                px_ = [q.x() for q in pts]
+                xs += [min(px_) - stroke_px / 2, max(px_) + stroke_px / 2]
+    if not xs:
+        return None
+    return (min(xs) + max(xs)) / 2.0
 
 
 def _draw_sketch(canvas, path: skia.Path, col, a: float, shadow: float, kboil: int, ctx):
@@ -1376,6 +1543,19 @@ def paint_icon(canvas, name: str, cx: float, cy: float, box: float, col, alpha: 
     canvas.restore()
 
 
+@lru_cache(maxsize=512)
+def icon_ink_dx(name: str, variant: str = "outline") -> float:
+    """Desfase x del centro de la tinta del glifo Tabler respecto al centro de su caja de 24
+    (unidades de la caja): algunos glifos (phone) no estan centrados en su caja y quedaban ~7 px
+    de lado. draw_icon lo compensa para que la tinta quede centrada en el x del item."""
+    ps = assets.icon_paths(resolve_icon(name), variant)
+    bs = [p.computeTightBounds() for p in ps or []]
+    bs = [b for b in bs if b.width() > 0 or b.height() > 0]
+    if not bs:
+        return 0.0
+    return (min(b.left() for b in bs) + max(b.right() for b in bs)) / 2.0 - 12.0
+
+
 def draw_icon(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> None:
     item = sanitize(item)
     name = item.get("name") or "star"
@@ -1415,6 +1595,7 @@ def draw_icon(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> No
     if anim_out == "undraw" and pout > 0:
         q = min(q, 1.0 - pout)
     kboil = round(ease.hold_steps(lt, 12.0) * 12.0)  # boil a 12 fps (animacion a doces)
+    idx = icon_ink_dx(name, variant)                 # glifo centrado por su tinta
     with group(canvas, cx, cy, st):
         a = st.a
         if badge != "none":
@@ -1436,11 +1617,11 @@ def draw_icon(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> No
                 # sombra difusa del trazo para legibilidad sobre fondos claros
                 canvas.save()
                 canvas.translate(0, ctx.px(3))
-                paint_icon(canvas, name, 0.0, 0.0, box, "#000000", 0.45 * a * shd, q, variant, sw + 0.8,
-                           blur=ctx.px(5))
+                paint_icon(canvas, name, -idx * box / 24.0, 0.0, box, "#000000", 0.45 * a * shd, q, variant,
+                           sw + 0.8, blur=ctx.px(5))
                 canvas.restore()
         sketch = int(kboil) if style == "sketch" else None
-        paint_icon(canvas, name, 0.0, 0.0, box, icol, a, q, variant, sw, sketch,
+        paint_icon(canvas, name, -idx * box / 24.0, 0.0, box, icol, a, q, variant, sw, sketch,
                    hatch=bool(_g(item, "hatch", style == "sketch")))
 
 
@@ -2272,10 +2453,24 @@ def draw_card(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> No
 # ============================================================== lower third
 
 
+def lower_third_align(item: dict) -> str:
+    """'center' (x = centro del panel, simetrico) o 'left' (x = borde izquierdo, legado). Sin
+    `align` (planes viejos) es 'left' para no mover lo ya hecho; el director y el Studio mandan
+    'center' (DEFAULTS)."""
+    return "center" if (item or {}).get("align") == "center" else "left"
+
+
 def draw_lower_third(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> None:
     """Rotulo: barra de acento que crece -> panel que se despliega -> titulo y rol (versalitas con
-    tracking). Todo se ajusta al ancho disponible hasta SAFE.right (titulo con fit_font, rol que
-    se reduce y si no alcanza termina en elipsis).
+    tracking). Todo se ajusta al ancho disponible (titulo con fit_font, rol que se reduce y si no
+    alcanza termina en elipsis).
+    align 'center' (default nuevo, simetrico): x = CENTRO del panel; ancho util del texto =
+    SYM_W*W - 2*padx; el panel (4 esquinas redondeadas px(14)) se despliega DESDE EL CENTRO (ancho
+    visible pw*pan_p centrado en x); titulo y rol centrados que entran subiendo; el acento es una
+    barra horizontal de alto px(8) en el borde INFERIOR del panel, centrada, que crece del centro al
+    ancho del panel con bar_p; pivote del grupo en el centro del panel.
+    align 'left' o sin align (legado): x = borde izquierdo; barra vertical a la izquierda y el
+    panel se despliega hacia la derecha hasta SAFE.right.
     anim_in: 'draw' (default) = solo la revelacion propia; 'none' = sin revelacion; cualquier otra
     (slide_left, pop, fade...) se aplica como transformacion del grupo ademas de la revelacion.
     anim_out: 'undraw' (default) = el panel se pliega; 'none' = corte; otras = transformacion
@@ -2293,11 +2488,16 @@ def draw_lower_third(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx
     acc = item.get("color") or item.get("accent") or pal["accent"]
     if theme != "dark" and C.luminance(acc) > 0.8:  # acento blanco sobre panel blanco: no se ve
         acc = pal["accent2"]
-    x0 = _clamp(_num(item, "x", 0.07), 0.0, C.SAFE["right"] - 0.2) * ctx.W
+    centered = lower_third_align(item) == "center"
     yc = _num(item, "y", 0.70) * ctx.H
     padx, pady = ctx.px(28), ctx.px(20)
     barw = ctx.px(10)
-    avail = max(ctx.px(120), (C.SAFE["right"] * ctx.W - x0) - barw - 2 * padx)
+    if centered:
+        x0 = 0.0
+        avail = max(ctx.px(120), SYM_W * ctx.W - 2 * padx)
+    else:
+        x0 = _clamp(_num(item, "x", 0.07), 0.0, C.SAFE["right"] - 0.2) * ctx.W
+        avail = max(ctx.px(120), (C.SAFE["right"] * ctx.W - x0) - barw - 2 * padx)
     ft = fit_font(F["title"], title, size * ctx.W, avail, min_px=size * ctx.W * 0.55)
     title = ellipsize(ft, title, avail)
     sub_u = subtitle.upper()
@@ -2342,6 +2542,12 @@ def draw_lower_third(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx
     bg = "#0F0F14" if theme == "dark" else "#FFFFFF"
     bg_a = 0.78 if theme == "dark" else 0.96
     fg = "#FFFFFF" if theme == "dark" else "#15151B"
+    sub_col = acc if theme == "dark" else C.mix(acc, "#000000", 0.35)
+    if centered:
+        cx = safe_cx(_num(item, "x", XC) * ctx.W, pw / 2, ctx)
+        _lower_third_centered(canvas, ctx, st, cx, yc, top, pw, ph, pady, bar_p, pan_p, lin, out,
+                              title, ft, sub_u, fs, trk, th_t, gap, fg, bg, bg_a, acc, sub_col)
+        return
     # grupo con pivote en el borde izquierdo del rotulo (la barra)
     with group(canvas, x0, yc, st):
         canvas.translate(-x0, -yc)
@@ -2363,12 +2569,53 @@ def draw_lower_third(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx
             se = ease.out_cubic(_clamp((lin - 0.42) / 0.45)) * (1 - out)
             if sub_u:
                 draw_text(canvas, sub_u, x0 + barw + padx, top + pady + th_t + gap + fs.getSize() * 0.95
-                          + (1 - se) * ctx.px(14), fs, acc if theme == "dark" else C.mix(acc, "#000000", 0.35), se,
-                          tracking=trk)
+                          + (1 - se) * ctx.px(14), fs, sub_col, se, tracking=trk)
             canvas.restore()
         # barra de acento
         bh = ph * bar_p
         canvas.drawRoundRect(skia.Rect.MakeXYWH(x0, yc - bh / 2, barw, bh), barw / 2, barw / 2, C.fill(acc))
+        if lay:
+            canvas.restore()
+
+
+def _lower_third_centered(canvas, ctx, st, cx, yc, top, pw, ph, pady, bar_p, pan_p, lin, out,
+                          title, ft, sub_u, fs, trk, th_t, gap, fg, bg, bg_a, acc, sub_col) -> None:
+    """Rotulo centrado (align 'center'): todo es simetrico respecto a cx en CADA cuadro (el panel
+    y la barra crecen del centro hacia afuera y el texto entra en vertical)."""
+    rad = ctx.px(14)
+    bar_h = ctx.px(8)
+    with group(canvas, cx, yc, st):
+        canvas.translate(-cx, -yc)
+        lay = st.a < 0.999
+        if lay:
+            canvas.saveLayer(None, skia.Paint(Alphaf=st.a))
+        if pan_p > 0.002:
+            vw = pw * pan_p
+            pr = skia.Rect.MakeXYWH(cx - vw / 2, top, vw, ph)
+            r = min(rad, vw / 2, ph / 2)
+            rr = skia.RRect.MakeRectXY(pr, r, r)
+            soft_shadow(canvas, rr, ctx, pan_p * 0.8, key=0.18, amb=0.14)
+            canvas.drawRRect(rr, C.fill(bg, bg_a))
+            canvas.save()
+            canvas.clipRect(pr, skia.ClipOp.kIntersect, True)
+            te = ease.out_cubic(_clamp((lin - 0.28) / 0.45)) * (1 - out)
+            draw_text(canvas, title, cx, top + pady + ft.getSize() * 0.86 + (1 - te) * ctx.px(14), ft, fg, te,
+                      align="center")
+            se = ease.out_cubic(_clamp((lin - 0.42) / 0.45)) * (1 - out)
+            if sub_u:
+                draw_text(canvas, sub_u, cx, top + pady + th_t + gap + fs.getSize() * 0.95 + (1 - se) * ctx.px(14),
+                          fs, sub_col, se, align="center", tracking=trk)
+            canvas.restore()
+        # barra de acento: borde inferior del panel, crece del centro (recortada al panel completo
+        # para que siga sus esquinas redondeadas)
+        bw_ = pw * bar_p
+        if bw_ > 0.5:
+            canvas.save()
+            canvas.clipRRect(skia.RRect.MakeRectXY(skia.Rect.MakeXYWH(cx - pw / 2, top, pw, ph), rad, rad),
+                             skia.ClipOp.kIntersect, True)
+            canvas.drawRoundRect(skia.Rect.MakeXYWH(cx - bw_ / 2, top + ph - bar_h, bw_, bar_h), bar_h / 2,
+                                 bar_h / 2, C.fill(acc))
+            canvas.restore()
         if lay:
             canvas.restore()
 
@@ -2521,19 +2768,19 @@ def _link_below_layout(item: dict, ctx):
         h = size * LINK_TWO_LINE_H
         ib = h * 0.36
         # el enlace corto identifica a la persona: la pastilla crece hasta SAFE antes de achicarlo
-        room = max(size * 0.8, SAFE_W * ctx.W - (ib + h * 0.2 + h * 0.8))
+        room = max(size * 0.8, SYM_W * ctx.W - (ib + h * 0.2 + h * 0.8))
         fb = fit_font(F["title"], label, h * 0.3, room, min_px=h * 0.2)
         label = ellipsize(fb, label, room)
         fd = fit_font(F["body"], disp, h * 0.21, room, min_px=h * 0.13)
         disp = ellipsize(fd, disp, room)
         bw = max(fb.measureText(label), fd.measureText(disp)) + ib + h * 0.2 + h * 0.8
-        return label, fb, h, ib, min(SAFE_W * ctx.W, max(bw, wfix)), disp, fd
+        return label, fb, h, ib, min(SYM_W * ctx.W, max(bw, wfix)), disp, fd
     h = size * 0.2
     fb = fit_font(F["title"], label, h * 0.38, size * 0.9, min_px=h * 0.26)
     label = ellipsize(fb, label, size * 0.9)
     ib = h * 0.42
     bw = fb.measureText(label) + ib + h * 0.2 + h * 1.0
-    return label, fb, h, ib, min(SAFE_W * ctx.W, max(bw, wfix)), "", None
+    return label, fb, h, ib, min(SYM_W * ctx.W, max(bw, wfix)), "", None
 
 
 LINK_TWO_LINE_H = 0.25        # alto / ancho de la pastilla link_below con `display`
@@ -2562,7 +2809,7 @@ def _item_width(item: dict, ctx) -> float:
         w = float(item.get("width") or 0.0)
     except (TypeError, ValueError):
         return 0.0
-    return _clamp(w, 0.0, SAFE_W) * ctx.W
+    return _clamp(w, 0.0, SYM_W) * ctx.W
 
 
 def _follow_layout(item: dict, ctx) -> dict:
@@ -2602,7 +2849,7 @@ def _follow_layout(item: dict, ctx) -> dict:
         W_ = max(base, _item_width(item, ctx), lead + need_txt + trail + max(bw_a, bw_b))
     else:
         W_ = max(base, _item_width(item, ctx))        # sin perfil: el ancho de `size` (como antes)
-    W_ = min(SAFE_W * ctx.W, W_)
+    W_ = min(SYM_W * ctx.W, W_)
     maxw = W_ - lead - trail - max(bw_a, bw_b)
     # el @usuario completo manda: si ni al minimo cabe, el boton se compacta (hasta 0.72x)
     if sub and is_handle:
@@ -2978,7 +3225,7 @@ def draw_sticker_text(canvas: skia.Canvas, item: dict, lt: float, dur: float, ct
     size = size_of(item, "sticker_text", 0.062) * ctx.W
     border = ctx.px(8) if bool(_g(item, "border", True)) else 0.0
     # ancho maximo de la pastilla (con borde y padding) = ancho de SAFE
-    max_tw = SAFE_W * ctx.W - 2 * border - size * 1.0
+    max_tw = SYM_W * ctx.W - 2 * border - size * 1.0
     fnt = fit_font(item.get("font") or "Poppins-Black", text, size, max_tw, min_px=size * 0.5)
     text = ellipsize(fnt, text, max_tw)
     c = center_of(item, ctx, XC, 0.35)
@@ -3228,7 +3475,7 @@ def _socials_layout(item: dict, ctx):
     F = _fonts(ctx)
     wm = item.get("variant") == "watermark"
     h = size_of(item, "watermark" if wm else "socials", 0.034 if wm else DEFAULTS["socials"]["size"]) * ctx.W
-    maxw = SAFE_W * ctx.W
+    maxw = SYM_W * ctx.W
     chips = []
     for l in socials_links(item):
         if wm:

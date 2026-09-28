@@ -107,6 +107,120 @@ test("duplicateItem desplaza sin salirse y changeKind conserva lo comun", () => 
   assert.equal(c.variant, "follow");        // default del nuevo kind
 });
 
+// ---- simetria (regla de la marca): todo lo que agrega el usuario nace centrado
+const SCHEMA_SYM = {
+  common: SCHEMA.common,
+  tracks: {
+    text: { key: "preset", common: "range", items: {
+      cascade: { label: "Cascada", params: [{ k: "text", type: "text", default: "" }, { k: "x", type: "num", default: 0.1 }, { k: "align", type: "seg", default: "left" }] },
+      counter: { label: "Contador", params: [{ k: "x", type: "num", default: 0.5 }, { k: "anchor", type: "seg", default: "right" }] },
+    } },
+    graphics: { key: "kind", common: "range", items: {
+      // defaults ASIMETRICOS a proposito (catalogo viejo): la red de seguridad de newItem los centra
+      doodle: { label: "Garabato", params: [{ k: "x", type: "num", default: 0.47 }, { k: "name", type: "select", default: "sparkle" }] },
+      card: { label: "Tarjeta", params: [{ k: "x", type: "num", default: 0.47 }, { k: "size", type: "num", default: 0.74 }] },
+      lower_third: { label: "Rotulo", params: [{ k: "x", type: "num", default: 0.07 }, { k: "title", type: "text", default: "" }, { k: "align", type: "seg", default: "center", nofill: true }] },
+      media: { label: "Medio", params: [{ k: "x", type: "num", default: null }, { k: "y", type: "num", default: null }] },
+      progress: { label: "Barra", params: [{ k: "bar_y", type: "num", default: 0 }] },
+    } },
+  },
+};
+
+test("simetria: constantes espejo de ctx (XC, SYM_W) y zona segura simetrica", () => {
+  assert.equal(C.XC, 0.5);
+  assert.ok(Math.abs(C.SYM_W - 0.76) < 1e-9);
+  assert.ok(Math.abs(C.SAFE.left - (1 - C.SAFE.right)) < 1e-9);
+  assert.equal(C.TEXT_PRESETS.cascade.align, "center");               // el bloque de la cascada se centra
+});
+
+test("simetria: newItem centra textos y graficos aunque el catalogo diga otra cosa", () => {
+  const fx = {};
+  const casc = C.newItem(SCHEMA_SYM, "text", "cascade", 1, 10, fx);
+  assert.equal(casc.x, 0.5); assert.equal(casc.align, "center");
+  const cnt = C.newItem(SCHEMA_SYM, "text", "counter", 1, 10, fx);
+  assert.equal(cnt.anchor, "center"); assert.equal(cnt.x, 0.5);
+  for (const k of ["doodle", "card", "lower_third"]) assert.equal(C.newItem(SCHEMA_SYM, "graphics", k, 1, 10, fx).x, 0.5, k);
+  const lt = C.newItem(SCHEMA_SYM, "graphics", "lower_third", 1, 10, fx);
+  assert.equal(lt.align, "center"); assert.ok(C.ltCentered(lt));
+  // el PiP sin posicion sigue automatico y la barra no recibe x
+  const pip = C.newItem(SCHEMA_SYM, "graphics", "media", 1, 10, fx);
+  assert.equal(pip.x, undefined); assert.equal(pip.y, undefined);
+  assert.equal(C.newItem(SCHEMA_SYM, "graphics", "progress", 1, 10, fx).x, undefined);
+});
+
+test("simetria: changeKind recentra cuando x cambia de significado (rotulo anclado a la izquierda)", () => {
+  // rotulo viejo (sin align: x = borde izquierdo) -> tarjeta: x pasa a ser un centro -> 0.5
+  const old = { id: "gr_1", kind: "lower_third", title: "Ana", x: 0.07, y: 0.7, start: 1, end: 2 };
+  const card = C.changeKind(SCHEMA_SYM, "graphics", C.clone(old), "card");
+  assert.equal(card.x, 0.5); assert.equal(card.align, undefined);
+  // tarjeta en x 0.3 (elegida por el usuario) -> rotulo centrado: x sigue siendo el centro
+  const lt = C.changeKind(SCHEMA_SYM, "graphics", { id: "gr_2", kind: "card", x: 0.3, start: 1, end: 2 }, "lower_third");
+  assert.equal(lt.align, "center"); assert.equal(lt.x, 0.3);
+  // rotulo centrado -> garabato: conserva x (ya era un centro)
+  const dd = C.changeKind(SCHEMA_SYM, "graphics", { id: "gr_3", kind: "lower_third", align: "center", x: 0.42, start: 1, end: 2 }, "doodle");
+  assert.equal(dd.x, 0.42); assert.equal(dd.align, undefined);
+});
+
+test("simetria: cambiar la alineacion del rotulo lo recoloca (centro <-> borde izquierdo)", () => {
+  const lt = { kind: "lower_third", align: "center", x: 0.5 };
+  C.setLowerThirdAlign(lt, "left");
+  assert.equal(lt.align, "left"); assert.equal(lt.x, C.SAFE.left);
+  C.setLowerThirdAlign(lt, "left");                                   // sin cambio: x se respeta
+  assert.equal(lt.x, C.SAFE.left);
+  lt.x = 0.2;
+  C.setLowerThirdAlign(lt, "center");
+  assert.equal(lt.align, "center"); assert.equal(lt.x, 0.5);
+  const legacy = { kind: "lower_third", x: 0.07 };                   // sin align = izquierda
+  assert.equal(C.ltCentered(legacy), false);
+  C.setLowerThirdAlign(legacy, "center");
+  assert.equal(legacy.x, 0.5);
+});
+
+test("simetria: rotulo centrado en la vista en vivo (graphics.draw_lower_third): caja y revelacion", () => {
+  const W = 1080, pw = 420, barw = 10, padx = 28;
+  // centrado en 0.5: mismo aire a izquierda y derecha; ancho util SYM_W*W - 2*padx
+  const g = C.lowerThirdX({ kind: "lower_third", align: "center", x: 0.5 }, W, pw, barw, padx, 120);
+  assert.equal(g.centered, true);
+  assert.ok(Math.abs(g.left - (W - g.right)) < 1e-9);
+  assert.ok(Math.abs(g.avail - (0.76 * W - 56)) < 1e-9);
+  // el panel visible se despliega desde el centro: simetrico en CADA cuadro de la entrada
+  for (const lt of [0.05, 0.2, 0.35, 0.5, 1.0]) {
+    const rv = C.lowerThirdReveal({ kind: "lower_third", align: "center" }, lt, 3);
+    const vl = g.cx - pw * rv.pan / 2, vr = g.cx + pw * rv.pan / 2, bl = g.cx - pw * rv.bar / 2, br = g.cx + pw * rv.bar / 2;
+    assert.ok(Math.abs(vl - (W - vr)) < 1e-9 && Math.abs(bl - (W - br)) < 1e-9, lt);
+  }
+  // acotado SIMETRICO: en x = 0.3 el panel no sale de SAFE.left (0.12); si no cabe, al centro
+  const g2 = C.lowerThirdX({ kind: "lower_third", align: "center", x: 0.3 }, W, pw, barw, padx);
+  assert.ok(Math.abs(g2.left - 0.12 * W) < 1e-9);
+  assert.equal(C.lowerThirdX({ kind: "lower_third", align: "center", x: 0.2 }, W, 0.9 * W, barw, padx).cx, 0.5 * W);
+  // legado (sin align): x = borde izquierdo con la barra vertical; ancho util hasta SAFE.right
+  const lg = C.lowerThirdX({ kind: "lower_third", x: 0.07 }, W, pw, barw, padx);
+  assert.equal(lg.centered, false);
+  assert.ok(Math.abs(lg.left - 0.07 * W) < 1e-9 && Math.abs(lg.right - (0.07 * W + barw + pw)) < 1e-9);
+  assert.ok(Math.abs(lg.avail - (0.88 * W - 0.07 * W - barw - 56)) < 1e-9);
+  assert.ok(Math.abs(C.lowerThirdX({ kind: "lower_third" }, W, pw, barw, padx).x0 - 0.07 * W) < 1e-9);
+  // revelacion: barra -> panel -> textos; se pliega al final con undraw; sin revelacion con none
+  const r0 = C.lowerThirdReveal({}, 0, 3), r1 = C.lowerThirdReveal({}, 1.5, 3), rEnd = C.lowerThirdReveal({}, 2.95, 3);
+  assert.equal(r0.bar, 0); assert.ok(r1.bar > 0.99 && r1.pan > 0.99 && r1.te > 0.99 && r1.se > 0.99);
+  assert.ok(rEnd.pan < 0.5 && rEnd.te < 0.5);
+  const rNone = C.lowerThirdReveal({ anim_in: "none", anim_out: "none" }, 2.95, 3);
+  assert.ok(rNone.pan > 0.99 && rNone.bar > 0.99);
+  assert.ok(Math.abs(C.ease("out_expo", 0.5) - (1 - Math.pow(2, -5))) < 1e-12);
+});
+
+test("simetria: el iman del arrastre centra la caja VISIBLE, no el ancla", () => {
+  // rotulo anclado a la izquierda: ancla en 0.25 y caja visible centrada en 0.495 -> el ancla se
+  // corre 0.005 y la caja queda exactamente en el centro
+  const [x, on] = C.snapCenterX(0.25, 0.495);
+  assert.equal(on, true); assert.ok(Math.abs(x - 0.255) < 1e-9);
+  // lejos del centro: no hay iman
+  assert.deepEqual(C.snapCenterX(0.3, 0.3), [0.3, false]);
+  assert.deepEqual(C.snapCenterX(0.3, 0.5 + C.SNAP_X + 0.001), [0.3, false]);
+  // caja ya centrada: el ancla no se mueve
+  assert.deepEqual(C.snapCenterX(0.5, 0.5), [0.5, true]);
+  assert.equal(C.snapCenterX(0.1, 0.49, 0.02)[1], true);              // tolerancia propia
+});
+
 test("itemLabel y activeAt", () => {
   assert.equal(C.itemLabel(SCHEMA, "text", { preset: "title_pop", lines: [{ text: "HOLA" }, { text: "mundo" }] }), "HOLA mundo");
   assert.equal(C.itemLabel(SCHEMA, "text", { preset: "counter", prefix: "$", to: 500 }), "$500");
@@ -420,25 +534,32 @@ test("foto con pie: los subtitulos se MUEVEN (render.photo_caption_y) y respetan
   assert.equal(C.photoCaptionY(photo, 0.2), null);
 });
 
-test("PiP automatico (render.media_auto_place): lejos de la cara, dentro de SAFE y sobre los subtitulos", () => {
+test("PiP automatico (render.media_auto_place): CENTRADO en x, lejos de la cara, dentro de SAFE y sobre los subtitulos", () => {
   const S = C.SAFE;
   const face = [0.62, 0.3, 0.2, 0.12];
   const [x, y, s] = C.mediaAutoPlace(face, 0.3, 0.3, 0.66, []);
   const r = [x - 0.15 * s, y - 0.15 * s, x + 0.15 * s, y + 0.15 * s];
   const zone = [face[0] - face[2] / 2 - 0.03, face[1] - face[3] / 2 - 0.05, face[0] + face[2] / 2 + 0.03, face[1] + face[3] / 2 + 0.03];
   const inter = Math.max(0, Math.min(r[2], zone[2]) - Math.max(r[0], zone[0])) * Math.max(0, Math.min(r[3], zone[3]) - Math.max(r[1], zone[1]));
-  assert.equal(inter, 0);
-  assert.ok(x < face[0]);                               // cara a la derecha -> PiP a la izquierda
+  assert.ok(inter < 1e-9);                              // (redondeo a 4 decimales: 0 +- 1e-17)
+  assert.equal(x, 0.5);                                 // simetria: nunca de lado (aunque la cara este a la derecha)
+  assert.ok(y > zone[3]);                               // al pecho, bajo la barbilla
   assert.ok(r[0] >= S.left - 1e-9 && r[2] <= S.right + 1e-9 && r[1] >= S.top - 1e-9 && r[3] <= 0.66 + 1e-9);
-  // sin cara: arriba a la derecha
+  // cara baja (sin lugar en el pecho): arriba de la cabeza, centrado
+  const low = [0.45, 0.55, 0.2, 0.12];
+  const [x3, y3] = C.mediaAutoPlace(low, 0.3, 0.2, 0.7, []);
+  assert.equal(x3, 0.5); assert.ok(y3 < low[1] - low[3] / 2);
+  // sin cara: arriba, centrado
   const [x2, y2] = C.mediaAutoPlace(null, 0.3, 0.3, 0.66, []);
-  assert.ok(x2 > 0.5 && y2 < 0.4);
+  assert.equal(x2, 0.5); assert.ok(y2 < 0.4);
+  // tarjeta enorme: centrada igual (nunca empujada a un lado)
+  assert.equal(C.mediaAutoPlace(face, 0.95, 0.3, 0.66, [])[0], 0.5);
   // pipPlace: x/y fijos se respetan; vacios -> automatico con la tarjeta de pipCard
   const fx = { captions: { y: 0.72 }, text: [], graphics: [] };
   assert.deepEqual(C.pipPlace(fx, { x: 0.3, y: 0.4, size: 0.36, start: 0, end: 2 }, face, 1080, 1920, 1080, 1920), { x: 0.3, y: 0.4, size: 0.36, auto: false });
   const a = C.pipPlace(fx, { x: null, y: null, size: 0.36, start: 0, end: 2 }, face, 1080, 1920, 1080, 1920);
   assert.equal(a.auto, true);
-  assert.ok(a.x < face[0]);
+  assert.equal(a.x, 0.5);
   const [pw, ph] = C.pipCard(0.36, null, 1080, 1920, 1080);
   assert.ok(Math.abs(pw - 0.36 * 1080) < 1e-6 && Math.abs(ph - pw * 1920 / 1080) < 1e-6);
   assert.deepEqual(C.pipCard(0.4, 1, 10, 20, 1000).map(Math.round), [400, 400]);
@@ -592,9 +713,12 @@ test("titulos: presets y fuentes como el render (espacio, separacion, ancho util
   assert.equal(C.TEXT_PRESETS.title_pop.space, 1.12);
   assert.deepEqual(C.italicOf("DMSerifDisplay"), { font: "DMSerifDisplay-Italic", synth: false });
   assert.deepEqual(C.italicOf("Anton"), { font: "Anton", synth: true });
-  // ancho util: centrado en 0.5 -> 2 * min(0.44, 0.38); a la izquierda -> hasta SAFE.right; deriva
+  // ancho util: x es el CENTRO del bloque con cualquier alineacion (simetria) -> 2 * min(x - 0.12,
+  // 0.88 - x); minimo 0.3; deriva
   assert.ok(Math.abs(C.textUsable(0.5, "center") - 0.76) < 1e-9);
-  assert.ok(Math.abs(C.textUsable(0.1, "left") - 0.78) < 1e-9);
+  assert.ok(Math.abs(C.textUsable(0.5, "left") - 0.76) < 1e-9);
+  assert.ok(Math.abs(C.textUsable(0.35, "right") - 0.46) < 1e-9);
+  assert.ok(Math.abs(C.textUsable(0.1, "left") - 0.3) < 1e-9);
   assert.ok(Math.abs(C.textUsable(0.5, "center", 0.5, 0.04) - 0.76 * 0.5 / 1.04) < 1e-9);
 });
 
@@ -655,4 +779,16 @@ test("dropReemitted: lo que el director re-emite con sufijo no viaja al re-dirig
   assert.deepEqual(r.fx.effects.map(e => e.id), ["fx_hookbg_s0", "fx_hookbg_s1", "fx_cam_s0", "fx_cam_s0b", "fx_hookbg_s0d"]);
   assert.equal(r.fx.text, fx.text);
   assert.equal(JSON.stringify(fx), before);                      // el plan local (la propuesta) queda igual
+});
+
+test("iconInkDx: centro de la tinta del glifo respecto a su caja de 24 (graphics.icon_ink_dx) para centrar el icono en la vista", () => {
+  const cols = n => new Array(n).fill(0);
+  const a = cols(96); for (let i = 30; i <= 81; i++) a[i] = 255;           // tinta 30..81 -> centro 56 px
+  assert.equal(C.iconInkDx(a), 2);                                          // 56*24/96 - 12
+  const b = cols(96); for (let i = 12; i <= 83; i++) b[i] = 200;             // centrada: 0
+  assert.equal(C.iconInkDx(b), 0);
+  const c = cols(96); for (let i = 10; i <= 81; i++) c[i] = 255; c[5] = 10;  // bajo el umbral (24) no cuenta
+  assert.equal(C.iconInkDx(c), -0.5);
+  assert.equal(C.iconInkDx(cols(96)), 0);
+  assert.equal(C.iconInkDx(null), 0);
 });

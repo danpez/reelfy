@@ -1036,7 +1036,7 @@ def _direct_plan(plan, d, on_step=None, use_llm=True):
             not (prev_vlm and prev_vlm != "heuristico"):
         warns.append("director: la IA de visión no describió las tomas (tiempo agotado o modelo "
                      "no disponible); tomas con heurísticas")
-    out = _apply_music(out, mover)
+    out = _sym(_apply_music(out, mover))
     print(f"   director: {d['style']} {d['intensity']} seed {d['seed']} en {time.time() - t0:.1f}s "
           f"(llm={dd.get('llm')}, vlm={dd.get('vlm')}, music_sync={kw.get('music_sync', 'auto')}, "
           f"timings={dd.get('timings')})")
@@ -1045,6 +1045,65 @@ def _direct_plan(plan, d, on_step=None, use_llm=True):
 
 def _is_v2(plan):
     return isinstance(plan, dict) and plan.get("version") == 2 and isinstance(plan.get("fx"), dict)
+
+
+# ---- simetria (regla de la marca): todo overlay deja el mismo espacio a izquierda y derecha.
+# director.symmetrize(plan) -> plan (puro, sin LLM, conserva ids/tiempos/contenido) centra o
+# espeja lo que puso la IA (nunca lo del usuario ni lo bloqueado). Los planes de un director
+# anterior a la regla se simetrizan UNA vez al abrirlos (director.sym = 1) y todo lo que sale
+# del director (dirigir, re-dirigir, sincronizar con la musica, aplicar el perfil) pasa por el.
+SYM_VERSION = 1
+
+
+def _needs_sym(plan):
+    return _is_v2(plan) and not ((plan.get("director") or {}).get("sym") or 0) >= SYM_VERSION
+
+
+def _sym(plan):
+    """Plan v2 -> copia simetrizada con director.sym marcado. Nunca lanza: sin
+    director.symmetrize (motor viejo) o si falla, devuelve el plan tal cual."""
+    if not _is_v2(plan):
+        return plan
+    try:
+        from motion import director
+        fn = getattr(director, "symmetrize", None)
+        if fn is None:
+            return plan
+        out = fn(json.loads(json.dumps(plan)))
+    except Exception:  # noqa: nunca se pierde el plan por la simetria
+        traceback.print_exc()
+        return plan
+    if not _is_v2(out):
+        return plan
+    d = out.get("director")
+    if not isinstance(d, dict):
+        d = out["director"] = {}
+    d["sym"] = SYM_VERSION
+    return out
+
+
+def _sym_stored(job_id, plan, rev):
+    """Plan guardado de un director anterior a la regla de simetria (sin director.sym): se
+    simetriza una vez y se guarda con concurrencia optimista (plan_rev sube: el Studio adopta
+    la version nueva al cargarla). Con el trabajo ocupado (export, analisis, director) se deja
+    para la siguiente carga. -> (plan, plan_rev)."""
+    if not _needs_sym(plan):
+        return plan, rev
+    try:
+        j = jobstore.get_light(job_id)
+        if not j or j.get("state") in ("queued", "running") or _side_running(job_id, "direct"):
+            return plan, rev
+        out = _sym(plan)
+        if out is plan:
+            return plan, rev
+        ok, rev2 = jobstore.update_plan(job_id, out, rev)
+        if ok:
+            print(f"   simetria: plan de {job_id} simetrizado (rev {rev} -> {rev2})")
+            return out, rev2
+        return jobstore.get_plan(job_id)        # otro escritor gano: se sirve lo guardado
+    except Exception:  # noqa
+        traceback.print_exc()
+        return plan, rev
 
 
 def _load():
@@ -1566,6 +1625,7 @@ def _music_resync(jid, ev, tick, tgt):
     out = director.redirect(tgt["orig"], tgt.get("style"), tgt.get("intensity"), tgt.get("seed"), **kw)
     if tgt.get("music") is not None:
         out = _apply_music(out, tgt["music"])
+    out = _sym(out)
     grid = (out.get("director") or {}).get("music_grid")
     if ev.is_set() or not grid:
         tick.set(state="ready", resync="available",
@@ -2444,7 +2504,7 @@ def compose_timeline(body: dict = Body(...)):
 def render(job_id: str, body: dict = Body(...)):
     """`def`: importa el motor (skia/cv2) y escribe sqlite en el threadpool."""
     job = _job_or_404(job_id)
-    plan = body.get("plan") or jobstore.get_plan(job_id)[0]
+    plan = body.get("plan") or _sym_stored(job_id, *jobstore.get_plan(job_id))[0]
     if not plan:
         raise HTTPException(409, "El job no tiene plan; analiza el video primero.")
     if job["state"] in ("queued", "running"):
@@ -3111,6 +3171,8 @@ def direct(job_id: str, body: dict = Body(...)):
         raise HTTPException(500, f"No se pudo re-dirigir: {e}")
     if music_body is not None and only:
         out = _apply_music(out, music_body)     # (con full, _direct_plan ya la aplico)
+    if not (full and not only):
+        out = _sym(out)                         # (con full, _direct_plan ya lo simetrizo)
     jobstore.update(job_id, plan=out)
     rev = jobstore.get_light(job_id)["plan_rev"]
     if minfo is not None:
@@ -3127,6 +3189,7 @@ def get_plan(job_id: str):
     plan, rev = jobstore.get_plan(job_id)
     if plan is None:
         raise HTTPException(404, "Sin plan")
+    plan, rev = _sym_stored(job_id, plan, rev)     # planes de antes de la regla de simetria
     try:                               # proyectos de antes del proxy: se genera al abrirlos
         j = jobstore.get_light(job_id)
         if j and j.get("state") not in ("queued", "running"):
@@ -3525,7 +3588,7 @@ def _reapply_profile(job_id, plan):
         traceback.print_exc()
         return plan, False
     _keep_src_names(plan, out)
-    return out, True
+    return _sym(out), True
 
 
 def _with_profile(plan, raw):
@@ -3657,6 +3720,7 @@ def profile_put(job_id: str, body: dict = Body(...)):
         traceback.print_exc()
         raise HTTPException(500, f"No se pudo aplicar el perfil: {e}")
     _keep_src_names(plan, out)
+    out = _sym(out)
     ok, rev = jobstore.update_plan(job_id, out, base)
     if not ok:
         return JSONResponse({"ok": False, "detail": "El plan cambió en el servidor (re-dirigido u otra "
@@ -3846,7 +3910,7 @@ def status(job_id: str, plan: int | None = None, rev: int | None = None):
         if len(_PHASE_SEEN) > 500:
             _PHASE_SEEN.pop(next(iter(_PHASE_SEEN)))
     if want:
-        st["plan"], st["plan_rev"] = jobstore.get_plan(job_id)
+        st["plan"], st["plan_rev"] = _sym_stored(job_id, *jobstore.get_plan(job_id))
     return JSONResponse(st)
 
 

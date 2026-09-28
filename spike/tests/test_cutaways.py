@@ -414,7 +414,7 @@ def test_fallback_title_stays_inside_safe():
 def test_scene_text_defaults_to_safe_center():
     from motion import graphics as G
     ti = CU._text_item({"text": "Hola"}, True, _ctx())
-    assert abs(ti["x"] - G.XC) < 1e-9
+    assert abs(ti["x"] - G.XC) < 1e-9 and G.XC == 0.5 == CU.XC      # centro del cuadro (simetria)
     assert CU._text_item({"text": {"preset": "title_pop", "text": "  "}}, True, _ctx()) is None
     assert CU._text_item({"text": {"preset": "counter", "to": 1000}}, True, _ctx()) is not None
 

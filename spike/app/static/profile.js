@@ -22,7 +22,7 @@
     ["follow_cta", "Botón Seguir", "Con la red principal y el @usuario"],
     ["booking_cta", "Invitación a reservar", "Cuando invita al link o a agendar"],
     ["end_card", "Tarjeta final", "Redes, reservas y ubicación al cierre"],
-    ["handle_watermark", "Marca de agua @usuario", "Pequeña, en una esquina libre"]];
+    ["handle_watermark", "Marca de agua @usuario", "Pequeña, centrada arriba"]];
   const KIND_ES = { social: "Redes", messaging: "Mensajes", booking: "Reservas", web: "Web", maps: "Ubicación", email: "Correo", phone: "Teléfono" };
   const FIELDS = [["name", "Nombre", "Dra. Ana Ruiz"], ["title", "Profesión o título", "Odontóloga"], ["business", "Negocio", "Clínica Dental Sonríe"],
     ["phone", "Teléfono", "+52 55 1234 5678"], ["whatsapp", "WhatsApp", "+52 55 1234 5678"], ["address", "Dirección", "Av. Demo 123, Guadalajara"]];

@@ -86,6 +86,7 @@
   const FONT_STATE = {};                  // nombre -> "loading" | "ok" | "err"
   const ICON_CACHE = {};                  // nombre -> svg (string)
   const ICON_IMG = {};                    // nombre|color -> Image
+  const ICON_DX = {};                     // nombre -> desfase de la tinta (unidades de la caja 24)
   let SELX = [];                          // seleccion multiple fx: [{track,id}]
   let CLIP = null;                        // portapapeles interno
   let TLCACHE = { key: "", tl: null };
@@ -383,8 +384,20 @@
     if (!svg) return null;
     let s = svg.replace(/currentColor/g, color || "#fff");
     if (!/xmlns=/.test(s)) s = s.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"');
-    const im = new Image(); im.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(s);
+    const im = new Image();
+    // tinta centrada como el render (graphics.icon_ink_dx): se mide una vez por glifo al cargar
+    if (ICON_DX[name] == null) im.onload = () => { if (ICON_DX[name] == null) ICON_DX[name] = iconDxOf(im); };
+    im.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(s);
     ICON_IMG[key] = im; return null;
+  }
+  function iconDxOf(im) {
+    try {
+      const n = 96, cv = document.createElement("canvas"); cv.width = cv.height = n;
+      const g = cv.getContext("2d"); g.drawImage(im, 0, 0, n, n);
+      const d = g.getImageData(0, 0, n, n).data, cols = new Array(n).fill(0);
+      for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) cols[x] = Math.max(cols[x], d[(y * n + x) * 4 + 3]);
+      return C.iconInkDx(cols);
+    } catch (e) { return 0; }             // lienzo contaminado (navegador viejo): sin ajuste
   }
 
   // ------------------------------------------------------------------ utilidades de edicion
@@ -1678,7 +1691,9 @@
       if (nullable) {
         const nl = document.createElement("label"); nl.className = "fnull"; nl.innerHTML = `<input type="checkbox" ${v == null ? "checked" : ""}>Auto`;
         const cb = nl.querySelector("input");
-        cb.onchange = () => edit(() => { set(cb.checked ? null : (p.default != null ? p.default : (p.min != null ? p.min : 0))); after(obj, o2, true); }, { rebuild: true });
+        // x fijo nace centrado (simetria); un rotulo anclado a la izquierda, en el borde de SAFE
+        const fixed = () => (p.k === "x" ? (obj.kind === "lower_third" && !C.ltCentered(obj) ? C.SAFE.left : C.XC) : p.default != null ? p.default : (p.min != null ? p.min : 0));
+        cb.onchange = () => edit(() => { set(cb.checked ? null : fixed()); after(obj, o2, true); }, { rebuild: true });
         wrap.appendChild(nl);
         if (v == null) { n.disabled = true; if (rg) rg.disabled = true; }
       }
@@ -1710,8 +1725,11 @@
       const v = get(), opts = p.opts || [];
       if (t === "seg" && opts.length <= 5) {
         const s = document.createElement("div"); s.className = "seg sm";
-        s.innerHTML = opts.map(x => `<button data-v="${esc(x)}" class="${x === v ? "sel" : ""}">${esc(lbl(x))}</button>`).join("");
-        s.querySelectorAll("button").forEach(bt => bt.onclick = () => { edit(() => { set(bt.dataset.v); after(obj, o2, true); }, { inspector: false }); s.querySelectorAll("button").forEach(x => x.classList.toggle("sel", x === bt)); });
+        // rotulo: centrado <-> izquierda cambia el significado de x (centro / borde): se recoloca
+        const ltA = p.k === "align" && obj && obj.kind === "lower_third";
+        const vv = ltA && v == null ? "left" : v;          // sin align = rotulo de un plan viejo
+        s.innerHTML = opts.map(x => `<button data-v="${esc(x)}" class="${x === vv ? "sel" : ""}">${esc(lbl(x))}</button>`).join("");
+        s.querySelectorAll("button").forEach(bt => bt.onclick = () => { edit(() => { if (ltA) C.setLowerThirdAlign(obj, bt.dataset.v); else set(bt.dataset.v); after(obj, o2, true); }, ltA ? { rebuild: true } : { inspector: false }); s.querySelectorAll("button").forEach(x => x.classList.toggle("sel", x === bt)); });
         return frow(label, s, false, p.hint);
       }
       const sel = document.createElement("select"); sel.className = "fsel";
@@ -2104,6 +2122,8 @@
       if (xy) return [clamp(xy[0], 0, 1), clamp(xy[1], 0, 1)];
       const fx0 = f ? f[0] : 0.5, fy0 = f ? f[1] : 0.35, fw = f ? f[2] : 0.2, fh = f ? f[3] : 0.12;
       const a = it.anchor || "face";
+      // sin ancla a la cara: centrado (graphics.center_of usa XC), nunca del lado de la cara
+      if (x == null && !it.anchor) x = C.XC;
       if (x == null) x = a === "face_left" ? fx0 - fw * 1.3 : a === "face_right" ? fx0 + fw * 1.3 : fx0;
       if (y == null) y = a === "face_top" ? fy0 - fh * 1.4 : fy0;
     }
@@ -2184,7 +2204,9 @@
     const serif = it.preset === "serif_elegant";
     const color = it.color || "#FFFFFF", accent = it.accent || "#FFD23F";
     const accCol = serif && !it.accent ? color : accent;       // serif_elegant: el acento es la italica
-    const align = it.preset === "cascade" ? "left" : (it.align || PR.align || "center");
+    // x es el CENTRO del bloque con cualquier alineacion (text._place, simetria): `align` solo alinea
+    // las lineas dentro del bloque; en cascade la escalera va dentro y el bloque entero se centra
+    const align = it.align || PR.align || "center", casc = it.preset === "cascade";
     c.save();
     c.textBaseline = "alphabetic";
     // medidas a 1 px (se escalan): avance y tinta de cada palabra con su fuente
@@ -2199,7 +2221,7 @@
       return { ms, sp };
     };
     const [ix, iy] = itemXY(it);
-    const maxw = C.textUsable(it.x != null ? +it.x : align === "left" ? C.SAFE.left + 0.02 : align === "right" ? C.SAFE.right - 0.02 : ix, align, it.width, PR.drift) * W;
+    const maxw = C.textUsable(it.x != null ? +it.x : ix, align, it.width, PR.drift) * W;
     let meas = lines.map(l => { const words = l.text.split(/\s+/).filter(Boolean); return Object.assign({ l, words }, measureLine(l, words)); });
     const widthAt = (m, px) => (m.ms.reduce((q, x) => q + x.adv, 0) + m.sp * Math.max(0, m.ms.length - 1)) * px;
     // una sola linea logica que no cabe: se envuelve balanceada (text._fit con size explicito)
@@ -2224,6 +2246,15 @@
       m.h = m.asc + m.desc;
       totalH += m.h + (i ? base * gapK : 0); maxW = Math.max(maxW, m.l.pill ? m.w + px * 1.6 : m.w);
     });
+    // escalera de cascade (text._cascade_offsets): cada linea entra cascade_step mas a la derecha
+    // sin pasar el ancho util; el bloque mide lo que ocupa la escalera completa
+    const offs = meas.map(() => 0);
+    if (casc && meas.length > 1) {
+      let stp = 0.13 * W;
+      meas.forEach((m, i) => { if (i) stp = Math.min(stp, Math.max(0, (maxw - m.w) / i)); });
+      meas.forEach((m, i) => { offs[i] = i * stp; });
+      maxW = Math.max(maxW, ...meas.map((m, i) => offs[i] + m.w));
+    }
     const cx = B.x + (ix + st.dx) * W, cy = B.y + (iy + st.dy) * B.h;
     c.globalAlpha *= st.a;
     c.translate(cx, cy); c.scale(st.sc, st.sc); if (it.rotation) c.rotate(+it.rotation * Math.PI / 180);
@@ -2243,13 +2274,12 @@
     const stroke = (+it.stroke || 0) * s * 2, sh = it.shadow != null ? +it.shadow : 0.6;
     const bb = { x: cx - maxW / 2, y: cy - totalH / 2, w: maxW, h: totalH };
     if (it.box && it.preset !== "highlight_marker" && it.preset !== "kicker") {
-      const bl = align === "left" ? 0 : align === "right" ? -maxW : -maxW / 2;
-      c.fillStyle = it.box; rrect(c, bl - base * 0.25, y - base * 0.18, maxW + base * 0.5, totalH + base * 0.36, base * 0.18); c.fill();
+      c.fillStyle = it.box; rrect(c, -maxW / 2 - base * 0.25, y - base * 0.18, maxW + base * 0.5, totalH + base * 0.36, base * 0.18); c.fill();
     }
-    if (align === "left") bb.x = cx; else if (align === "right") bb.x = cx - maxW;
     meas.forEach((m, li) => {
       if (li) y += base * gapK;
-      const lx0 = align === "left" ? (it.preset === "cascade" ? li * W * 0.05 : 0) : align === "right" ? -m.w : -m.w / 2;
+      // lineas alineadas DENTRO del bloque centrado en cx (text._align_lines)
+      const lx0 = casc ? -maxW / 2 + offs[li] : align === "left" ? -maxW / 2 : align === "right" ? maxW / 2 - m.w : -m.w / 2;
       const by = y + m.asc;
       if (m.l.pill) {
         c.font = fontCss(m.l.font, m.px);
@@ -2311,16 +2341,17 @@
 
   /** CTA con la geometria de graphics.draw_cta (size acotado por variante, alto de la pastilla y
       tipografia proporcionales al ancho). Devuelve la caja en coordenadas del canvas. */
-  const CTA_SIZE = { follow: 0.72, link_below: 0.56 }, SAFE_W = C.SAFE.right - C.SAFE.left;
+  // ancho maximo de todo lo centrado = C.SYM_W (0.76): centrado en 0.5 nunca toca el borde de SAFE
+  const CTA_SIZE = { follow: 0.72, link_below: 0.56 }, SYM_W = C.SYM_W;
   function drawCta(c, it, cx, cy, B, lt) {
     const v = it.variant || "follow", W = B.w;
-    const rng = v === "follow" ? [0.56, SAFE_W] : v === "link_below" ? [0.4, 0.74] : [0.45, SAFE_W];
+    const rng = v === "follow" ? [0.56, SYM_W] : v === "link_below" ? [0.4, 0.74] : [0.45, SYM_W];
     const S = clamp(+(it.size != null ? it.size : (CTA_SIZE[v] || 0.62)), rng[0], rng[1]) * W;
     const ent = PLAN.entities || {}, acc = it.color && it.color !== "#FFFFFF" ? it.color : "#FFD23F";
     const bold = "Poppins-ExtraBold";
     c.shadowColor = "rgba(0,0,0,.35)"; c.shadowBlur = 14 * B.s; c.shadowOffsetY = 4 * B.s;
     c.textBaseline = "middle"; c.textAlign = "left";
-    const wfix = it.width ? clamp(+it.width, 0, SAFE_W) * W : 0;        // ancho comun de la pila del cierre
+    const wfix = it.width ? clamp(+it.width, 0, SYM_W) * W : 0;        // ancho comun de la pila del cierre
     const fitTo = (fname, txt, px, room, minPx) => { let f = px; c.font = fontCss(fname, f); const w0 = c.measureText(txt).width; if (w0 > room) { f = Math.max(minPx || px * 0.4, px * room / w0); c.font = fontCss(fname, f); } return f; };
     if (v === "link_below") {
       // graphics._link_below_layout: con `display` (enlace corto) la pastilla lleva dos lineas
@@ -2330,14 +2361,14 @@
       let h, ib, bw, fb, fd = 0, tw;
       if (disp) {
         h = S * 0.25; ib = h * 0.36;
-        const room = Math.max(S * 0.8, SAFE_W * W - (ib + h * 0.2 + h * 0.8));
+        const room = Math.max(S * 0.8, SYM_W * W - (ib + h * 0.2 + h * 0.8));
         fd = fitTo("Poppins-Medium", disp, h * 0.21, room, h * 0.13); const wd = c.measureText(disp).width;
         fb = fitTo(bold, label, h * 0.3, room, h * 0.2); const wl = c.measureText(label).width;
-        tw = Math.max(wl, wd); bw = Math.min(SAFE_W * W, Math.max(tw + ib + h * 0.2 + h * 0.8, wfix));
+        tw = Math.max(wl, wd); bw = Math.min(SYM_W * W, Math.max(tw + ib + h * 0.2 + h * 0.8, wfix));
       } else {
         h = S * 0.2; ib = h * 0.42;
         fb = fitTo(bold, label, h * 0.38, S * 0.9, h * 0.26); tw = c.measureText(label).width;
-        bw = Math.min(SAFE_W * W, Math.max(tw + ib + h * 0.2 + h, wfix));
+        bw = Math.min(SYM_W * W, Math.max(tw + ib + h * 0.2 + h, wfix));
       }
       c.fillStyle = acc; rrect(c, -bw / 2, -h / 2, bw, h, h / 2); c.fill(); c.shadowBlur = 0; c.shadowOffsetY = 0;
       const x1 = -(tw + ib + h * 0.2) / 2, tx = x1 + ib + h * 0.2;
@@ -2368,7 +2399,7 @@
       const lead = h * 0.13 + d + h * 0.22, trail = h * 0.35;
       c.font = fontCss(bold, h * 0.31); let need = c.measureText(name0).width;
       if (sub) { c.font = fontCss("Poppins-SemiBold", h * 0.22); need = Math.max(need, c.measureText(sub).width); }
-      const Wd = Math.min(SAFE_W * W, title ? Math.max(S, wfix, lead + need + trail + bwb) : Math.max(S, wfix));
+      const Wd = Math.min(SYM_W * W, title ? Math.max(S, wfix, lead + need + trail + bwb) : Math.max(S, wfix));
       const maxw = Wd - lead - trail - bwb;
       // nombre largo: variantes mas cortas (sin el segundo apellido) antes de achicar
       const parts = name0.split(/\s+/);
@@ -2455,11 +2486,11 @@
         if (lum(icol) > 0.8 && lum(bcol) > 0.7) icol = "#15151A";
       }
       c.shadowBlur = gm.badge ? 0 : c.shadowBlur;
-      const im = iconImage(it.name, icol);
-      if (im) c.drawImage(im, -gm.icon / 2, -gm.icon / 2, gm.icon, gm.icon);
+      const im = iconImage(it.name, icol), idx = (ICON_DX[it.name] || 0) * gm.icon / 24;
+      if (im) c.drawImage(im, -gm.icon / 2 - idx, -gm.icon / 2, gm.icon, gm.icon);
       else { c.strokeStyle = icol; c.lineWidth = 2 * s * 3; c.beginPath(); c.arc(0, 0, gm.icon * 0.32, 0, Math.PI * 2); c.stroke(); }
     } else if (k === "card") {
-      const w = Math.max(0.4, +it.size || 0.7) * W, h = w * (it.variant === "checklist" ? 0.62 : 0.4);
+      const w = clamp(+it.size || 0.74, 0.5, SYM_W) * W, h = w * (it.variant === "checklist" ? 0.62 : 0.4);
       const th = it.theme || "light";
       const bg = th === "dark" ? "#141414" : th === "brand" ? (it.color && it.color !== "#FFFFFF" ? it.color : "#FFD23F") : "#FFFFFF";
       const fg = lum(bg) > 0.55 ? "#111111" : "#FFFFFF";
@@ -2475,31 +2506,65 @@
       (it.items || []).slice(0, 4).forEach((x, i) => { c.font = fontCss("Poppins-Medium", w * 0.045); c.fillText("- " + x, -w / 2 + pad, ty + w * (0.18 + i * 0.065)); });
       bb = { x: cx - w / 2, y: cy - h / 2, w, h };
     } else if (k === "lower_third") {
-      // graphics.draw_lower_third: barra de acento + panel; nombre en negritas y el rol en
-      // VERSALITAS con tracking y color de acento (x = borde izquierdo, y = centro)
-      const fs = clamp(+it.size || 0.056, 0.02, 0.2) * W, light = it.theme === "light";
+      // graphics.draw_lower_third. Centrado (align "center", el default): x = CENTRO del panel, que
+      // se despliega desde el centro, titulo y rol centrados que entran subiendo y el acento es una
+      // barra en el borde inferior que crece del centro; todo simetrico en cada cuadro. Legado (sin
+      // align o "left"): x = borde izquierdo, barra vertical a la izquierda y el panel se despliega a
+      // la derecha. El nombre va en negritas y el rol en VERSALITAS con tracking
+      c.restore(); c.save(); c.globalAlpha *= st.a;        // pivote propio (centro o borde izquierdo)
+      const fs0 = clamp(+it.size || 0.056, 0.03, 0.09) * W, light = it.theme === "light";
       let acc2 = it.color || it.accent || "#FFD23F"; if (light && lum(acc2) > 0.8) acc2 = "#FF3B5C";
       const padx = 28 * s, pady = 20 * s, barw = 10 * s;
       const title = String(it.title || (PLAN.entities || {}).name || ""), sub = String(it.subtitle || (PLAN.entities || {}).role || "").toUpperCase();
-      c.font = fontCss("Poppins-Bold", fs); const wt = c.measureText(title).width;
-      const fsub = fs * 0.5, trk = fsub * 0.14;
-      c.font = fontCss("Poppins-SemiBold", fsub); const ws = sub ? c.measureText(sub).width + trk * Math.max(0, sub.length - 1) : 0;
+      const avail = C.lowerThirdX(it, W, 0, barw, padx, 120 * s).avail;
+      // lo que no cabe se reduce (fit_font hasta 0.55 del titulo; el rol hasta 0.7)
+      let fs = fs0; c.font = fontCss("Poppins-Bold", fs); let wt = c.measureText(title).width;
+      if (wt > avail) { fs = Math.max(fs0 * 0.55, fs * avail / wt); c.font = fontCss("Poppins-Bold", fs); wt = Math.min(avail, c.measureText(title).width); }
+      const subW = f => { c.font = fontCss("Poppins-SemiBold", f); return sub ? c.measureText(sub).width + f * 0.14 * Math.max(0, sub.length - 1) : 0; };
+      let fsub = fs0 * 0.5, ws = subW(fsub);
+      if (ws > avail) { fsub = Math.max(fs0 * 0.35, fsub * avail / ws); ws = Math.min(avail, subW(fsub)); }
+      const trk = fsub * 0.14;
       const tht = fs * 1.05, ths = sub ? fsub * 1.25 : 0, gap = sub ? 8 * s : 0;
       const ph = pady * 2 + tht + gap + ths, pw = Math.max(wt, ws) + padx * 2;
-      const pan = C.ease("out_cubic", clamp((lt - 0.12) / 0.5, 0, 1));
-      c.shadowBlur = 0; c.shadowOffsetY = 0;
-      c.fillStyle = light ? "rgba(255,255,255,.96)" : "rgba(15,15,20,.78)"; c.fillRect(barw, -ph / 2, pw * pan, ph);
-      c.fillStyle = acc2; c.fillRect(0, -ph / 2, barw, ph * C.ease("out_cubic", clamp(lt / 0.32, 0, 1)));
-      c.save(); c.beginPath(); c.rect(barw, -ph / 2, pw * pan, ph); c.clip();
-      c.textBaseline = "alphabetic"; c.fillStyle = light ? "#15151B" : "#FFFFFF";
-      c.font = fontCss("Poppins-Bold", fs); c.fillText(title, barw + padx, -ph / 2 + pady + fs * 0.9);
-      if (sub) {
+      const rv = C.lowerThirdReveal(it, lt, L), g = C.lowerThirdX(it, W, pw, barw, padx, 120 * s);
+      const bgc = light ? "rgba(255,255,255,.96)" : "rgba(15,15,20,.78)", fg = light ? "#15151B" : "#FFFFFF";
+      const px0 = B.x + (g.centered ? g.cx : g.x0) + st.dx * W;
+      c.translate(px0, cy); c.scale(st.sc, st.sc); if (it.rotation) c.rotate(+it.rotation * Math.PI / 180);
+      c.shadowBlur = 0; c.shadowOffsetY = 0; c.textBaseline = "alphabetic";
+      const subText = (x, y) => {
         c.fillStyle = acc2; c.font = fontCss("Poppins-SemiBold", fsub);
-        if ("letterSpacing" in c) { c.letterSpacing = `${trk.toFixed(1)}px`; c.fillText(sub, barw + padx, -ph / 2 + pady + tht + gap + fsub * 0.95); c.letterSpacing = "0px"; }
-        else c.fillText(sub, barw + padx, -ph / 2 + pady + tht + gap + fsub * 0.95);
+        // letterSpacing tambien suma despues de la ultima letra: centrado se compensa medio tracking
+        if ("letterSpacing" in c) { c.letterSpacing = `${trk.toFixed(1)}px`; c.fillText(sub, x + (c.textAlign === "center" ? trk / 2 : 0), y); c.letterSpacing = "0px"; }
+        else c.fillText(sub, x, y);
+      };
+      if (rv.bar <= 0.002) bb = null;
+      else if (g.centered) {
+        const rad = 14 * s, barh = 8 * s;
+        if (rv.pan > 0.002) {
+          const vw = pw * rv.pan;
+          c.fillStyle = bgc; rrect(c, -vw / 2, -ph / 2, vw, ph, rad); c.fill();
+          c.save(); c.beginPath(); c.rect(-vw / 2, -ph / 2, vw, ph); c.clip(); c.textAlign = "center";
+          c.save(); c.globalAlpha *= rv.te; c.fillStyle = fg; c.font = fontCss("Poppins-Bold", fs);
+          c.fillText(title, 0, -ph / 2 + pady + fs * 0.86 + (1 - rv.te) * 14 * s); c.restore();
+          if (sub) { c.save(); c.globalAlpha *= rv.se; subText(0, -ph / 2 + pady + tht + gap + fsub * 0.95 + (1 - rv.se) * 14 * s); c.restore(); }
+          c.restore();
+        }
+        const bw = pw * rv.bar;          // acento: borde inferior, del centro hacia afuera
+        if (bw > 0.5) { c.save(); rrect(c, -pw / 2, -ph / 2, pw, ph, rad); c.clip(); c.fillStyle = acc2; rrect(c, -bw / 2, ph / 2 - barh, bw, barh, barh / 2); c.fill(); c.restore(); }
+        bb = { x: px0 - pw / 2, y: cy - ph / 2, w: pw, h: ph };
+      } else {
+        if (rv.pan > 0.002) {
+          c.fillStyle = bgc; c.fillRect(barw, -ph / 2, pw * rv.pan, ph);
+          c.save(); c.beginPath(); c.rect(barw, -ph / 2, pw * rv.pan, ph); c.clip(); c.textAlign = "left";
+          c.save(); c.globalAlpha *= rv.te; c.fillStyle = fg; c.font = fontCss("Poppins-Bold", fs);
+          c.fillText(title, barw + padx - (1 - rv.te) * 40 * s, -ph / 2 + pady + fs * 0.86); c.restore();
+          if (sub) { c.save(); c.globalAlpha *= rv.se; subText(barw + padx, -ph / 2 + pady + tht + gap + fsub * 0.95 + (1 - rv.se) * 14 * s); c.restore(); }
+          c.restore();
+        }
+        c.fillStyle = acc2; rrect(c, 0, -ph * rv.bar / 2, barw, ph * rv.bar, barw / 2); c.fill();
+        bb = { x: px0, y: cy - ph / 2, w: barw + pw, h: ph };
       }
-      c.restore();
-      bb = { x: cx, y: cy - ph / 2, w: barw + pw, h: ph };
+      c.textAlign = "left";
     } else if (k === "cta") {
       bb = drawCta(c, it, cx, cy, B, lt);
     } else if (k === "sticker_text") {
@@ -2603,7 +2668,7 @@
       rejilla (`layout`, `cols`, `width`), o marca de agua (`variant` watermark con `backdrop`). */
   function drawSocials(c, it, lt, L, B, st) {
     const wm = it.variant === "watermark", W = B.w;
-    const h = (it.size != null ? +it.size : (wm ? 0.034 : 0.074)) * W, maxw = SAFE_W * W;
+    const h = (it.size != null ? +it.size : (wm ? 0.034 : 0.074)) * W, maxw = SYM_W * W;
     const links = (it.links || []).slice(0, 8).map(l => {
       const p = PLATS[l && l.platform] ? l.platform : "web";
       return { p, t: String((l && l.text) || "").trim() || (PLATS[p] ? PLATS[p].label : "Web") };
@@ -2620,7 +2685,7 @@
     let rows = [];
     if (it.layout === "grid" && !wm) {
       const cols = Math.max(1, Math.min(4, +(it.cols || 2), chips.length));
-      const wfix = it.width ? clamp(+it.width, 0, SAFE_W) * W : 0;
+      const wfix = it.width ? clamp(+it.width, 0, SYM_W) * W : 0;
       const cw = Math.min(wfix ? (wfix - gap * (cols - 1)) / cols : Math.max(...chips.map(x => x.w)), (maxw - gap * (cols - 1)) / cols);
       chips = chips.map(x => Object.assign(x, { f: fitF(x.t, h * 0.36, Math.max(h, cw - h * 1.48)), w: cw }));
       for (let i = 0; i < chips.length; i += cols) rows.push(chips.slice(i, i + cols));
@@ -2632,7 +2697,7 @@
     const totW = Math.max(...rows.map(r => r.reduce((q, x) => q + x.w, 0) + gap * (r.length - 1)));
     const title = !wm && it.title ? String(it.title).toUpperCase() : "";
     const totH = rows.length * h + (rows.length - 1) * gap + (title ? h * 0.52 : 0);
-    let cx = B.x + (it.x != null ? +it.x : 0.47) * W, cy = B.y + (it.y != null ? +it.y : 0.62) * B.h;
+    let cx = B.x + (it.x != null ? +it.x : C.XC) * W, cy = B.y + (it.y != null ? +it.y : 0.62) * B.h;
     cx = clamp(cx, B.x + C.SAFE.left * W + totW / 2, B.x + C.SAFE.right * W - totW / 2);
     if (totH < (C.SAFE.bottom - C.SAFE.top) * B.h) cy = clamp(cy, B.y + C.SAFE.top * B.h + totH / 2, B.y + C.SAFE.bottom * B.h - totH / 2);
     const dark = it.theme === "dark", mono = it.icon_style === "mono";
@@ -2717,7 +2782,7 @@
     const m = it.media && it.media.sid ? it.media : null;
     const f = m ? mediaFrame(it, m, lt, V && !V.paused) : (V.videoWidth ? { src: V, w: V.videoWidth, h: V.videoHeight } : null);
     c.save();
-    c.translate(B.x + W * 0.5, B.y + H * (it.y != null ? +it.y : 0.46) + dy); c.rotate(rot * Math.PI / 180); c.scale(sc, sc);
+    c.translate(B.x + W * (it.x != null ? +it.x : C.XC), B.y + H * (it.y != null ? +it.y : 0.46) + dy); c.rotate(rot * Math.PI / 180); c.scale(sc, sc);
     c.shadowColor = "rgba(0,0,0,.4)"; c.shadowBlur = 24 * B.s; c.shadowOffsetY = 10 * B.s;
     c.fillStyle = "#FBFAF6"; rrect(c, -fw / 2, -fh / 2, fw, fh, 6 * B.s); c.fill(); c.shadowBlur = 0; c.shadowOffsetY = 0;
     const ix = -fw / 2 + border, iy = -fh / 2 + border, iw = fw - 2 * border;
@@ -2763,6 +2828,7 @@
   }
 
   let HITS = [];   // cajas de lo dibujado en el ultimo cuadro (para seleccionar en el canvas)
+  let DRAG_GUIDE = false;   // guia vertical del centro mientras el arrastre queda imantado al centro
   /** Composicion en vivo sobre el canvas (despues del video base). */
   FX.drawLive = function (t) {
     if (!isPro()) return;
@@ -2789,10 +2855,11 @@
       if (!(it.kind === "self_broll" && drawSelfBroll(c, it, lt))) drawSceneBg(c, it.background, it.bg_colors, lt);
       if (it.kind === "photo") drawPhoto(c, it, lt, L);
       if (it.text && (it.text.text || it.text.preset === "counter")) {
-        const tx = Object.assign({ x: 0.5, y: 0.45, size: 0.12, preset: "title_pop" }, it.text);
+        const tx = Object.assign({ x: C.XC, y: 0.45, size: 0.12, preset: "title_pop" }, it.text);
         drawTextItem(c, tx, lt, L);
       }
-      if (it.card) drawGraphic(c, Object.assign({ kind: "card", x: 0.5, y: 0.5, size: 0.74 }, it.card), lt, L, null, t);
+      // cutaways._card_from: centrada y del ancho maximo simetrico
+      if (it.card) drawGraphic(c, Object.assign({ kind: "card", x: C.XC, y: 0.52, size: C.SYM_W }, it.card), lt, L, null, t);
       // graficos embebidos (cutaways._embedded): offset y length relativos a la escena
       (it.graphics || []).forEach(gr => {
         if (!gr || gr.enabled === false) return;
@@ -3047,6 +3114,12 @@
         c.restore();
       }
     }
+    // guia del centro (arrastre imantado): la caja visible queda simetrica
+    if (DRAG_GUIDE) {
+      c.save(); c.strokeStyle = "rgba(255,210,63,.9)"; c.lineWidth = 1; c.setLineDash([5, 4]);
+      const gx = Math.round(LB.x + LB.w / 2) + 0.5;
+      c.beginPath(); c.moveTo(gx, LB.y); c.lineTo(gx, LB.y + LB.h); c.stroke(); c.restore();
+    }
     // seleccion
     const sel = SEL;
     HITS.forEach(h => {
@@ -3096,15 +3169,20 @@
         const k = clamp((bb0.w + dx) / Math.max(10, bb0.w), 0.2, 5);
         obj.size = r3(clamp(s0 * k, 0.01, 1.5));
       } else {
-        if (hit.track !== "captions") obj.x = r3(clamp(x0 + dx / LB.w, 0, 1));
+        if (hit.track !== "captions") {
+          // iman al centro sobre la caja VISIBLE (no el ancla): un rotulo anclado a la izquierda,
+          // un texto alineado o unas redes acotadas quedan centrados de verdad (simetria)
+          const bcx = (bb0.x - LB.x + bb0.w / 2 + dx) / LB.w;
+          const [nx, snapped] = C.snapCenterX(clamp(x0 + dx / LB.w, 0, 1), bcx);
+          obj.x = r3(clamp(nx, 0, 1)); DRAG_GUIDE = snapped;
+        }
         let ny = clamp(y0 + dy / LB.h, 0.02, 0.98);
         if (Math.abs(ny - 0.5) < 0.012) ny = 0.5;   // iman al centro
         obj.y = r3(ny);
-        if (hit.track !== "captions" && Math.abs(obj.x - 0.5) < 0.012) obj.x = 0.5;
       }
     };
     CV.onpointerup = () => {
-      CV.onpointermove = null; CV.onpointerup = null;
+      CV.onpointermove = null; CV.onpointerup = null; DRAG_GUIDE = false;
       if (began) { if (hit.track !== "captions") autoLock(obj); FX.changed({ noMut: true, rebuild: true }); if (hit.track === "captions") FX.renderProjectGroups(); }
     };
     return true;

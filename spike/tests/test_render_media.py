@@ -253,6 +253,7 @@ def test_logo_cfg_saneado():
     d = R.logo_cfg({"pos": "top-left", "size": 7, "opacity": -1, "path": "/x/l.png"})
     assert (d["pos"], d["size"], d["opacity"], d["path"]) == ("tl", 0.5, 0.0, "/x/l.png")
     assert R.logo_cfg({"pos": "raro", "size": "nan"})["pos"] == "br"
+    assert R.logo_cfg({"pos": "top-center"})["pos"] == "tc" and R.logo_cfg({"pos": "bc"})["pos"] == "bc"
     assert set(R.PRO_OPTS) == {"logo", "air", "enhance_audio"}
 
 
@@ -292,6 +293,22 @@ def test_logo_en_render_frame_por_esquina(src, tmp_path):
     # sin archivo: se omite con aviso (no truena)
     pr = R.prepare(p, _opts(tmp_path, logo={"path": str(tmp_path / "no.png")}))
     assert "logo:archivo" in pr["skipped"] and pr["job"]["logo"] is None
+
+
+def test_logo_centrado_arriba_y_abajo_es_simetrico(src, tmp_path):
+    """pos tc/bc: el logo va centrado (mismo margen a izquierda y derecha, regla de simetria)."""
+    logo = _logo_file(tmp_path)
+    p = _plan(src)
+    for pos in ("tc", "bc"):
+        fr = R.render_frame(p, 1.0, _opts(tmp_path, logo={"pos": pos, "size": 0.2, "opacity": 1.0,
+                                                           "path": str(logo)}))
+        h, w = fr.shape[:2]
+        y = int(round(w * 0.03)) + int(round(w * 0.2)) // 4
+        y = y if pos == "tc" else h - 1 - y
+        row = np.array([_close(fr[y, x], LOGO_RGB, 30) for x in range(w)])
+        xs = np.nonzero(row)[0]
+        assert len(xs) > w * 0.15, pos
+        assert abs(xs[0] - (w - 1 - xs[-1])) <= 2, (pos, xs[0], w - 1 - xs[-1])
 
 
 def test_marca_en_render_pro_y_draft(src, tmp_path):
@@ -579,28 +596,52 @@ def _zone(f):
 
 
 def test_pip_automatico_no_tapa_la_cara():
+    """Regla de simetria: el PiP automatico SIEMPRE va centrado en x = 0.5 (mismo aire a los
+    lados); para librar la cara baja al pecho, sube sobre la cabeza o se achica, nunca de lado."""
     S = C.SAFE
     for face in ([0.5, 0.33, 0.3, 0.17], [0.62, 0.3, 0.25, 0.14], [0.35, 0.4, 0.2, 0.12],
                  [0.47, 0.28, 0.36, 0.2]):
         for w, h in ((0.36, 0.36), (0.36, 0.114), (0.36, 0.152), (0.3, 0.45)):
             x, y, s = R.media_auto_place(face, w, h, 0.66)
+            assert x == 0.5, (face, w, h, x)
             r = (x - w * s / 2, y - h * s / 2, x + w * s / 2, y + h * s / 2)
+            assert abs(r[0] - (1 - r[2])) < 1e-9                    # margen izq == der
             assert r[0] >= S["left"] - 1e-6 and r[2] <= S["right"] + 1e-6, (face, w, h, r)
             assert r[1] >= S["top"] - 1e-6 and r[3] <= 0.66 + 1e-6, (face, w, h, r)
             assert R._overlap(r, _zone(face)) == 0.0, (face, w, h, r, s)
-    # lado contrario a la cara; sin cara, arriba a la derecha
-    assert R.media_auto_place([0.66, 0.3, 0.2, 0.12], 0.25, 0.2, 0.66)[0] < 0.4
-    assert R.media_auto_place([0.3, 0.3, 0.2, 0.12], 0.25, 0.2, 0.66)[0] > 0.55
+    # cara de cualquier lado: centrado igual (antes iba al lado contrario de la cara)
+    assert R.media_auto_place([0.66, 0.3, 0.2, 0.12], 0.25, 0.2, 0.66)[0] == 0.5
+    assert R.media_auto_place([0.3, 0.3, 0.2, 0.12], 0.25, 0.2, 0.66)[0] == 0.5
+    # sin cara: arriba al centro, a tamano completo
     x, y, s = R.media_auto_place(None, 0.3, 0.2, 0.66)
-    assert x > 0.6 and y < 0.3 and s == 1.0
-    # otros overlays activos (un titulo en el pecho): se evitan si hay lugar, sin tapar la cara
+    assert x == 0.5 and y < 0.3 and s == 1.0
+    # sin cara y con algo arriba: abajo al centro (sobre los subtitulos)
+    x, y, s = R.media_auto_place(None, 0.3, 0.2, 0.66, [(0.1, 0.05, 0.9, 0.4)])
+    assert x == 0.5 and y > 0.4 and y + 0.1 <= 0.66 and s == 1.0
+    # pecho primero; otros overlays activos (un titulo en el pecho): arriba de la cabeza si cabe
     face = [0.5, 0.33, 0.3, 0.17]
     x, y, s = R.media_auto_place(face, 0.36, 0.114, 0.66)
-    assert y > 0.45                                                   # el pecho estaba libre
+    assert x == 0.5 and y > 0.45                                      # el pecho estaba libre
     avoid = [(0.06, 0.45, 0.88, 0.62)]
     x, y, s = R.media_auto_place(face, 0.36, 0.114, 0.66, avoid)
     r = (x - 0.18 * s, y - 0.057 * s, x + 0.18 * s, y + 0.057 * s)
+    assert x == 0.5 and y < 0.2
     assert R._overlap(r, avoid[0]) == 0.0 and R._overlap(r, _zone(face)) == 0.0
+    # tarjeta demasiado ancha para SAFE: centrada igual (nunca empujada de lado)
+    x, y, s = R.media_auto_place(face, 0.9, 0.1, 0.66)
+    assert x == 0.5
+
+
+def test_pip_automatico_se_achica_antes_de_tapar_la_cara():
+    """Sin lugar centrado a tamano completo, la tarjeta baja de escala (hasta 0.4) antes de
+    tocar la cara; si ni asi cabe, gana la de menor cruce con la cara (siempre en x = 0.5)."""
+    face = [0.5, 0.32, 0.34, 0.18]                 # cara grande: poco pecho y nada arriba
+    x, y, s = R.media_auto_place(face, 0.3, 0.45, 0.66)
+    r = (x - 0.15 * s, y - 0.225 * s, x + 0.15 * s, y + 0.225 * s)
+    assert x == 0.5 and s == 0.4 and R._overlap(r, _zone(face)) == 0.0
+    assert R.PIP_SCALES[-1] == 0.4
+    x, y, s = R.media_auto_place([0.5, 0.45, 0.6, 0.5], 0.5, 0.5, 0.66)  # cara que llena el cuadro
+    assert x == 0.5 and s in R.PIP_SCALES
 
 
 def test_pip_sin_posicion_se_coloca_en_el_job_y_en_frame(src, tmp_path, media):
@@ -631,7 +672,7 @@ def test_pip_sin_posicion_se_coloca_en_el_job_y_en_frame(src, tmp_path, media):
     R.set_anchors(job, np.tile(f2, (job["n_frames"], 1)), pr["mods"])
     g = job["graphics"][0]
     assert g["_size0"] == 0.36 and g["size"] < 0.36 and card_ok(g, f2)
-    # sin cara (testsrc): arriba a la derecha en el cuadro real
+    # sin cara (testsrc): arriba al centro en el cuadro real
     fr = R.render_frame(p, 1.0, o)
     x, y, _ = R.media_auto_place(None, 0.36 * 1.06, 0.36 * W / 1.5 * 1.06 / H, 0.72 - 0.06)
     assert _close(fr[int(y * H), int(x * W)], MAGENTA, 14), (x, y, fr[int(y * H), int(x * W)])

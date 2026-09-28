@@ -443,12 +443,12 @@ def test_follow_director_item_takes_name_from_entities():
     assert G.follow_texts({"label": "Consultorio Sol"}, ctx)[0] == "Consultorio Sol"
     arr, cv = _frame()
     ctx.entities = {"name": "Dra. Ana Ruiz", "role": "Dentista"}
-    G.draw_cta(cv, dict(it, x=0.47, y=0.6, size=0.62, anim_in="pop", anim_out="fade"), 1.5, 3.0, ctx)
+    G.draw_cta(cv, dict(it, x=0.5, y=0.6, size=0.62, anim_in="pop", anim_out="fade"), 1.5, 3.0, ctx)
     assert _changed(arr) > 3000
 
 
 def test_link_below_arrow_fades_with_cta():
-    it = {"id": "lb", "variant": "link_below", "label": "Agenda tu cita", "x": 0.47, "y": 0.5, "size": 0.46,
+    it = {"id": "lb", "variant": "link_below", "label": "Agenda tu cita", "x": 0.5, "y": 0.5, "size": 0.46,
           "anim_in": "pop", "anim_out": "fade"}
     mid = _mask(_draw("cta", it, 1.5, dur=3.0))
     end = _mask(_draw("cta", it, 2.98, dur=3.0))
@@ -509,7 +509,7 @@ def test_card_long_chips_and_url_stay_inside_card():
     it = {"id": "chips", "variant": "schedule", "title": "Horarios disponibles",
           "subtitle": "https://beacons.ai/consultorio-dental-agenda-en-linea-con-un-nombre-largo",
           "items": ["Lunes a viernes de 9:00 a 19:00 horas, sabados de 9:00 a 14:00 horas", "Domingo"],
-          "x": 0.47, "y": 0.45, "anim_in": "none"}
+          "x": 0.5, "y": 0.45, "anim_in": "none"}
     arr = _draw("card", it, 2.0)
     left, right, Wc, Hc = _card_rect(it)
     ys, xs = np.nonzero(_mask(arr))
@@ -597,7 +597,7 @@ def test_badge_icon_waits_for_badge_to_settle():
 
 
 def test_card_content_visible_from_first_frames():
-    it = {"id": "cf", "variant": "price", "title": "Limpieza dental", "value": "$1,000 MXN", "x": 0.47,
+    it = {"id": "cf", "variant": "price", "title": "Consulta general", "value": "$650 MXN", "x": 0.5,
           "y": 0.5, "anim_in": "slide_up"}
     arr = _draw("card", it, 1 / 30)
     ink = (arr[..., :3].astype(int).sum(axis=2) < 600)  # texto oscuro (aun translucido) sobre blanco
@@ -606,7 +606,7 @@ def test_card_content_visible_from_first_frames():
 
 
 def test_price_suffix_does_not_jump_while_counting():
-    it = {"id": "pr", "variant": "price", "theme": "dark", "title": "Precio", "value": "$1,000 MXN", "x": 0.47,
+    it = {"id": "pr", "variant": "price", "theme": "dark", "title": "Precio", "value": "$1,000 MXN", "x": 0.5,
           "y": 0.5, "anim_in": "none", "size": 0.74}
 
     def right_edge(lt):
@@ -657,7 +657,7 @@ def test_generic_schema_sizes_stay_legible():
     # size=0.18 (default generico del esquema) no deja un CTA/tarjeta microscopicos
     for kind, it in (("cta", {"variant": "follow", "label": "Hola"}), ("cta", {"variant": "save"}),
                      ("card", {"variant": "price", "value": "$1,000"})):
-        arr = _draw(kind, dict(it, id="leg", size=0.18, x=0.47, y=0.5, anim_in="none"), 1.5)
+        arr = _draw(kind, dict(it, id="leg", size=0.18, x=0.5, y=0.5, anim_in="none"), 1.5)
         ys, xs = np.nonzero(_mask(arr))
         assert (xs.max() - xs.min()) / W > 0.4, kind
 
@@ -691,10 +691,10 @@ def test_icon_filled_uses_resolved_name_and_public_api():
 
 
 def test_share_cta_never_leaves_empty_circle_for_long():
-    it = {"id": "sh", "variant": "share", "x": 0.47, "y": 0.5, "anim_in": "none", "anim_out": "none"}
+    it = {"id": "sh", "variant": "share", "x": 0.5, "y": 0.5, "anim_in": "none", "anim_out": "none"}
     ctx = _ctx()
     lab, fb, h, ib, w = G._pill_layout(G.sanitize(it), G._CTA_LABEL["share"], ctx)
-    bx = int(G.safe_cx(0.47 * W, w / 2, ctx) - w / 2 + h * 0.14 + ib / 2)
+    bx = int(G.safe_cx(0.5 * W, w / 2, ctx) - w / 2 + h * 0.14 + ib / 2)
     by = int(0.5 * H)
     empty = 0
     for i in range(60):
@@ -721,7 +721,7 @@ def test_location_card_compact_without_map():
 
 def test_link_below_arrow_scale_shortens_arrow():
     """`arrow_scale` acorta la flecha del link (para no pisar los subtitulos); 0 la quita."""
-    it = {"id": "lk", "kind": "cta", "variant": "link_below", "label": "Agenda tu cita", "x": 0.47,
+    it = {"id": "lk", "kind": "cta", "variant": "link_below", "label": "Agenda tu cita", "x": 0.5,
           "y": 0.45, "size": 0.62, "anim_out": "none"}
 
     def bottom(img):
@@ -755,13 +755,13 @@ def test_media_pip_draws_the_image_framed_and_rounded():
     """PiP del medio propio (render inyecta _media_image): imagen dentro de la ventana, marco blanco
     (frame), esquinas redondeadas (la esquina exacta queda con el fondo) y respeta la proporcion
     del medio (ancho size*W)."""
-    it = {"id": "m1", "kind": "media", "x": 0.47, "y": 0.4, "size": 0.5, "_media_image": _media_img(),
+    it = {"id": "m1", "kind": "media", "x": 0.5, "y": 0.4, "size": 0.5, "_media_image": _media_img(),
           "media": {"sid": "a1b2c3", "type": "image", "w": 600, "h": 400}, "radius": 40, "frame": True}
     arr = _draw("media", it, 1.0)
     ys, xs = np.nonzero(_diff(arr, BG) > 0)
     w_px, h_px = xs.max() - xs.min(), ys.max() - ys.min()
     assert 0.46 * W <= w_px <= 0.62 * W                      # ancho ~ size (+ marco y sombra)
-    cx, cy = int(0.47 * W), int(0.4 * H)
+    cx, cy = int(0.5 * W), int(0.4 * H)
     assert arr[cy, cx - int(0.1 * W), 0] > 180 and arr[cy, cx + int(0.1 * W), 2] > 180
     # marco blanco justo fuera de la imagen (arriba al centro)
     top = min(y for y in range(int(0.2 * H), cy) if arr[y, cx, :3].min() > 235)
@@ -774,7 +774,7 @@ def test_media_pip_draws_the_image_framed_and_rounded():
 
 
 def test_media_without_image_draws_placeholder_and_photo_uses_media():
-    it = {"id": "m2", "kind": "media", "x": 0.47, "y": 0.4, "size": 0.4,
+    it = {"id": "m2", "kind": "media", "x": 0.5, "y": 0.4, "size": 0.4,
           "media": {"sid": "a1b2c3", "type": "video", "w": 1080, "h": 1920}}
     arr = _draw("media", it, 1.0)
     assert _changed(arr) > 2000                               # marcador visible (sin medio aun)
