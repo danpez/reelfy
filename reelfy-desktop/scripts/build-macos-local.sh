@@ -145,6 +145,11 @@ rm -f "$DMG"
 # como el CI: desde src-tauri (dmg_settings.py resuelve el fondo relativo a esa carpeta)
 (cd src-tauri && "$DMGBUILD" -s ../scripts/dmg_settings.py -D app="$(cd "../$(dirname "$APP")" && pwd)/Reelfy.app" Reelfy "$DMG")
 
+if [ "$UNSIGNED" != "1" ]; then
+  # el DMG tambien firmado: Gatekeeper lo acepta como "Notarized Developer ID" (sin firma el
+  # ticket basta para abrirlo, pero spctl lo marca "no usable signature")
+  codesign --force --timestamp -s "$SIGN_ID" "$DMG"
+fi
 if [ "$NOTARIZE" = "1" ]; then
   say "[8/8] notarizar y estampar el DMG"
   xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait | tee "$OUT/notary-dmg.log" || true
