@@ -65,3 +65,7 @@ spike/acestep.cpp/
 spike/music-models/
 spike/.pytest_cache/
 .engine-cache/
+
+# builds locales del instalador (scripts/build-macos-local.sh)
+dist-local/
+.dmgbuild-venv/

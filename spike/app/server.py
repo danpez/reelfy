@@ -26,6 +26,7 @@ if __name__ == "__main__":
 _CHILD = __name__ == "__mp_main__"
 
 import atexit
+from contextlib import asynccontextmanager
 import hashlib
 import io
 import json
@@ -198,6 +199,18 @@ def _stop_ollama():
         OLLAMA_PID_F.unlink()
     except OSError:
         pass
+
+
+# uvicorn (>=0.29) vuelve a lanzar SIGTERM/SIGINT al terminar su apagado ordenado: el proceso
+# muere por la senal y los atexit NO corren (por eso el ollama quedaba huerfano aunque la app
+# mandara SIGTERM). El apagado de la app (lifespan) si corre antes: ahi se apaga el ollama.
+@asynccontextmanager
+async def _lifespan(_app):
+    yield
+    _stop_ollama()
+
+
+app.router.lifespan_context = _lifespan
 
 
 def _start_ollama():

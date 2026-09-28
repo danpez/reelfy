@@ -103,3 +103,18 @@ def test_vigilante_apaga_cuando_muere_el_padre():
 def test_texto_de_primer_arranque_con_tamanos_reales():
     html = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "index.html")).read()
     assert "~4 GB" not in html and "~5.5 GB" in html and "~3.7 GB" in html
+
+
+def test_el_apagado_del_servidor_apaga_el_ollama(monkeypatch):
+    """uvicorn re-lanza SIGTERM tras su apagado ordenado (los atexit no corren): el ollama se
+    apaga en el lifespan de la app, que si corre."""
+    import asyncio
+    calls = []
+    monkeypatch.setattr(S, "_stop_ollama", lambda: calls.append(1))
+    assert S.app.router.lifespan_context is S._lifespan
+
+    async def run():
+        async with S.app.router.lifespan_context(S.app):
+            assert calls == []
+    asyncio.run(run())
+    assert calls == [1]
