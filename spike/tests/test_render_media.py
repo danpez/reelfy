@@ -852,3 +852,28 @@ def test_foto_con_pie_mueve_los_subtitulos(src, tmp_path, media):
         return (ys.min() + ys.max()) / 2 / H
     assert abs(rows_diff(False) - auto[0]["y"]) < 0.05
     assert abs(rows_diff(True) - 0.72) < 0.05
+
+
+def test_logo_del_enlace_usa_el_media_root_del_render(src, tmp_path, media):
+    """El `logo` de un enlace del perfil (tarjeta, pastilla de reservas) se lee por sid del MISMO
+    media_root que el `media` del job (graphics no se queda con la carpeta de POST /sources): con
+    el archivo en media_root el logo se dibuja; con un sid sin archivo, el icono de siempre."""
+    from motion import graphics as G
+    _png(media / "logo01.png", (20, 150, 90), (256, 256))
+    card = {"id": "gr_c", "kind": "card", "variant": "schedule", "start": 0.0, "end": 3.5, "x": 0.5,
+            "y": 0.45, "size": 0.8, "title": "Horarios disponibles", "subtitle": "En ReservaDemo",
+            "theme": "light", "anim_in": "none", "anim_out": "none", "platform": "paseoclub"}
+    o = _opts(tmp_path, quality="final")
+    G.clear_media_cache()
+    try:
+        con = R.render_frame(_plan(src, {"graphics": [dict(card, logo={"sid": "logo01", "type": "image"})]}), 2.0, o)
+        sin = R.render_frame(_plan(src, {"graphics": [dict(card, logo={"sid": "no_existe", "type": "image"})]}), 2.0, o)
+        base = R.render_frame(_plan(src, {"graphics": [card]}), 2.0, o)
+    finally:
+        G.MEDIA_OPTS = {}
+        G.clear_media_cache()
+    assert np.array_equal(sin, base)                       # sin archivo: el dibujo de siempre
+    diff = np.abs(con[..., :3].astype(int) - base[..., :3].astype(int)).sum(-1) > 60
+    assert diff.sum() > 60
+    d = np.abs(con[..., :3].astype(int) - np.array((20, 150, 90))).sum(-1) < 45
+    assert (d & diff).sum() > 30                           # el verde del logo, en el hueco del icono

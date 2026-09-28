@@ -113,7 +113,14 @@ la marca), pastilla de reservas con enlace corto cuando la voz invita de verdad 
 abajo', 'agenda', 'pide tu cita'; nunca 'los dientes de abajo') y >= 1.5 s, tarjeta final >= 2.2 s
 con pila alineada (ubicacion, Seguir, chips de las demas redes, reservas) o, si a camara no cabe,
 escena corta con el video desenfocado; notas de lo que no cupo; marca de agua opcional que se
-aparta de los titulos.
+aparta de los titulos. Foto y logo de cada enlace (profile.link_media, descargados solos por el
+servidor o subidos): Seguir con la foto de SU red (la foto subida del perfil manda), pastilla de
+reservas con la foto de la pagina + insignia del logo (o solo el logo), tarjetas que nombran la
+plataforma (horarios 'En PaseoClub') con `platform` + `logo` y chips con el logo de las paginas sin
+icono propio. apply_profile_media(plan, perfil) las pone sin mover nada (misma geometria).
+Efectos de recorte (bg_replace, color_pop, subject_outline): el director NO los propone solo (AUTO_MATTE_FX: el borde
+del recorte deja halos); siguen disponibles a mano en el Studio y un plan que ya los traia los
+conserva al aplicar el perfil (redirect keep_rev).
 Opcional (`trim=True`): el director propone recortes `cuts` con src "ai" (b-roll mudo largo,
 silencios > SILENCE_MAX, aire muerto inicial > LEAD_MAX, cola `tail`); el Studio puede
 desactivarlos con `enabled: false`.
@@ -141,6 +148,7 @@ from typing import Any, Callable
 import numpy as np
 
 from . import assets
+from . import linkmedia as LM
 from . import profile as PR
 from .ctx import SAFE, FrameCtx
 
@@ -159,6 +167,11 @@ SHOTS_VERSION = "s9"          # analisis de tomas (rostro por tiempo, calidad de
 TRACKS = ("text", "graphics", "cutaways", "effects", "transitions", "sfx")
 ID_PREFIX = {"text": "tx", "graphics": "gr", "cutaways": "cw", "effects": "fx",
              "transitions": "tr", "sfx": "sf"}
+# efectos que dependen del RECORTE de la persona (fondo reemplazado, sujeto a color): el borde del
+# matte deja halos y fugas, asi que el director ya no los propone solo (quedan a mano en el Studio).
+# Un plan que ya los traia de la IA los conserva al re-aplicar el perfil (redirect keep_rev).
+AUTO_MATTE_FX = False
+MATTE_FX = ("bg_replace", "color_pop")
 
 # ---------------------------------------------------------------- catalogo (seccion 3.1)
 TEXT_PRESETS = ("title_pop", "stack", "cascade", "serif_elegant", "script_accent", "behind_giant",
@@ -209,7 +222,7 @@ FIELDS = {
                            "button_color", "avatar", "style", "media", "radius", "border",
                            "border_color", "fit", "caption", "platform", "display", "initials",
                            "links", "layout", "icon_style", "stagger", "opacity", "width", "cols",
-                           "backdrop", "align"},
+                           "backdrop", "align", "logo"},
     "cutaways": _COMMON | {"kind", "background", "bg_colors", "text", "graphics", "src_t",
                            "zoom_from", "zoom_to", "card", "anim_in", "anim_out", "media", "caption",
                            "tilt", "size", "pan", "in_dur", "out_dur"},
@@ -2524,6 +2537,7 @@ class _Choreo:
         self.plan = plan
         self.style = style if style in STYLES else "dinamico"
         self.S = STYLES[self.style]
+        self.auto_matte = AUTO_MATTE_FX         # bg_replace / color_pop propuestos por la IA
         self.I = _clamp(float(intensity), 0.0, 1.0)
         self.seed = int(seed)
         self.rev = int(rev)
@@ -5085,7 +5099,7 @@ class _Choreo:
                                  first["t0"] - 0.05, ws[-1]["t1"] + 0.5, "hook")
         # whoosh de entrada
         self.sfx(max(0.0, first["t0"] - 0.05), "whoosh_fast", prio=9)
-        if self.S["scenes"]["outline"]:
+        if self.S["scenes"]["outline"] and self.auto_matte:      # contorno = borde del recorte
             sh = self.shot_at(first["t0"])
             if sh["talk"] and not sh.get("face_nominal") and sh.get("matte_ok", True):
                 it = self.add("effects", "hook_outline", {
@@ -5136,6 +5150,8 @@ class _Choreo:
                     self.sfx(max(0.0, a) + 0.02, "swoosh_up", prio=6, src_id=str(fx0.get("id", "")))
                     self.music_swells.append({"start": _r(a), "end": _r(b), "db": 1.5})
                     return None
+        if not self.auto_matte:
+            return None                         # fondo reemplazado: solo a mano (AUTO_MATTE_FX)
         cols = [self.pal["dark"], self.pal["accent2"]]
         it = self.add("effects", "hookbg", {"start": a, "end": b, "kind": "bg_replace", "background": kind,
                                             "bg_colors": cols, "fade_in": 0.0, "fade_out": 0.12},
@@ -5476,9 +5492,10 @@ class _Choreo:
             if bf:
                 via = "En mi página" if self.book["kind"] == "web" else \
                     "En " + PR.PLATFORMS.get(bf["platform"], {}).get("label", "el link")
-            self.card("schedule", sched_i, t0, end, title=title,
-                      subtitle=self.ent.get("schedule") or via or ("En el link de abajo" if link_i is not None else ""),
-                      icon="calendar-event", theme="light", sfx_name="ding")
+            sub = self.ent.get("schedule") or via or ("En el link de abajo" if link_i is not None else "")
+            self.card("schedule", sched_i, t0, end, title=title, subtitle=sub, icon="calendar-event",
+                      theme="light", sfx_name="ding",
+                      extra=card_media(self.prof, bf["platform"]) if bf and via and sub == via else None)
             s["info"]["_done"] = True
         if link_i is not None:
             s = self._sent_of(link_i)
@@ -5583,7 +5600,7 @@ class _Choreo:
                 cross = None                    # en la toma siguiente taparia la cara
         t_txt_end = cross or end
         spec = dict(base, start=t0, end=t_txt_end, y=_r(y, 4), size=_r(size, 4))
-        dark_bg = shot.get("matte_ok") and bool(self.S["scenes"]["bg_replace"])
+        dark_bg = self.auto_matte and shot.get("matte_ok") and bool(self.S["scenes"]["bg_replace"])
         if dark_bg and zone == "top":
             spec["color"] = "#FFFFFF"          # sobre el fondo oscuro nuevo, arriba de la cabeza
         else:
@@ -5714,7 +5731,9 @@ class _Choreo:
 
     def card(self, variant: str, wi: int, t0: float, t1: float, title: str = "", subtitle: str = "",
              value: str = "", icon: str = "", theme: str = "light", sfx_name: str = "pop",
-             cut_end: float | None = None) -> dict | None:
+             cut_end: float | None = None, extra: dict | None = None) -> dict | None:
+        """Tarjeta en la primera franja libre. `extra`: campos del perfil (platform + logo de la
+        plataforma que nombra: el logo va en el hueco del icono, mismo alto)."""
         shot = self.shot_at(self.words[wi]["t0"])
         t1 = max(min(t1, shot["end"] - 0.03), min(t0 + 0.9, shot["end"] - 0.03))   # no cruza el corte
         g = self.geom(shot, t0, t1)
@@ -5722,6 +5741,7 @@ class _Choreo:
         base = {"kind": "card", "variant": variant, "title": title, "subtitle": subtitle,
                 "value": value, "icon": icon, "theme": theme, "color": "#FFFFFF",
                 "anim_in": "rise", "anim_out": "fade", "rotation": 0.0, "items": []}
+        base.update(extra or {})
         # zona libre (arriba de la cabeza, o pecho + franja baja) donde quepa a >= 0.58 de ancho
         spans = [("top", g["top"][0], g["top"][1]), ("center", g["center"][0], g["low"][1])]
         for z, lo, hi in spans:
@@ -5871,7 +5891,7 @@ class _Choreo:
         persona en la frase de beneficio (o de humor) con su titulo en tinta de contraste."""
         cfg = self.S["scenes"]
         budget = _lerp(*cfg["budget"], self.I) * self.D
-        if not cfg["bg_replace"] or self.scene_time() >= budget:
+        if not self.auto_matte or not cfg["bg_replace"] or self.scene_time() >= budget:
             return
         order = {"beneficio": 0, "oferta": 1, "cierre": 2, "problema": 3, "otro": 4}
         cands = sorted([s for s in self.sents if not s["info"].get("_done")
@@ -5967,7 +5987,7 @@ class _Choreo:
         n = self.title_sequence(s, s["w0"], s["w1"], "title", ["top", "center"],
                                 ["center", "center_low", "top"], humor=info["tone"] == "humor",
                                 end_limit=self.title_limit())
-        if self.S["color_pop"] and self.I >= 0.55:
+        if self.auto_matte and self.S["color_pop"] and self.I >= 0.55:
             self._color_pop(s)
         info["_done"] = n > 0
         return True
@@ -6481,7 +6501,8 @@ class _Choreo:
         # una web con la etiqueta automatica ('Sitio web') lleva una accion segun el rubro
         ctx = " ".join(str(x or "") for x in (self.role, self.prof.get("business"), self.prof.get("title"),
                                                 self.script.get("topic")))
-        return {"label": PR.link_cta(b, ctx), "display": b["display"], "platform": b["platform"], "icon": b["icon"]}
+        return dict({"label": PR.link_cta(b, ctx), "display": b["display"], "platform": b["platform"],
+                     "icon": b["icon"]}, **book_media(b))
 
     def button_color(self) -> str:
         """Color del boton Seguir: el acento del estilo si se lee como boton; si el acento es
@@ -6507,8 +6528,8 @@ class _Choreo:
                 f["platform"] = ps["platform"]
             else:
                 f["subtitle"] = self.prof.get("title") or "Sígueme para más"
-            if self.prof.get("avatar"):
-                f.update(avatar="image", media=copy.deepcopy(self.prof["avatar"]))
+            # foto: la que subio el usuario; si no, la de SU red (descargada sola); si no, iniciales
+            f.update(follow_media(self.prof, (ps or {}).get("platform"), (ps or {}).get("handle")))
             return f
         handle = str(self.ent.get("handle") or "").strip()
         if handle:
@@ -6539,7 +6560,7 @@ class _Choreo:
                 continue
             if link and self.book is not None and l.get("url") == self.book.get("url"):
                 continue
-            out.append({"platform": l["platform"], "text": l["display"]})
+            out.append(dict({"platform": l["platform"], "text": l["display"]}, **chip_media(l)))
         if place:
             addr = str(self.prof.get("address") or "")
             mp = next((l for l in PR.all_links(self.prof) if l["kind"] == "maps"), None)
@@ -6800,7 +6821,7 @@ class _Choreo:
         if self.S["scenes"]["bg_blur"] and not shot.get("face_nominal"):
             self.add("effects", "cta_blur", {"start": b0, "end": t1, "kind": "bg_blur", "radius": 16.0,
                                              "fade_in": 0.25}, event=False)
-        elif self.S["scenes"]["outline"] and shot.get("matte_ok"):
+        elif self.S["scenes"]["outline"] and self.auto_matte and shot.get("matte_ok"):
             self.add("effects", "cta_outline", {"start": b0, "end": t1, "kind": "subject_outline",
                                                 "color": self.pal["accent"], "width": 6.0, "glow": 0.5},
                      event=False)
@@ -7001,7 +7022,7 @@ class _Choreo:
             return
         end_f = self.reserved[0][0] if self.reserved else self.D
         item = {"kind": "socials", "variant": "watermark",
-                "links": [{"platform": ps["platform"], "text": ps["handle"]}], "size": 0.03,
+                "links": [dict({"platform": ps["platform"], "text": ps["handle"]}, **chip_media(ps))], "size": 0.03,
                 "layout": "row", "anim_in": "fade", "anim_out": "fade", "opacity": 0.8, "backdrop": 0.34,
                 "rotation": 0.0, "color": "#FFFFFF"}
         w, h = socials_size(item, self.style)
@@ -7070,10 +7091,10 @@ class _Choreo:
             n = self.title_sequence(s, s["w0"], s["w1"], "title", ["top", "center"],
                                     ["center", "center_low", "top"], humor=humor,
                                     end_limit=self.title_limit())
-            if not color_pop_used and (fxk == "color_pop" or (self.S["color_pop"] and info["section"] == "beneficio"
-                                                              and self.I >= 0.55)):
+            if self.auto_matte and not color_pop_used and (
+                    fxk == "color_pop" or (self.S["color_pop"] and info["section"] == "beneficio" and self.I >= 0.55)):
                 color_pop_used = self._color_pop(s)
-            if n == 0 and fxk in ("zoom", "icono", "garabato"):
+            if n == 0 and fxk in ("zoom", "icono", "garabato", "color_pop"):
                 em = [self.words[i] for i in info["emph"]] or ws[-1:]
                 self.punch_at(em[0]["t0"], 0.1, 0.4)
             info["_done"] = n > 0
@@ -8379,12 +8400,17 @@ def _script_from_public(plan: dict, pub: dict, shots: list[dict]) -> dict:
 
 def choreograph(plan: dict, shots: list[dict], script: dict, style: str = "dinamico",
                 intensity: float = 0.75, seed: int = 7, fixed: dict | None = None,
-                windows: list | None = None, rev: int = 0, grid: dict | None = None) -> tuple[dict, _Choreo]:
+                windows: list | None = None, rev: int = 0, grid: dict | None = None,
+                auto_matte: bool | None = None) -> tuple[dict, _Choreo]:
+    """`auto_matte`: la IA propone fondos reemplazados / sujeto a color (default AUTO_MATTE_FX;
+    True solo para reproducir un plan que ya los traia)."""
     # el coreografo marca frases como hechas (info._done): cada pasada parte de una copia limpia
     script = dict(script)
     script["sents"] = [dict(s_, info={k: v for k, v in s_["info"].items() if not k.startswith("_")})
                        for s_ in script["sents"]]
     ch = _Choreo(plan, shots, script, style, intensity, seed, fixed=fixed, windows=windows, rev=rev)
+    if auto_matte is not None:
+        ch.auto_matte = bool(auto_matte)
     ch.grid = grid
     fx = ch.run()
     return fx, ch
@@ -8627,6 +8653,206 @@ def _follow_title(prof: dict | None) -> str:
     if biz and ps is not None and _brand_handle(biz, ps.get("handle", "")):
         return biz
     return nm
+
+
+def _ai_matte_fx(fx: dict | None) -> bool:
+    """El plan trae efectos de recorte (bg_replace / color_pop) que propuso la IA."""
+    return any(isinstance(e, dict) and e.get("kind") in MATTE_FX and e.get("src", "ai") != "user"
+               for e in (fx or {}).get("effects") or [])
+
+
+# ---- foto y logo de los enlaces del perfil en los items (profile.link_media). La foto y el logo
+# ocupan el hueco del icono / las iniciales: la geometria (ancho natural, alto, simetria) no cambia
+def _media_item(m: dict | None) -> dict | None:
+    """Medio del perfil para un item (sin `src`: el renderer resuelve el sid en media_root)."""
+    if not isinstance(m, dict) or not m.get("sid"):
+        return None
+    out = {k: copy.deepcopy(m[k]) for k in ("sid", "type", "name", "w", "h", "crop", "thumb") if k in m}
+    out["type"] = "image"
+    return out
+
+
+def own_icon(platform: str | None) -> bool:
+    """La red tiene icono de marca propio en Reelfy (Instagram, TikTok...): su logo no se usa."""
+    return str(platform or "") in LM.OWN_ICON
+
+
+def _link_logo(link: dict | None, platform: str | None = None) -> dict | None:
+    plat = platform or (link or {}).get("platform")
+    return None if link is None or own_icon(plat) else _media_item(PR.link_media(link, "logo"))
+
+
+def follow_media(prof: dict | None, platform: str | None = None, handle: str | None = None) -> dict:
+    """Foto del CTA Seguir: la que SUBIO el usuario (profile.avatar) manda; si no, la foto del
+    enlace de ESA red (Instagram -> su foto de perfil publica); sin foto {} (iniciales). Si la red no
+    tiene icono propio y su pagina tiene logo, `logo` (la insignia de la red)."""
+    if not prof:
+        return {}
+    link = PR.link_for(prof, platform, handle) if platform else None
+    out: dict = {}
+    m = _media_item(prof.get("avatar")) or _media_item(PR.link_media(link, "photo"))
+    if m:
+        out.update(avatar="image", media=m)
+    lg = _link_logo(link, platform)
+    if lg:
+        out["logo"] = lg
+    return out
+
+
+def book_media(link: dict | None) -> dict:
+    """Pastilla de reservas / web: con foto de la pagina -> foto redonda en el hueco del icono y el
+    logo como insignia; solo logo -> el logo en su insignia redondeada; nada -> {} (icono Tabler)."""
+    out: dict = {}
+    ph = _media_item(PR.link_media(link, "photo"))
+    if ph:
+        out.update(avatar="image", media=ph)
+    lg = _link_logo(link)
+    if lg:
+        out["logo"] = lg
+    return out
+
+
+def card_media(prof: dict | None, platform: str | None) -> dict:
+    """Tarjeta que nombra una plataforma del perfil ('En PaseoClub'): `platform` + `logo` (el logo
+    reemplaza al icono en su insignia) si la pagina lo tiene. {} si el perfil no tiene ese enlace."""
+    link = PR.link_for(prof, platform) if prof else None
+    if link is None:
+        return {}
+    out = {"platform": platform}
+    lg = _link_logo(link)
+    if lg:
+        out["logo"] = lg
+    return out
+
+
+def chip_media(link: dict | None) -> dict:
+    """Chip de redes: el logo de la pagina si su plataforma no tiene icono propio."""
+    lg = _link_logo(link)
+    return {"logo": lg} if lg else {}
+
+
+def _find_link(prof: dict | None, platform: str | None, display: str | None = None,
+               handle: str | None = None) -> dict | None:
+    """Enlace del perfil de un item: misma red y mismo @usuario / texto corto si los trae."""
+    if not prof or not platform:
+        return None
+    links = [l for l in PR.all_links(prof) if l.get("platform") == platform]
+    if handle:
+        return next((l for l in links if str(l.get("handle") or "").lower() == str(handle).lower()), None)
+    if display:
+        hit = next((l for l in links if l.get("display") == display), None)
+        if hit is not None:
+            return hit
+    return links[0] if links else None
+
+
+def _patch_item_media(it: dict, prof: dict | None, ours: set[str]) -> bool:
+    """Foto/logo del perfil en UN item ya colocado (Seguir, pastilla link_below, tarjeta con
+    `platform`, chips; tambien los de una escena). Solo se tocan medios del perfil (`ours`: sids del
+    perfil vigente y del anterior) o su ausencia: una imagen elegida a mano y el avatar 'face' se
+    respetan; 'Regenerar' que eligio iniciales con la foto disponible sigue con iniciales.
+    -> True si cambio."""
+    if not isinstance(it, dict):
+        return False
+    before = json.dumps(it, sort_keys=True, ensure_ascii=False)
+
+    def mine(m):
+        return not isinstance(m, dict) or not m.get("sid") or str(m["sid"]) in ours
+
+    def put_photo(want):
+        cur = it.get("media")
+        if not mine(cur):
+            return
+        m = want.get("media")
+        if m:
+            had = isinstance(cur, dict) and bool(cur.get("sid"))
+            it["media"] = m
+            if not had and it.get("avatar") in (None, "", "initial", "image"):
+                it["avatar"] = "image"
+        elif isinstance(cur, dict):
+            it.pop("media", None)
+            if it.get("avatar") == "image":
+                it["avatar"] = "initial"
+
+    def put_logo(obj, lg):
+        if not mine(obj.get("logo")):
+            return
+        if lg:
+            obj["logo"] = lg
+        else:
+            obj.pop("logo", None)
+
+    k, v = it.get("kind"), it.get("variant")
+    if k == "cta" and v == "follow":
+        plat, h = it.get("platform"), it.get("handle")
+        if plat and h and _find_link(prof, plat, handle=h) is None and prof is not None \
+                and any(l.get("handle") for l in PR.all_links(prof) if l.get("platform") == plat):
+            return False                      # Seguir de OTRA cuenta (hecho a mano): no es del perfil
+        want = follow_media(prof, plat, h) if prof else {}
+        put_photo(want)
+        put_logo(it, want.get("logo"))
+    elif k == "cta" and v == "link_below":
+        if not it.get("platform"):
+            return False                      # 'Link abajo' generico (sin enlace del perfil)
+        want = book_media(_find_link(prof, it.get("platform"), it.get("display")))
+        put_photo(want)
+        put_logo(it, want.get("logo"))
+    elif k == "card":
+        if not it.get("platform") and it.get("src", "ai") == "ai" and prof:
+            # tarjeta de un plan anterior que NOMBRA una pagina del perfil ('En PaseoClub'):
+            # se etiqueta con su plataforma para que lleve el logo (como las nuevas del director)
+            ws = [norm(w) for w in " ".join(str(it.get(f) or "") for f in
+                                            ("title", "subtitle", "value")).split()]
+            seen = set(ws) | {a + b for a, b in zip(ws, ws[1:])}      # 'Paseo Club' = 'PaseoClub'
+            for l in PR.all_links(prof):
+                lab = norm(str((PR.PLATFORMS.get(l.get("platform")) or {}).get("label") or ""))
+                if len(lab) >= 4 and lab in seen:
+                    it["platform"] = l["platform"]
+                    break
+        if it.get("platform"):
+            put_logo(it, _link_logo(_find_link(prof, it.get("platform"), it.get("display"))))
+    elif k == "socials":
+        for c in it.get("links") or []:
+            if isinstance(c, dict) and c.get("platform") and not own_icon(c.get("platform")):
+                put_logo(c, _link_logo(_find_link(prof, c["platform"], c.get("text"))))
+    return json.dumps(it, sort_keys=True, ensure_ascii=False) != before
+
+
+def apply_profile_media(plan: dict, profile: dict | None = None, old: dict | None = None
+                        ) -> tuple[dict, list[str]]:
+    """Pone / actualiza / quita la foto y el logo de los enlaces del perfil en lo que YA esta en el
+    plan (Seguir, pastilla de reservas, tarjetas con `platform`, chips, y los de las escenas) sin
+    re-dirigir ni mover nada: mismos ids, tiempos, posiciones y tamanos (la foto y el logo ocupan el
+    hueco del icono / las iniciales). Lo usa el servidor cuando termina la descarga automatica.
+    `profile` (None = el del plan) queda en plan.profile; `old` (default: el del plan) = de donde
+    venian los medios a reemplazar. -> (plan copia, ids cambiados)."""
+    p = copy.deepcopy(plan)
+    prev = PR.normalize_profile(old) if old is not None else _plan_profile(plan)
+    prof = PR.normalize_profile(profile) if profile is not None else _plan_profile(plan)
+    if profile is not None:
+        if prof:
+            p["profile"] = prof
+        else:
+            p.pop("profile", None)
+    if prof is None and prev is None:
+        return p, []
+    ours = PR.media_sids(prof) | PR.media_sids(prev)
+    fx = p.get("fx") if isinstance(p.get("fx"), dict) else {}
+    changed = []
+    for it in fx.get("graphics") or []:
+        if _patch_item_media(it, prof, ours):
+            changed.append(str(it.get("id")))
+    for c in fx.get("cutaways") or []:
+        if not isinstance(c, dict):
+            continue
+        hit = False
+        for g in c.get("graphics") or []:
+            hit = _patch_item_media(g, prof, ours) or hit
+        if isinstance(c.get("card"), dict):
+            hit = _patch_item_media(c["card"], prof, ours) or hit
+        if hit:
+            changed.append(str(c.get("id")))
+    return p, changed
 
 
 def _name_anchor(words: list[dict], name: str) -> list[int] | None:
@@ -9658,6 +9884,10 @@ def redirect(plan: dict, style: str | None = None, intensity: float | None = Non
     only = set(only_ids or [])
     if only:
         return _redirect_only(p, d, shots, script, style, intensity, seed, rev, only, locked_ids)
+    # aplicar el perfil (keep_rev) no cambia el resto de la edicion: un plan que ya traia fondos
+    # reemplazados / sujeto a color de la IA (director anterior a AUTO_MATTE_FX) los conserva;
+    # re-dirigir de verdad (otro estilo, regenerar) ya no los propone
+    legacy_matte = True if keep_rev and _ai_matte_fx(old) else None
     fixed = {k: [] for k in TRACKS}
     windows = None
     tl = _timeline(p)
@@ -9701,7 +9931,8 @@ def redirect(plan: dict, style: str | None = None, intensity: float | None = Non
         for k in range(4):
             fx_, ch_ = choreograph(copy.deepcopy(p), shots, script, style, intensity,
                                    seed if not only else seed + rev + 97 * k,
-                                   fixed=copy.deepcopy(fixed), windows=windows, rev=rev + k, grid=grid_)
+                                   fixed=copy.deepcopy(fixed), windows=windows, rev=rev + k, grid=grid_,
+                                   auto_matte=legacy_matte)
             if not only:
                 break
             new_items = [{kk: v for kk, v in it.items() if kk != "id"} for tr in TRACKS for it in fx_[tr]]
@@ -9781,6 +10012,7 @@ def _retext_locked(plan: dict, old: dict | None, new: dict | None) -> list[str]:
     o_bk, n_bk = PR.booking_link(old), PR.booking_link(new)
     o_cta = PR.link_cta(o_bk, " ".join(str((old or {}).get(k) or "") for k in ("business", "title")))
     n_ctx = " ".join(str((new or {}).get(k) or "") for k in ("business", "title"))
+    ours = PR.media_sids(old) | PR.media_sids(new)
     out = []
     for it in fx.get("graphics") or []:
         if not isinstance(it, dict) or not (it.get("locked") or it.get("src") == "user" or it.get("id") in locked_ids):
@@ -9802,17 +10034,14 @@ def _retext_locked(plan: dict, old: dict | None, new: dict | None) -> list[str]:
                 it["initials"] = PR.initials(n_fol)
             if n_ps:
                 it.update(handle=n_ps["handle"], platform=n_ps["platform"])
-            if (new or {}).get("avatar"):
-                it.update(media=copy.deepcopy(new["avatar"]), avatar="image")
-            elif it.get("avatar") == "image":
-                it.pop("media", None)
-                it["avatar"] = "initial"
         elif (k == "cta" and v == "link_below" or k == "card" and v in ("booking", "link")) and o_bk and n_bk \
                 and (it.get("label") in (o_bk["label"], o_cta) or it.get("display") == o_bk["display"]):
             lab = n_bk["label"] if k == "card" else PR.link_cta(n_bk, n_ctx)
             it.update(label=lab, display=n_bk["display"], platform=n_bk["platform"])
             if k == "cta":
                 it["icon"] = n_bk["icon"]
+        # foto y logo del perfil nuevo (foto subida, de su red o de la pagina; sin ellos, iniciales)
+        _patch_item_media(it, new, ours)
         if json.dumps(it, sort_keys=True, ensure_ascii=False) != before:
             out.append(str(it.get("id")))
     return out
@@ -9836,6 +10065,8 @@ def apply_profile(plan: dict, profile: dict | None) -> dict:
         return direct(p, use_llm=False)
     fixed = _retext_locked(p, old, prof)
     out = redirect(p, music_sync=False, keep_rev=True)
+    # foto/logo tambien en lo bloqueado dentro de escenas (la pila de la tarjeta final)
+    out, _more = apply_profile_media(out, None, old)
     if fixed:
         out["director"]["notes"] = list(out["director"].get("notes") or []) + [
             f"perfil aplicado tambien a lo bloqueado: {', '.join(fixed)[:200]}"]

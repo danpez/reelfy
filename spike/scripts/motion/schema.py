@@ -358,7 +358,11 @@ GRAPHIC_KIND_PARAMS = {
         P("label", "text", "Texto del botón", ""),
         sel("platform", "Plataforma (icono)", PLATFORM_IDS, None, nullable=True,
             hint="Enlace o reservas: icono de la red o de la página"),
-        P("display", "text", "Enlace corto", "", hint="p. ej. paseo.club/tu-nombre (subtítulo si no hay)")]},
+        P("display", "text", "Enlace corto", "", hint="p. ej. paseo.club/tu-nombre (subtítulo si no hay)"),
+        # logo del enlace (linkmedia lo obtiene de la pagina o el usuario lo sube): reemplaza al
+        # icono del encabezado. `aux`: no es el medio principal del kind (fxcore.mediaParam)
+        P("logo", "media", "Logo", None, nullable=True, accept=["image"], aux=True,
+          hint="Reemplaza al icono (p. ej. el logo de tu página de reservas)")]},
     "lower_third": {"label": "Rótulo (lower third)", "params": [
         P("title", "text", "Título", "", req=True), P("subtitle", "text", "Subtítulo", ""),
         sel("theme", "Tema", ["dark", "light"], "dark", seg=True),
@@ -379,10 +383,13 @@ GRAPHIC_KIND_PARAMS = {
         P("button", "text", "Botón", "Seguir"),
         P("button_done", "text", "Botón pulsado", "Siguiendo"),
         P("button_color", "color", "Color del botón", None, nullable=True),
-        sel("avatar", "Avatar", ["initial", "face", "image"], "initial", seg=True),
+        sel("avatar", "Avatar", ["initial", "face", "image"], "initial", seg=True,
+            hint="Link abajo: imagen = la foto redonda en lugar del icono"),
         P("initials", "text", "Iniciales", "", hint="Vacío = del nombre"),
         P("media", "media", "Foto de perfil", None, nullable=True, accept=["image"],
-          hint="Imagen de perfil (si no, iniciales)"),
+          hint="Seguir: foto de perfil (si no, iniciales). Link abajo: foto del lugar"),
+        P("logo", "media", "Logo del sitio", None, nullable=True, accept=["image"], aux=True,
+          hint="Link abajo: insignia en la foto (o en lugar del icono). Seguir: insignia de la red"),
         num("width", "Ancho de la pastilla", None, 0.3, SYM_W, 0.01, nullable=True,
             hint="Seguir y Link abajo: ancho común de la tarjeta final (vacío = el natural)")]},
     "progress": {"label": "Barra de progreso", "params": [
@@ -399,7 +406,9 @@ GRAPHIC_KIND_PARAMS = {
     "socials": {"label": "Redes sociales", "params": [
         P("links", "rows", "Redes", [], fields=[
             sel("platform", "Red", PLATFORM_IDS, "instagram"),
-            P("text", "text", "Usuario o enlace", "")]),
+            P("text", "text", "Usuario o enlace", ""),
+            P("logo", "media", "Logo", None, nullable=True, accept=["image"], aux=True,
+              hint="Reservas o web: logo del sitio en la insignia")]),
         sel("layout", "Disposición", ["column", "row", "grid"], "column", seg=True,
             hint="grid = rejilla de chips del mismo ancho"),
         num("cols", "Columnas (rejilla)", 2, 1, 4, 1),
@@ -1174,7 +1183,9 @@ def _norm_rows(v: Any, fields: list[dict]) -> list[dict]:
             k = f["k"]
             if k not in d or d[k] is None:
                 continue
-            if f["type"] in ("select", "seg") and d[k] not in f["opts"]:
+            if f["type"] == "media":
+                d[k] = norm_media(d[k])            # {sid} saneado; una ruta o basura -> None
+            elif f["type"] in ("select", "seg") and d[k] not in f["opts"]:
                 d.pop(k)
             elif f["type"] == "bool" and not isinstance(d[k], bool):
                 d[k] = bool(d[k]) if isinstance(d[k], (int, float)) else f.get("default")
@@ -1492,6 +1503,8 @@ def _check_param(errs: list, where: str, item: dict, prm: dict) -> None:
                                     f"[{f['min']}, {f['max']}]")
                 elif f["type"] in ("select", "seg") and fv not in f["opts"]:
                     errs.append(f"{where}: '{k}[{i}].{f['k']}'={fv!r} no es una opcion valida")
+                elif f["type"] == "media" and norm_media(fv) is None:
+                    errs.append(f"{where}: '{k}[{i}].{f['k']}' debe ser un medio con 'sid' valido")
     elif t == "media":
         if norm_media(v) is None:
             errs.append(f"{where}: '{k}' debe ser un medio con 'sid' valido")

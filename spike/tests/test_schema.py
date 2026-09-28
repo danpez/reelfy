@@ -560,3 +560,43 @@ def test_medios_propios_en_el_catalogo_y_normalize():
     bad = copy.deepcopy(p)
     bad["fx"]["graphics"][0]["media"] = {"sid": "x/y"}
     assert any("medio" in e for e in S.validate(bad))
+
+
+def test_logo_y_foto_del_enlace_en_el_catalogo_y_normalize():
+    """Perfil: `logo` (medio, nullable, solo imagen, auxiliar) en cta, card y en los enlaces de
+    socials; link_below usa avatar/media como el Seguir. normalize los conserva saneados."""
+    cta = {p["k"]: p for p in S.item_params("graphics", "cta")}
+    card = {p["k"]: p for p in S.item_params("graphics", "card")}
+    for ps in (cta, card):
+        lg = ps["logo"]
+        assert lg["type"] == "media" and lg["nullable"] and lg["accept"] == ["image"] and lg["aux"] is True
+        assert lg["default"] is None
+    assert "Link abajo" in cta["avatar"]["hint"] and "Link abajo" in cta["media"]["hint"]
+    assert not cta["media"].get("aux")                          # el medio principal del CTA sigue siendo `media`
+    soc = {p["k"]: p for p in S.item_params("graphics", "socials")}
+    fl = {f["k"]: f for f in soc["links"]["fields"]}
+    assert fl["logo"]["type"] == "media" and fl["logo"]["aux"] is True
+    logo = {"sid": "lg0123abcd", "type": "image", "name": "logo_demo.png", "w": 512, "h": 512,
+            "src": "https://reserva.demo/icon.svg"}
+    photo = {"sid": "ph0123abcd", "type": "image", "name": "foto_demo.png", "w": 1024, "h": 1024}
+    p = S.normalize({"video": "x", "duration": 10.0, "fx": {"graphics": [
+        {"kind": "cta", "variant": "link_below", "start": 1, "end": 3, "avatar": "image", "media": photo, "logo": logo},
+        {"kind": "cta", "variant": "follow", "start": 3, "end": 5, "logo": "/ruta/local.png"},
+        {"kind": "card", "variant": "schedule", "start": 5, "end": 7, "logo": logo},
+        {"kind": "socials", "start": 7, "end": 9, "links": [
+            {"platform": "web", "text": "reserva.demo/ana", "logo": logo},
+            {"platform": "web", "text": "otra.demo", "logo": {"sid": "../x"}}]}]}}, fill=True)
+    g = p["fx"]["graphics"]
+    clean = {k: v for k, v in logo.items() if k != "src"}      # norm_media: solo lo que usa el motor
+    assert g[0]["logo"] == clean and g[0]["media"] == photo and g[0]["avatar"] == "image"
+    assert g[1]["logo"] is None                                 # nunca una ruta
+    assert g[2]["logo"] == clean
+    assert g[3]["links"][0]["logo"] == clean and g[3]["links"][1]["logo"] is None
+    assert S.validate(p) == []
+    bad = copy.deepcopy(p)
+    bad["fx"]["graphics"][3]["links"][0]["logo"] = {"sid": "x/y"}
+    assert any("links[0].logo" in e for e in S.validate(bad))
+    # un plan sin logo no gana la clave con fill=False (planes viejos intactos)
+    q = S.normalize({"video": "x", "duration": 10.0, "fx": {"graphics": [
+        {"kind": "card", "variant": "link", "start": 1, "end": 2}]}})
+    assert "logo" not in q["fx"]["graphics"][0]

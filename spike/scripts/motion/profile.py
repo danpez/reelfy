@@ -25,6 +25,9 @@ API:
   entities_from(profile) -> (dict, [claves])   entidades que el perfil fija (name_src 'perfil').
   primary_social(p), booking_link(p), all_links(p), initials(nombre), name_variants(nombre),
   name_span(palabras, nombre) / name_hits(...), link_cta(enlace, rubro).
+  Foto y logo de cada enlace (photo/logo, media_src auto|user, media_off; ver _keep_link_media):
+  link_media(enlace, 'photo'|'logo'), link_for(p, red, @usuario?), media_wanted(enlace) (lo que el
+  servidor descarga solo), media_sids(p).
 """
 from __future__ import annotations
 
@@ -759,6 +762,15 @@ def dedupe_links(links: list[dict]) -> list[dict]:
         if k in seen:
             if l.get("primary"):
                 out[seen[k]]["primary"] = True
+            keep = out[seen[k]]
+            for mk in ("photo", "logo"):          # la foto/logo del duplicado no se pierde
+                if isinstance(l.get(mk), dict) and not keep.get(mk):
+                    keep[mk] = l[mk]
+                    src = (l.get("media_src") or {}).get(mk)
+                    if src:
+                        keep["media_src"] = dict(keep.get("media_src") or {}, **{mk: src})
+                    if l.get("media_for") and not keep.get("media_for"):
+                        keep["media_for"] = l["media_for"]
             continue
         seen[k] = len(out)
         out.append(l)
@@ -890,12 +902,120 @@ def _norm_link(v: Any) -> dict | None:
         if t and not (switched and t in auto | {base.get("handle", "")}):
             base[k] = t
     base["primary"] = bool(v.get("primary"))
+    stale = switched or (isinstance(v.get("media_for"), str) and _url_key(v["media_for"]) != _url_key(base["url"]))
+    _keep_link_media(base, v, stale)
     return base
+
+
+# ---------------------------------------------------------------- foto y logo de los enlaces
+# Cada enlace puede traer su foto (la vista previa de la pagina: og:image; en Instagram la foto de
+# perfil) y el logo del sitio (icono), descargados SOLOS por el servidor (motion/linkmedia.py) o
+# subidos por el usuario:
+#   photo / logo: medio propio {sid, type:'image', name?, w?, h?, src?}   (nunca una ruta)
+#   media_src {photo, logo}: 'auto' (lo descargo el servidor) | 'user' (lo subio el usuario: nunca
+#       se pisa ni se vuelve a descargar)
+#   media_off {photo, logo}: el usuario lo quito (no se vuelve a descargar solo)
+#   media_for: url del enlace para la que se descargo lo 'auto' (si el enlace cambia, se descarta)
+LINK_MEDIA_KINDS = ("photo", "logo")
+MEDIA_SRC = ("auto", "user")
+# enlaces sin vista previa util (correo, telefono, mapa, WhatsApp: su imagen es la de la app)
+NO_PREVIEW = {"email", "phone", "maps", "whatsapp"}
+_HTTP_RX = re.compile(r"^https?://[^\s<>\"']{1,500}$", re.I)
+
+
+def _url_key(u: Any) -> str:
+    return re.sub(r"^https?://(www\.)?", "", str(u or "").strip().lower()).rstrip("/")
+
+
+def _norm_media(v: Any) -> dict | None:
+    """Foto o logo de un enlace: medio propio saneado como el avatar (sid, nunca una ruta) + `src`
+    (url http(s) de la imagen de origen, solo informativa)."""
+    out = _norm_avatar(v)
+    if out is not None and isinstance(v.get("src"), str) and _HTTP_RX.match(v["src"].strip()):
+        out["src"] = v["src"].strip()
+    return out
+
+
+def _keep_link_media(base: dict, v: dict, stale: bool) -> None:
+    """Pasa a `base` (enlace reconocido de nuevo) la foto/logo de `v` saneados. Lo 'auto' de otra
+    url o de otra red (el enlace cambio) se descarta; lo quitado por el usuario (media_off) no
+    vuelve salvo que el mismo usuario suba uno ('user'). Sin media_src un medio es del usuario."""
+    src_in = v.get("media_src") if isinstance(v.get("media_src"), dict) else {}
+    off_in = v.get("media_off") if isinstance(v.get("media_off"), dict) else {}
+    src: dict[str, str] = {}
+    off: dict[str, bool] = {}
+    for k in LINK_MEDIA_KINDS:
+        if off_in.get(k) is True:
+            off[k] = True
+        m = _norm_media(v.get(k))
+        if m is None:
+            continue
+        s = src_in.get(k) if src_in.get(k) in MEDIA_SRC else "user"
+        if s == "auto" and (stale or off.get(k)):
+            continue
+        base[k] = m
+        src[k] = s
+    if src:
+        base["media_src"] = src
+    if off:
+        base["media_off"] = off
+    mf = v.get("media_for")
+    if "auto" in src.values() and isinstance(mf, str) and _HTTP_RX.match(mf.strip()):
+        base["media_for"] = mf.strip()
+
+
+def link_media(link: dict | None, kind: str) -> dict | None:
+    """Foto ('photo') o logo ('logo') utilizable del enlace (None si no hay o el usuario lo quito)."""
+    if not isinstance(link, dict) or kind not in LINK_MEDIA_KINDS:
+        return None
+    if (link.get("media_off") or {}).get(kind) and (link.get("media_src") or {}).get(kind) != "user":
+        return None
+    m = link.get(kind)
+    return m if isinstance(m, dict) and m.get("sid") else None
+
+
+def link_for(p: dict | None, platform: str | None, handle: str | None = None) -> dict | None:
+    """Enlace del perfil de esa red (con ese @usuario si se da; si no coincide ninguno, None)."""
+    if not platform:
+        return None
+    h = str(handle or "").lower()
+    cands = [l for l in all_links(p) if l.get("platform") == platform]
+    if h:
+        return next((l for l in cands if str(l.get("handle") or "").lower() == h), None)
+    return cands[0] if cands else None
+
+
+def media_wanted(link: dict | None) -> list[str]:
+    """Lo que el servidor puede descargar SOLO para este enlace: foto/logo que no subio ni quito
+    el usuario. [] para enlaces sin pagina (correo, telefono, mapa, WhatsApp) o sin http(s)."""
+    if not isinstance(link, dict) or link.get("platform") in NO_PREVIEW or \
+            not _HTTP_RX.match(str(link.get("url") or "")):
+        return []
+    from .linkmedia import OWN_ICON          # redes con icono propio: su logo no se descarga
+    src = link.get("media_src") or {}
+    off = link.get("media_off") or {}
+    return [k for k in LINK_MEDIA_KINDS if src.get(k) != "user" and not off.get(k)
+            and not (k == "logo" and link.get("platform") in OWN_ICON)]
+
+
+def media_sids(p: dict | None) -> set[str]:
+    """sids de los medios del perfil (avatar + foto/logo de cada enlace)."""
+    out = set()
+    av = (p or {}).get("avatar")
+    if isinstance(av, dict) and av.get("sid"):
+        out.add(str(av["sid"]))
+    for l in all_links(p):
+        for k in LINK_MEDIA_KINDS:
+            m = l.get(k)
+            if isinstance(m, dict) and m.get("sid"):
+                out.add(str(m["sid"]))
+    return out
 
 
 def normalize_profile(p: Any) -> dict | None:
     """Perfil saneado o None si no trae nada util. Campos: name, title, business, tagline,
-    links [...], phone, whatsapp, email, address, avatar, use {lower_third, follow_cta,
+    links [...] (cada uno con photo/logo/media_src/media_off/media_for opcionales: ver
+    _keep_link_media), phone, whatsapp, email, address, avatar, use {lower_third, follow_cta,
     booking_cta, end_card, handle_watermark} (+ id y gender opcionales)."""
     if not isinstance(p, dict):
         return None

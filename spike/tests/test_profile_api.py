@@ -17,6 +17,10 @@ import pytest
 
 from test_server_api import srv  # noqa: F401  (servidor aislado con un trabajo en review)
 
+# foto/logo automaticos de los enlaces (paseo.club, instagram.com): SIN red en estas pruebas (el
+# servidor aislado hereda el entorno). Con red simulada: tests/test_server_linkmedia.py
+os.environ.setdefault("REELFY_LINK_MEDIA", "0")
+
 SPIKE = Path(__file__).resolve().parents[1]
 TEXT = ("ella es la Dra. Lucia Fernandez, es Odontologa, su instagram es https://instagram.com/dra.lucia.demo "
         "(o simplemente @dra.lucia.demo) y su pagina web es de PaseoClub https://paseo.club/business/dra-lucia-demo")
@@ -215,3 +219,16 @@ assert (S.SOURCES / "5ce0000000f1.png").exists()
 print("OK")
 '''
     _run(code, tmp_path)
+
+
+def test_link_media_status_without_network(srv):  # noqa: F811
+    """Sin red (pruebas): el perfil responde igual, con media_status 'done' y sin foto/logo
+    inventados; refrescar avisa que la descarga automatica esta apagada."""
+    api = srv["api"]
+    pr = api.post("/profile/parse", {"text": TEXT})["profile"]
+    assert pr["media_status"] == "done"
+    assert not any(k in l for l in pr["links"] for k in ("photo", "logo", "media_src"))
+    r = api.post("/profile/media/refresh", {"profile": pr})
+    assert r["ok"] and r["enabled"] is False and r["urls"] == [] and r["profile"]["media_status"] == "done"
+    assert api.post("/profile/media/refresh", {}, raw=True)[0] == 400
+    assert "profile_media" in api.get("/settings")["features"]

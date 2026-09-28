@@ -539,9 +539,10 @@ def test_dentista_edit(dentista):
     assert any(g.get("kind") == "sticker_text" and g.get("text") and ctr[0]["start"] <= g["start"] <= ctr[0]["end"]
                for g in fx["graphics"])
     assert ctr[0].get("text")
-    # escenas: fondo reemplazado + desenfoque + transiciones de entrada/salida de la escena
+    # escenas: desenfoque + destello + B/N y transiciones de entrada/salida de la escena. El fondo
+    # reemplazado y el sujeto a color ya NO los propone la IA (el borde del recorte deja halos)
     kinds = {it["kind"] for it in fx["effects"]}
-    assert {"bg_replace", "bg_blur", "flash_frame", "color_pop", "bw"} <= kinds
+    assert {"bg_blur", "flash_frame", "bw"} <= kinds and not kinds & set(D.MATTE_FX)
     trs = [tl.remap_clamped(t["at"]) for t in fx["transitions"]]
     for c in fx["cutaways"]:
         assert any(abs(t - tl.remap_clamped(c["start"])) < 0.12 for t in trs)
@@ -815,7 +816,8 @@ def test_scene_budget_and_transitions(styled):
                  if e["kind"] in ("bw", "bg_replace", "color_pop"))
     assert scene / tl.final_duration >= 0.12
     assert any(e["kind"] == "flash_frame" for e in p["fx"]["effects"])
-    assert any(e["kind"] == "bg_replace" for e in p["fx"]["effects"])
+    # el presupuesto se cubre con escenas e insertos: sin fondo reemplazado ni sujeto a color de la IA
+    assert not any(e["kind"] in D.MATTE_FX for e in p["fx"]["effects"])
     trs = [tl.remap_clamped(t["at"]) for t in p["fx"]["transitions"]]
     for c in p["fx"]["cutaways"]:
         assert any(abs(t - tl.remap_clamped(c["start"])) < 0.12 for t in trs)
@@ -1688,19 +1690,25 @@ def test_role_needs_spoken_topic_words():
     assert ent2["role"] != "Bienes raíces"
 
 
-def test_hook_is_close_and_on_a_new_background():
+def test_hook_is_close_and_on_a_new_background(monkeypatch):
     """Hook con impacto (plano abierto a camara, recorte limpio): arranca cerrado (cara ~18% del
-    alto) y con el fondo del estilo detras desde el primer cuadro; termina con el encuadre
-    cerrado. Sin recorte limpio no hay fondo nuevo."""
+    alto). El fondo del estilo detras (bg_replace) ya NO lo pone la IA (AUTO_MATTE_FX: el borde del
+    recorte deja halos); con la bandera encendida sale desde el primer cuadro y termina con el
+    encuadre cerrado, y sin recorte limpio no hay fondo nuevo."""
     p = synthetic_plan()
     p["dims"] = [2160, 3840]                                 # fuente 4K: hay resolucion para cerrar
     p["shots"][0]["face"] = [0.5, 0.3, 0.1, 0.08]
+    auto = D.direct(p, use_llm=False, trim=False)
+    assert not [e for e in auto["fx"]["effects"] if e["kind"] in D.MATTE_FX]
+    monkeypatch.setattr(D, "AUTO_MATTE_FX", True)
     out = D.direct(p, use_llm=False, trim=False)
     tl = _tl(out)
     first = min(w["start"] for ph in p["phrases"] for w in ph)
     cam = [e for e in out["fx"]["effects"] if e["kind"] == "zoom"]
     c0 = min(cam, key=lambda e: e["start"])
     assert c0["from"] >= min(1.75, 0.18 / 0.08) - 1e-3
+    c_auto = min((e for e in auto["fx"]["effects"] if e["kind"] == "zoom"), key=lambda e: e["start"])
+    assert c_auto["from"] >= min(1.75, 0.18 / 0.08) - 1e-3             # el hook cerrado no depende del fondo
     bg = [e for e in out["fx"]["effects"] if e["id"].startswith("fx_hookbg")]
     assert len(bg) == 1 and bg[0]["kind"] == "bg_replace" and bg[0]["background"] == D.STYLES["dinamico"]["hook_bg"]
     assert tl.remap_clamped(bg[0]["start"]) <= tl.remap_clamped(first) + 0.01
@@ -2240,10 +2248,14 @@ def test_camera_covers_the_first_frame_after_each_join():
 
 
 # ---------------------------------------------------------------- QA final (entrega): arreglos minimos
-def test_locked_hook_keeps_a_single_hook_background():
+def test_locked_hook_keeps_a_single_hook_background(monkeypatch):
     """Con el titulo del hook bloqueado, re-dirigir conserva SU fondo (_lock_groups) y no emite
-    una copia identica (fx_hookbg_s0b): dos bg_replace iguales duplicaban recorte y compositor."""
+    una copia identica (fx_hookbg_s0b): dos bg_replace iguales duplicaban recorte y compositor.
+    El plan viene de un director que aun ponia el fondo solo (AUTO_MATTE_FX encendido); re-dirigir
+    con el director actual lo conserva por estar bloqueado con su titulo."""
+    monkeypatch.setattr(D, "AUTO_MATTE_FX", True)
     p = D.direct(synthetic_plan(), use_llm=False)
+    monkeypatch.setattr(D, "AUTO_MATTE_FX", False)
     hook = [t for t in p["fx"]["text"] if t["id"].startswith("tx_hook")][0]
     hook["locked"] = True
     a, b = hook["start"], hook["end"]

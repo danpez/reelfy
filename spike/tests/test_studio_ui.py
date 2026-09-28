@@ -497,3 +497,65 @@ def test_subtitulos_en_vivo_miden_lo_que_el_export(tmp_path):
             assert abs(r["w"] - g["w"]) <= 0.03 * g["w"], (c["cfg"], g["words"], r["w"], g["w"])
     assert n >= 40
     print(f'grupos: {n}, desviacion maxima del ancho: {dev * 100:.2f} %')
+
+
+@needs_node
+def test_foto_y_logo_del_enlace_igual_al_render(tmp_path):
+    """La vista en vivo dibuja la foto y el logo de los enlaces del Perfil con la geometria del
+    export: hueco de link_below (fxcore.linkSlot vs graphics.link_slot_geom), constantes de las
+    insignias y el mismo criterio para presentar un logo (fxcore.logoLook vs graphics.logo_look)
+    sobre imagenes sinteticas (a sangre, transparente, blanco, JPG ancho, semitransparente)."""
+    import numpy as np
+    from motion import graphics as G
+    consts = _node_json(tmp_path, "k.js", "process.stdout.write(JSON.stringify([C.LINK_PHOTO,C.LINK_LOGO,C.LINK_BADGE,"
+                        "C.LINK_PAD_R,C.FOLLOW_BADGE,C.LOGO_PAD,C.LOGO_RING,C.LOGO_PLATE,C.LOGO_PLATE_DARK]));")
+    assert consts == [G.LINK_PHOTO, G.LINK_LOGO, G.LINK_BADGE, G.LINK_PAD_R, G.FOLLOW_BADGE, G.LOGO_PAD,
+                      G.LOGO_RING, G.LOGO_PLATE, G.LOGO_PLATE_DARK]
+    cases = [[k, h, two] for k in ("photo", "logo", "icon") for h in (60.0, 120.95, 151.2) for two in (True, False)]
+    got = _node_json(tmp_path, "s.js", "process.stdout.write(JSON.stringify(%s.map(c=>C.linkSlot(c[0],c[1],c[2]))));"
+                     % json.dumps(cases))
+    for (k, h, two), g in zip(cases, got):
+        e = G.link_slot_geom(k, h, two)
+        for a, b in (("d", "d"), ("inset", "inset"), ("gap", "gap"), ("padR", "pad_r")):
+            assert abs(g[a] - e[b]) < 1e-9, (k, h, two, a)
+    rnd = np.random.default_rng(5)
+
+    def img(w, h, bg, box=None, fg=None):
+        a = np.zeros((h, w, 4), np.uint8)
+        a[...] = bg
+        if box:
+            x0, y0, x1, y1 = box
+            a[y0:y1, x0:x1] = fg
+        return a
+    imgs = [img(48, 48, (255, 120, 0, 255)),                                        # icono de app
+            img(64, 40, (0, 0, 0, 0), (9, 4, 41, 30), (200, 30, 180, 255)),         # transparente
+            img(40, 40, (0, 0, 0, 0), (8, 8, 32, 32), (255, 255, 255, 255)),        # blanco
+            img(90, 30, (250, 244, 230, 255), (20, 8, 70, 22), (20, 40, 160, 255)),  # JPG ancho
+            img(40, 40, (0, 0, 0, 0)),                                              # vacio
+            np.concatenate([rnd.integers(0, 256, (36, 50, 3)), rnd.integers(0, 256, (36, 50, 1))], -1).astype(np.uint8)]
+    (tmp_path / "logos.json").write_text(json.dumps(
+        [{"w": int(a.shape[1]), "h": int(a.shape[0]), "px": a.reshape(-1).tolist()} for a in imgs]))
+    got = _node_json(tmp_path, "l.js", "const d=JSON.parse(fs.readFileSync(%s,'utf8'));"
+                     "process.stdout.write(JSON.stringify(d.map(c=>C.logoLook(Uint8ClampedArray.from(c.px),c.w,c.h))));"
+                     % json.dumps(str(tmp_path / "logos.json")))
+    for a, g in zip(imgs, got):
+        e = G.logo_look(G._as_image(a))
+        assert g["bleed"] == e["bleed"] and g["plate"] == e["plate"] and tuple(g["box"]) == tuple(e["box"]), (g, e)
+    # cada caso distinto de verdad (el espejo no pasa por coincidencia)
+    assert [g["bleed"] for g in got[:2]] == [True, False] and got[2]["plate"] == G.LOGO_PLATE_DARK
+    assert got[3]["plate"] == "#FAF4E6" and got[1]["box"] == [9, 4, 41, 30]
+
+
+def test_studio_dibuja_foto_y_logo_del_perfil():
+    """fx.js dibuja en vivo lo mismo que graphics: foto redonda en el hueco de link_below con el logo
+    en su esquina, logo solo en insignia redondeada, logo como insignia del Seguir, logo en el
+    encabezado de la tarjeta y en los chips; el inspector deja quitar un medio opcional."""
+    fx = (STATIC / "fx.js").read_text()
+    for frag in ("C.linkSlot(kind", "drawLogoBadge(c, lg, bx, by, bd, \"circle\")", "drawLogoBadge(c, lg, scx, 0, d, \"squircle\")",
+                 "drawLogoBadge(c, lgf, bx, by, bd, \"circle\")", "drawLogoBadge(c, lgc,", "C.logoLook(", "C.logoFit(",
+                 "C.LINK_BADGE", "C.FOLLOW_BADGE", 'data-a="clear"'):
+        assert frag in fx, frag
+    pf = (STATIC / "profile.js").read_text()
+    for frag in ("/profile/media/refresh", "media_status", "Obteniendo foto…", "media_off", "media_src", "/tlsource/",
+                 "Cambiar", "PF.adoptLinkMedia", "PF.setLinkMedia"):
+        assert frag in pf, frag

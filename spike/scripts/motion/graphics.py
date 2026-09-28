@@ -32,17 +32,25 @@ Parametros extra (opcionales, no normativos) que entiende este modulo:
     follow con `title` (nombre) + `platform` + `handle` (icono de la red y @usuario en la segunda
     linea), `initials` y `media` (foto de perfil: render inyecta `_media_image`); link_below con
     `display` (texto corto del enlace en una segunda linea) y `platform`/`icon`.
+    Foto y logo del enlace (linkmedia: og:image de la pagina / icono del sitio, o subidos):
+    link_below con avatar 'image' + `media` = foto redonda en el hueco del icono y `logo` como
+    insignia en su esquina inferior derecha; solo `logo` = el logo en una insignia redondeada;
+    follow con `logo` = el logo como insignia de la red (redes sin icono propio).
   - card: variante `booking` (reservas: encabezado con icono, `title`/`display` y boton `label`)
-    y `platform` (icono de la red en link/booking).
-  - socials (perfil): chips de plataforma con icono de marca + usuario (`links` [{platform, text}],
-    `layout` row|column, `variant` chips|watermark, `theme`, `icon_style` brand|mono, `title`,
-    `stagger`, `opacity`); entrada escalonada.
+    y `platform` (icono de la red en link/booking); `logo` (medio) reemplaza al icono del
+    encabezado en cualquier variante.
+  - socials (perfil): chips de plataforma con icono de marca + usuario (`links` [{platform, text,
+    logo?}], `layout` row|column, `variant` chips|watermark, `theme`, `icon_style` brand|mono,
+    `title`, `stagger`, `opacity`); entrada escalonada; `logo` del enlace en la insignia del chip.
+  - Imagenes de perfil (media / logo): ver media_file_image (mismo resolver de render por sid,
+    cache por archivo y tamano; sin archivo -> el dibujo de siempre).
   - sticker_text: `text`, `font`, `border` (bool).
 """
 from __future__ import annotations
 
 import math
 import re
+import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from functools import lru_cache
@@ -458,9 +466,13 @@ def sanitize(item: dict) -> dict:
         it.pop("days")
     if "links" in it:
         lk = it["links"]
-        it["links"] = [{"platform": str(x.get("platform") or "web"), "text": str(x.get("text") or "")}
+        it["links"] = [dict({"platform": str(x.get("platform") or "web"), "text": str(x.get("text") or "")},
+                            **{k: x[k] for k in ("logo", "_logo_image") if k in x and
+                               (k == "_logo_image" or media_ref(x[k]) is not None)})
                        for x in (lk if isinstance(lk, (list, tuple)) else [])
                        if isinstance(x, dict) and isinstance(x.get("text", ""), (str, int, float))][:8]
+    if it.get("logo") is not None and media_ref(it["logo"]) is None:
+        it.pop("logo")                  # logo = medio propio {sid, ...}; una ruta o basura se descarta
     for k in ("anim_in", "anim_out"):
         if it.get(k) is not None:
             it[k] = ANIM_ALIASES.get(it[k], it[k])
@@ -1726,7 +1738,9 @@ def _digits_w(s: str, fnt: skia.Font) -> float:
 
 
 def _row_header(item, th, F, u, inner_w, ctx, icon: str, title: str, subtitle: str, badge_fn=None,
-                badge_scale: float = 1.0, title_px: float = 5.6):
+                badge_scale: float = 1.0, title_px: float = 5.6, logo=None):
+    """Encabezado: insignia con icono (o `badge_fn`) + titulo y subtitulo. `logo` (imagen del logo
+    del enlace: la pagina de reservas) reemplaza a la insignia con su icono (draw_logo_badge)."""
     bs = 15.0 * u * badge_scale
     gap = 4.2 * u
     tw = inner_w - bs - gap
@@ -1747,10 +1761,13 @@ def _row_header(item, th, F, u, inner_w, ctx, icon: str, title: str, subtitle: s
             cv.save()
             cv.translate(bcx, bcy)
             cv.scale(sp, sp)
-            draw_badge(cv, "squircle", 0, 0, bs, th["badge"], ctx, a)
-            if badge_fn is not None:
+            if logo is not None:
+                draw_logo_badge(cv, logo, 0, 0, bs, a, ctx, "squircle", shadow=True)
+            elif badge_fn is not None:
+                draw_badge(cv, "squircle", 0, 0, bs, th["badge"], ctx, a)
                 badge_fn(cv, 0.0, 0.0, bs, t, a)
             else:
+                draw_badge(cv, "squircle", 0, 0, bs, th["badge"], ctx, a)
                 q, ip = _badge_icon_q(t, t_icon, bs * 0.56, ctx)
                 if q > 0 and ip > 0.01:
                     cv.scale(ip, ip)
@@ -2251,9 +2268,11 @@ def _card_rows(item, th, F, u, inner_w, ctx) -> list[_Row]:
     value = item.get("value")
     items = item.get("items") or []
     icon = item.get("icon") or CARD_ICON[v]
+    # `logo` (logo del enlace: la pagina de reservas que menciona la tarjeta) reemplaza al icono
+    lg = logo_image(item)
     rows: list[_Row] = []
     if v == "price":
-        rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or "Precio", sub))
+        rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or "Precio", sub, logo=lg))
         rows.append(_row_value(item, th, F, u, inner_w, ctx, str(value or "$0"), counter=True, big=16.5))
         if items:
             rows.append(_row_divider(th, u))
@@ -2263,10 +2282,10 @@ def _card_rows(item, th, F, u, inner_w, ctx) -> list[_Row]:
         # la hospede y la completa no cabe sobre la toma
         if item.get("map") is not False and str(item.get("map", "")).lower() not in ("false", "0", "no"):
             rows.append(_row_map(item, th, F, u, inner_w, ctx))
-        rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or str(value or ""), sub))
+        rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or str(value or ""), sub, logo=lg))
     elif v == "schedule":
         rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or "Horarios disponibles", sub,
-                                badge_fn=_cal_clock_badge(th, u), badge_scale=1.12))
+                                badge_fn=_cal_clock_badge(th, u), badge_scale=1.12, logo=lg))
         days = item.get("days")
         if days is not None:
             rows.append(_row_chips(th, F, u, inner_w, ["L", "M", "M", "J", "V", "S", "D"],
@@ -2283,9 +2302,9 @@ def _card_rows(item, th, F, u, inner_w, ctx) -> list[_Row]:
         disp = str(item.get("display") or "")
         if plat and not item.get("icon"):
             icon = platform_icon(plat, icon)
-        badge = _platform_badge_fn(plat, ctx) if _is_brand(plat) else None
+        badge = _platform_badge_fn(plat, ctx) if _is_brand(plat) and lg is None else None
         rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or "Agenda tu cita", sub or disp,
-                                badge_fn=badge))
+                                badge_fn=badge, logo=lg))
         if v == "booking" and items:
             rows.append(_row_chips(th, F, u, inner_w, [str(x) for x in items]))
         rows.append(_row_button(item, th, F, u, inner_w, ctx,
@@ -2293,13 +2312,13 @@ def _card_rows(item, th, F, u, inner_w, ctx) -> list[_Row]:
                                 "arrow-right", cursor=bool(_g(item, "cursor", True))))
     elif v == "phone":
         rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or "Llamanos", sub,
-                                badge_fn=_ringing_icon(icon, th, ctx)))
+                                badge_fn=_ringing_icon(icon, th, ctx), logo=lg))
         if value:
             rows.append(_row_value(item, th, F, u, inner_w, ctx, str(value), counter=False, big=9.5, marker=False))
     elif v == "rating":
         rv = parse_amount(str(value or "5"))[1] or 5.0
         rows.append(_row_stars(th, F, u, inner_w, rv))
-        rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or f"{rv:.1f}", sub)
+        rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or f"{rv:.1f}", sub, logo=lg)
                     if title else _row_value(item, th, F, u, inner_w, ctx, f"{rv:.1f}", True, 12.0, False))
         if sub and not title:
             rows.append(_row_text(th, F, u, inner_w, sub))
@@ -2317,7 +2336,7 @@ def _card_rows(item, th, F, u, inner_w, ctx) -> list[_Row]:
         if frac is not None:
             rows.append(_row_bar(th, u, float(frac)))
     else:
-        rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title, sub))
+        rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title, sub, logo=lg))
         if value:
             rows.append(_row_value(item, th, F, u, inner_w, ctx, str(value), counter=False, big=11.0, marker=False))
         if items:
@@ -2692,10 +2711,12 @@ def _avatar(canvas, cx, cy, d, initial: str, pal, a, ctx, face_img=None, ring: s
 _AVATAR_CACHE = _LRU(16)
 
 
-def _avatar_photo(item: dict, d: float):
-    """Foto de perfil (medio propio `_media_image`) recortada al cuadrado (con `focus`) y reducida
-    UNA vez al diametro del avatar (cache por imagen y tamano: no se reduce en cada cuadro)."""
-    img = media_image(item)
+def _avatar_photo(item: dict, d: float, img=None):
+    """Foto de perfil (medio propio: `_media_image` de render o el archivo del `media`, ver
+    item_photo; o `img`) recortada al cuadrado (con `focus`) y remuestreada UNA vez al diametro
+    del avatar (cache por imagen y tamano: no se reduce en cada cuadro). Reduce en escalones 2x y
+    cubica; una fuente chica (la foto de 100 px de Instagram) se amplia con Catmull-Rom."""
+    img = img if img is not None else item_photo(item)
     if img is None or img.width() < 4 or img.height() < 4:
         return None
     px = max(8, int(round(d * 0.8 * 1.5)))
@@ -2727,10 +2748,273 @@ def _avatar_photo(item: dict, d: float):
         surf = C.offscreen(px, px)
         cv = surf.getCanvas()
         cv.clear(skia.ColorTRANSPARENT)
-        cv.drawImageRect(sub, src_r, skia.Rect.MakeWH(px, px), C.SAMPLING_CUBIC, skia.Paint(AntiAlias=True))
+        cv.drawImageRect(sub, src_r, skia.Rect.MakeWH(px, px),
+                         SAMPLING_UP if src_r.width() < px else C.SAMPLING_CUBIC, skia.Paint(AntiAlias=True))
         return surf.makeImageSnapshot()
 
     return _AVATAR_CACHE.get_or(key, build)
+
+
+# ============================================================== perfil: foto y logo de los enlaces
+# Los enlaces del Perfil traen su foto (og:image de la pagina; en Instagram la foto de perfil) y
+# su logo (icono del sitio), que Reelfy obtiene solo (linkmedia) o que el usuario sube: medios
+# propios {sid, type:'image', ...} en la carpeta de POST /sources. El `media` de un cta lo
+# decodifica render (`_media_image`); el `logo` (cta, card y chips de socials) y el `media` sin
+# inyectar (medicion del director, tarjeta dentro de una escena) se resuelven AQUI por sid con el
+# mismo resolver de render (render.media_path: nunca una ruta del plan). MEDIA_OPTS =
+# {media_root?, media_resolver?} como los opts de render (vacio = la carpeta de POST /sources).
+# `_logo_image` inyectado (skia.Image o RGBA recto numpy) manda. Sin archivo -> None y el dibujo
+# de siempre (icono / iniciales), sin avisos.
+MEDIA_OPTS: dict = {}
+MEDIA_PX = 1024                   # lado maximo al decodificar (fotos de 1024 px, logos de 512)
+MISS_RETRY = 2.0                  # s: un sid sin archivo se vuelve a buscar (la descarga puede llegar)
+SAMPLING_UP = skia.SamplingOptions(skia.CubicResampler.CatmullRom())   # ampliar: algo mas nitida
+HIT_TTL = 1.0                     # s: la ruta resuelta de un sid se revisa (stat) a lo mas 1 vez por segundo
+_FILE_IMG = _LRU(24)              # (ruta, mtime) -> skia.Image premultiplicada
+_FILE_MISS: dict = {}             # (sid, opts) -> instante del ultimo intento sin archivo
+_FILE_HIT: dict = {}              # (sid, opts) -> ((ruta, mtime), instante): sin stat en cada cuadro
+_SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def media_ref(v) -> dict | None:
+    """El medio propio `v` ({sid, ...} con sid de POST /sources) o None (ruta, basura)."""
+    if isinstance(v, dict) and isinstance(v.get("sid"), str) and _SID_RE.match(v["sid"].strip()):
+        return v
+    return None
+
+
+def clear_media_cache() -> None:
+    """Olvida imagenes y faltantes (tras bajar o cambiar una foto/logo, y en pruebas)."""
+    _FILE_IMG.clear()
+    _FILE_MISS.clear()
+    _FILE_HIT.clear()
+    _NP_IMG.clear()
+    _LOGO_LOOK.clear()
+    _RESAMPLED.clear()
+    _AVATAR_CACHE.clear()
+
+
+def _premul(arr: np.ndarray) -> np.ndarray:
+    """RGBA recto -> premultiplicado (lo que espera skia): un logo transparente sin halo claro."""
+    a = arr[..., 3:4].astype(np.uint16)
+    out = np.array(arr, np.uint8, copy=True)
+    out[..., :3] = ((arr[..., :3].astype(np.uint16) * a + 127) // 255).astype(np.uint8)
+    return out
+
+
+_NP_IMG = _LRU(16)                # id(array) -> (array, skia.Image): la misma inyeccion no se reconvierte
+
+
+def _as_image(v, straight: bool = True, cache: bool = True):
+    """skia.Image o RGBA numpy (recto si `straight`) -> skia.Image | None. Un logo inyectado como
+    array se convierte UNA vez (la cache guarda el array: su id no se recicla mientras este ahi) y
+    asi las caches por imagen (logo_look, remuestreo) sirven cuadro a cuadro. `cache=False` para
+    cuadros de un medio que pueden reusar el mismo buffer (video)."""
+    if v is None:
+        return None
+    if isinstance(v, np.ndarray):
+        hit = _NP_IMG.get(id(v)) if cache else None
+        if hit is not None and hit[0] is v:
+            return hit[1]
+        try:
+            arr = v if v.ndim == 3 and v.shape[-1] == 4 else \
+                np.dstack([v[..., :3], np.full(v.shape[:2], 255, np.uint8)])
+            arr = np.ascontiguousarray(arr.astype(np.uint8))
+            img = C.image_from_rgba(_premul(arr) if straight else arr)
+        except Exception:
+            return None
+        if cache:
+            _NP_IMG[id(v)] = (v, img)
+            if len(_NP_IMG) > _NP_IMG.cap:
+                _NP_IMG.popitem(last=False)
+        return img
+    return v if hasattr(v, "width") else None
+
+
+def media_file_image(media) -> skia.Image | None:
+    """Imagen del medio propio `media` ({sid}) leida de su archivo con el resolver de render
+    (EXIF, HEIC, perfil de color; cabe en MEDIA_PX). Cache por (archivo, mtime): un logo nuevo con
+    el mismo sid se vuelve a leer; un sid sin archivo se reintenta cada MISS_RETRY s."""
+    m = media_ref(media)
+    if m is None:
+        return None
+    sid = m["sid"].strip()
+    mk = (sid, repr(MEDIA_OPTS.get("media_root")), id(MEDIA_OPTS.get("media_resolver")))
+    now = time.monotonic()
+    if now - _FILE_MISS.get(mk, -1e9) < MISS_RETRY:
+        return None
+    from . import render as _R  # perezoso: render importa este modulo
+    hit = _FILE_HIT.get(mk)
+    if hit is not None and now - hit[1] < HIT_TTL:
+        key = hit[0]
+    else:
+        try:
+            p = _R.media_path(m, MEDIA_OPTS)
+            key = (str(p), p.stat().st_mtime_ns) if p is not None and p.suffix.lower() in _R.MEDIA_IMAGE_EXT else None
+        except Exception:  # noqa: resolver roto / archivo que desaparece
+            key = None
+        if key is None:
+            _FILE_HIT.pop(mk, None)
+            _FILE_MISS[mk] = now
+            return None
+        _FILE_HIT[mk] = (key, now)
+
+    def build():
+        try:
+            return _as_image(_R.decode_image(key[0], MEDIA_PX, MEDIA_PX))
+        except Exception:  # noqa: archivo ilegible -> el dibujo de siempre
+            return None
+
+    img = _FILE_IMG.get_or(key, build)
+    if img is None:
+        _FILE_HIT.pop(mk, None)
+        _FILE_MISS[mk] = now
+    else:
+        _FILE_MISS.pop(mk, None)
+    return img
+
+
+def item_photo(item: dict):
+    """Foto del item: la que inyecta render (`_media_image`, aunque sea None: render ya decidio)
+    o, sin inyeccion, la del archivo de su `media`."""
+    if "_media_image" in item:
+        return media_image(item)
+    return media_file_image(item.get("media"))
+
+
+def logo_image(d: dict):
+    """Logo del item (o de un enlace de socials): `_logo_image` inyectado o el archivo de `logo`."""
+    if not isinstance(d, dict):
+        return None
+    if d.get("_logo_image") is not None:
+        return _as_image(d["_logo_image"])
+    return media_file_image(d.get("logo"))
+
+
+LOGO_PAD = 0.17                   # aire del logo sobre su placa (x lado de la insignia redondeada)
+LOGO_RING = 0.8                   # insignia redonda: la diagonal del logo cabe en 0.8 del diametro
+LOGO_PLATE, LOGO_PLATE_DARK = "#FFFFFF", "#17171D"
+_LOGO_LOOK = _LRU(32)
+_RESAMPLED = _LRU(64)
+
+
+def _img_uid(img) -> int:
+    try:
+        return img.uniqueID()
+    except Exception:  # noqa
+        return id(img)
+
+
+def logo_look(img) -> dict:
+    """Como se presenta un logo (analisis cacheado por imagen; mismo criterio que fxcore.logoLook):
+      bleed: opaco hasta el borde y casi cuadrado (icono de app, apple-touch-icon) -> llena la
+             insignia (cover) con su propio fondo;
+      si no, CABE (contain) con aire sobre una placa: la del color de su borde si es opaco (un JPG
+      con fondo), blanca si es transparente, u oscura si su tinta es casi blanca (un logo blanco
+      sobre transparente desapareceria). `box` = caja de tinta (sin el margen transparente del
+      archivo): todos los logos se ven del mismo tamano."""
+    def build():
+        arr = C.image_to_rgba(img)                # premultiplicado
+        h, w = arr.shape[:2]
+        a = arr[..., 3]
+        ring = np.concatenate([a[0, :], a[-1, :], a[:, 0], a[:, -1]]).astype(np.float32)
+        if ring.mean() > 0.8 * 255:
+            if 0.85 <= w / max(1, h) <= 1 / 0.85:
+                return {"bleed": True, "plate": None, "box": (0, 0, w, h)}
+            rgb = np.concatenate([arr[0, :, :3], arr[-1, :, :3], arr[:, 0, :3], arr[:, -1, :3]])
+            med = np.median(rgb, axis=0)
+            return {"bleed": False, "plate": "#%02X%02X%02X" % tuple(int(math.floor(v + 0.5)) for v in med),
+                    "box": (0, 0, w, h)}
+        # icono de app con ESQUINAS REDONDEADAS (apple-touch-icon, SVG con rx): el centro de cada
+        # borde es opaco y cubre casi todo -> tambien llena la insignia (su fondo es parte del icono;
+        # sin esto su crema se leia como 'logo blanco' y caia en una placa oscura)
+        q = [v[len(v) // 4:len(v) - len(v) // 4] for v in (a[0, :], a[-1, :], a[:, 0], a[:, -1])]
+        if 0.85 <= w / max(1, h) <= 1 / 0.85 and np.concatenate(q).astype(np.float32).mean() > 0.9 * 255 \
+                and float((a > 128).mean()) > 0.85:
+            return {"bleed": True, "plate": None, "box": (0, 0, w, h)}
+        ys, xs = np.nonzero(a > 12)
+        if not len(xs):
+            return {"bleed": False, "plate": LOGO_PLATE, "box": (0, 0, w, h)}
+        box = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+        m = a > 128
+        lum = 0.0
+        if m.any():
+            av = a[m].astype(np.float32)[:, None]
+            rgb = np.clip(arr[m][:, :3].astype(np.float32) / np.maximum(av, 1.0), 0.0, 1.0)   # recto
+            lum = float((rgb @ np.array([0.2126, 0.7152, 0.0722], np.float32)).mean())
+        return {"bleed": False, "plate": LOGO_PLATE_DARK if lum > 0.86 else LOGO_PLATE, "box": box}
+
+    return _LOGO_LOOK.get_or(_img_uid(img), build)
+
+
+def _resampled(img, src: tuple, w: int, h: int):
+    """Region `src` (x0, y0, x1, y1) de `img` remuestreada UNA vez a w x h px (cache): reduce en
+    escalones 2x (caja, sin aliasing) y termina con cubica Mitchell; si amplia (fuente chica),
+    Catmull-Rom."""
+    w, h = max(1, int(w)), max(1, int(h))
+    key = (_img_uid(img), tuple(round(float(v), 2) for v in src), w, h)
+
+    def build():
+        x0, y0, x1, y1 = (float(v) for v in src)
+        sub, sr = img, skia.Rect.MakeLTRB(x0, y0, x1, y1)
+        k = min((x1 - x0) / w, (y1 - y0) / h)
+        steps = 0
+        while k / 2 ** (steps + 1) >= 1.2:
+            steps += 1
+        if steps:
+            try:
+                sub = downsample(img.makeSubset(skia.IRect.MakeLTRB(int(x0), int(y0), int(math.ceil(x1)),
+                                                                     int(math.ceil(y1)))), steps)
+                sr = skia.Rect.MakeWH(sub.width(), sub.height())
+            except Exception:  # noqa
+                sub, sr = img, skia.Rect.MakeLTRB(x0, y0, x1, y1)
+        surf = C.offscreen(w, h)
+        cv = surf.getCanvas()
+        cv.clear(skia.ColorTRANSPARENT)
+        cv.drawImageRect(sub, sr, skia.Rect.MakeWH(w, h), C.SAMPLING_CUBIC if k >= 1.0 else SAMPLING_UP,
+                         skia.Paint(AntiAlias=True))
+        return surf.makeImageSnapshot()
+
+    return _RESAMPLED.get_or(key, build)
+
+
+def logo_fit(look: dict, d: float, shape: str) -> tuple[float, float]:
+    """(ancho, alto) px del logo contain dentro de una insignia de lado d: redondeada con aire
+    LOGO_PAD por lado; redonda con la diagonal en LOGO_RING del diametro."""
+    x0, y0, x1, y1 = look["box"]
+    bw, bh = max(1.0, float(x1 - x0)), max(1.0, float(y1 - y0))
+    k = d * LOGO_RING / math.hypot(bw, bh) if shape == "circle" else d * (1 - 2 * LOGO_PAD) / max(bw, bh)
+    return bw * k, bh * k
+
+
+def draw_logo_badge(canvas, img, cx: float, cy: float, d: float, a: float, ctx, shape: str = "squircle",
+                    shadow: bool = False) -> None:
+    """Logo de un enlace en una insignia `shape` (circle | squircle) de lado d centrada en (cx, cy)
+    (ver logo_look): icono de app -> llena la insignia; si no, cabe con aire sobre su placa. Filo
+    fino para que la placa blanca se lea sobre una tarjeta o pastilla blanca. Simetrica: su tinta
+    queda centrada en cx."""
+    r = skia.Rect.MakeXYWH(cx - d / 2, cy - d / 2, d, d)
+    circ = shape == "circle"
+    rr = skia.RRect.MakeOval(r) if circ else _squircle(r, 0.3)
+    if shadow:
+        soft_shadow(canvas, rr, ctx, a, key=0.2, amb=0.12, spread=d / ctx.px(150),
+                    circle=(cx, cy, d / 2) if circ else None)
+    look = logo_look(img)
+    canvas.save()
+    canvas.clipRRect(rr, skia.ClipOp.kIntersect, True)
+    paint = skia.Paint(Alphaf=a, AntiAlias=True)
+    if look["bleed"]:
+        src, _dst = fit_src(img, 1.0, 1.0, "cover")
+        px = max(8, int(math.ceil(d * 1.5)))  # 1.5x: nitido tambien durante el pop
+        res = _resampled(img, (src.left(), src.top(), src.right(), src.bottom()), px, px)
+        canvas.drawImageRect(res, r, C.SAMPLING_CUBIC, paint)
+    else:
+        canvas.drawRRect(rr, C.fill(look["plate"], a))
+        lw, lh = logo_fit(look, d, shape)
+        res = _resampled(img, look["box"], math.ceil(lw * 1.5), math.ceil(lh * 1.5))
+        canvas.drawImageRect(res, skia.Rect.MakeXYWH(cx - lw / 2, cy - lh / 2, lw, lh), C.SAMPLING_CUBIC, paint)
+    canvas.restore()
+    canvas.drawRRect(rr, C.stroke("#000000", max(1.0, d * 0.018), 0.1 * a))
 
 
 def _face_crop(ctx) -> skia.Image | None:
@@ -2756,34 +3040,70 @@ def _cta_width(item: dict, key: str, ctx) -> float:
     return size_of(item, rk, CTA_SIZE.get(v or "follow", 0.62)) * ctx.W
 
 
+def link_slot(item: dict) -> tuple[str, object, object]:
+    """('photo' | 'logo' | 'icon', foto, logo) del hueco del icono de link_below: foto redonda
+    (avatar 'image' o sin avatar, con su `media`), si no el `logo` del sitio en su insignia, si
+    no el icono Tabler de siempre. Decide por las imagenes que SI se pueden leer (sin archivo ->
+    el dibujo de siempre)."""
+    logo = logo_image(item)
+    photo = item_photo(item) if item.get("avatar") in (None, "image") else None
+    if photo is not None and min(photo.width(), photo.height()) >= 4:
+        return "photo", photo, logo
+    if logo is not None and min(logo.width(), logo.height()) >= 4:
+        return "logo", None, logo
+    return "icon", None, None
+
+
+def link_slot_geom(kind: str, h: float, two_lines: bool) -> dict:
+    """Hueco del icono de link_below (mismo calculo que fxcore.linkSlot): d = diametro / lado del
+    hueco, inset = borde -> hueco, gap = hueco -> texto, pad_r = texto -> borde. La foto y el logo
+    quedan concentricos con la punta redonda de la pastilla; el icono con el aire de siempre."""
+    if kind in ("photo", "logo"):
+        d = h * (LINK_PHOTO if kind == "photo" else LINK_LOGO)
+        return {"d": d, "inset": (h - d) / 2, "gap": h * 0.2, "pad_r": h * LINK_PAD_R}
+    ib = h * (0.36 if two_lines else 0.42)
+    pad = h * (0.4 if two_lines else 0.5)
+    return {"d": ib, "inset": pad, "gap": h * 0.2, "pad_r": pad}
+
+
 def _link_below_layout(item: dict, ctx):
-    """(label, fuente, alto, icono, ancho, display, fuente_display). Con `display` (texto corto del
-    enlace: 'paseo.club/dra-demo') la pastilla es mas alta y lo lleva en una segunda linea."""
+    """(label, fuente, alto, icono, ancho, display, fuente_display, hueco). Con `display` (texto
+    corto del enlace: 'paseo.club/dra-demo') la pastilla es mas alta y lo lleva en una segunda
+    linea. `hueco` = link_slot_geom + {kind, photo, logo}: con foto o logo la pastilla hace sitio
+    (sin pasar SAFE: el texto se achica antes)."""
     F = _fonts(ctx)
     label = str(item.get("label") or ctx.entities.get("link_label") or "Agenda aqui")
     disp = str(item.get("display") or "").strip()
     size = _cta_width(item, "link_below", ctx)
     wfix = _item_width(item, ctx)             # ancho comun de la pila del cierre (0 = natural)
+    kind, photo, logo = link_slot(item)
     if disp:
         h = size * LINK_TWO_LINE_H
-        ib = h * 0.36
+        S = dict(link_slot_geom(kind, h, True), kind=kind, photo=photo, logo=logo)
+        side = S["inset"] + S["d"] + S["gap"] + S["pad_r"]
         # el enlace corto identifica a la persona: la pastilla crece hasta SAFE antes de achicarlo
-        room = max(size * 0.8, SYM_W * ctx.W - (ib + h * 0.2 + h * 0.8))
+        room = max(size * 0.8, SYM_W * ctx.W - side) if kind == "icon" else SYM_W * ctx.W - side
         fb = fit_font(F["title"], label, h * 0.3, room, min_px=h * 0.2)
         label = ellipsize(fb, label, room)
         fd = fit_font(F["body"], disp, h * 0.21, room, min_px=h * 0.13)
         disp = ellipsize(fd, disp, room)
-        bw = max(fb.measureText(label), fd.measureText(disp)) + ib + h * 0.2 + h * 0.8
-        return label, fb, h, ib, min(SYM_W * ctx.W, max(bw, wfix)), disp, fd
+        bw = max(fb.measureText(label), fd.measureText(disp)) + side
+        return label, fb, h, h * 0.36, min(SYM_W * ctx.W, max(bw, wfix)), disp, fd, S
     h = size * 0.2
-    fb = fit_font(F["title"], label, h * 0.38, size * 0.9, min_px=h * 0.26)
-    label = ellipsize(fb, label, size * 0.9)
-    ib = h * 0.42
-    bw = fb.measureText(label) + ib + h * 0.2 + h * 1.0
-    return label, fb, h, ib, min(SYM_W * ctx.W, max(bw, wfix)), "", None
+    S = dict(link_slot_geom(kind, h, False), kind=kind, photo=photo, logo=logo)
+    side = S["inset"] + S["d"] + S["gap"] + S["pad_r"]
+    room = size * 0.9 if kind == "icon" else min(size * 0.9, SYM_W * ctx.W - side)
+    fb = fit_font(F["title"], label, h * 0.38, room, min_px=h * 0.26)
+    label = ellipsize(fb, label, room)
+    bw = fb.measureText(label) + side
+    return label, fb, h, h * 0.42, min(SYM_W * ctx.W, max(bw, wfix)), "", None, S
 
 
 LINK_TWO_LINE_H = 0.25        # alto / ancho de la pastilla link_below con `display`
+LINK_PHOTO = 0.72             # diametro de la foto en link_below (x alto de la pastilla)
+LINK_LOGO = 0.62              # lado de la insignia del logo sin foto (x alto)
+LINK_BADGE = 0.46             # logo en la esquina de la foto (x diametro de la foto)
+LINK_PAD_R = 0.42             # texto -> borde derecho con foto o logo (x alto; libra la punta redonda)
 
 
 def cta_extent(item: dict, ctx) -> float:
@@ -2939,7 +3259,10 @@ def _cta_follow(canvas, item, lt, dur, ctx, a):
         canvas.scale(ae, ae)
         _avatar(canvas, 0, 0, d, initial, pal, a, ctx, face, ring=plat, photo=photo)
         canvas.restore()
-    if L["badge"]:
+    # `logo` (medio): el logo del sitio como insignia (redes sin icono propio: el director solo lo
+    # pone ahi; si el usuario lo elige, manda)
+    logo = logo_image(item) if title else None
+    if L["badge"] or logo is not None:
         # insignia de la red en la esquina del avatar, con aro blanco (~0.44 del avatar)
         be_ = spring(lt - 0.22, 3.0, 0.5)
         if be_ > 0.01:
@@ -2949,7 +3272,10 @@ def _cta_follow(canvas, item, lt, dur, ctx, a):
             canvas.translate(bx_, by_)
             canvas.scale(be_, be_)
             canvas.drawCircle(0, 0, bd / 2 + max(1.5, h * 0.028), C.fill("#FFFFFF", a))
-            draw_platform_badge(canvas, L["badge"], 0, 0, bd, a, ctx, shadow=False)
+            if logo is not None:
+                draw_logo_badge(canvas, logo, 0, 0, bd, a, ctx, "circle")
+            else:
+                draw_platform_badge(canvas, L["badge"], 0, 0, bd, a, ctx, shadow=False)
             canvas.restore()
     done = lt >= press_at + 0.08
     fb = L["fb"]
@@ -3005,7 +3331,7 @@ def _cta_link_below(canvas, item, lt, dur, ctx, a):
     F = _fonts(ctx)
     acc = item.get("color") or pal["accent"]
     on = "#141418" if C.luminance(acc) > 0.55 else "#FFFFFF"
-    label, fb, h, ib, bw, disp, fd = _link_below_layout(item, ctx)
+    label, fb, h, ib, bw, disp, fd, S = _link_below_layout(item, ctx)
     br = skia.Rect.MakeXYWH(-bw / 2, -h / 2, bw, h)
     rr = skia.RRect.MakeRectXY(br, h / 2, h / 2)
     soft_shadow(canvas, rr, ctx, a)
@@ -3024,18 +3350,29 @@ def _cta_link_below(canvas, item, lt, dur, ctx, a):
         canvas.restore()
     icon = item.get("icon") or (platform_icon(item.get("platform"), "calendar-event") if item.get("platform")
                                 else "calendar-event")
+    # grupo [hueco + texto] centrado con su aire propio (foto/logo concentricos con la punta)
+    tw = max(fb.measureText(label), fd.measureText(disp)) if disp else fb.measureText(label)
+    d = S["d"]
+    scx = -(S["inset"] + d + S["gap"] + tw + S["pad_r"]) / 2 + S["inset"] + d / 2
+    tx = scx + d / 2 + S["gap"]
+    if S["kind"] == "photo":
+        _link_photo(canvas, item, S, scx, h, lt, a, ctx)
+    elif S["kind"] == "logo":
+        le = spring(lt - 0.03, 3.0, 0.5)
+        if le > 0.01:
+            canvas.save()
+            canvas.translate(scx, 0)
+            canvas.scale(le, le)
+            draw_logo_badge(canvas, S["logo"], 0, 0, d, a, ctx, "squircle")
+            canvas.restore()
+    else:
+        paint_icon(canvas, icon, scx, 0, ib, on, a, _clamp((lt - 0.15) / 0.5), stroke_w=2.3)
     if disp:
-        tw = max(fb.measureText(label), fd.measureText(disp))
-        x1 = -(tw + ib + h * 0.2) / 2
-        paint_icon(canvas, icon, x1 + ib / 2, 0, ib, on, a, _clamp((lt - 0.15) / 0.5), stroke_w=2.3)
-        tx = x1 + ib + h * 0.2
         draw_text(canvas, label, tx, -h * 0.03, fb, on, a)
         de = ease.out_cubic(_clamp((lt - 0.2) / 0.35))
         draw_text(canvas, disp, tx, h * 0.27, fd, on, a * 0.78 * de)
     else:
-        x1 = -(fb.measureText(label) + ib + h * 0.2) / 2
-        paint_icon(canvas, icon, x1 + ib / 2, 0, ib, on, a, _clamp((lt - 0.15) / 0.5), stroke_w=2.3)
-        draw_text(canvas, label, x1 + ib + h * 0.2, fb.getSize() * 0.36, fb, on, a)
+        draw_text(canvas, label, tx, fb.getSize() * 0.36, fb, on, a)
     # flecha dibujada a mano que rebota hacia abajo; hereda el alpha del CTA (fade de salida)
     ap = _clamp((lt - 0.25) / 0.4)
     # `arrow_scale` (0.4..1): flecha mas corta cuando abajo hay subtitulos; 0 = sin flecha
@@ -3051,6 +3388,42 @@ def _cta_link_below(canvas, item, lt, dur, ctx, a):
                 draw_doodle(canvas, sub, lt - 0.25, max(0.1, dur - 0.25), ctx)
         else:
             draw_doodle(canvas, sub, lt - 0.25, max(0.1, dur - 0.25), ctx)
+        canvas.restore()
+
+
+def _link_photo(canvas, item, S, scx: float, h: float, lt: float, a: float, ctx) -> None:
+    """Foto redonda del lugar en el hueco de link_below (aro blanco, entra con resorte como el
+    avatar del Seguir) y, si hay `logo`, el logo del sitio como insignia en su esquina inferior
+    derecha (misma idea que la insignia de la red del Seguir)."""
+    d = S["d"]
+    ae = spring(lt - 0.03, 3.0, 0.5)
+    if ae > 0.01:
+        ring = max(1.5, d * 0.05)
+        inner = d - 2 * ring
+        canvas.save()
+        canvas.translate(scx, 0)
+        canvas.scale(ae, ae)
+        canvas.drawCircle(0, 0, d / 2, C.fill("#FFFFFF", a))
+        img = _avatar_photo(item, inner / 0.8, S["photo"])
+        if img is not None:
+            canvas.save()
+            pth = skia.Path()
+            pth.addCircle(0, 0, inner / 2)
+            canvas.clipPath(pth, skia.ClipOp.kIntersect, True)
+            canvas.drawImageRect(img, skia.Rect.MakeXYWH(-inner / 2, -inner / 2, inner, inner),
+                                 C.SAMPLING_CUBIC, skia.Paint(Alphaf=a, AntiAlias=True))
+            canvas.restore()
+        canvas.restore()
+    if S["logo"] is None:
+        return
+    be = spring(lt - 0.22, 3.0, 0.5)
+    if be > 0.01:
+        bd = d * LINK_BADGE
+        canvas.save()
+        canvas.translate(scx + d * 0.36, d * 0.33)
+        canvas.scale(be, be)
+        canvas.drawCircle(0, 0, bd / 2 + max(1.5, h * 0.028), C.fill("#FFFFFF", a))
+        draw_logo_badge(canvas, S["logo"], 0, 0, bd, a, ctx, "circle")
         canvas.restore()
 
 
@@ -3266,13 +3639,7 @@ def media_image(item: dict):
     img = item.get("_media_image")
     if img is None:
         return None
-    if isinstance(img, np.ndarray):
-        try:
-            arr = img if img.shape[-1] == 4 else np.dstack([img, np.full(img.shape[:2], 255, np.uint8)])
-            return C.image_from_rgba(np.ascontiguousarray(arr.astype(np.uint8)))
-        except Exception:
-            return None
-    return img if hasattr(img, "width") else None
+    return _as_image(img, straight=False, cache=False)
 
 
 def media_box(item: dict, img, W: float) -> tuple[float, float]:
@@ -3460,12 +3827,15 @@ def _platform_badge_fn(platform: str | None, ctx):
 
 
 def socials_links(item: dict) -> list[dict]:
-    """Chips del item: `links` [{platform, text}] (texto vacio = etiqueta de la red)."""
+    """Chips del item: `links` [{platform, text, logo?}] (texto vacio = etiqueta de la red; `logo` =
+    logo del sitio para la insignia de una red sin icono propio: reservas, web)."""
     out = []
     for l in item.get("links") or []:
         plat = l.get("platform") if l.get("platform") in PR.PLATFORMS else "web"
         text = str(l.get("text") or "").strip() or PR.PLATFORMS[plat]["label"]
-        out.append({"platform": plat, "text": text})
+        c = {"platform": plat, "text": text}
+        c.update({k: l[k] for k in ("logo", "_logo_image") if l.get(k) is not None})
+        out.append(c)
     return out[:8]
 
 
@@ -3566,6 +3936,8 @@ def draw_socials(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) ->
     dark = item.get("theme") == "dark"
     mono = item.get("icon_style") == "mono"
     acc = item.get("color") if item.get("color") and C.luminance(item["color"]) < 0.92 else ctx.palette["accent"]
+    # logo de cada chip (misma orden que chips): solo en chips a color (mono = iconos parejos)
+    logos = [None if (wm or mono) else logo_image(l) for l in socials_links(item)]
     with group(canvas, cx, cy, st_out):
         a0 = st_out.a
         y = -tot_h / 2
@@ -3627,8 +3999,11 @@ def draw_socials(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) ->
                             canvas.save()
                             canvas.translate(-w / 2 + h * 0.14 + d / 2, 0)
                             canvas.scale(be, be)
-                            draw_platform_badge(canvas, plat, 0, 0, d, a, ctx, "mono" if mono else "brand",
-                                                shadow=False, fill=acc)
+                            if logos[i] is not None:
+                                draw_logo_badge(canvas, logos[i], 0, 0, d, a, ctx, "circle")
+                            else:
+                                draw_platform_badge(canvas, plat, 0, 0, d, a, ctx, "mono" if mono else "brand",
+                                                    shadow=False, fill=acc)
                             canvas.restore()
                         te = ease.out_cubic(_clamp((tl - 0.08) / 0.3))
                         draw_text(canvas, txt, -w / 2 + h * 0.14 + d + h * 0.2 + (1 - te) * h * 0.15,

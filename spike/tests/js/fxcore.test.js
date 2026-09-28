@@ -792,3 +792,100 @@ test("iconInkDx: centro de la tinta del glifo respecto a su caja de 24 (graphics
   assert.equal(C.iconInkDx(cols(96)), 0);
   assert.equal(C.iconInkDx(null), 0);
 });
+
+// ---- perfil: foto y logo de los enlaces (espejo de graphics.link_slot_geom / logo_look / logo_fit)
+function rgbaImg(w, h, fn) {
+  const px = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const v = fn(x, y); px.set(v, (y * w + x) * 4); }
+  return px;
+}
+
+test("linkSlot: foto y logo concentricos con la punta; el icono con el aire de siempre", () => {
+  const p = C.linkSlot("photo", 100, true);
+  assert.equal(p.d, 72); assert.equal(p.inset, 14); assert.equal(p.gap, 20); assert.equal(p.padR, 42);
+  const l = C.linkSlot("logo", 100, false);
+  assert.ok(Math.abs(l.d - 62) < 1e-9 && Math.abs(l.inset - 19) < 1e-9);
+  // icono: exactamente la pastilla de antes (ib 0.36h/0.42h, 0.2h de separacion, 0.8h/1.0h de aire)
+  const i2 = C.linkSlot("icon", 100, true), i1 = C.linkSlot("icon", 100, false);
+  assert.ok(Math.abs(i2.d - 36) < 1e-9 && Math.abs(i2.inset + i2.padR - 80) < 1e-9);
+  assert.ok(Math.abs(i1.d - 42) < 1e-9 && Math.abs(i1.inset + i1.padR - 100) < 1e-9);
+});
+
+test("logoLook: icono de app a sangre, logo transparente con placa, blanco con placa oscura, JPG ancho con su fondo", () => {
+  const app = C.logoLook(rgbaImg(40, 40, () => [255, 120, 0, 255]), 40, 40);
+  assert.equal(app.bleed, true);
+  const tr = C.logoLook(rgbaImg(50, 40, (x, y) => (x >= 10 && x < 30 && y >= 5 && y < 25 ? [200, 30, 180, 255] : [0, 0, 0, 0])), 50, 40);
+  assert.deepEqual(tr, { bleed: false, plate: C.LOGO_PLATE, box: [10, 5, 30, 25] });
+  const wh = C.logoLook(rgbaImg(30, 30, (x, y) => (x > 5 && x < 25 && y > 5 && y < 25 ? [255, 255, 255, 255] : [0, 0, 0, 0])), 30, 30);
+  assert.equal(wh.plate, C.LOGO_PLATE_DARK);
+  const wide = C.logoLook(rgbaImg(60, 20, (x, y) => (x > 15 && x < 45 && y > 5 && y < 15 ? [20, 40, 160, 255] : [250, 244, 230, 255])), 60, 20);
+  assert.deepEqual(wide, { bleed: false, plate: "#FAF4E6", box: [0, 0, 60, 20] });
+  const empty = C.logoLook(rgbaImg(8, 8, () => [0, 0, 0, 0]), 8, 8);
+  assert.deepEqual(empty, { bleed: false, plate: C.LOGO_PLATE, box: [0, 0, 8, 8] });
+});
+
+test("logoFit: contain con aire en la insignia redondeada; diagonal en el aro de la redonda", () => {
+  const [w, h] = C.logoFit({ box: [0, 0, 200, 100] }, 100, "squircle");
+  assert.ok(Math.abs(w - 100 * (1 - 2 * C.LOGO_PAD)) < 1e-9 && Math.abs(h - w / 2) < 1e-9);
+  const [cw, ch] = C.logoFit({ box: [10, 10, 110, 110] }, 100, "circle");
+  assert.ok(Math.abs(Math.hypot(cw, ch) - 100 * C.LOGO_RING) < 1e-9);
+});
+
+test("mediaParam: el logo (aux) no hace de una tarjeta un kind de medio propio", () => {
+  const s = C.clone(SCHEMA);
+  s.tracks.graphics.items.card = { label: "Tarjeta", params: [{ k: "logo", type: "media", accept: ["image"], aux: true }] };
+  s.tracks.graphics.items.cta.params.push({ k: "media", type: "media", accept: ["image"] }, { k: "logo", type: "media", accept: ["image"], aux: true });
+  assert.equal(C.mediaParam(s, "graphics", "card"), null);
+  assert.equal(C.mediaParam(s, "graphics", "cta").k, "media");
+  assert.equal(C.mediaKindFor(s, "graphics", "image"), null);    // sin PiP: nunca una tarjeta ni un CTA
+  s.tracks.graphics.items.media = { label: "PiP", params: [{ k: "media", type: "media", accept: ["image", "video"] }] };
+  assert.equal(C.mediaKindFor(s, "graphics", "image"), "media");
+});
+
+// profile.js en node (sin DOM): las reglas de foto/logo por enlace del panel Perfil
+function loadProfileJs() {
+  const vm = require("node:vm"), fs = require("node:fs");
+  const src = fs.readFileSync(path.join(__dirname, "..", "..", "app", "static", "profile.js"), "utf8");
+  const ctx = { window: {}, console };
+  vm.runInNewContext(src, ctx);
+  return ctx.window.PF;
+}
+
+test("perfil: foto/logo automaticos se adoptan; lo que el usuario subio o quito manda", () => {
+  const PF = loadProfileJs();
+  const ph = sid => ({ sid, type: "image", name: sid + ".png", w: 100, h: 100 });
+  const draft = { links: [
+    { platform: "instagram", kind: "social", handle: "ana.demo", url: "https://www.instagram.com/ana.demo/" },
+    { platform: "web", kind: "booking", url: "https://reserva.demo/ana", photo: ph("mine"), media_src: { photo: "user" } },
+    { platform: "web", kind: "web", url: "https://otra.demo/", media_off: { photo: true } },
+  ] };
+  const server = { media_status: "done", links: [
+    { platform: "instagram", handle: "ana.demo", url: "https://www.instagram.com/ana.demo/", photo: ph("ig100") },
+    { platform: "web", url: "https://reserva.demo/ana", photo: ph("og1024"), logo: ph("icon512"), media_src: { photo: "auto", logo: "auto" } },
+    { platform: "web", url: "https://otra.demo/", photo: ph("og2"), logo: ph("icon2") },
+  ] };
+  PF.adoptLinkMedia(draft, server);
+  const [ig, bk, ot] = draft.links;
+  assert.equal(ig.photo.sid, "ig100"); assert.equal(ig.media_src.photo, "auto");
+  assert.equal(bk.photo.sid, "mine");                         // la subida por el usuario no se pisa
+  assert.equal(bk.logo.sid, "icon512"); assert.equal(bk.media_src.logo, "auto");
+  assert.equal(ot.photo, undefined);                          // quitada: no vuelve
+  assert.equal(ot.logo.sid, "icon2");
+  assert.ok(draft.links.every(l => l._mediaTried));
+  // Quitar apaga (media_off) y Cambiar la marca como del usuario
+  PF.setLinkMedia(bk, "logo", null);
+  assert.equal(bk.logo, undefined); assert.equal(bk.media_off.logo, true);
+  PF.setLinkMedia(ig, "photo", ph("up1"));
+  assert.equal(ig.photo.sid, "up1"); assert.equal(ig.media_src.photo, "user"); assert.equal(ig.media_off.photo, false);
+});
+
+test("perfil: foto de la persona = la subida, si no la de su red principal, si no la de un enlace", () => {
+  const PF = loadProfileJs();
+  const p = { links: [{ platform: "web", kind: "booking", photo: { sid: "og" } },
+    { platform: "instagram", kind: "social", primary: true, photo: { sid: "ig" } }] };
+  assert.equal(PF.facePhoto(p).sid, "ig");
+  assert.equal(PF.facePhoto(Object.assign({}, p, { avatar: { sid: "av" } })).sid, "av");
+  p.links[1].media_off = { photo: true };
+  assert.equal(PF.facePhoto(p).sid, "og");
+  assert.equal(PF.facePhoto({ links: [] }), null);
+});

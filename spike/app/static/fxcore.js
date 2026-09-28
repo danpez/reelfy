@@ -1062,6 +1062,65 @@
     if (a < 0 || !n) return 0;
     return Math.round(((a + b + 1) / 2 * 24 / n - 12) * 1e3) / 1e3;
   }
+  // ---- perfil: foto y logo de los enlaces (graphics.link_slot_geom / logo_look / logo_fit)
+  const LINK_PHOTO = 0.72, LINK_LOGO = 0.62, LINK_BADGE = 0.46, LINK_PAD_R = 0.42, FOLLOW_BADGE = 0.44;
+  const LOGO_PAD = 0.17, LOGO_RING = 0.8, LOGO_PLATE = "#FFFFFF", LOGO_PLATE_DARK = "#17171D";
+  /** Hueco del icono de la pastilla link_below de alto h: kind "photo" | "logo" | "icon", con o sin
+      `display` (dos lineas) -> {d, inset, gap, padR}. Foto y logo concentricos con la punta redonda. */
+  function linkSlot(kind, h, twoLines) {
+    if (kind === "photo" || kind === "logo") {
+      const d = h * (kind === "photo" ? LINK_PHOTO : LINK_LOGO);
+      return { d, inset: (h - d) / 2, gap: h * 0.2, padR: h * LINK_PAD_R };
+    }
+    const pad = h * (twoLines ? 0.4 : 0.5);
+    return { d: h * (twoLines ? 0.36 : 0.42), inset: pad, gap: h * 0.2, padR: pad };
+  }
+  /** Como presentar un logo desde sus pixeles RGBA RECTOS (ImageData.data, w x h); mismo criterio
+      que graphics.logo_look (que mide premultiplicado: aqui se premultiplica igual):
+      bleed (opaco hasta el borde y casi cuadrado: llena la insignia) o contain sobre `plate` (color
+      del borde si es opaco, blanca, u oscura si la tinta es casi blanca); box = caja de tinta. */
+  function logoLook(px, w, h) {
+    const pm = (i, c) => Math.floor((px[i * 4 + c] * px[i * 4 + 3] + 127) / 255);
+    const ring = [];
+    for (let x = 0; x < w; x++) ring.push(x);
+    for (let x = 0; x < w; x++) ring.push((h - 1) * w + x);
+    for (let y = 0; y < h; y++) ring.push(y * w);
+    for (let y = 0; y < h; y++) ring.push(y * w + w - 1);
+    const mean = ring.reduce((q, i) => q + px[i * 4 + 3], 0) / Math.max(1, ring.length);
+    if (mean > 0.8 * 255) {
+      const r = w / Math.max(1, h);
+      if (r >= 0.85 && r <= 1 / 0.85) return { bleed: true, plate: null, box: [0, 0, w, h] };
+      const med = c => { const v = ring.map(i => pm(i, c)).sort((a, b) => a - b), n = v.length; return n % 2 ? v[(n - 1) / 2] : (v[n / 2 - 1] + v[n / 2]) / 2; };
+      return { bleed: false, plate: "#" + [0, 1, 2].map(c => Math.floor(med(c) + 0.5).toString(16).padStart(2, "0").toUpperCase()).join(""), box: [0, 0, w, h] };
+    }
+    // icono de app con esquinas redondeadas: centro de cada borde opaco y casi todo cubierto (= graphics)
+    const qs = (n, f) => { const o = []; for (let k = Math.floor(n / 4); k < n - Math.floor(n / 4); k++) o.push(f(k)); return o; };
+    const mids = [].concat(qs(w, x => x), qs(w, x => (h - 1) * w + x), qs(h, y => y * w), qs(h, y => y * w + w - 1));
+    const midA = mids.reduce((q, i) => q + px[i * 4 + 3], 0) / Math.max(1, mids.length);
+    let cov = 0;
+    for (let i = 0; i < w * h; i++) if (px[i * 4 + 3] > 128) cov++;
+    const rr = w / Math.max(1, h);
+    if (rr >= 0.85 && rr <= 1 / 0.85 && midA > 0.9 * 255 && cov / Math.max(1, w * h) > 0.85)
+      return { bleed: true, plate: null, box: [0, 0, w, h] };
+    let x0 = w, y0 = h, x1 = -1, y1 = -1, lum = 0, n = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x, a = px[i * 4 + 3];
+      if (a > 12) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+      if (a > 128) {
+        const ch = c => Math.min(1, Math.max(0, pm(i, c) / Math.max(a, 1)));
+        lum += 0.2126 * ch(0) + 0.7152 * ch(1) + 0.0722 * ch(2); n++;
+      }
+    }
+    if (x1 < 0) return { bleed: false, plate: LOGO_PLATE, box: [0, 0, w, h] };
+    return { bleed: false, plate: n && lum / n > 0.86 ? LOGO_PLATE_DARK : LOGO_PLATE, box: [x0, y0, x1 + 1, y1 + 1] };
+  }
+  /** (ancho, alto) del logo contain en una insignia de lado d: redondeada con aire LOGO_PAD por lado;
+      redonda (`circle`) con la diagonal en LOGO_RING del diametro. */
+  function logoFit(look, d, shape) {
+    const b = look.box, bw = Math.max(1, b[2] - b[0]), bh = Math.max(1, b[3] - b[1]);
+    const k = shape === "circle" ? d * LOGO_RING / Math.hypot(bw, bh) : d * (1 - 2 * LOGO_PAD) / Math.max(bw, bh);
+    return [bw * k, bh * k];
+  }
   /** text._kicker_split: etiqueta del kicker (explicita, primera linea, o el texto corto entero). */
   function kickerSplit(item, lines) {
     const lab = item && item.kicker;
@@ -1357,9 +1416,11 @@
   }
 
   // ------------------------------------------------------------------ medios propios
-  /** Parametro de medio propio (type "media": {sid, type, name, w, h, dur}) de un kind, o null. */
+  /** Parametro de medio propio (type "media": {sid, type, name, w, h, dur}) de un kind, o null. Los
+      medios auxiliares (`aux`: el logo de una tarjeta o de un CTA) no hacen del kind uno "de medio":
+      soltar una foto nunca crea una tarjeta ni reemplaza un logo. */
   function mediaParam(schema, track, kind) {
-    return kindParams(schema, track, kind).find(p => p.type === "media") || null;
+    return kindParams(schema, track, kind).find(p => p.type === "media" && !p.aux) || null;
   }
   function mediaKinds(schema, track) { return kinds(schema, track).filter(k => mediaParam(schema, track, k)); }
   /** Kind con el que se agrega un medio propio en una pista: graphics -> PiP (`media`), escenas ->
@@ -1417,6 +1478,8 @@
     accentEs, hasLines, titleText, setTitleText, clearLineStyles, captionsHiddenAt, captionGroupSuppressed, captionY, snapTargets,
     captionRangeAlpha, capGroupAt, photoCaptionY, photoCaptionRows, captionYAt,
     sameVisual, regenCompanions, mergeRegenerate, normText, contentSig, dedupeFx, iconGeom, iconInkDx, kickerSplit, anchorXY,
+    LINK_PHOTO, LINK_LOGO, LINK_BADGE, LINK_PAD_R, FOLLOW_BADGE, LOGO_PAD, LOGO_RING, LOGO_PLATE, LOGO_PLATE_DARK,
+    linkSlot, logoLook, logoFit,
     pipCard, mediaAutoPlace, overlayBoxes, pipPlace, faceMedian,
     transitionOffJoin, setProLangs, planForLang, fxTexts, applyFxTexts, musicSig, mediaParam, mediaKinds, mediaKindFor,
     humanSkip,

@@ -1742,25 +1742,35 @@
     if (t === "lines") return frow(label, linesEditor(p, obj, o2, get, set), "wide", p.hint);
     if (t === "rows") return frow(label, rowsEditor(p, obj, o2, get, set), "wide", p.hint);
     if (t === "sfx") return sfxPicker(obj);
-    if (t === "media") return frow(label, mediaControl(obj, o2, get, set), true, p.hint);
+    if (t === "media") return frow(label, mediaControl(obj, o2, get, set, p), true, p.hint);
     return null;
   }
 
-  /** Medio propio (imagen o clip subido por /sources): miniatura, nombre y "Cambiar". */
-  function mediaControl(obj, o2, get, set) {
+  /** Medio propio (imagen o clip subido por /sources): miniatura, nombre, "Cambiar" y, si el
+      parametro admite vacio (logo, foto de perfil), "Quitar". Un parametro solo de imagen (`accept`)
+      rechaza un clip. */
+  function mediaControl(obj, o2, get, set, p) {
     const w = document.createElement("div"); w.className = "mediapick";
+    const only = p && p.accept && p.accept.length === 1 ? p.accept[0] : null;
     const draw = () => {
       const v = get() || {};
       const th = v.thumb || (v.sid ? `/tlsource/${encodeURIComponent(v.sid)}/thumb` : "");
       w.innerHTML = `<div class="mth">${th ? `<img src="${esc(th)}" alt="">` : ICO("image")}</div><div class="mnm"><b>${esc(v.name || "Sin archivo")}</b>`
-        + `<span>${v.type === "video" ? `Video · ${(+v.dur || 0).toFixed(1)} s` : v.type ? "Imagen" : "Elige una imagen o un clip"}${v.w ? ` · ${v.w}×${v.h}` : ""}</span></div>`
-        + `<button class="btn ghost mini" type="button">${ICO("upload")}${v.sid ? "Cambiar" : "Elegir"}</button>`;
-      w.querySelector("button").onclick = () => FX.pickMedia(null, null, async file => {
+        + `<span>${v.type === "video" ? `Video · ${(+v.dur || 0).toFixed(1)} s` : v.type ? "Imagen" : only === "image" ? "Elige una imagen" : "Elige una imagen o un clip"}${v.w ? ` · ${v.w}×${v.h}` : ""}</span></div>`
+        + `<button class="btn ghost mini" type="button" data-a="pick">${ICO("upload")}${v.sid ? "Cambiar" : "Elegir"}</button>`
+        + (p && p.nullable && v.sid ? `<button class="xbtn" type="button" data-a="clear" title="Quitar">${ICO("trash")}</button>` : "");
+      w.querySelector('[data-a="pick"]').onclick = () => FX.pickMedia(null, null, async file => {
         if (window.chip) chip("Subiendo el archivo…");
-        try { const m = await uploadMedia(file); edit(() => { set(m); after(obj, o2, true); }, { inspector: false }); draw(); }
+        try {
+          const m = await uploadMedia(file);
+          if (only && m.type && m.type !== only) throw new Error(only === "image" ? "aquí solo va una imagen" : "aquí solo va un clip");
+          edit(() => { set(m); after(obj, o2, true); }, { inspector: false }); draw();
+        }
         catch (e) { toast(`No se pudo subir: ${e.message || e}`, "alert"); }
         finally { if (window.chip) chip(null); }
       });
+      const cl = w.querySelector('[data-a="clear"]');
+      if (cl) cl.onclick = () => { edit(() => { set(null); after(obj, o2, true); }, { inspector: false }); draw(); };
     };
     draw();
     return w;
@@ -2358,21 +2368,38 @@
       const label = String(it.label || ent.link_label || "Agenda aquí"), disp = String(it.display || "").trim();
       const on = lum(acc) > 0.55 ? "#141418" : "#FFFFFF";
       const icon = it.icon || (it.platform && PLATS[it.platform] && PLATS[it.platform].icon) || "calendar-event";
-      let h, ib, bw, fb, fd = 0, tw;
+      // hueco del icono (graphics.link_slot): foto redonda del lugar (avatar image + media), si no el
+      // logo del sitio en su insignia, si no el icono; foto y logo concentricos con la punta
+      const ph = (it.avatar == null || it.avatar === "image") && it.media && it.media.sid ? mediaFrame(it, it.media, 0, false) : null;
+      const lg = it.logo && it.logo.sid ? mediaFrame(it, it.logo, 0, false) : null;
+      const kind = ph ? "photo" : lg ? "logo" : "icon";
+      let h, bw, fb, fd = 0, tw, sl;
       if (disp) {
-        h = S * 0.25; ib = h * 0.36;
-        const room = Math.max(S * 0.8, SYM_W * W - (ib + h * 0.2 + h * 0.8));
+        h = S * 0.25; sl = C.linkSlot(kind, h, true);
+        const side = sl.inset + sl.d + sl.gap + sl.padR;
+        const room = kind === "icon" ? Math.max(S * 0.8, SYM_W * W - side) : SYM_W * W - side;
         fd = fitTo("Poppins-Medium", disp, h * 0.21, room, h * 0.13); const wd = c.measureText(disp).width;
         fb = fitTo(bold, label, h * 0.3, room, h * 0.2); const wl = c.measureText(label).width;
-        tw = Math.max(wl, wd); bw = Math.min(SYM_W * W, Math.max(tw + ib + h * 0.2 + h * 0.8, wfix));
+        tw = Math.max(wl, wd); bw = Math.min(SYM_W * W, Math.max(tw + side, wfix));
       } else {
-        h = S * 0.2; ib = h * 0.42;
-        fb = fitTo(bold, label, h * 0.38, S * 0.9, h * 0.26); tw = c.measureText(label).width;
-        bw = Math.min(SYM_W * W, Math.max(tw + ib + h * 0.2 + h, wfix));
+        h = S * 0.2; sl = C.linkSlot(kind, h, false);
+        const side = sl.inset + sl.d + sl.gap + sl.padR;
+        fb = fitTo(bold, label, h * 0.38, kind === "icon" ? S * 0.9 : Math.min(S * 0.9, SYM_W * W - side), h * 0.26); tw = c.measureText(label).width;
+        bw = Math.min(SYM_W * W, Math.max(tw + side, wfix));
       }
       c.fillStyle = acc; rrect(c, -bw / 2, -h / 2, bw, h, h / 2); c.fill(); c.shadowBlur = 0; c.shadowOffsetY = 0;
-      const x1 = -(tw + ib + h * 0.2) / 2, tx = x1 + ib + h * 0.2;
-      const im = iconImage(icon, on); if (im) c.drawImage(im, x1, -ib / 2, ib, ib);
+      const d = sl.d, scx = -(sl.inset + d + sl.gap + tw + sl.padR) / 2 + sl.inset + d / 2, tx = scx + d / 2 + sl.gap;
+      if (kind === "photo") {
+        const ring = Math.max(1.5, d * 0.05), inner = d - 2 * ring;
+        c.fillStyle = "#FFFFFF"; c.beginPath(); c.arc(scx, 0, d / 2, 0, Math.PI * 2); c.fill();
+        c.save(); c.beginPath(); c.arc(scx, 0, inner / 2, 0, Math.PI * 2); c.clip(); drawFit(c, ph, scx - inner / 2, -inner / 2, inner, inner, "cover", it.focus, 1); c.restore();
+        if (lg) {   // logo del sitio en la esquina inferior derecha de la foto (aro blanco)
+          const bd = d * C.LINK_BADGE, bx = scx + d * 0.36, by = d * 0.33;
+          c.fillStyle = "#FFFFFF"; c.beginPath(); c.arc(bx, by, bd / 2 + Math.max(1.5, h * 0.028), 0, Math.PI * 2); c.fill();
+          drawLogoBadge(c, lg, bx, by, bd, "circle");
+        }
+      } else if (kind === "logo") drawLogoBadge(c, lg, scx, 0, d, "squircle");
+      else { const im = iconImage(icon, on); if (im) c.drawImage(im, scx - d / 2, -d / 2, d, d); }
       c.fillStyle = on; c.textBaseline = "alphabetic";
       if (disp) {
         c.font = fontCss(bold, fb); c.fillText(label, tx, -h * 0.03);
@@ -2419,11 +2446,15 @@
       }
       c.restore();
       const pl = title && it.platform && handle ? PLATS[it.platform] : null;
-      if (pl) {   // insignia de la red en la esquina del avatar (0.44 del diametro)
-        const bd = d * 0.44, bx = ax + d * 0.36, by = d * 0.36;
-        c.fillStyle = "#FFFFFF"; c.beginPath(); c.arc(bx, by, bd / 2 + 1.5 * B.s, 0, Math.PI * 2); c.fill();
-        c.fillStyle = pl.color || "#1E2330"; c.beginPath(); c.arc(bx, by, bd / 2, 0, Math.PI * 2); c.fill();
-        const im = iconImage(pl.icon, lum(pl.color || "#000") > 0.6 ? "#141418" : "#FFFFFF"); if (im) c.drawImage(im, bx - bd * 0.32, by - bd * 0.32, bd * 0.64, bd * 0.64);
+      const lgf = title && it.logo && it.logo.sid ? mediaFrame(it, it.logo, 0, false) : null;
+      if (pl || lgf) {   // insignia de la red (o el logo del sitio) en la esquina del avatar (0.44 del diametro)
+        const bd = d * C.FOLLOW_BADGE, bx = ax + d * 0.36, by = d * 0.33;
+        c.fillStyle = "#FFFFFF"; c.beginPath(); c.arc(bx, by, bd / 2 + Math.max(1.5 * B.s, h * 0.028), 0, Math.PI * 2); c.fill();
+        if (lgf) drawLogoBadge(c, lgf, bx, by, bd, "circle");
+        else {
+          c.fillStyle = pl.color || "#1E2330"; c.beginPath(); c.arc(bx, by, bd / 2, 0, Math.PI * 2); c.fill();
+          const im = iconImage(pl.icon, lum(pl.color || "#000") > 0.6 ? "#141418" : "#FFFFFF"); if (im) c.drawImage(im, bx - bd * 0.32, by - bd * 0.32, bd * 0.64, bd * 0.64);
+        }
       }
       const bcol = it.button_color || (it.color && lum(it.color) <= 0.85 ? it.color : "#FF3B5C");
       c.fillStyle = bcol; rrect(c, Wd / 2 - h * 0.15 - bwb, -h * 0.3, bwb, h * 0.6, h * 0.3); c.fill();
@@ -2494,12 +2525,20 @@
       const th = it.theme || "light";
       const bg = th === "dark" ? "#141414" : th === "brand" ? (it.color && it.color !== "#FFFFFF" ? it.color : "#FFD23F") : "#FFFFFF";
       const fg = lum(bg) > 0.55 ? "#111111" : "#FFFFFF";
-      c.fillStyle = bg; rrect(c, -w / 2, -h / 2, w, h, w * 0.06); c.fill(); c.shadowBlur = 0;
+      c.fillStyle = bg; rrect(c, -w / 2, -h / 2, w, h, w * 0.06); c.fill(); c.shadowBlur = 0; c.shadowOffsetY = 0;   // texto sin sombra (como el render)
       const pad = w * 0.07; let ty = -h / 2 + pad;
       c.textBaseline = "top"; c.fillStyle = fg;
       const ic = iconImage(it.icon, fg); const isz = h * 0.28;
       let tx = -w / 2 + pad;
-      if (it.icon) { if (ic) c.drawImage(ic, tx, ty, isz, isz); tx += isz + pad * 0.6; }
+      // `logo` (logo de la pagina que menciona la tarjeta): reemplaza al icono en su insignia redondeada
+      // con la geometria de graphics._row_header: insignia de 15u (x1.12 en horario) a 6.4u del borde
+      const lgc = it.logo && it.logo.sid ? mediaFrame(it, it.logo, 0, false) : null;
+      if (lgc) {
+        const u = w / 100, bs = 15 * u * (it.variant === "schedule" ? 1.12 : 1), p0 = 6.4 * u;
+        drawLogoBadge(c, lgc, -w / 2 + p0 + bs / 2, -h / 2 + p0 + bs / 2, bs, "squircle"); c.fillStyle = fg;
+        tx = -w / 2 + p0 + bs + 4.2 * u; ty = -h / 2 + p0 + bs * 0.12;
+      }
+      else if (it.icon) { if (ic) c.drawImage(ic, tx, ty, isz, isz); tx += isz + pad * 0.6; }
       c.font = fontCss("Poppins-Bold", w * 0.065); c.fillText(String(it.title || "").slice(0, 40), tx, ty);
       c.globalAlpha *= 0.75; c.font = fontCss("Poppins-Medium", w * 0.045); c.fillText(String(it.subtitle || "").slice(0, 50), tx, ty + w * 0.08); c.globalAlpha /= 0.75;
       if (it.value) { c.font = fontCss("Poppins-ExtraBold", w * 0.1); c.fillText(String(it.value), -w / 2 + pad, h / 2 - pad - w * 0.11); }
@@ -2607,7 +2646,9 @@
         e.vid = v;
         const th = new Image(); th.src = m.thumb || `/tlsource/${encodeURIComponent(m.sid)}/thumb`; e.thumb = th;
       } else {
-        const im = new Image(); im.onerror = () => { e.err = true; }; im.src = url; e.img = im;
+        const im = new Image(); im.onerror = () => { e.err = true; };
+        im.onload = () => { if (FX.drawOverlayNow && V && V.paused) FX.drawOverlayNow(); };   // foto/logo en pausa: aparece al cargar
+        im.src = url; e.img = im;
       }
     }
     return e;
@@ -2636,6 +2677,36 @@
     paused: e.vid ? e.vid.paused : null, ready: e.vid ? e.vid.readyState : (e.img && e.img.complete ? 4 : 0) }));
   /** Los clips que no se dibujaron en este cuadro se pausan. */
   function pauseIdleMedia(now) { Object.values(MEDIA_EL).forEach(e => { if (e.vid && !e.vid.paused && now - e.used > 150) e.vid.pause(); }); }
+  /** Como presentar un logo (fxcore.logoLook, igual que graphics.logo_look), medido una vez por imagen. */
+  function logoLookOf(f) {
+    const im = f.src; if (im._look) return im._look;
+    let look = { bleed: false, plate: C.LOGO_PLATE, box: [0, 0, f.w, f.h] };
+    try {
+      const k = Math.min(1, 512 / Math.max(f.w, f.h)), w = Math.max(1, Math.round(f.w * k)), h = Math.max(1, Math.round(f.h * k));
+      const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+      const g = cv.getContext("2d", { willReadFrequently: true }); g.drawImage(im, 0, 0, w, h);
+      look = C.logoLook(g.getImageData(0, 0, w, h).data, w, h);
+      if (k !== 1) look.box = look.box.map(v => v / k);
+    } catch (e) { /* lienzo sin lectura: placa blanca */ }
+    im._look = look; return look;
+  }
+  /** graphics.draw_logo_badge: logo en una insignia `shape` (circle | squircle) de lado d centrada en
+      (cx, cy): icono de app -> llena la insignia; si no, cabe con aire sobre su placa; filo fino. */
+  function drawLogoBadge(c, f, cx, cy, d, shape) {
+    const look = logoLookOf(f);
+    c.save(); c.shadowBlur = 0; c.shadowOffsetY = 0; c.imageSmoothingQuality = "high";
+    c.beginPath(); if (shape === "circle") c.arc(cx, cy, d / 2, 0, Math.PI * 2); else rrect(c, cx - d / 2, cy - d / 2, d, d, d * 0.3);
+    c.save(); c.clip();
+    if (look.bleed) drawFit(c, f, cx - d / 2, cy - d / 2, d, d, "cover", null, 1);
+    else {
+      c.fillStyle = look.plate; c.fillRect(cx - d / 2, cy - d / 2, d, d);
+      const [lw, lh] = C.logoFit(look, d, shape), b = look.box;
+      c.drawImage(f.src, b[0], b[1], b[2] - b[0], b[3] - b[1], cx - lw / 2, cy - lh / 2, lw, lh);
+    }
+    c.restore();
+    c.lineWidth = Math.max(1, d * 0.018); c.strokeStyle = "rgba(0,0,0,.1)"; c.stroke();
+    c.restore();
+  }
   /** graphics.fit_src: dibuja `f` en la ventana (x, y, w, h) con cover/contain, focus y zoom. */
   function drawFit(c, f, x, y, w, h, fit, focus, zoom) {
     const iw = f.w, ih = f.h, z = clamp(+(zoom || 1), 1, 4);
@@ -2671,7 +2742,7 @@
     const h = (it.size != null ? +it.size : (wm ? 0.034 : 0.074)) * W, maxw = SYM_W * W;
     const links = (it.links || []).slice(0, 8).map(l => {
       const p = PLATS[l && l.platform] ? l.platform : "web";
-      return { p, t: String((l && l.text) || "").trim() || (PLATS[p] ? PLATS[p].label : "Web") };
+      return { p, t: String((l && l.text) || "").trim() || (PLATS[p] ? PLATS[p].label : "Web"), lg: l && l.logo && l.logo.sid ? l.logo : null };
     });
     if (!links.length) return null;
     const fontN = wm ? "Poppins-SemiBold" : "Poppins-Bold";
@@ -2679,7 +2750,7 @@
     let chips = links.map(l => {
       const f = fitF(l.t, wm ? h * 0.62 : h * 0.36, maxw - h * 1.4);
       const w = wm ? h * 1.05 + c.measureText(l.t).width : h * 0.14 + h * 0.72 + h * 0.2 + c.measureText(l.t).width + h * 0.42;
-      return { p: l.p, t: l.t, f, w };
+      return { p: l.p, t: l.t, f, w, lg: l.lg };
     });
     const gap = h * (wm ? 0.3 : 0.22);
     let rows = [];
@@ -2728,8 +2799,12 @@
             c.fillStyle = dark ? "rgba(17,17,22,.86)" : "#FFFFFF"; rrect(c, -ch.w / 2, -h / 2, ch.w, h, h / 2); c.fill();
             c.shadowBlur = 0; c.shadowOffsetY = 0;
             const d = h * 0.72, bx = -ch.w / 2 + h * 0.14 + d / 2;
-            c.fillStyle = bcol; c.beginPath(); c.arc(bx, 0, d / 2, 0, Math.PI * 2); c.fill();
-            const im = iconImage(pl.icon || "world", lum(bcol) > 0.6 ? "#15151B" : "#FFFFFF"); if (im) c.drawImage(im, bx - d * 0.3, -d * 0.3, d * 0.6, d * 0.6);
+            const lgf = ch.lg && !mono ? mediaFrame(it, ch.lg, 0, false) : null;   // logo del sitio (graphics: chips a color)
+            if (lgf) drawLogoBadge(c, lgf, bx, 0, d, "circle");
+            else {
+              c.fillStyle = bcol; c.beginPath(); c.arc(bx, 0, d / 2, 0, Math.PI * 2); c.fill();
+              const im = iconImage(pl.icon || "world", lum(bcol) > 0.6 ? "#15151B" : "#FFFFFF"); if (im) c.drawImage(im, bx - d * 0.3, -d * 0.3, d * 0.6, d * 0.6);
+            }
             c.font = fontCss(fontN, ch.f); c.fillStyle = dark ? "#FFFFFF" : "#15151B"; c.fillText(ch.t, -ch.w / 2 + h * 0.14 + d + h * 0.2, 0);
           }
           c.restore();

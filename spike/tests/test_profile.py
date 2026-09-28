@@ -593,3 +593,71 @@ def test_normalize_is_idempotent(text):
     q = P.normalize_profile(json.loads(json.dumps(p)))
     assert json.dumps(p, sort_keys=True) == json.dumps(q, sort_keys=True) == \
         json.dumps(P.normalize_profile(q), sort_keys=True)
+
+
+# ---------------------------------------------------------------- foto y logo de los enlaces
+PC_URL = "https://paseo.club/business/negocio-demo"
+FOTO = {"sid": "a1b2c3d4e5f6", "type": "image", "name": "foto_paseoclub.png", "w": 1024, "h": 768,
+        "src": "https://cdn.demo.test/foto.png"}
+LOGO = {"sid": "0f1e2d3c4b5a", "type": "image", "w": 512, "h": 512}
+
+
+def _link(**kw):
+    return P.normalize_profile({"name": "Negocio Demo", "links": [dict({"url": PC_URL}, **kw)]})["links"][0]
+
+
+def test_link_media_is_kept_and_sanitized():
+    """photo/logo de un enlace: medio propio (sid valido, nunca una ruta; src solo http(s)),
+    media_src auto|user, media_off; idempotente."""
+    import json
+    l = _link(photo=dict(FOTO, path="/etc/passwd"), logo=LOGO, media_src={"photo": "auto", "logo": "auto"},
+              media_for=PC_URL)
+    assert l["photo"] == FOTO and l["logo"] == {"sid": LOGO["sid"], "type": "image", "w": 512, "h": 512}
+    assert l["media_src"] == {"photo": "auto", "logo": "auto"} and l["media_for"] == PC_URL
+    assert P.link_media(l, "photo")["sid"] == FOTO["sid"] and P.link_media(l, "logo")["sid"] == LOGO["sid"]
+    # basura: sid con ruta, src que no es http, tipos raros
+    bad = _link(photo={"sid": "../../x", "type": "image"}, logo={"sid": "ok_logo", "src": "file:///etc/x"},
+                media_src={"photo": "robado", "logo": 7}, media_off="si")
+    assert "photo" not in bad and bad["logo"] == {"sid": "ok_logo", "type": "image"}
+    assert bad["media_src"] == {"logo": "user"} and "media_off" not in bad       # sin etiqueta: del usuario
+    p = P.normalize_profile({"name": "Negocio Demo", "links": [dict(l)]})
+    assert json.dumps(p, sort_keys=True) == json.dumps(P.normalize_profile(json.loads(json.dumps(p))), sort_keys=True)
+
+
+def test_link_media_off_user_and_stale():
+    """Quitada por el usuario (media_off) no vuelve sola; la subida por el usuario ('user') manda
+    aunque este apagada la automatica; lo 'auto' de OTRA url (el enlace cambio) se descarta."""
+    off = _link(photo=FOTO, media_src={"photo": "auto"}, media_off={"photo": True})
+    assert "photo" not in off and off["media_off"] == {"photo": True} and P.link_media(off, "photo") is None
+    assert P.media_wanted(off) == ["logo"]
+    mine = _link(photo=FOTO, media_src={"photo": "user"}, media_off={"photo": True})
+    assert mine["photo"]["sid"] == FOTO["sid"] and P.link_media(mine, "photo") is not None
+    assert P.media_wanted(mine) == ["logo"]
+    stale = _link(photo=FOTO, logo=LOGO, media_src={"photo": "auto", "logo": "user"},
+                  media_for="https://paseo.club/business/otro-negocio")
+    assert "photo" not in stale and stale["logo"]["sid"] == LOGO["sid"]          # lo del usuario se queda
+    # el Studio cambia la red de un @usuario: la foto automatica de la otra red no se arrastra
+    ig = P.normalize_profile({"links": [{"url": "https://instagram.com/cuenta.demo", "platform": "tiktok",
+                                         "photo": FOTO, "media_src": {"photo": "auto"}}]})["links"][0]
+    assert ig["platform"] == "tiktok" and "photo" not in ig
+
+
+def test_media_wanted_link_for_and_sids():
+    p = P.normalize_profile({"name": "Dra. Demo", "avatar": {"sid": "avatar_demo"}, "links": [
+        {"url": "https://instagram.com/dra.demo", "photo": FOTO, "media_src": {"photo": "auto"}},
+        "https://instagram.com/otra.cuenta.demo", {"url": PC_URL, "logo": LOGO}, "wa.me/5215512345678",
+        "correo.demo@ejemplo.test", "maps.app.goo.gl/AbCdEf"]})
+    by = {l["platform"]: l for l in p["links"]}
+    assert P.media_wanted(by["instagram"]) == ["photo"]         # 'auto' se refresca; logo: icono propio
+    assert P.media_wanted(P.normalize_profile({"links": ["https://linktr.ee/demo"]})["links"][0]) == ["photo", "logo"]
+    assert P.media_wanted(by["paseoclub"]) == ["photo"]                   # el logo es del usuario
+    assert P.media_wanted(by["whatsapp"]) == P.media_wanted(by["email"]) == P.media_wanted(by["maps"]) == []
+    assert P.link_for(p, "instagram", "@otra.cuenta.demo")["handle"] == "@otra.cuenta.demo"
+    assert P.link_for(p, "instagram")["handle"] == "@dra.demo" and P.link_for(p, "instagram", "@nadie") is None
+    assert P.link_for(p, None) is None
+    assert P.media_sids(p) == {"avatar_demo", FOTO["sid"], LOGO["sid"]}
+    # un duplicado no pierde su foto
+    d = P.normalize_profile({"links": ["https://instagram.com/dra.demo",
+                                       {"url": "instagram.com/dra.demo/", "photo": FOTO, "media_src": {"photo": "auto"}}]})
+    assert len(d["links"]) == 1 and d["links"][0]["photo"]["sid"] == FOTO["sid"]
+    assert d["links"][0]["media_src"] == {"photo": "auto"}

@@ -596,6 +596,10 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
         "dither": float(opts.get("dither", 1.0) or 0.0),
         "modules": dict(opts.get("modules") or {}), "sys_path": list(opts.get("sys_path") or []),
         "strict": bool(opts.get("strict")),
+        # carpeta(s) de los medios propios para lo que graphics resuelve por sid (logo del enlace,
+        # foto de una tarjeta dentro de una escena): la MISMA que resuelve `media` (serializable)
+        # (un `media_resolver` no viaja a los procesos: sin media_root, la carpeta de POST /sources)
+        "media_root": [str(x) for x in _media_roots(opts)] if opts.get("media_root") is not None else None,
     }
     caption_layout(job)
     return job, skipped
@@ -1831,6 +1835,12 @@ class Compositor:
         self.t_comp = 0.0
         self.prof: dict[str, float] = {}       # s acumulados por etapa/kind (perfil)
         self._logo = self._prep_logo(job.get("logo"))
+        # logos / fotos que graphics lee por sid (graphics.media_file_image): mismo media_root que
+        # los `media` del job (uno por proceso, como el compositor)
+        gm = self.mods.get("graphics")
+        if gm is not None and hasattr(gm, "MEDIA_OPTS"):
+            root = job.get("media_root")
+            gm.MEDIA_OPTS = {"media_root": list(root)} if root else {}
         dith = float(job.get("dither", 0.0) or 0.0)
         self._grain = _Grain(self.W, self.H, dith) if dith > 0 and job["quality"] != "draft" else None
         z = lambda it: (int(it.get("z", 0) or 0), it.get("_ord", 0))  # noqa: E731

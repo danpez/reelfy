@@ -1762,8 +1762,14 @@ def _finish_analysis(job_id, prog, plan, params, bar=None):
     warns = []
     bar = bar or _PhaseBar(job_id, prog)
     if params.get("profile"):
-        # perfil de la persona (nombre, profesion, redes): el director lo integra en la edicion
-        plan["profile"] = params["profile"]
+        # perfil de la persona (nombre, profesion, redes): el director lo integra en la edicion,
+        # con la foto/logo de sus enlaces que ya bajaron mientras se analizaba (lo que llegue
+        # despues lo pone _lm_propagate al quedar en review)
+        try:
+            plan["profile"] = _lm_ready(params["profile"]) or params["profile"]
+        except Exception:  # noqa
+            traceback.print_exc()
+            plan["profile"] = params["profile"]
     if d["enabled"]:
         bar.set(DIRECTOR_STEPS["tomas"][0], "Dirigiendo la edición…", "director", force=True)
 
@@ -2132,8 +2138,12 @@ def _gc_sources(now=None):
                 used.add(Path(str(it["path"])).name.split(".")[0].split("_")[0])
     # medios propios que un plan referencia ({sid, type} en fx): tampoco se borran
     used |= jobstore.referenced_sids()
-    # fotos de perfil de los perfiles guardados (el Studio las reutiliza en otros proyectos)
-    used |= {str((pr.get("avatar") or {}).get("sid")) for pr in _profiles_load() if pr.get("avatar")}
+    # fotos de perfil y foto/logo de los enlaces de los perfiles guardados (el Studio las reutiliza
+    # en otros proyectos) y de la cache de enlaces (un perfil nuevo con el mismo enlace las usa)
+    from motion import profile as PR
+    for pr in _profiles_load():
+        used |= PR.media_sids(pr)
+    used |= _lm_cache_sids()
     groups = {}
     for p in SOURCES.iterdir():
         sid = p.name.split(".")[0].split("_")[0]
@@ -2511,7 +2521,7 @@ def render(job_id: str, body: dict = Body(...)):
         raise HTTPException(409, "Este proyecto ya está procesándose; espera o cancela.")
     _require_license()
     if _is_v2(plan) and not body.get("legacy"):
-        plan = _synced_plan(job_id, plan)
+        plan = _lm_plan(_synced_plan(job_id, plan))
         fmt = _fmt_of(body)
         from motion import render as R
         if fmt not in R.FORMAT_NAMES:
@@ -2594,7 +2604,7 @@ def preview(job_id: str, body: dict = Body(...)):
     if not plan:
         raise HTTPException(409, "El job no tiene plan; analiza el video primero.")
     if body.get("pro"):
-        return _start_preview_pro(job_id, _synced_plan(job_id, plan), _fmt_of(body), _engine_opts(body))
+        return _start_preview_pro(job_id, _lm_plan(_synced_plan(job_id, plan)), _fmt_of(body), _engine_opts(body))
     return _preview_legacy(job_id, plan, body)
 
 
@@ -2868,7 +2878,7 @@ def frame(job_id: str, body: dict = Body(...)):
     tiene otro mas nuevo del mismo job responde 204 sin renderizar."""
     _job_or_404(job_id)
     _require_license()
-    plan = _synced_plan(job_id, _plan_from(body, job_id))
+    plan = _lm_plan(_synced_plan(job_id, _plan_from(body, job_id)))
     if not _is_v2(plan):
         raise HTTPException(400, "El cuadro exacto necesita un plan v2 (dirigido).")
     try:
@@ -3094,6 +3104,9 @@ def direct(job_id: str, body: dict = Body(...)):
     if _side_running(job_id, "direct"):
         raise HTTPException(409, "El director ya está trabajando en este proyecto.")
     plan = _plan_from(body, job_id)
+    if isinstance(plan, dict) and isinstance(plan.get("profile"), dict) and "profile" not in (body or {}):
+        # la foto/logo de sus enlaces que ya bajaron entran en la edicion nueva
+        plan = dict(plan, profile=_lm_ready(plan["profile"]) or plan["profile"])
     from motion import director
     if "profile" in (body or {}):
         # perfil de la persona (null = quitarlo): el director lo re-aplica al re-dirigir; lo
@@ -3171,6 +3184,11 @@ def direct(job_id: str, body: dict = Body(...)):
         raise HTTPException(500, f"No se pudo re-dirigir: {e}")
     if music_body is not None and only:
         out = _apply_music(out, music_body)     # (con full, _direct_plan ya la aplico)
+    if only and isinstance(out, dict) and out.get("profile"):
+        try:                                    # lo regenerado lleva la foto/logo del perfil
+            out = director.apply_profile_media(out)[0]
+        except Exception:  # noqa
+            traceback.print_exc()
     if not (full and not only):
         out = _sym(out)                         # (con full, _direct_plan ya lo simetrizo)
     jobstore.update(job_id, plan=out)
@@ -3190,6 +3208,7 @@ def get_plan(job_id: str):
     if plan is None:
         raise HTTPException(404, "Sin plan")
     plan, rev = _sym_stored(job_id, plan, rev)     # planes de antes de la regla de simetria
+    plan, rev = _lm_stored(job_id, plan, rev)      # foto/logo de los enlaces que ya bajaron
     try:                               # proyectos de antes del proxy: se genera al abrirlos
         j = jobstore.get_light(job_id)
         if j and j.get("state") not in ("queued", "running"):
@@ -3224,6 +3243,15 @@ def put_plan(job_id: str, body: dict = Body(...)):
             _music_superseded(job_id, plan, base, rev)
         return {"ok": True, "plan_rev": rev, "plan": plan, "profile_applied": True}
     if not ok:
+        pm = _pm_side(job_id)
+        if pm.get("state") == "applied" and base == pm.get("from_rev") and rev == pm.get("plan_rev"):
+            # la unica revision posterior es la foto/logo del perfil que llego sola (el servidor la
+            # puso sobre `from_rev`): la edicion del usuario gana y ya la lleva (_reapply_profile)
+            ok, rev2 = jobstore.update_plan(job_id, plan, rev)
+            if ok:
+                jobstore.side_update(job_id, "profile_media", state="merged", plan_rev=rev2)
+                return {"ok": True, "plan_rev": rev2, "plan": plan, "profile_applied": True}
+            rev = rev2
         # la unica revision posterior es la sincronizacion automatica con la musica IA (el
         # servidor la escribio sobre la propuesta `from_rev`): no es un conflicto real
         ms = _music_side(job_id)
@@ -3547,15 +3575,17 @@ def _profile_param(raw, pid=None):
         return None
     if not isinstance(raw, dict):
         raise HTTPException(400, "Perfil inválido.")
-    return PR.normalize_profile(raw)
+    # foto/logo de sus enlaces: lo ya descargado entra ya; lo que falta se baja en segundo plano
+    return _lm_ready(PR.normalize_profile(raw))
 
 
 def _profile_key(prof):
-    """Huella del perfil (sin id ni fecha de guardado): detecta un cambio real."""
+    """Huella del perfil (sin id, fecha de guardado ni estado de la descarga): detecta un cambio
+    real (incluida la foto/logo de un enlace)."""
     if not prof:
         return ""
-    return json.dumps({k: v for k, v in prof.items() if k not in ("id", "updated")}, sort_keys=True,
-                      ensure_ascii=False)
+    return json.dumps({k: v for k, v in prof.items() if k not in ("id", "updated", "media_status")},
+                      sort_keys=True, ensure_ascii=False)
 
 
 def _reapply_profile(job_id, plan):
@@ -3573,8 +3603,21 @@ def _reapply_profile(job_id, plan):
         if old:
             plan = dict(plan, profile=old)
         return plan, False
-    new = PR.normalize_profile(plan.get("profile"))
-    if _profile_key(new) == _profile_key(old) or plan.get("version") != 2 or not isinstance(plan.get("fx"), dict):
+    raw = PR.normalize_profile(plan.get("profile"))
+    new = _lm_ready(raw)                   # foto/logo ya descargados (cache, sin red)
+    if _profile_key(new) == _profile_key(old):
+        if _profile_key(raw) == _profile_key(new) or not _is_v2(plan):
+            return plan, False
+        # el Studio guardo con el perfil de ANTES de que llegara la foto/logo (mismo perfil): se
+        # ponen sin re-dirigir ni mover nada
+        from motion import director
+        try:
+            out, _ids = director.apply_profile_media(plan, new)
+        except Exception:  # noqa
+            traceback.print_exc()
+            return plan, False
+        return out, True
+    if plan.get("version") != 2 or not isinstance(plan.get("fx"), dict):
         return plan, False
     from motion import director
     base = json.loads(json.dumps(plan))
@@ -3589,6 +3632,376 @@ def _reapply_profile(job_id, plan):
         return plan, False
     _keep_src_names(plan, out)
     return _sym(out), True
+
+
+# ---- foto y logo de los enlaces del perfil (motion/linkmedia.py) ----
+# Si el perfil menciona su Instagram, su pagina de PaseoClub u otra pagina, la foto publica de ese
+# lugar (vista previa og:image; en Instagram la foto de perfil) y el logo del sitio se descargan
+# SOLOS en segundo plano como medios propios (input/sources, formato de POST /sources). Ninguna
+# peticion espera a la red: solo LEEN la cache (DATA/assets/brand/link_media.json: url del enlace
+# -> {ok, t, photo, logo}); una tarea por perfil (sin repetir urls en curso) baja lo que falta, lo
+# guarda en los perfiles guardados (media_src 'auto') y lo pone en los proyectos que usan ese enlace
+# (director.apply_profile_media: sin mover nada) con concurrencia optimista: plan_rev sube y
+# /status lleva `profile_media` {state 'applied', plan_rev, from_rev} para que el Studio lo adopte.
+# Lo del usuario (media_src 'user') y lo que quito (media_off) nunca se toca. REELFY_LINK_MEDIA=0 lo
+# apaga; bajo pytest va apagado salvo REELFY_LINK_MEDIA=1 (las pruebas usan un servidor local).
+LINK_MEDIA_F = paths.BRAND / "link_media.json"
+LM_TIMEOUT_S = 8.0        # por peticion (pagina e imagenes)
+LM_RETRY_S = 600.0        # una pagina que no respondio (sin red) se reintenta tras 10 min
+LM_JOB_WAIT_S = 900.0     # un proyecto ocupado (analizando, exportando) se espera hasta 15 min
+LM_POLL_S = 2.0
+LM_CACHE_MAX = 300
+_LM_LOCK = threading.Lock()      # cache en disco + registro de descargas en curso
+_LM_RUNNING = {}                 # url -> hilo que la descarga
+
+
+def _lm_enabled():
+    v = os.environ.get("REELFY_LINK_MEDIA")
+    if v is not None and v.strip():
+        return v.strip().lower() not in ("0", "false", "no", "off")
+    return "PYTEST_CURRENT_TEST" not in os.environ       # pruebas: sin red salvo que se pida
+
+
+def _lm_http():
+    """GET acotado de linkmedia (red real). Las pruebas lo sustituyen por un servidor local."""
+    from motion import linkmedia as LM
+    return LM._http_get
+
+
+def _lm_cache():
+    try:
+        d = json.loads(LINK_MEDIA_F.read_text()) if LINK_MEDIA_F.exists() else {}
+    except Exception:  # noqa: cache corrupta = sin cache (se vuelve a descargar)
+        d = {}
+    return d if isinstance(d, dict) else {}
+
+
+def _lm_cache_put(url, ent):
+    """Guarda el resultado de un enlace. Un intento SIN red no borra lo que ya se tenia."""
+    with _LM_LOCK:
+        d = _lm_cache()
+        prev = d.get(url) if isinstance(d.get(url), dict) else None
+        if not ent.get("ok") and prev and prev.get("ok"):
+            prev["t_try"] = ent["t"]
+            ent = prev
+        d[url] = ent
+        if len(d) > LM_CACHE_MAX:
+            for k in sorted(d, key=lambda k_: float((d[k_] or {}).get("t") or 0))[:len(d) - LM_CACHE_MAX]:
+                d.pop(k, None)
+        LINK_MEDIA_F.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LINK_MEDIA_F.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False))
+        os.replace(tmp, LINK_MEDIA_F)
+
+
+def _lm_cache_sids():
+    out = set()
+    for ent in _lm_cache().values():
+        for k in ("photo", "logo"):
+            m = (ent or {}).get(k) if isinstance(ent, dict) else None
+            if isinstance(m, dict) and m.get("sid"):
+                out.add(str(m["sid"]))
+    return out
+
+
+def _lm_file(m):
+    return isinstance(m, dict) and bool(m.get("sid")) and _resolve_source(m["sid"]) is not None
+
+
+def _lm_links(prof):
+    """Enlaces del perfil con algo que descargar solo -> [(enlace, [kinds])]."""
+    from motion import profile as PR
+    out = []
+    for l in (prof or {}).get("links") or []:
+        want = PR.media_wanted(l) if isinstance(l, dict) else []
+        if want:
+            out.append((l, want))
+    return out
+
+
+def _lm_fill(prof, cache=None):
+    """Perfil -> copia saneada con la foto/logo 'auto' ya descargados (solo cache, sin red). Lo
+    subido o quitado por el usuario no se toca; una pagina que no respondio deja lo que habia."""
+    from motion import profile as PR
+    prof = PR.normalize_profile(prof) if prof else None
+    todo = _lm_links(prof)
+    if not todo:
+        return prof
+    cache = _lm_cache() if cache is None else cache
+    for l, want in todo:
+        ent = cache.get(l.get("url"))
+        if not isinstance(ent, dict) or not ent.get("ok"):
+            continue
+        src = dict(l.get("media_src") or {})
+        for k in want:
+            m = ent.get(k)
+            if _lm_file(m):
+                l[k] = m
+                src[k] = "auto"
+            else:
+                l.pop(k, None)
+                src.pop(k, None)
+        if src:
+            l["media_src"] = src
+        else:
+            l.pop("media_src", None)
+        if "auto" in src.values():
+            l["media_for"] = l["url"]
+        else:
+            l.pop("media_for", None)
+    return PR.normalize_profile(prof)
+
+
+def _lm_missing(prof, force=False):
+    """[(url, plataforma)] que hay que descargar: sin cache, sin red hace > LM_RETRY_S, archivo
+    borrado, o todo lo 'auto' con `force` (refrescar)."""
+    cache = _lm_cache()
+    now = time.time()
+    out = []
+    for l, want in _lm_links(prof):
+        ent = cache.get(l["url"])
+        if force or not isinstance(ent, dict):
+            out.append((l["url"], l.get("platform")))
+        elif not ent.get("ok"):
+            if now - float(ent.get("t") or 0) >= LM_RETRY_S:
+                out.append((l["url"], l.get("platform")))
+        elif any(isinstance(ent.get(k), dict) and not _lm_file(ent[k]) for k in want):
+            out.append((l["url"], l.get("platform")))
+    return list(dict.fromkeys(out))
+
+
+def _lm_running(url):
+    th = _LM_RUNNING.get(url)
+    return th is not None and th.is_alive()
+
+
+def _lm_kick(prof, force=False):
+    """Descarga en SEGUNDO PLANO lo que le falta a `prof` (nunca bloquea). -> urls lanzadas."""
+    if not prof or not _lm_enabled():
+        return []
+    try:
+        todo = _lm_missing(prof, force=force)
+    except Exception:  # noqa
+        traceback.print_exc()
+        return []
+    with _LM_LOCK:
+        todo = [(u, p) for u, p in todo if not _lm_running(u)]
+        if not todo:
+            return []
+        th = threading.Thread(target=_lm_run, args=(todo,), daemon=True,
+                              name=f"reelfy-linkmedia-{hashlib.sha1(todo[0][0].encode()).hexdigest()[:6]}")
+        for u, _p in todo:
+            _LM_RUNNING[u] = th
+        # se arranca DENTRO del candado: antes de start() is_alive() es False y otro pedido
+        # simultaneo lanzaria la misma url dos veces (dos escritores del mismo <sid>.png)
+        th.start()
+    return [u for u, _p in todo]
+
+
+def _lm_run(todo):
+    """Hilo de descarga de un perfil: pagina -> foto + logo (linkmedia), cache y propagacion."""
+    from motion import linkmedia as LM
+    done = []
+    try:
+        for url, plat in todo:
+            reached = []
+            base = _lm_http()
+
+            def get(u, limit, timeout, _b=base, _u=url, _r=reached):
+                r = _b(u, limit, timeout)
+                if u == _u:
+                    _r.append(1)                 # la pagina respondio (con o sin imagen)
+                return r
+            t0 = time.time()
+            try:
+                res = LM.fetch_link_media(url, plat, SOURCES, timeout=LM_TIMEOUT_S, fetch=get) or {}
+            except Exception:  # noqa: linkmedia no lanza; por si acaso
+                traceback.print_exc()
+                res = {}
+            ok = bool(reached)
+            _lm_cache_put(url, {"ok": ok, "t": round(time.time(), 1), "photo": res.get("photo"),
+                                "logo": res.get("logo")})
+            print(f"   perfil: foto/logo de {url[:60]} -> "
+                  f"{'sin red' if not ok else ('foto' if res.get('photo') else 'sin foto') + (' + logo' if res.get('logo') else '')}"
+                  f" ({time.time() - t0:.1f}s)")
+            done.append(url)
+    finally:
+        with _LM_LOCK:
+            for url, _p in todo:
+                if _LM_RUNNING.get(url) is threading.current_thread():
+                    _LM_RUNNING.pop(url, None)
+    if done:
+        try:
+            _lm_propagate(done)
+        except Exception:  # noqa: la foto es un extra: nunca tumba nada
+            traceback.print_exc()
+
+
+def _lm_uses(prof, urls):
+    return any(isinstance(l, dict) and l.get("url") in urls for l in (prof or {}).get("links") or [])
+
+
+def _lm_propagate(urls):
+    """Descarga terminada: la foto/logo pasa a los perfiles guardados y a los proyectos que usan
+    esos enlaces. Un proyecto ocupado (analizando, exportando, dirigiendo) se reintenta."""
+    from motion import profile as PR
+    urls = set(urls)
+    cache = _lm_cache()
+    with _PROFILES_LOCK:
+        items = _profiles_load()
+        changed = False
+        for i, pr in enumerate(items):
+            if not _lm_uses(pr, urls):
+                continue
+            cur = PR.normalize_profile(pr)
+            new = _lm_fill(cur, cache)
+            if cur and new and _profile_key(new) != _profile_key(cur):
+                new["id"] = pr["id"]
+                if pr.get("updated"):
+                    new["updated"] = pr["updated"]
+                items[i] = new
+                changed = True
+        if changed:
+            _profiles_save(items)
+    pending = list(jobstore.all_ids())
+    deadline = time.time() + LM_JOB_WAIT_S
+    while pending:
+        nxt = []
+        for jid in pending:
+            try:
+                r = _lm_apply_job(jid, urls)
+            except Exception:  # noqa
+                traceback.print_exc()
+                r = "skip"
+            if r == "busy":
+                nxt.append(jid)
+        pending = nxt
+        if not pending or time.time() > deadline:
+            break
+        time.sleep(LM_POLL_S)
+
+
+def _lm_apply_job(jid, urls):
+    """Pone la foto/logo descargados en el plan de `jid` (sin re-dirigir: misma geometria).
+    -> 'done' | 'skip' | 'busy' (ocupado u otro escritor gano: se reintenta)."""
+    from motion import profile as PR
+    j = jobstore.get_light(jid)
+    if not j:
+        return "skip"
+    plan, rev = jobstore.get_plan(jid)
+    uses = _lm_uses((plan or {}).get("profile"), urls)
+    if j.get("state") in ("queued", "running") or _side_running(jid, "direct"):
+        if uses:
+            return "busy"
+        params = (jobstore.get(jid) or {}).get("params") or {}
+        return "busy" if _lm_uses(params.get("profile"), urls) else "skip"
+    if not uses or not _is_v2(plan):
+        return "skip"
+    old = PR.normalize_profile(plan.get("profile"))
+    new = _lm_fill(old)
+    if _profile_key(new) == _profile_key(old):
+        return "done"
+    from motion import director
+    out, ids = director.apply_profile_media(plan, new)
+    ok, rev2 = jobstore.update_plan(jid, out, rev)
+    if not ok:
+        return "busy"
+    jobstore.side_update(jid, "profile_media", replace=True, state="applied", plan_rev=rev2, from_rev=rev,
+                         from_hash=jobstore.plan_hash(plan), items=ids[:40],
+                         message="Foto y logo del perfil listos")
+    print(f"   perfil: foto/logo en el proyecto {jid} (rev {rev} -> {rev2}; {len(ids)} elementos)")
+    return "done"
+
+
+def _lm_status(prof, cache=None):
+    """Estado de la foto/logo automaticos del perfil: 'fetching' (descargando), 'offline' (alguna
+    pagina no respondio; se reintenta sola) o 'done' (nada pendiente, o descarga apagada)."""
+    urls = [l["url"] for l, _w in _lm_links(prof)]
+    if not urls or not _lm_enabled():
+        return "done"
+    with _LM_LOCK:
+        if any(_lm_running(u) for u in urls):
+            return "fetching"
+    cache = _lm_cache() if cache is None else cache
+    if any(u not in cache for u in urls):
+        return "fetching"                       # recien pedida (el hilo esta por arrancar)
+    return "offline" if any(not (cache[u] or {}).get("ok") for u in urls) else "done"
+
+
+def _lm_decorate(prof, cache=None):
+    """Copia del perfil para la respuesta con `media_status` (no se guarda)."""
+    if not isinstance(prof, dict):
+        return prof
+    try:
+        return dict(prof, media_status=_lm_status(prof, cache))
+    except Exception:  # noqa
+        return prof
+
+
+def _lm_decorate_all(items):
+    cache = _lm_cache()
+    return [_lm_decorate(x, cache) for x in items]
+
+
+def _lm_ready(prof, kick=True):
+    """Perfil saneado con lo ya descargado + descarga en segundo plano de lo que falta."""
+    prof = _lm_fill(prof)
+    if kick:
+        _lm_kick(prof)
+    return prof
+
+
+def _lm_plan(plan):
+    """Plan que manda el Studio con el perfil de ANTES de que bajara la foto/logo: se ponen (sin
+    mover nada) para que el cuadro, la vista previa y el export ya salgan con ellos. Barato: sin
+    enlaces con algo automatico no lee nada."""
+    if not _is_v2(plan) or not isinstance(plan.get("profile"), dict) or not _lm_links(plan["profile"]):
+        return plan
+    try:
+        from motion import profile as PR
+        raw = PR.normalize_profile(plan["profile"])
+        new = _lm_fill(raw)
+        if _profile_key(new) == _profile_key(raw):
+            return plan
+        from motion import director
+        return director.apply_profile_media(plan, new)[0]
+    except Exception:  # noqa: la foto es un extra: el plan sale tal cual
+        traceback.print_exc()
+        return plan
+
+
+def _lm_stored(job_id, plan, rev):
+    """Al abrir un proyecto: la foto/logo de sus enlaces que ya estan en la cache (bajados para
+    este u otro perfil) se ponen y se guardan (concurrencia optimista; plan_rev sube como con la
+    simetria); lo que falta empieza a bajar en segundo plano. Ocupado: se deja para despues.
+    -> (plan, plan_rev)."""
+    if not _is_v2(plan) or not isinstance(plan.get("profile"), dict):
+        return plan, rev
+    try:
+        _lm_kick(plan["profile"])
+        out = _lm_plan(plan)
+        if out is plan:
+            return plan, rev
+        j = jobstore.get_light(job_id)
+        if not j or j.get("state") in ("queued", "running") or _side_running(job_id, "direct"):
+            return plan, rev
+        ok, rev2 = jobstore.update_plan(job_id, out, rev)
+        if not ok:
+            return jobstore.get_plan(job_id)
+        jobstore.side_update(job_id, "profile_media", replace=True, state="applied", plan_rev=rev2,
+                             from_rev=rev, from_hash=jobstore.plan_hash(plan),
+                             message="Foto y logo del perfil listos")
+        return out, rev2
+    except Exception:  # noqa: la foto es un extra
+        traceback.print_exc()
+        return plan, rev
+
+
+def _pm_side(job_id):
+    try:
+        return jobstore.side_get(job_id, "profile_media") or {}
+    except Exception:  # noqa
+        return {}
 
 
 def _with_profile(plan, raw):
@@ -3618,8 +4031,31 @@ def profile_parse(body: dict = Body(...)):
     r = PR.parse_profile_text(text, use_llm=use_llm)
     if not use_llm and (body or {}).get("use_llm", True):
         r["notes"] = list(r.get("notes") or []) + ["IA local no disponible: nombre y profesión por reglas"]
-    return {"profile": r["profile"], "notes": list(dict.fromkeys(r.get("notes") or [])), "llm": r["llm"],
-            "ms": round((time.time() - t0) * 1000)}
+    # la foto de su Instagram / de su pagina empieza a bajar mientras el usuario confirma
+    prof = _lm_ready(r["profile"]) if r.get("profile") else r.get("profile")
+    return {"profile": _lm_decorate(prof), "notes": list(dict.fromkeys(r.get("notes") or [])),
+            "llm": r["llm"], "ms": round((time.time() - t0) * 1000)}
+
+
+@app.post("/profile/media/refresh")
+def profile_media_refresh(body: dict = Body(...)):
+    """Vuelve a bajar la foto/logo AUTOMATICOS de los enlaces de un perfil ({profile} |
+    {profile_id} | {job_id}); lo que subio el usuario nunca se toca. No espera a la red: la descarga
+    va en segundo plano y al terminar actualiza los perfiles guardados y los proyectos que usan esos
+    enlaces. -> {ok, profile (con media_status), urls, enabled}."""
+    body = body or {}
+    jid = str(body.get("job_id") or "").strip()
+    if jid:
+        plan, _rev = jobstore.get_plan(jid)
+        if plan is None:
+            raise HTTPException(404, "Sin plan")
+        prof = _lm_fill(plan.get("profile"))
+    else:
+        prof = _lm_fill(_profile_param(body.get("profile"), body.get("profile_id")))
+    if not prof:
+        raise HTTPException(400, "Falta el perfil.")
+    urls = _lm_kick(prof, force=True)
+    return {"ok": True, "profile": _lm_decorate(prof), "urls": urls, "enabled": _lm_enabled()}
 
 
 @app.get("/profile/platforms")
@@ -3634,7 +4070,7 @@ def profile_platforms():
 
 @app.get("/profiles")
 def profiles_list():
-    return {"profiles": _profiles_load()}
+    return {"profiles": _lm_decorate_all(_profiles_load())}
 
 
 @app.post("/profiles")
@@ -3647,6 +4083,7 @@ def profiles_save(body: dict = Body(...)):
     prof = PR.normalize_profile(raw)
     if not prof:
         raise HTTPException(400, "El perfil está vacío: agrega nombre, profesión o un enlace.")
+    prof = _lm_ready(prof)                 # foto/logo de sus enlaces (lo que falta, en 2o plano)
     with _PROFILES_LOCK:
         items = _profiles_load()
         # solo un `id` EXPLICITO sobrescribe (editar un perfil guardado); sin id, un nombre que ya
@@ -3668,7 +4105,8 @@ def profiles_save(body: dict = Body(...)):
         items = [x for x in items if x.get("id") != pid] + [prof]
         items.sort(key=lambda x: -float(x.get("updated") or 0))
         _profiles_save(items[:100])
-    return {"ok": True, "id": pid, "profile": prof, "profiles": items[:100], "replaced": replaced}
+    return {"ok": True, "id": pid, "profile": _lm_decorate(prof),
+            "profiles": _lm_decorate_all(items[:100]), "replaced": replaced}
 
 
 @app.delete("/profiles/{pid}")
@@ -3679,7 +4117,7 @@ def profiles_delete(pid: str):
             raise HTTPException(404, "Perfil no encontrado.")
         items = [x for x in items if x.get("id") != pid]
         _profiles_save(items)
-    return {"ok": True, "profiles": items}
+    return {"ok": True, "profiles": _lm_decorate_all(items)}
 
 
 @app.get("/profile/{job_id}")
@@ -3687,7 +4125,8 @@ def profile_get(job_id: str):
     plan, rev = jobstore.get_plan(job_id)
     if plan is None:
         raise HTTPException(404, "Sin plan")
-    return {"profile": plan.get("profile"), "plan_rev": rev}
+    return {"profile": _lm_decorate(plan.get("profile")), "plan_rev": rev,
+            "profile_media": _pm_side(job_id) or None}
 
 
 @app.put("/profile/{job_id}")
@@ -3727,14 +4166,14 @@ def profile_put(job_id: str, body: dict = Body(...)):
                                                      "ventana); recarga antes de guardar el perfil.",
                              "plan_rev": rev}, status_code=409)
     _kick_analysis(job_id, out, _fmt_of(body))
-    return {"ok": True, "plan": out, "plan_rev": rev, "profile": out.get("profile"),
+    return {"ok": True, "plan": out, "plan_rev": rev, "profile": _lm_decorate(out.get("profile")),
             "ms": round((time.time() - t0) * 1000)}
 
 
 # capacidades de la API que el Studio puede consultar antes de usarlas
 API_FEATURES = ("captions", "source_proxy", "jobs_meta", "music_beats", "translate_texts",
                 "translate_titles", "preview_music_refresh", "music_sync", "air_optin", "media",
-                "profile")
+                "profile", "profile_media")
 
 
 @app.get("/settings")
@@ -3910,7 +4349,7 @@ def status(job_id: str, plan: int | None = None, rev: int | None = None):
         if len(_PHASE_SEEN) > 500:
             _PHASE_SEEN.pop(next(iter(_PHASE_SEEN)))
     if want:
-        st["plan"], st["plan_rev"] = _sym_stored(job_id, *jobstore.get_plan(job_id))
+        st["plan"], st["plan_rev"] = _lm_stored(job_id, *_sym_stored(job_id, *jobstore.get_plan(job_id)))
     return JSONResponse(st)
 
 

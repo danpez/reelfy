@@ -196,6 +196,59 @@ def test_cta_profile_and_wide_centered(extra):
     _assert_sym(G.draw_cta, dict({"id": "cp", "kind": "cta", "x": 0.5, "y": 0.6}, **extra))
 
 
+def _rgba(w, h, rgb, alpha=255):
+    img = np.zeros((h, w, 4), np.uint8)
+    img[..., :3] = rgb
+    img[..., 3] = alpha
+    return img
+
+
+def _logo_tr():
+    """Logo transparente, descentrado a proposito en su lienzo (la caja de tinta lo recentra)."""
+    img = np.zeros((256, 256, 4), np.uint8)
+    img[40:150, 20:200] = (200, 30, 180, 255)
+    return img
+
+
+PHOTO = _rgba(400, 300, (40, 200, 90))
+APP = _rgba(180, 180, (255, 120, 0))
+
+
+@pytest.mark.parametrize("extra", [
+    # Perfil: foto del lugar en el hueco + logo en su esquina, solo logo, foto sin display, ancho comun
+    {"label": "Agenda en ReservaDemo", "display": "reserva.demo/ana", "avatar": "image", "_media_image": PHOTO,
+     "_logo_image": _logo_tr()},
+    {"label": "Agenda en ReservaDemo", "display": "reserva.demo/ana", "_logo_image": APP},
+    {"label": "Agenda en ReservaDemo", "avatar": "image", "_media_image": PHOTO, "_logo_image": APP},
+    {"label": "Agenda tu cita con la especialista demo de siempre", "display": "reserva.demo/una-ruta-bastante-larga",
+     "avatar": "image", "_media_image": PHOTO},
+    {"label": "Agenda", "display": "reserva.demo/ana", "_logo_image": _logo_tr(), "width": 0.74},
+])
+def test_link_below_with_photo_and_logo_centered(extra):
+    it = dict({"id": "lp", "kind": "cta", "variant": "link_below", "x": 0.5, "y": 0.6}, **extra)
+    L, R = _assert_sym(G.draw_cta, it)
+    assert L >= C.SAFE["left"] * W - 0.03 * W                   # cabe en SYM_W (sombra aparte)
+
+
+def test_follow_with_logo_badge_centered():
+    _assert_sym(G.draw_cta, {"id": "fl", "kind": "cta", "variant": "follow", "title": "Estudio Demo", "handle": "estudio.demo",
+                             "platform": "web", "avatar": "image", "_media_image": PHOTO, "_logo_image": APP,
+                             "x": 0.5, "y": 0.6})
+
+
+@pytest.mark.parametrize("variant", ["schedule", "booking", "link", "generic"])
+def test_card_with_logo_centered(variant):
+    _assert_sym(G.draw_card, {"id": f"cl_{variant}", "kind": "card", "variant": variant, "title": "Horarios disponibles",
+                              "subtitle": "En ReservaDemo", "label": "Agendar", "x": 0.5, "y": 0.55,
+                              "_logo_image": _logo_tr()})
+
+
+@pytest.mark.parametrize("layout", ["column", "row", "grid"])
+def test_socials_with_logo_centered(layout):
+    links = LINKS + [{"platform": "web", "text": "reserva.demo/ana", "_logo_image": APP}]
+    _assert_sym(G.draw_socials, {"id": f"sl_{layout}", "kind": "socials", "layout": layout, "links": links, "y": 0.55})
+
+
 @pytest.mark.parametrize("layout", ["column", "row", "grid"])
 def test_socials_centered(layout):
     _assert_sym(G.draw_socials, {"id": f"s_{layout}", "kind": "socials", "layout": layout, "links": LINKS,
