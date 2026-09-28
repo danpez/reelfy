@@ -106,7 +106,7 @@ def srv(tmp_path_factory):
     env = dict(os.environ, REELFY_PORT=str(port), REELFY_DATA=str(data), REELFY_GATED="0",
                REELFY_AUTO_DOWNLOAD="0", REELFY_OLLAMA_URL="http://127.0.0.1:9",
                REELFY_ACE_BIN=str(data / "sin_ace"), REELFY_MUSIC_MODELS=str(data / "sin_musica"),
-               REELFY_WORKERS="1")
+               REELFY_WORKERS="1", REELFY_TEST_DIRECT_DELAY="1.0")
     log = open(data / "server_stdout.log", "w")
     proc = subprocess.Popen([PY, "-u", str(SPIKE / "app" / "server.py")], cwd=str(SPIKE),
                             env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -130,6 +130,9 @@ def srv(tmp_path_factory):
                    (job, json.dumps(synthetic_plan(video, dur)), now, now))
         cx.commit()
         cx.close()
+        # el video del trabajo (como lo deja /analyze o /compose): /source, proxy y miniatura
+        import shutil
+        shutil.copyfile(video, data / "input" / f"{job}.mp4")
         yield {"api": api, "job": job, "data": data, "video": video, "dur": dur, "proc": proc}
     finally:
         proc.terminate()
@@ -262,6 +265,11 @@ def test_musica_escuchable(srv):
     r = api.post(f"/music/{job}", {"plan": _plan(srv), "seed": 11})
     assert r["file"].startswith(f"music_{job}_") and r["source"] == "procedural"
     assert r["duration"] > 3.0 and r["seed"] == 11
+    # beats y downbeats en tiempo final (la pista Musica del Studio los dibuja)
+    b = r["beats"]
+    assert len(b) >= 4 and all(isinstance(x, float) for x in b)
+    assert all(x < y for x, y in zip(b, b[1:])) and 0 <= b[0] and b[-1] <= r["duration"] + 0.5
+    assert set(r["downbeats"]) <= set(b) or len(r["downbeats"]) <= len(b)
     code, body, hdr = api.get(r["url"], raw=True)
     assert code == 200 and len(body) > 100_000 and hdr["content-type"] == "audio/wav"
 
@@ -370,8 +378,29 @@ ok, okm, msg = S.space_check(5 * GB, 4 * GB, 6.0)
 assert not ok and "insuficiente" in msg
 ok, okm, msg = S.space_check(0, 4 * GB, 6.0)
 assert ok and not okm and "procedural" in msg
+# opciones del proyecto: saneadas; sin claves = lo de siempre
+assert S._engine_opts({}) == {"enhance_audio": True}
+eo = S._engine_opts({"air": 0.9, "air_user": True, "enhance_audio": False, "logo": {"pos": "zz", "size": 5}})
+assert eo["air"] == 0.35 and eo["enhance_audio"] is False
+# el aire es opt-in: sin air_user (el default AIR=0.16 del Studio) el render va a sangre completa
+assert "air" not in S._engine_opts({"air": 0.16}) and "air" not in S._engine_opts({"air": 0.16, "air_user": "si"})
+assert eo["logo"]["pos"] == "br" and eo["logo"]["size"] == 0.4 and eo["logo"]["path"].endswith("logo.png")
+assert "air" not in S._engine_opts({"air": 0}) and "logo" not in S._engine_opts({"logo": None})
+# el aire solo cuenta con una fuente mas ANCHA que la salida (si no, no cambia el base)
+H, V = sys.argv[1], sys.argv[2]
+assert S._eff_engine({"video": H}, "9:16", {"air": 0.16, "enhance_audio": True})["air"] == 0.16
+assert "air" not in S._eff_engine({"video": V}, "9:16", {"air": 0.16})
+assert "air" not in S._eff_engine({"video": H}, "16:9", {"air": 0.16})
+o = S._motor_opts({"air": 0.2, "logo": {"path": "x"}, "enhance_audio": False}, "1:1", quality="draft")
+assert o["media_root"] == str(S.SOURCES) and o["fmt"] == "1:1" and o["air"] == 0.2 and o["quality"] == "draft"
 print("OK")
 '''
+    hvid, vvid = tmp_path / "h.mp4", tmp_path / "v.mp4"
+    for f, size in ((hvid, "640x360"), (vvid, "360x640")):
+        subprocess.run([str(paths.FFMPEG), "-v", "error", "-y", "-f", "lavfi", "-i",
+                        f"testsrc2=s={size}:r=30:d=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        str(f)], check=True)
+    code = code.replace("sys.argv[1], sys.argv[2]", f"{str(hvid)!r}, {str(vvid)!r}")
     env = dict(os.environ, REELFY_DATA=str(tmp_path), REELFY_GATED="0", REELFY_AUTO_DOWNLOAD="0",
                REELFY_OLLAMA_URL="http://127.0.0.1:9")
     r = subprocess.run([PY, "-c", code], cwd=str(SPIKE), env=env, capture_output=True, text=True,
@@ -507,3 +536,274 @@ def test_direct_en_segundo_plano_conserva_musica_elegida(srv):
     assert api.post(f"/cancel/{job}?only=direct")["ok"]
     st = api.wait(job, lambda s: s.get("direct_state") in ("done", "error", "canceled"), 300)
     assert st["direct_state"] == "canceled" and st["plan_rev"] == rev1
+
+
+def _png(path, rgb=(255, 0, 200)):
+    from PIL import Image
+    im = Image.new("RGBA", (120, 120), (0, 0, 0, 0))
+    im.paste(Image.new("RGBA", (100, 100), rgb + (255,)), (10, 10))
+    im.save(path)
+    return path
+
+
+def _upload_logo(api, png):
+    import uuid as _u
+    bnd = "----t" + _u.uuid4().hex
+    body = (f"--{bnd}\r\nContent-Disposition: form-data; name=\"logo\"; filename=\"logo.png\"\r\n"
+            f"Content-Type: image/png\r\n\r\n").encode() + png.read_bytes() + f"\r\n--{bnd}--\r\n".encode()
+    req = urllib.request.Request(api.base + "/brand/logo", data=body, method="POST",
+                                 headers={"Content-Type": f"multipart/form-data; boundary={bnd}"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def _magenta(img, box):
+    a = np.asarray(img.convert("RGB"), np.int16)[box[1]:box[3], box[0]:box[2]]
+    return float((np.abs(a - np.array([255, 0, 200], np.int16)).max(axis=2) < 60).mean())
+
+
+def test_opciones_del_proyecto_logo_aire_audio(srv, tmp_path):
+    """/settings anuncia pro_opts; /brand/logo responde 204 sin logo; el cuadro exacto aplica el
+    logo de la marca (esquina pedida) y el registro de opciones queda en /status.engine."""
+    from PIL import Image
+    import io
+    api, job = srv["api"], srv["job"]
+    sett = api.get("/settings")
+    assert set(sett["pro_opts"]) == {"logo", "enhance_audio"} and sett["pro_opts_optin"] == ["air"]
+    assert {"captions", "source_proxy", "jobs_meta", "music_beats", "translate_texts", "translate_titles",
+            "music_sync", "air_optin"} <= set(sett["features"])
+    assert sett["pro_langs"][:2] == ["es", "en"] and {"pt", "fr", "de", "it"} <= set(sett["pro_langs"])
+    if not sett["logo"]:
+        code, body, _ = api.get("/brand/logo", raw=True)
+        assert code == 204 and body == b""
+    plan = _plan(srv)
+    logo = {"pos": "tr", "size": 0.14, "opacity": 1.0}
+    assert _upload_logo(api, _png(tmp_path / "l.png"))["ok"]
+    assert api.get("/settings")["logo"] is True and api.get("/brand/logo", raw=True)[0] == 200
+    W = 1080
+    box = (int(W * 0.80), 20, int(W * 0.99), int(0.03 * 1920 + 0.16 * W))
+    code, body, _ = api.post(f"/frame/{job}", {"plan": plan, "t_final": 1.0, "logo": logo,
+                                               "air": 0.16, "air_user": True, "enhance_audio": True},
+                             raw=True)
+    assert code == 200
+    with_logo = _magenta(Image.open(io.BytesIO(body)), box)
+    code, body, _ = api.post(f"/frame/{job}", {"plan": plan, "t_final": 1.0, "logo": None}, raw=True)
+    without = _magenta(Image.open(io.BytesIO(body)), box)
+    assert with_logo > 0.25 and without < 0.02, (with_logo, without)
+    # otra esquina: abajo a la izquierda
+    code, body, _ = api.post(f"/frame/{job}", {"plan": plan, "t_final": 1.0,
+                                               "logo": dict(logo, pos="bl")}, raw=True)
+    im = Image.open(io.BytesIO(body))
+    assert _magenta(im, (10, 1920 - 230, 230, 1900)) > 0.25 and _magenta(im, box) < 0.02
+    st = api.get(f"/status/{job}?plan=0")
+    assert st["engine"]["enhance_audio"] is True and "air" not in st["engine"]   # fuente vertical
+
+
+def test_grupos_de_subtitulos_del_render(srv):
+    """POST /captions: los grupos EXACTOS del render (text.caption_groups) en tiempo original,
+    con las palabras del plan (las que no caen en cortes), en orden y sin repetir."""
+    api, job = srv["api"], srv["job"]
+    plan = _plan(srv)
+    code, body, hdr = api.post(f"/captions/{job}", {"plan": plan, "fmt": "9:16"}, raw=True)
+    assert code == 200 and int(hdr["x-captions-ms"]) >= 0
+    groups = json.loads(body)
+    assert groups and all({"start", "end", "words", "text", "lines", "rect", "start_final",
+                           "end_final"} <= set(g) for g in groups)
+    from motion import timeline as TL
+    tl = TL.Timeline.from_plan(plan, fps=30)
+    kept = [w["text"] for ph in plan["phrases"] for w in ph
+            if tl.map_range(float(w["start"]), float(w["end"])) is not None]
+    got = [w["text"] for g in groups for w in g["words"]]
+    assert got == kept, (got, kept)
+    for g in groups:
+        assert g["start"] < g["end"] and g["start_final"] < g["end_final"]
+        assert g["words"][0]["start"] >= g["start"] - 0.01
+        assert all(0.0 <= v <= 1.0 for v in g["rect"])
+        assert g["text"].split() and len(g["text"].split()) == len(g["words"])
+    assert all(a["start_final"] < b["start_final"] for a, b in zip(groups, groups[1:]))
+    # la palabra justo despues del corte (2.9-3.2) cae en un grupo cuyo inicio original es >= al corte
+    # cache por contenido (misma respuesta)
+    assert api.post(f"/captions/{job}", {"plan": plan, "fmt": "9:16"}) == groups
+    off = json.loads(json.dumps(plan))
+    off["fx"]["captions"]["enabled"] = False
+    assert api.post(f"/captions/{job}", {"plan": off}) == []
+    assert api.post(f"/captions/{job}", {"plan": plan, "fmt": "2:1"}, raw=True)[0] == 400
+    v1 = dict(plan, version=1)
+    v1.pop("fx")
+    assert api.post(f"/captions/{job}", {"plan": v1}, raw=True)[0] == 400
+
+
+def test_proxy_del_video_miniatura_y_proyectos_recientes(srv):
+    """/source?proxy=1: H.264 con el lado corto a 720 (sin agrandar), mismo reloj y GOP corto,
+    generado en segundo plano; /jobs con tema, duracion, version y miniatura."""
+    api, job = srv["api"], srv["job"]
+    _plan(srv)
+    code, body, hdr = api.get(f"/source/{job}?proxy=1", raw=True)
+    assert code == 200 and hdr.get("x-reelfy-proxy") in ("ready", "pending")
+    st = api.wait(job, lambda s: s.get("proxy_state") in ("done", "error", "canceled"), 120)
+    assert st["proxy_state"] == "done", st.get("proxy_error")
+    assert st["proxy_url"] == f"/source/{job}?proxy=1"
+    code, body, hdr = api.get(f"/source/{job}?proxy=1", raw=True)
+    assert code == 200 and hdr.get("x-reelfy-proxy") == "ready"
+    f = srv["data"] / "work" / f"{job}_src720.mp4"
+    info = _probe(f)
+    v = [x for x in info["streams"] if x["codec_type"] == "video"][0]
+    assert (v["width"], v["height"]) == (720, 1280) and v["codec_name"] == "h264"
+    assert abs(float(info["format"]["duration"]) - srv["dur"]) < 0.1
+    assert any(x["codec_type"] == "audio" for x in info["streams"])
+    kf = subprocess.run([str(paths.FFPROBE), "-v", "error", "-select_streams", "v:0", "-skip_frame",
+                         "nokey", "-show_entries", "frame=pts_time", "-of", "csv=p=0", str(f)],
+                        capture_output=True, text=True).stdout.split()
+    kf = [float(x.split(",")[0]) for x in kf if x.split(",")[0]]
+    assert len(kf) >= 10 and max(b - a for a, b in zip(kf, kf[1:])) <= 0.4
+    # sin proxy: el original de siempre
+    code, body, hdr = api.get(f"/source/{job}", raw=True)
+    assert code == 200 and "x-reelfy-proxy" not in hdr
+    assert len(body) == (srv["data"] / "input" / f"{job}.mp4").stat().st_size
+    jobs = api.get("/jobs")
+    mine = next(j for j in jobs if j["id"] == job)
+    assert mine["version"] == 2 and mine["has_plan"] and mine["plan_rev"] >= 1
+    assert abs(mine["duration"] - srv["dur"]) < 0.01 and mine["final_duration"] < mine["duration"]
+    assert mine["topic"] and mine["thumb"] == f"/thumb/{job}"
+    code, body, hdr = api.get(mine["thumb"], raw=True)
+    from PIL import Image
+    import io
+    assert code == 200 and hdr["content-type"] == "image/jpeg"
+    assert Image.open(io.BytesIO(body)).size[1] == 360
+    assert api.get("/thumb/noexiste", raw=True)[0] == 404
+
+
+def test_traducir_textos_e_idiomas(srv):
+    """/translate {texts, lang}: SIN la IA local (Ollama caido en esta prueba) responde 503 con el
+    motivo en vez de devolver el espanol como traduccion; lo neutro (precios) y `es` no necesitan
+    la IA; idioma desconocido o texts invalido -> 400. (La traduccion con la IA: test_translate.)"""
+    api, job = srv["api"], srv["job"]
+    code, body, _ = api.post(f"/translate/{job}", {"texts": ["Agenda tu cita", "Hoy"], "lang": "pt"}, raw=True)
+    assert code == 503 and "Ollama" in json.loads(body)["detail"], body
+    r = api.post(f"/translate/{job}", {"texts": ["$450", "2x1"], "lang": "pt"})   # nada que traducir
+    assert r["texts_pt"] == ["$450", "2x1"] and r["untranslated"] == [] and "phrases_pt" not in r
+    r = api.post(f"/translate/{job}", {"texts": ["Hola\nmundo"], "lang": "es"})
+    assert r["texts_es"] == ["Hola\nmundo"]
+    plan = _plan(srv)
+    code, body, _ = api.post(f"/translate/{job}", {"plan": plan, "lang": "fr"}, raw=True)
+    assert code == 503, body
+    r = api.post(f"/translate/{job}", {"plan": plan, "lang": "es"})
+    assert r["phrases_es"] == plan["phrases"]
+    assert api.post(f"/translate/{job}", {"texts": ["x"], "lang": "xx"}, raw=True)[0] == 400
+    assert api.post(f"/translate/{job}", {"texts": "x"}, raw=True)[0] == 400
+
+
+def _new_job(srv, video, plan, state="review"):
+    """Otro trabajo en la misma base (como lo deja el analisis) con su video."""
+    import shutil
+    job = "t" + os.urandom(5).hex()
+    cx = sqlite3.connect(srv["data"] / "jobs.db", timeout=30)
+    now = time.time()
+    cx.execute("INSERT INTO jobs (id, kind, state, phase, pct, message, ext, params, plan, "
+               "created, updated, plan_rev) VALUES (?, 'compose', ?, ?, 100, '', '.mp4', '{}', ?, ?, ?, 1)",
+               (job, state, state, json.dumps(plan) if plan else None, now, now))
+    cx.commit()
+    cx.close()
+    if video is not None:
+        shutil.copyfile(video, srv["data"] / "input" / f"{job}.mp4")
+    return job
+
+
+def test_proxy_mismo_reloj_y_fuente_que_no_decodifica(srv, tmp_path):
+    """El proxy conserva el pts EXACTO de cada cuadro (una fuente cuyo video empieza en 21 ms
+    sigue empezando en 21 ms); una fuente que no decodifica falla UNA vez (la marca evita
+    relanzar ffmpeg en cada pedido y la cabecera dice `none`); su miniatura responde 404 sin
+    reintentar y /jobs no la anuncia."""
+    api = srv["api"]
+    off = tmp_path / "desfase.mp4"          # video con 21 ms de desfase (como los MOV del iPhone)
+    subprocess.run([str(paths.FFMPEG), "-v", "error", "-y", "-f", "lavfi",
+                    "-i", "testsrc2=s=720x1280:r=30:d=3", "-f", "lavfi",
+                    "-i", "sine=frequency=300:sample_rate=48000:duration=3",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-output_ts_offset", "0",
+                    "-shortest", str(tmp_path / "base.mp4")], check=True)
+    subprocess.run([str(paths.FFMPEG), "-v", "error", "-y", "-itsoffset", "0.021354", "-i",
+                    str(tmp_path / "base.mp4"), "-i", str(tmp_path / "base.mp4"), "-map", "0:v",
+                    "-map", "1:a", "-c", "copy", str(off)], check=True)
+    job = _new_job(srv, off, synthetic_plan(off, 3.0))
+
+    def v_start(f):
+        v = [x for x in _probe(f)["streams"] if x["codec_type"] == "video"][0]
+        return float(v["start_time"])
+    assert abs(v_start(off) - 0.021354) < 0.002
+    api.get(f"/source/{job}?proxy=1", raw=True)
+    st = api.wait(job, lambda s: s.get("proxy_state") in ("done", "error", "canceled"), 120)
+    assert st["proxy_state"] == "done", st.get("proxy_error")
+    pv = srv["data"] / "work" / f"{job}_src720.mp4"
+    assert abs(v_start(pv) - v_start(off)) <= 0.001, (v_start(pv), v_start(off))
+    # fuente que no decodifica
+    bad = tmp_path / "roto.mp4"
+    bad.write_bytes(b"esto no es un video" * 100)
+    jb = _new_job(srv, bad, None, state="error")
+    api.get(f"/source/{jb}?proxy=1", raw=True)
+    st = api.wait(jb, lambda s: s.get("proxy_state") in ("done", "error", "canceled"), 60)
+    assert st["proxy_state"] == "error"
+    t_err = st["proxy"]["updated"]
+    for _ in range(4):
+        code, _, hdr = api.get(f"/source/{jb}?proxy=1", raw=True)
+        assert code == 200 and hdr.get("x-reelfy-proxy") == "none"
+    time.sleep(0.5)
+    assert api.get(f"/status/{jb}?plan=0")["proxy"]["updated"] == t_err     # no se relanzo
+    code, body, _ = api.get(f"/thumb/{jb}", raw=True)
+    assert code == 404 and b"/" not in body                                 # sin rutas del disco
+    assert (srv["data"] / "work" / f"{jb}_thumb.err").exists()
+    assert api.get(f"/thumb/{jb}", raw=True)[0] == 404
+    mine = next(j for j in api.get("/jobs") if j["id"] == jb)
+    assert mine["thumb"] is None
+
+
+def test_miniatura_con_pedidos_simultaneos(srv):
+    """Varios pedidos a la vez de una miniatura sin cache: todos 200 (antes compartian el
+    temporal y 4 de 6 respondian 500)."""
+    from concurrent.futures import ThreadPoolExecutor
+    api = srv["api"]
+    job = _new_job(srv, srv["video"], synthetic_plan(srv["video"], srv["dur"]))
+    with ThreadPoolExecutor(6) as ex:
+        res = list(ex.map(lambda _: api.get(f"/thumb/{job}", raw=True), range(6)))
+    assert [r[0] for r in res] == [200] * 6
+    assert len({len(r[1]) for r in res}) == 1
+    assert not list((srv["data"] / "work").glob(f"{job}_thumb*.part.jpg"))
+
+
+def test_aire_es_opt_in_en_fuente_horizontal(srv, tmp_path):
+    """Fuente HORIZONTAL en 9:16: el default del Studio (air 0.16 sin air_user) da el mismo
+    cuadro que sin aire (a sangre completa, reencuadre con la cara); con air_user el margen
+    desenfocado aparece a los lados."""
+    from PIL import Image
+    import io
+    api = srv["api"]
+    hv = tmp_path / "horizontal.mp4"
+    subprocess.run([str(paths.FFMPEG), "-v", "error", "-y", "-f", "lavfi",
+                    "-i", "testsrc2=s=1280x720:r=30:d=3", "-f", "lavfi",
+                    "-i", "sine=frequency=300:sample_rate=48000:duration=3",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(hv)],
+                   check=True)
+    job = _new_job(srv, hv, synthetic_plan(hv, 3.0))
+    plan = api.post(f"/direct/{job}", {"full": True, "use_llm": False, "music": "none"})["plan"]
+    bare = json.loads(json.dumps(plan))
+    for k in ("text", "graphics", "cutaways", "transitions", "effects"):
+        bare["fx"][k] = []
+    bare["fx"]["captions"] = dict(bare["fx"].get("captions") or {}, enabled=False)
+
+    def frame(**kw):
+        code, body, _ = api.post(f"/frame/{job}", {"plan": bare, "t_final": 1.0, "fmt": "9:16", **kw},
+                                 raw=True, timeout=300)
+        assert code == 200, body[:300]
+        return np.asarray(Image.open(io.BytesIO(body)).convert("RGB"), np.int16)
+    none = frame()
+    default = frame(air=0.16)
+    user = frame(air=0.16, air_user=True)
+    def changed(a, b):
+        return float((np.abs(a - b).max(axis=2) > 25).mean())
+    Image.fromarray(np.concatenate([none, default, user], axis=1).astype(np.uint8)).save(
+        os.environ.get("REELFY_TEST_SHOT") or (srv["data"] / "aire_opt_in.jpg"))
+    # (en testsrc2 las barras anchas casi no cambian al desenfocarse: lo que cambia son los bordes
+    # laterales -el margen- y el zoom; ~2.5 % de los pixeles)
+    assert changed(default, none) < 0.002, changed(default, none)
+    assert changed(user, none) > 0.012, changed(user, none)
+    st = api.get(f"/status/{job}?plan=0")
+    assert st["engine"].get("air") == 0.16 and st["engine"].get("air_user") is True

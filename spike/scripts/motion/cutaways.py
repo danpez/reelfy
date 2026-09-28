@@ -65,7 +65,10 @@ NEEDS_FRAME = {"photo": ("_still", "start"), "self_broll": ("_src_image", "src_t
 DEFAULTS = {
     "title_card": {"background": "grid_warp", "anim_in": "cut", "anim_out": "cut"},
     "info_card": {"background": "gradient", "anim_in": "cut", "anim_out": "cut"},
-    "photo": {"background": "paper", "anim_in": "cut", "anim_out": "cut", "size": 0.72},
+    # photo: foto instantanea (polaroid) con cinta; `media` = imagen/video propio ({sid, type, w, h,
+    # dur, crop?}: render inyecta item['_media_image']); sin media usa el cuadro del video al inicio
+    "photo": {"background": "paper", "anim_in": "cut", "anim_out": "cut", "size": 0.72, "media": None,
+              "fit": "cover", "focus": None, "zoom": 1.0, "caption": "", "media_in": 0.0, "loop": True},
     "self_broll": {"zoom_from": 1.0, "zoom_to": 1.18, "anim_in": "cut", "anim_out": "cut"},
 }
 TAU = math.tau
@@ -359,8 +362,10 @@ def _bg_gradient(canvas, colors, lt, ctx):
     small = C.offscreen(w, h)
     uni = [float(w), float(h), float(lt)] + sum((_rgba_f(c) for c in cols[:4]), [])
     data = skia.Data.MakeWithCopy(np.array(uni, np.float32).tobytes())
-    small.getCanvas().drawPaint(skia.Paint(Shader=eff.makeShader(data)))
+    small.getCanvas().drawPaint(skia.Paint(Shader=eff.makeShader(data), Dither=True))
     img = small.makeImageSnapshot()
+    # la ampliacion x6 no lleva dither (duplicaria el costo a 1080x1920): el grano de encima ya
+    # rompe los escalones de 8 bits
     canvas.drawImageRect(img, skia.Rect.MakeWH(W, H), C.SAMPLING_FAST)
     grain(canvas, ctx, 0.035)
 
@@ -1051,7 +1056,8 @@ def draw_photo(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> N
     kind = item.get("background") or "paper"
     colors = item.get("bg_colors")
     dark = is_dark(kind, colors, ctx)
-    img = item.get("_still") or ctx.base_image()
+    own = graphics.media_image(item)            # imagen/video propio (motor: _media_image)
+    img = own or item.get("_still") or ctx.base_image()
     W, H = ctx.W, ctx.H
     rnd = ctx.rand(f"photo:{item.get('id', '')}")
     tilt = _num(item, "tilt", -4.0 + (rnd - 0.5) * 4.0)
@@ -1062,7 +1068,7 @@ def draw_photo(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> N
     def paint(cv):
         _bg_settle(cv, item, lt, ctx, kind, colors)
         pw = W * _clamp(_num(item, "size", DEFAULTS["photo"]["size"]), 0.3, 0.8)
-        ph_img = pw * 0.92 * 1.2
+        ph_img = pw * 0.92 * 1.2              # hueco fijo 0.91 x 1.104 pw (render.PHOTO_ASPECT)
         border = pw * 0.045
         bottom = pw * 0.2
         fw, fh = pw, ph_img + border + bottom
@@ -1082,9 +1088,18 @@ def draw_photo(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> N
         cv.drawRRect(rr, C.fill("#FBFAF6"))
         ir = skia.Rect.MakeXYWH(-fw / 2 + border, -fh / 2 + border, fw - 2 * border, ph_img)
         if img is not None:
-            focus = (ctx.face[0], ctx.face[1] + 0.08) if ctx.face else None
-            src = _cover_src(img, ir.width(), ir.height(), focus)
-            cv.drawImageRect(img, src, ir, C.SAMPLING_FAST, None)
+            if own is not None:
+                fit = "contain" if item.get("fit") == "contain" else "cover"
+                src, dst = graphics.fit_src(img, ir.width(), ir.height(), fit, item.get("focus"),
+                                            _num(item, "zoom", 1.0))
+                if fit == "contain":
+                    cv.drawRect(ir, C.fill("#1A1A20"))
+                cv.drawImageRect(img, src, dst.makeOffset(ir.centerX(), ir.centerY()),
+                                 C.SAMPLING_CUBIC if not ctx.draft else C.SAMPLING_FAST, None)
+            else:
+                focus = (ctx.face[0], ctx.face[1] + 0.08) if ctx.face else None
+                src = _cover_src(img, ir.width(), ir.height(), focus)
+                cv.drawImageRect(img, src, ir, C.SAMPLING_FAST, None)
             # "revelado" de foto instantanea: velo que se aclara
             dev = 1.0 - ease.out_cubic(_clamp((lt - 0.1) / 0.9))
             if dev > 0.01:

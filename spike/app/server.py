@@ -29,7 +29,9 @@ import atexit
 import hashlib
 import io
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1057,24 +1059,25 @@ def _sha(s):
     return hashlib.sha1(s.encode()).hexdigest()[:16]
 
 
-def _analysis_keys(plan, fmt):
+def _analysis_keys(plan, fmt, eo=None):
     """Claves del ANALISIS de fondo -> (base_key, full_key). Solo cuenta lo que lo cambia:
-    video + cortes + reencuadre/formato + audio (base y voz), pista de rostro, rangos de matte
-    y grade. Editar textos, graficos o SFX (el autoguardado del Studio) NO cambia la clave:
-    la vista previa y el export esperan y reutilizan el analisis en curso en vez de
-    cancelarlo. Con la misma base_key tambien se espera (base y rostro se reutilizan; lo que
-    falte del matte lo calcula quien lo necesita)."""
+    video + cortes + reencuadre/formato + audio (base y voz; con el aire y el audio de estudio
+    del proyecto, `eo`), pista de rostro, rangos de matte y grade. Editar textos, graficos o SFX
+    (el autoguardado del Studio) NO cambia la clave: la vista previa y el export esperan y
+    reutilizan el analisis en curso en vez de cancelarlo. Con la misma base_key tambien se
+    espera (base y rostro se reutilizan; lo que falte del matte lo calcula quien lo necesita)."""
     fmt = str(fmt or "9:16")
+    bo = _base_part(eo or {})
     try:
         from motion import render as R
         fn = getattr(R, "analysis_key", None)          # API publica del motor (si existe)
         if callable(fn):
-            k = fn(plan, {"fmt": fmt})
+            k = fn(plan, {"fmt": fmt, **bo})
             if isinstance(k, dict) and k.get("base") and k.get("full"):
                 return str(k["base"]), str(k["full"])
             if isinstance(k, (tuple, list)) and len(k) == 2:
                 return str(k[0]), str(k[1])
-        pr = R.prepare(plan, {"fmt": fmt, "workers": 0})
+        pr = R.prepare(plan, {"fmt": fmt, "workers": 0, **bo})
         bv, bw = R._base_files(pr)
         job, o = pr["job"], pr["opts"]
         ff = R._face_file(job, pr["mods"], Path(o["cache_dir"]), bv.stem.replace("base_", ""))
@@ -1090,6 +1093,7 @@ def _analysis_keys(plan, fmt):
         fx = (plan or {}).get("fx") or {}
         sub = {k: (plan or {}).get(k) for k in ("video", "cuts", "duration", "camera")}
         sub["fx_camera"], sub["fx_grade"] = fx.get("camera"), fx.get("grade")
+        sub["engine"] = bo
         base = _sha(json.dumps(sub, sort_keys=True, default=str) + fmt)
         sub["shots"] = (plan or {}).get("shots")
         sub["fx_effects"] = fx.get("effects")
@@ -1115,6 +1119,145 @@ def _plan_from(body, job_id):
     if not plan:
         raise HTTPException(409, "El job no tiene plan; analiza el video primero.")
     return plan
+
+
+# ---- opciones del proyecto para el motor pro (marca, aire, audio de estudio) ----
+# No viven en el plan: el Studio las manda junto al plan en /frame, /preview y /render y el
+# motor las aplica (render.render_pro/_draft/_frame: opts.logo, opts.air, opts.enhance_audio).
+# /settings.pro_opts anuncia cuales aplica el render pro (la UI habilita esos controles).
+# El AIRE es opt-in en la edicion IA: solo cambia la imagen de una fuente mas ANCHA que la
+# salida (margen desenfocado a los lados) y un talking head horizontal con bandas se ve amateur.
+# El servidor lo aplica solo si el cuerpo trae `air_user: true` (el usuario movio el control);
+# el default del Studio (AIR=0.16) ya no lo activa. Mientras la UI no lo distinga, 'air' NO va
+# en pro_opts (la vista en vivo del Studio dibuja a sangre completa = lo que exporta) sino en
+# `pro_opts_optin`.
+PRO_OPTS = ("logo", "enhance_audio")
+PRO_OPTS_OPTIN = ("air",)
+ENGINE_KEYS = ("logo", "air", "air_user", "enhance_audio")   # claves del cuerpo que se leen
+LOGO_POS = ("tl", "tr", "bl", "br")
+BASE_OPTS = ("air", "enhance_audio")      # las que cambian el video base / la voz (claves de cache)
+_ENGINE = {}                              # job -> opciones vigentes (ultimo cuadro/vista/export)
+_ENGINE_LOCK = threading.Lock()
+
+
+def _num(v, lo, hi, default):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(x):
+        return default
+    return max(lo, min(hi, x))
+
+
+def _engine_opts(body):
+    """Cuerpo del Studio -> opciones del motor: {enhance_audio, air?, logo?}. Sin las claves
+    el resultado es el de siempre (audio de estudio, sin aire, sin logo). `air` solo cuenta con
+    `air_user: true` (opt-in). `logo` {pos, size, opacity} usa el logo de la marca
+    (POST /brand/logo)."""
+    b = body if isinstance(body, dict) else {}
+    eo = {"enhance_audio": b.get("enhance_audio") is not False}
+    a = _num(b.get("air"), 0.0, 0.35, 0.0) if b.get("air") is not None else 0.0
+    if a > 0.001 and b.get("air_user") is True:
+        eo["air"] = round(a, 4)
+    lg = b.get("logo")
+    if isinstance(lg, dict) and lg.get("enabled", True) is not False:
+        eo["logo"] = {"path": str(BRAND / "logo.png"),
+                      "pos": lg.get("pos") if lg.get("pos") in LOGO_POS else "br",
+                      "size": round(_num(lg.get("size"), 0.04, 0.4, 0.14), 4),
+                      "opacity": round(_num(lg.get("opacity"), 0.05, 1.0, 0.9), 3)}
+    return eo
+
+
+def _eff_engine(plan, fmt, eo):
+    """Quita el aire cuando no cambia la imagen (fuente con el aspecto de la salida o mas alta:
+    solo una fuente mas ANCHA lleva margen). Asi la clave del video base no cambia y base,
+    rostro y matte del analisis de fondo se reutilizan."""
+    eo = dict(eo or {})
+    if not eo.get("air"):
+        eo.pop("air", None)
+        return eo
+    try:
+        from motion import render as R
+        from motion import video_io as V
+        info = V.probe((plan or {}).get("video"))
+        bW, bH = R.output_size(fmt or "9:16", info)
+        mode, _ = V.reframe_mode(info, bW, bH, eo["air"])
+        if mode != "track+air":
+            eo.pop("air", None)
+    except Exception:  # noqa: sin probe (plan invalido): se deja como vino
+        pass
+    return eo
+
+
+def _base_part(eo):
+    return {k: eo[k] for k in BASE_OPTS if k in (eo or {})}
+
+
+def _saved_engine(job_id):
+    """Opciones guardadas en `side.engine` (sobreviven un reinicio): solo las del video base. El
+    aire guardado solo vale si fue elegido por el usuario (`air_user`; las versiones anteriores
+    guardaban el default del Studio)."""
+    try:
+        saved = jobstore.side_get(job_id, "engine")
+    except Exception:  # noqa
+        return None
+    if not saved:
+        return None
+    out = {"enhance_audio": saved.get("enhance_audio") is not False}
+    if saved.get("air") and saved.get("air_user"):
+        out["air"] = float(saved["air"])
+    return out
+
+
+def _get_engine(job_id):
+    """Opciones vigentes del trabajo para el analisis de fondo (memoria; tras un reinicio, las
+    guardadas; si nunca llego un pedido, las de siempre). Sin logo (no cambia el analisis)."""
+    with _ENGINE_LOCK:
+        cur = _ENGINE.get(job_id)
+    if cur is not None:
+        return _base_part(cur)
+    return _saved_engine(job_id) or {"enhance_audio": True}
+
+
+def _set_engine(job_id, eo, plan=None, fmt="9:16"):
+    """Registra las opciones EFECTIVAS del ultimo pedido (cuadro, vista previa, export). -> True
+    si cambio lo que afecta al video base (aire o audio de estudio): hay que relanzar el
+    analisis. Con `plan` se aplica _eff_engine a lo nuevo y a lo anterior antes de comparar (un
+    aire que no aplica a la fuente no cuenta como cambio)."""
+    if plan is not None:
+        eo = _eff_engine(plan, fmt, eo)
+    with _ENGINE_LOCK:
+        known = job_id in _ENGINE
+        raw = _ENGINE.get(job_id)
+        _ENGINE[job_id] = dict(eo or {})
+        if len(_ENGINE) > 200:
+            _ENGINE.pop(next(iter(_ENGINE)))
+    if raw is None:
+        raw = _saved_engine(job_id) or {"enhance_audio": True}
+    prev = _eff_engine(plan, fmt, raw) if plan is not None and raw.get("air") else raw
+    base_changed = _base_part(prev) != _base_part(eo)
+    if base_changed or not known or _base_part(raw) != _base_part(eo) or \
+            bool(raw.get("logo")) != bool((eo or {}).get("logo")):
+        try:
+            extra = {"air_user": True} if (eo or {}).get("air") else {}
+            jobstore.side_update(job_id, "engine", replace=True, logo=bool((eo or {}).get("logo")),
+                                 **_base_part(eo), **extra)
+        except Exception:  # noqa
+            pass
+    return base_changed
+
+
+def _motor_opts(eo, fmt, **kw):
+    """opts comunes del motor: formato, opciones del proyecto y carpeta de los medios propios
+    (`media_root`: el motor resuelve cada `{sid}` del plan a <media_root>/<sid>.<ext>; nunca
+    usa una ruta que venga en el plan)."""
+    o = {"fmt": fmt, "media_root": str(SOURCES)}
+    for k in ("enhance_audio", "air", "logo"):
+        if k in (eo or {}):
+            o[k] = eo[k]
+    o.update(kw)
+    return o
 
 
 # ---- tareas laterales por trabajo (vista previa real, analisis en 2o plano) ----
@@ -1207,17 +1350,22 @@ class _Throttle:
         return jobstore.side_update(self.job_id, self.name, match=self.tok, **kw)
 
 
-def _kick_analysis(job_id, plan, fmt="9:16", force=False):
+def _kick_analysis(job_id, plan, fmt="9:16", force=False, eo=None):
     """Tras review (y tras re-dirigir): render.ensure_analysis en SEGUNDO PLANO para que
     /frame y la vista previa real sean rapidos. Cancelable; no corre durante un export.
     Clave = _analysis_keys: el mismo analisis en curso no se relanza; uno con la MISMA base
-    (p. ej. solo cambio el matte) no se cancela: se encadena al terminar el actual."""
+    (p. ej. solo cambio el matte) no se cancela: se encadena al terminar el actual.
+    `eo`: aire y audio de estudio del proyecto (default: los del ultimo pedido del Studio).
+    La musica IA del plan NO la precalienta el motor (su prefetch no se puede cancelar: cada
+    cambio de estilo dejaba una generacion ACE huerfana): la genera la tarea lateral `music`."""
     if not _is_v2(plan):
         return False
+    _kick_music(job_id, plan, fmt)
     if os.environ.get("REELFY_BG_ANALYSIS", "1") == "0" and not force:
         return False
     fmt = str(fmt or "9:16")
-    bkey, key = _analysis_keys(plan, fmt)
+    eo = _base_part(_eff_engine(plan, fmt, eo if eo is not None else _get_engine(job_id)))
+    bkey, key = _analysis_keys(plan, fmt, eo)
     plan = json.loads(json.dumps(plan))
     with _SIDE_LOCK:
         cur = _SIDE.get((job_id, "analysis"))
@@ -1226,15 +1374,15 @@ def _kick_analysis(job_id, plan, fmt="9:16", force=False):
                 cur.pop("next", None)                # el pedido vigente ya es este
                 return False
             if cur.get("bkey") == bkey:
-                cur["next"] = (plan, fmt, bkey, key)   # misma base: encadenar, no cancelar
+                cur["next"] = (plan, fmt, bkey, key, eo)   # misma base: encadenar, no cancelar
                 return True
 
     def run(jid, ev):
         from motion import render as R
         from motion import video_io as V
-        req = (plan, fmt, bkey, key)
+        req = (plan, fmt, bkey, key, eo)
         while req is not None:
-            p_, f_, bk_, k_ = req
+            p_, f_, bk_, k_, e_ = req
             tok = uuid.uuid4().hex[:8]
             tick = _Throttle(jid, "analysis", ev, tok)
             jobstore.side_update(jid, "analysis", replace=True, state="queued", pct=0, stage="",
@@ -1250,10 +1398,10 @@ def _kick_analysis(job_id, plan, fmt="9:16", force=False):
                     raise V.Canceled("cancelado")
                 tick.set(state="running", pct=0, stage="base")
                 t0 = time.time()
-                res = R.ensure_analysis(p_, {
-                    "fmt": f_,
-                    "on_pct": lambda st, p: tick(stage=st, pct=round(float(p), 1)),
-                    "cancel": lambda: ev.is_set() or bool(_EXPORTING)})
+                res = R.ensure_analysis(p_, _motor_opts(
+                    e_, f_, prefetch_music=False,
+                    on_pct=lambda st, p: tick(stage=st, pct=round(float(p), 1)),
+                    cancel=lambda: ev.is_set() or bool(_EXPORTING)))
                 tick.set(state="done", pct=100, stage="done", t=round(time.time() - t0, 1),
                          matte=bool(res.get("matte")), grade=bool(res.get("grade")),
                          skipped=res.get("skipped") or [])
@@ -1278,6 +1426,192 @@ def _kick_analysis(job_id, plan, fmt="9:16", force=False):
                         me["closing"] = True        # un pedido que llegue ahora arranca otro hilo
 
     return _start_side(job_id, "analysis", run, key=key, bkey=bkey)
+
+
+# ---- musica IA de la propuesta vigente (tarea lateral `music`) ----
+# Una sola generacion ACE por trabajo y siempre la de la edicion VIGENTE: otra pista cancela la
+# anterior (mata ace-synth). Re-dirigir sin `full` con una pista nueva responde al instante sin
+# sincronia (music_sync=False: el director no lanza su hilo huerfano) y esta tarea genera la pista;
+# al terminar re-dirige la MISMA peticion (plan original, estilo, intensidad y semilla) con la
+# rejilla de beats y la guarda si el plan guardado sigue siendo la propuesta (base_rev). Si el
+# usuario ya edito, /status dice music_resync='available' (re-dirigir sincroniza al instante: la
+# pista queda en cache). Estados: generating -> ready -> syncing -> synced | superseded;
+# canceled | error.
+REDIRECT_CACHED_WAIT_S = float(os.environ.get("REELFY_REDIRECT_CACHED_WAIT", "10"))
+MUSIC_MIX_KEYS = ("swells", "gain_db", "duck_db", "fade_in", "intro_fade", "locked", "voice_carve_db")
+
+
+def _music_gen_key(MU, cfg, dur, style, seed):
+    """Identidad de la GENERACION ACE (el crudo): prompt, bpm, tonalidad y semilla, y el tramo de
+    duracion que se genera. Cambiar stops, drop o la mezcla reutiliza el mismo crudo: no cancela."""
+    try:
+        c, _ = MU._coerce_cfg(cfg, dur, seed)
+        st = style if style in MU.STYLE_MUSIC else "dinamico"
+        mood = c["mood"] or MU.STYLE_DEFAULT_MOOD[st]
+        prompt = MU.build_prompt(st, mood, c["prompt"], c["bpm"], c["seed"], c["keyscale"])
+        return f"{MU._raw_key(prompt, c['seed'])}:{int(MU.gen_duration(dur))}"
+    except Exception:  # noqa: sin las piezas internas del modulo: la cfg completa
+        sub = {k: v for k, v in (cfg or {}).items() if k not in MUSIC_MIX_KEYS}
+        return _sha(json.dumps([sub, round(float(dur), 2), style, seed], sort_keys=True, default=str))
+
+
+def _music_track(plan, fmt="9:16", eo=None):
+    """Pista IA que pedira el render de `plan` -> {cfg, dur, style, seed, key, pending} o None
+    (sin musica IA, sin el motor de musica instalado o plan invalido). Misma cfg que
+    render._audio (render.music_cfg en tiempo final). Barata (~ms)."""
+    if not _is_v2(plan):
+        return None
+    try:
+        from motion import music as MU
+        from motion import render as R
+        if not MU.music_ready():
+            return None
+        pr = R.prepare(plan, _motor_opts(eo or {}, fmt or "9:16", workers=0, quality="draft"))
+        job = pr["job"]
+        mcfg, on = R.music_cfg(pr["plan"], job, pr["timeline"])
+        dur = float(job["final_duration"])
+        if not on or (mcfg.get("source") or "ai") != "ai" or dur <= 0.25:
+            return None
+        style, seed = job["style"], job["seed"]
+        return {"cfg": mcfg, "dur": dur, "style": style, "seed": seed,
+                "key": _music_gen_key(MU, mcfg, dur, style, seed),
+                "pending": bool(MU.pending(mcfg, dur, style, seed))}
+    except Exception as e:  # noqa: la musica nunca tumba el pedido
+        print(f"   musica: sin datos de la pista ({e})")
+        return None
+
+
+def _music_side(job_id):
+    try:
+        return jobstore.side_get(job_id, "music") or {}
+    except Exception:  # noqa
+        return {}
+
+
+def _kick_music(job_id, plan, fmt="9:16", eo=None, target=None, info=None):
+    """Genera en segundo plano la pista IA de `plan` (la edicion vigente). Si ya esta en cache o
+    el plan no lleva musica IA, cancela una generacion obsoleta. `target` (propuesta de
+    re-dirigir) se sincroniza al terminar. -> 'running' | 'started' | None."""
+    info = info if info is not None else _music_track(plan, fmt, eo)
+    run_ = _side_running(job_id, "music")
+    if info is None or not info["pending"]:
+        if run_ is not None and (info is None or run_.get("key") != info["key"]):
+            run_["cancel"].set()                 # generaba la pista de otra edicion
+        return None
+    key = info["key"]
+    with _SIDE_LOCK:
+        cur = _SIDE.get((job_id, "music"))
+        if cur and cur["thread"].is_alive() and not cur["cancel"].is_set() and cur.get("key") == key:
+            if target is not None:               # misma pista: sincroniza la propuesta nueva
+                cur["target"] = target
+                jobstore.side_update(job_id, "music", match=cur.get("tok"), from_rev=target["rev"],
+                                     resync=None)
+            return "running"
+    tok = uuid.uuid4().hex[:8]
+    jobstore.side_update(job_id, "music", replace=True, state="generating", pct=0, tok=tok,
+                         key=key, from_rev=(target or {}).get("rev"), resync=None,
+                         message="Componiendo la música IA…")
+
+    def run(jid, ev):
+        from motion import music as MU
+        from motion import video_io as V
+        tick = _Throttle(jid, "music", ev, tok)
+        t0 = time.time()
+        try:
+            r = MU.get_music(info["cfg"], info["dur"], info["style"], info["seed"],
+                             lambda p=0, *_a: tick(pct=round(float(p or 0), 1)))
+            if ev.is_set():
+                raise V.Canceled("cancelado")
+            if (r or {}).get("source") != "ai":
+                tick.set(state="error", error="la música IA no se pudo generar (se usa la procedural)",
+                         message="La música IA no se pudo generar; suena la procedural",
+                         t=round(time.time() - t0, 1))
+                return
+            tick.set(state="ready", pct=100, t=round(time.time() - t0, 1), gen_s=r.get("gen_s"),
+                     bpm=r.get("bpm"), message="Música IA lista")
+            with _SIDE_LOCK:
+                me = _SIDE.get((jid, "music"))
+                tgt = me.get("target") if me is not None and me["cancel"] is ev else None
+            if tgt:
+                _music_resync(jid, ev, tick, tgt)
+        except (V.Canceled, JobCanceled):
+            tick.set(state="canceled", message="Generación cancelada (la edición cambió)")
+        except Exception as e:  # noqa: la musica es un extra: la procedural sigue sonando
+            traceback.print_exc()
+            tick.set(state="error", error=str(e)[:300], message="La música IA falló; suena la procedural")
+
+    _start_side(job_id, "music", run, key=key, restart=True, target=target, tok=tok)
+    return "started"
+
+
+def _music_resync(jid, ev, tick, tgt):
+    """La pista de la propuesta ya esta en cache: re-dirige la MISMA peticion con sincronia (el
+    director reutiliza la pista: < 1 s) y la guarda solo si el plan guardado sigue siendo la
+    propuesta (concurrencia optimista). Si no, music_resync='available'."""
+    from motion import director
+    plan, rev = jobstore.get_plan(jid)
+    if ev.is_set() or plan is None or rev != tgt["rev"]:
+        if ((plan or {}).get("director") or {}).get("music_grid"):
+            # otra re-direccion ya sincronizo el plan vigente (la pista estaba en cache)
+            tick.set(state="ready", resync=None, message="Música IA lista")
+        else:
+            tick.set(state="ready", resync="available",
+                     message="Música IA lista: re-dirige para sincronizar la edición (el plan cambió)")
+        return
+    tick.set(state="syncing", message="Sincronizando la edición con la música IA…")
+    kw = {"music_sync": True}
+    if _accepts(director.redirect, "music_timeout"):
+        kw["music_timeout"] = max(REDIRECT_MUSIC_WAIT_S, REDIRECT_CACHED_WAIT_S)
+    t0 = time.time()
+    out = director.redirect(tgt["orig"], tgt.get("style"), tgt.get("intensity"), tgt.get("seed"), **kw)
+    if tgt.get("music") is not None:
+        out = _apply_music(out, tgt["music"])
+    grid = (out.get("director") or {}).get("music_grid")
+    if ev.is_set() or not grid:
+        tick.set(state="ready", resync="available",
+                 message="Música IA lista (sin sincronía automática: re-dirige para sincronizar)")
+        return
+    ok, new_rev = jobstore.update_plan(jid, out, base_rev=rev)
+    if not ok:
+        tick.set(state="ready", resync="available",
+                 message="Música IA lista: re-dirige para sincronizar la edición (el plan cambió)")
+        return
+    tick.set(state="synced", resync=None, plan_rev=new_rev, from_rev=rev,
+             from_hash=jobstore.plan_hash(plan), synced_hash=jobstore.plan_hash(out),
+             bpm=grid.get("bpm"), sync_s=round(time.time() - t0, 2),
+             message=f"Edición sincronizada con la música IA ({float(grid.get('bpm') or 0):.0f} BPM)")
+    print(f"   musica: propuesta sincronizada (rev {rev} -> {new_rev}) en {time.time() - t0:.1f}s")
+    _kick_analysis(jid, out, tgt.get("fmt") or "9:16")
+
+
+def _synced_plan(job_id, plan):
+    """El Studio manda la propuesta SIN sincronia y el servidor ya guardo su version sincronizada
+    (mismo contenido que la propuesta y nadie edito despues): se usa la sincronizada. Asi la vista
+    previa y el export salen al beat aunque el Studio no haya recargado el plan."""
+    ms = _music_side(job_id)
+    if ms.get("state") != "synced" or not isinstance(plan, dict):
+        return plan
+    try:
+        if jobstore.plan_hash(plan) != ms.get("from_hash"):
+            return plan
+        stored, rev = jobstore.get_plan(job_id)
+    except Exception:  # noqa
+        return plan
+    if stored is None or rev != ms.get("plan_rev"):
+        return plan
+    return stored
+
+
+def _music_superseded(job_id, plan, base_rev, new_rev):
+    """El autoguardado del Studio piso la version sincronizada con su plan sin rejilla de beats:
+    se avisa (music_resync='available'; re-dirigir sincroniza al instante)."""
+    ms = _music_side(job_id)
+    if ms.get("state") != "synced" or base_rev != ms.get("plan_rev"):
+        return
+    if ((plan or {}).get("director") or {}).get("music_grid"):
+        return
+    jobstore.side_update(job_id, "music", state="superseded", resync="available", plan_rev=new_rev,
+                         message="Editaste la propuesta: re-dirige para sincronizarla con la música")
 
 
 # ================================================================ handlers de los workers
@@ -1367,6 +1701,9 @@ def _finish_analysis(job_id, prog, plan, params, bar=None):
     d = _director_params(params.get("director"))
     warns = []
     bar = bar or _PhaseBar(job_id, prog)
+    if params.get("profile"):
+        # perfil de la persona (nombre, profesion, redes): el director lo integra en la edicion
+        plan["profile"] = params["profile"]
     if d["enabled"]:
         bar.set(DIRECTOR_STEPS["tomas"][0], "Dirigiendo la edición…", "director", force=True)
 
@@ -1395,7 +1732,16 @@ def _finish_analysis(job_id, prog, plan, params, bar=None):
         prog.cancel.check()
     jobstore.update(job_id, state="review", phase="review", pct=100, stage="review",
                     message="Análisis listo", plan=plan, warnings=warns)
-    _kick_analysis(job_id, plan, d.get("fmt") or "9:16")
+    fmt = d.get("fmt") or "9:16"
+    if _is_v2(plan):
+        # las opciones de /compose o /analyze llegaron crudas (sin video): se guardan las
+        # EFECTIVAS (un aire que no aplica a esta fuente no se muestra ni relanza nada)
+        with _ENGINE_LOCK:
+            raw = _ENGINE.get(job_id)
+        if raw and raw.get("air"):
+            _set_engine(job_id, raw, plan, fmt)
+    _kick_analysis(job_id, plan, fmt)
+    _kick_src_proxy(job_id)            # proxy 720p del video para el Studio (seeks rapidos)
 
 
 def _analyze(job_id, job):
@@ -1471,7 +1817,7 @@ def _render(job_id, job):
     Plan v2 -> motor pro (render.render_pro, con shorts); si no -> pipeline legacy."""
     p = job["params"] or {}
     if p.get("pro"):
-        _await_same_analysis(job_id, job["plan"], p.get("fmt") or "9:16")
+        _await_same_analysis(job_id, job["plan"], p.get("fmt") or "9:16", p.get("engine"))
     _EXPORTING.add(job_id)
     try:
         _cancel_side(name="analysis")           # el analisis de fondo no pisa el export
@@ -1482,14 +1828,14 @@ def _render(job_id, job):
         _EXPORTING.discard(job_id)
 
 
-def _await_same_analysis(job_id, plan, fmt):
+def _await_same_analysis(job_id, plan, fmt, eo=None):
     """Si el analisis de fondo de ESTE trabajo corre con la MISMA base (mismo video, cortes,
     reencuadre y formato; los textos/graficos/SFX no cuentan), el export lo espera y reutiliza
     base, rostro y matte de la cache en vez de cancelarlo y repetirlo. Otra base: se cancela."""
     cur = _side_running(job_id, "analysis")
     if not cur:
         return
-    bkey, _ = _analysis_keys(plan, fmt)
+    bkey, _ = _analysis_keys(plan, fmt, eo)
     if cur.get("bkey") != bkey:
         return
     if (jobstore.side_get(job_id, "analysis") or {}).get("state") != "running":
@@ -1564,6 +1910,7 @@ def _render_pro(job_id, job):
     p = job["params"] or {}
     plan = job["plan"]
     fmt = p.get("fmt") or "9:16"
+    eo = p.get("engine") or {}
     token = uuid.uuid4().hex[:6]
     out = OUTPUT / f"{job_id}_{token}.mp4"
     t0 = time.time()
@@ -1584,8 +1931,8 @@ def _render_pro(job_id, job):
     def on_step(m):
         prog.update(force=True, message=m)
 
-    opts = {"fmt": fmt, "shorts": bool(p.get("shorts", True)), "shorts_dir": str(OUTPUT),
-            "on_pct": on_pct, "on_step": on_step, "cancel": prog.cancel.canceled}
+    opts = _motor_opts(eo, fmt, shorts=bool(p.get("shorts", True)), shorts_dir=str(OUTPUT),
+                       on_pct=on_pct, on_step=on_step, cancel=prog.cancel.canceled)
     if p.get("workers"):
         opts["workers"] = int(p["workers"])
     prog.update(force=True, pct=0, stage="timeline", message="Preparando el render…")
@@ -1597,6 +1944,8 @@ def _render_pro(job_id, job):
     if isinstance(st.get("music"), dict):
         st["music"] = {k: v for k, v in st["music"].items() if k != "wav"}   # ruta local
     st["load"] = _load()
+    st["engine"] = {"air": eo.get("air"), "logo": bool(eo.get("logo")),
+                    "enhance_audio": eo.get("enhance_audio", True)}
     clips = [{"name": "Video completo", "file": out.name, "duration": round(stats.get("duration", 0), 3),
               "W": stats.get("W"), "H": stats.get("H"), "stats": st}]
     import thumbnail as thumb_mod
@@ -1709,8 +2058,9 @@ def _gc_orphans(now=None):
 
 
 def _gc_sources(now=None):
-    """Fuentes subidas (input/sources) que ningun trabajo referencia, tras SOURCE_AGE_S (una
-    recien subida puede estar esperando su /compose)."""
+    """Fuentes subidas (input/sources) que ningun trabajo referencia (ni su montaje ni un
+    medio propio de su plan), tras SOURCE_AGE_S (una recien subida puede estar esperando su
+    /compose o su item de medio propio)."""
     now = now or time.time()
     if not SOURCES.exists():
         return 0
@@ -1720,6 +2070,10 @@ def _gc_sources(now=None):
         for it in (spec.get("main") or []) + (spec.get("overlays") or []):
             if isinstance(it, dict) and it.get("path"):
                 used.add(Path(str(it["path"])).name.split(".")[0].split("_")[0])
+    # medios propios que un plan referencia ({sid, type} en fx): tampoco se borran
+    used |= jobstore.referenced_sids()
+    # fotos de perfil de los perfiles guardados (el Studio las reutiliza en otros proyectos)
+    used |= {str((pr.get("avatar") or {}).get("sid")) for pr in _profiles_load() if pr.get("avatar")}
     groups = {}
     for p in SOURCES.iterdir():
         sid = p.name.split(".")[0].split("_")[0]
@@ -1854,9 +2208,23 @@ def static_file(filename: str):
     return FileResponse(f)
 
 
+def _initial_engine(job_id, raw):
+    """Opciones del proyecto que el Studio ya conoce al crear el trabajo (`engine` en /compose
+    y /analyze): el primer analisis de fondo prepara el video base con ellas (sin esto un
+    aire distinto de 0 en una fuente ancha obliga a rehacer el base al abrir el Studio)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else None
+        except Exception:  # noqa
+            raw = None
+    if isinstance(raw, dict) and any(k in raw for k in ENGINE_KEYS):
+        _set_engine(job_id, _engine_opts(raw))
+
+
 @app.post("/analyze")
 async def analyze(video: UploadFile, glossary: str = Form(""), highlights: int = Form(2),
-                  director: str = Form("")):
+                  director: str = Form(""), engine: str = Form(""), profile: str = Form(""),
+                  profile_id: str = Form("")):
     ext = Path(video.filename or "v.mp4").suffix.lower() or ".mp4"
     if ext not in (".mp4", ".mov", ".m4v", ".mkv", ".webm"):
         raise HTTPException(400, "Formato no soportado. Usa MP4 o MOV.")
@@ -1867,9 +2235,12 @@ async def analyze(video: UploadFile, glossary: str = Form(""), highlights: int =
     with open(dst, "wb") as f:
         while chunk := await video.read(1 << 20):
             await run_in_threadpool(f.write, chunk)
+    prof = await run_in_threadpool(_profile_param, profile, profile_id)
     await run_in_threadpool(jobstore.create, job_id, kind="analyze", ext=ext,
                             params={"glossary": glossary, "n": highlights,
-                                    "director": _director_params(director)})
+                                    "director": _director_params(director),
+                                    **({"profile": prof} if prof else {})})
+    await run_in_threadpool(_initial_engine, job_id, engine)
     _gc_later("nuevo trabajo")
     return {"job_id": job_id}
 
@@ -2021,8 +2392,9 @@ def source_file(sid: str):
 def compose_timeline(body: dict = Body(...)):
     """Recibe la composición del timeline y arranca compose->analyze->director en un job.
     body: {main:[{sid,type,in,out|dur}], overlays:[{sid,type,start,dur,pos,size}],
-           glossary, highlights, director:{style,intensity,seed,music}}. `def`: resuelve
-    fuentes en disco y escribe sqlite en el threadpool."""
+           glossary, highlights, director:{style,intensity,seed,music},
+           engine?:{air, enhance_audio, logo}}. `def`: resuelve fuentes en disco y escribe
+    sqlite en el threadpool."""
     _require_engine()
     _require_license()
     main = []
@@ -2057,10 +2429,13 @@ def compose_timeline(body: dict = Body(...)):
         overlays.append(ov)
     spec = {"fps": 30, "main": main, "overlays": overlays}
     job_id = uuid.uuid4().hex[:12]
+    prof = _profile_param(body.get("profile"), body.get("profile_id"))
     jobstore.create(job_id, kind="compose", ext=".mp4",
                     params={"spec": spec, "glossary": body.get("glossary", ""),
                             "n": int(body.get("highlights", 2)),
-                            "director": _director_params(body.get("director"))})
+                            "director": _director_params(body.get("director")),
+                            **({"profile": prof} if prof else {})})
+    _initial_engine(job_id, body.get("engine"))
     _gc_later("nuevo trabajo")
     return {"job_id": job_id}
 
@@ -2076,11 +2451,15 @@ def render(job_id: str, body: dict = Body(...)):
         raise HTTPException(409, "Este proyecto ya está procesándose; espera o cancela.")
     _require_license()
     if _is_v2(plan) and not body.get("legacy"):
+        plan = _synced_plan(job_id, plan)
         fmt = _fmt_of(body)
         from motion import render as R
         if fmt not in R.FORMAT_NAMES:
             raise HTTPException(400, f"Formato desconocido: {fmt}. Usa {', '.join(R.FORMAT_NAMES)}.")
-        params = {"pro": True, "fmt": fmt, "shorts": bool(body.get("shorts", True))}
+        eo = _eff_engine(plan, fmt, _engine_opts(body))
+        _set_engine(job_id, eo, plan, fmt)
+        params = {"pro": True, "fmt": fmt, "shorts": bool(body.get("shorts", True)),
+                  "engine": eo}
         if body.get("workers"):
             params["workers"] = int(body["workers"])
     else:
@@ -2099,28 +2478,50 @@ def render(job_id: str, body: dict = Body(...)):
     return {"ok": True, "pro": bool(params.get("pro")), "plan_rev": jobstore.get_light(job_id)["plan_rev"]}
 
 
-CANCEL_ONLY = ("preview", "analysis", "direct", "job")
+CANCEL_ONLY = ("preview", "analysis", "direct", "music", "job")
 
 
 @app.post("/cancel/{job_id}")
 def cancel(job_id: str, only: str | None = None):
     """Cancela el trabajo principal (analisis/render) y sus tareas laterales (vista previa
-    real, analisis de fondo, re-dirigir en segundo plano). `?only=preview|analysis|direct`
-    cancela SOLO esa tarea lateral (cancelar la vista previa no mata un export en curso);
-    `?only=job` solo el trabajo principal."""
-    _job_or_404(job_id)
+    real, analisis de fondo, re-dirigir en segundo plano, musica IA). `?only=preview|analysis|
+    direct|music` cancela SOLO esa tarea lateral (cancelar la vista previa no mata un export en
+    curso); `?only=job` solo el trabajo principal. Con un EXPORT en curso, sin `only` se cancelan
+    el export, el analisis de fondo y re-dirigir, pero NO la vista previa (ni su actualizacion con
+    la musica IA) ni la generacion de la musica: son de la edicion, no del export."""
+    job = _job_or_404(job_id)
     if only and only not in CANCEL_ONLY:
         raise HTTPException(400, f"only debe ser uno de {', '.join(CANCEL_ONLY)}")
     if only and only != "job":
         return {"ok": True, "side": _cancel_side(job_id=job_id, name=only)}
+    exporting = job_id in _EXPORTING or (job.get("kind") == "render" and
+                                         job.get("state") in ("queued", "running"))
     jobstore.request_cancel(job_id)
-    n = 0 if only == "job" else _cancel_side(job_id=job_id)
+    if only == "job":
+        return {"ok": True, "side": 0}
+    if exporting:
+        n = sum(_cancel_side(job_id=job_id, name=k) for k in ("analysis", "direct"))
+    else:
+        n = _cancel_side(job_id=job_id)
     return {"ok": True, "side": n}
 
 
 @app.get("/jobs")
-def jobs_recent():
-    return jobstore.recent()
+def jobs_recent(limit: int = 20):
+    """Proyectos recientes con el resumen de su plan: [{id, kind, state, phase, pct, message,
+    error, created, updated, plan_rev, has_plan, version, topic, duration, final_duration,
+    style, shots, thumb}] (`thumb` = URL de la miniatura; null sin video)."""
+    out = jobstore.recent(max(1, min(50, int(limit))))
+    for j in out:
+        ext = j.get("ext")
+        ok = bool(ext) and (INPUT / f"{j['id']}{ext}").exists()
+        if ok and not _thumb_paths(j["id"])[0].exists():
+            # un trabajo con error y sin plan (video que no se pudo leer) o cuya miniatura ya
+            # fallo no anuncia miniatura (cada pedido relanzaria ffmpeg para nada)
+            ok = not (j.get("state") == "error" and not j.get("has_plan")) and \
+                not _thumb_paths(j["id"])[1].exists()
+        j["thumb"] = f"/thumb/{j['id']}" if ok else None
+    return out
 
 
 @app.post("/preview/{job_id}")
@@ -2133,11 +2534,15 @@ def preview(job_id: str, body: dict = Body(...)):
     if not plan:
         raise HTTPException(409, "El job no tiene plan; analiza el video primero.")
     if body.get("pro"):
-        return _start_preview_pro(job_id, plan, _fmt_of(body))
+        return _start_preview_pro(job_id, _synced_plan(job_id, plan), _fmt_of(body), _engine_opts(body))
     return _preview_legacy(job_id, plan, body)
 
 
-def _start_preview_pro(job_id, plan, fmt):
+# vista previa con la musica IA aun generandose: se espera (sondeo cancelable) a lo mas esto
+PREVIEW_MUSIC_WAIT_S = float(os.environ.get("REELFY_PREVIEW_MUSIC_WAIT", "300"))
+
+
+def _start_preview_pro(job_id, plan, fmt, eo=None):
     _require_license()
     if not _is_v2(plan):
         raise HTTPException(400, "La vista previa real necesita un plan v2 (dirigido).")
@@ -2145,7 +2550,9 @@ def _start_preview_pro(job_id, plan, fmt):
     if fmt not in R.FORMAT_NAMES:
         raise HTTPException(400, f"Formato desconocido: {fmt}.")
     plan = json.loads(json.dumps(plan))
-    bkey, key = _analysis_keys(plan, fmt)
+    eo = _eff_engine(plan, fmt, eo if eo is not None else {"enhance_audio": True})
+    _set_engine(job_id, eo, plan, fmt)
+    bkey, key = _analysis_keys(plan, fmt, eo)
     running = _side_running(job_id, "analysis")
     if running and running.get("bkey") != bkey:
         running["cancel"].set()        # analisis de otra base (otros cortes/formato): estorba
@@ -2158,48 +2565,181 @@ def _start_preview_pro(job_id, plan, fmt):
                          stage="", key=key, fmt=fmt, file=None, tok=tok,
                          message="Esperando el análisis…")
 
-    def run(jid, ev):
+    def draft(jid, ev, tick, lock):
+        """Un render_draft con el semaforo global y el candado del trabajo -> (out, stats)."""
         from motion import video_io as V
-        tick = _Throttle(jid, "preview", ev, tok)
         out = OUTPUT / f"{jid}_draft_{uuid.uuid4().hex[:6]}.mp4"
-        lock = _job_lock(jid)
         got_sem = got_lock = False
         try:
             got_sem = _acquire(_PREVIEW_SEM, ev)
             got_lock = got_sem and _acquire(lock, ev)
             if not got_lock or ev.is_set():
                 raise V.Canceled("cancelado")
-            tick.set(state="running", message="Generando la vista previa real…")
-            t0 = time.time()
-            stats = R.render_draft(plan, out, {
-                "fmt": fmt, "shorts": False,
-                "on_pct": lambda st, p: tick(stage=st, pct=round(float(p), 1)),
-                "on_step": lambda m: tick(force=True, message=m),
-                "cancel": ev.is_set})
-            if tick.set(state="done", pct=100, stage="done", file=out.name,
-                        t=round(time.time() - t0, 1), duration=round(stats.get("duration", 0), 3),
-                        warnings=list(stats.get("warnings") or []), done=True,
-                        message="Vista previa lista") is None:
-                out.unlink(missing_ok=True)          # ya la reemplazo otra vista previa
-            else:
-                for old in OUTPUT.glob(f"{jid}_draft_*.mp4"):
-                    if old != out:
-                        old.unlink(missing_ok=True)
-        except V.Canceled:
+            # la musica IA pendiente la genera la tarea lateral `music` (cancelable), no un
+            # prefetch del motor (el motor lo respeta cuando soporta opts.prefetch_music)
+            return out, R.render_draft(plan, out, _motor_opts(
+                eo, fmt, shorts=False, prefetch_music=False,
+                on_pct=lambda st, p: tick(stage=st, pct=round(float(p), 1)),
+                on_step=lambda m: tick(force=True, message=m),
+                cancel=ev.is_set))
+        except BaseException:
             out.unlink(missing_ok=True)
-            tick.set(state="canceled", message="Cancelada")
-        except Exception as e:  # noqa
-            traceback.print_exc()
-            out.unlink(missing_ok=True)
-            tick.set(state="error", error=str(e), message="La vista previa falló")
+            raise
         finally:
             if got_lock:
                 lock.release()
             if got_sem:
                 _PREVIEW_SEM.release()
 
+    def publish(jid, out, stats, t0, tick, keep=None, **extra):
+        """Deja la vista previa lista (si esta ejecucion sigue vigente) y borra las viejas.
+        `keep`: la que se esta reemplazando sin que el Studio lo pida (actualizacion con la musica
+        IA): el Studio puede seguir reproduciendola (pide rangos al hacer seek o repetir), asi
+        que queda en `prev_file` hasta la siguiente vista previa."""
+        if tick.set(state="done", pct=100, stage="done", file=out.name,
+                    prev_file=keep.name if keep is not None else None,
+                    t=round(time.time() - t0, 1), duration=round(stats.get("duration", 0), 3),
+                    warnings=list(stats.get("warnings") or []), done=True, **extra) is None:
+            out.unlink(missing_ok=True)          # ya la reemplazo otra vista previa
+            return False
+        for old in OUTPUT.glob(f"{jid}_draft_*.mp4"):
+            if old != out and old != keep:
+                old.unlink(missing_ok=True)
+        return True
+
+    def run(jid, ev):
+        from motion import video_io as V
+        tick = _Throttle(jid, "preview", ev, tok)
+        lock = _job_lock(jid)
+        t0 = time.time()
+        try:
+            tick.set(state="running", message="Generando la vista previa real…")
+            out, stats = draft(jid, ev, tick, lock)
+        except V.Canceled:
+            tick.set(state="canceled", message="Cancelada")
+            return
+        except Exception as e:  # noqa
+            traceback.print_exc()
+            tick.set(state="error", error=str(e), message="La vista previa falló")
+            return
+        pending = bool(stats.get("music_pending"))
+        msg = ("Vista previa lista (con música provisional: se actualizará sola con la música IA "
+               "en cuanto termine de generarse)" if pending else "Vista previa lista")
+        if not publish(jid, out, stats, t0, tick, message=msg, music_pending=pending,
+                       music_refresh="waiting" if pending else None):
+            return
+        if pending:
+            _refresh_preview_music(jid, ev, tick, plan, fmt, eo, draft, publish, lock, out)
+
     _start_side(job_id, "preview", run, key=None)
     return {"ok": True, "state": "queued"}
+
+
+class _SubTick:
+    """Progreso del refresco de la vista previa en claves propias (`refresh_pct`): no baja el
+    pct ni cambia la etapa de una vista previa que ya esta lista. Sigue atendiendo la
+    cancelacion (el _Throttle de abajo lanza Canceled)."""
+
+    def __init__(self, tick):
+        self.tick = tick
+
+    def __call__(self, force=False, **kw):
+        if "pct" in kw:
+            self.tick(force=force, refresh_pct=kw["pct"])
+        elif self.tick.ev.is_set():
+            from motion import video_io as V
+            raise V.Canceled("cancelado")
+
+    def set(self, **kw):
+        return self.tick.set(**kw)
+
+
+PROVISIONAL_MSG = "Vista previa con la música provisional"
+
+
+def _await_music(jid, ev, info, t0, wait_s):
+    """Espera a que la pista IA `info` quede en cache, generada por la tarea lateral `music` (la
+    UNICA generacion del trabajo). -> 'ready' | 'superseded' (la edicion cambio y esa pista ya no
+    se genera) | 'error'. Lanza Canceled (ev) o TimeoutError."""
+    from motion import music as MU
+    from motion import video_io as V
+
+    def cached():
+        try:
+            return not MU.pending(info["cfg"], info["dur"], info["style"], info["seed"])
+        except Exception:  # noqa
+            return False
+    while True:
+        if ev.is_set():
+            raise V.Canceled("cancelado")
+        if cached():
+            return "ready"
+        run_ = _side_running(jid, "music")
+        if run_ is None or run_.get("key") != info["key"] or run_["cancel"].is_set():
+            if cached():
+                return "ready"
+            ms = _music_side(jid)
+            if ms.get("key") == info["key"] and ms.get("state") == "error":
+                return "error"
+            return "superseded"
+        if time.time() - t0 > wait_s:
+            raise TimeoutError(f"la música IA no terminó en {wait_s:.0f} s")
+        ev.wait(0.5)
+
+
+def _refresh_preview_music(jid, ev, tick, plan, fmt, eo, draft, publish, lock, first=None):
+    """El draft sono con la musica procedural porque la IA aun se generaba (stats.music_pending):
+    espera a que la tarea lateral `music` (una generacion por trabajo, la de la edicion vigente)
+    deje la pista en cache, vuelve a hacer el draft (base, rostro y matte ya en cache) y publica
+    el archivo nuevo en la misma tarea `preview` (`preview_file` cambia; `prev_file` = la
+    provisional, que NO se borra hasta la siguiente vista previa: el Studio puede estar
+    reproduciendola). Cancelable con /cancel?only=preview o con otra vista previa; nunca pisa una
+    vista previa mas nueva. Con un export en curso no rehace el draft (music_refresh='skipped').
+    Cada salida deja un mensaje veraz (nunca promete una actualizacion que ya no va a pasar)."""
+    from motion import video_io as V
+    t0 = time.time()
+    try:
+        info = _music_track(plan, fmt, eo)
+        if info is None:
+            tick.set(music_refresh="error", music_error="sin música IA para esta edición",
+                     message=f"{PROVISIONAL_MSG} (la música IA no está disponible)")
+            return
+        if info["pending"]:
+            _kick_music(jid, plan, fmt, eo, info=info)
+            got = _await_music(jid, ev, info, t0, PREVIEW_MUSIC_WAIT_S)
+            if got == "superseded":
+                tick.set(music_refresh="superseded",
+                         message=f"{PROVISIONAL_MSG} (la edición cambió: pide otra vista previa)")
+                return
+            if got == "error":
+                tick.set(music_refresh="error", music_error=_music_side(jid).get("error"),
+                         message=f"{PROVISIONAL_MSG} (la música IA no se pudo generar)")
+                return
+        if ev.is_set():
+            raise V.Canceled("cancelado")
+        if jid in _EXPORTING:
+            tick.set(music_refresh="skipped", music_wait_s=round(time.time() - t0, 1),
+                     message=f"{PROVISIONAL_MSG} (la música IA ya está lista y el export la usa)")
+            return
+        tick.set(music_refresh="rendering", message="Actualizando la vista previa con la música IA…")
+        t1 = time.time()
+        out, stats = draft(jid, ev, _SubTick(tick), lock)
+        pending = bool(stats.get("music_pending"))
+        publish(jid, out, stats, t1, tick, keep=first, music_pending=pending,
+                music_refresh="done" if not pending else "error",
+                music_wait_s=round(t1 - t0, 1),
+                message="Vista previa actualizada con la música IA" if not pending else
+                f"{PROVISIONAL_MSG} (la música IA no quedó disponible)")
+    except V.Canceled:
+        tick.set(music_refresh="canceled",
+                 message=f"{PROVISIONAL_MSG} (la actualización con la música IA se canceló)")
+    except TimeoutError as e:
+        tick.set(music_refresh="timeout", music_error=str(e),
+                 message=f"{PROVISIONAL_MSG} (la música IA no terminó a tiempo)")
+    except Exception as e:  # noqa: refrescar es un extra: la vista previa ya estaba lista
+        traceback.print_exc()
+        tick.set(music_refresh="error", music_error=str(e)[:300],
+                 message=f"{PROVISIONAL_MSG} (la actualización con la música IA falló)")
 
 
 def _preview_legacy(job_id, plan, body):
@@ -2268,7 +2808,7 @@ def frame(job_id: str, body: dict = Body(...)):
     tiene otro mas nuevo del mismo job responde 204 sin renderizar."""
     _job_or_404(job_id)
     _require_license()
-    plan = _plan_from(body, job_id)
+    plan = _synced_plan(job_id, _plan_from(body, job_id))
     if not _is_v2(plan):
         raise HTTPException(400, "El cuadro exacto necesita un plan v2 (dirigido).")
     try:
@@ -2281,12 +2821,16 @@ def frame(job_id: str, body: dict = Body(...)):
     if fmt not in R.FORMAT_NAMES:
         raise HTTPException(400, f"Formato desconocido: {fmt}.")
     t0 = time.time()
+    eo = _eff_engine(plan, fmt, _engine_opts(body))
+    if _set_engine(job_id, eo, plan, fmt):
+        # otro aire/audio de estudio = otro video base: el analisis de fondo lo prepara
+        _kick_analysis(job_id, plan, fmt, eo=eo)
     seq = _FRAME_SEQ[job_id] = _FRAME_SEQ.get(job_id, 0) + 1
     try:
         with _FRAME_LOCK:          # render_frame comparte caches de modulo: uno a la vez
             if body.get("drop_stale") and _FRAME_SEQ.get(job_id) != seq:
                 return Response(status_code=204)   # ya hay un cuadro mas nuevo en camino
-            rgba = R.render_frame(plan, t, {"fmt": fmt, "quality": q})
+            rgba = R.render_frame(plan, t, _motor_opts(eo, fmt, quality=q))
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:  # noqa
@@ -2296,6 +2840,115 @@ def frame(job_id: str, body: dict = Body(...)):
     return Response(data, media_type="image/jpeg",
                     headers={"X-Frame-Ms": str(round((time.time() - t0) * 1000)),
                              "Cache-Control": "no-store"})
+
+
+# ---- grupos reales de subtitulos (los mismos que dibuja el render) ----
+_CAPS_CACHE = {}
+_CAPS_LOCK = threading.Lock()
+
+
+def caption_groups_for(plan, fmt="9:16"):
+    """Grupos de subtitulos EXACTOS del render (text.caption_groups sobre las frases en
+    tiempo final, en la caja de layout del formato) -> tiempo ORIGINAL del plan:
+    [{start, end, text, words: [{text, start, end, kw?}], lines, accent, rect, start_final,
+    end_final}]. `words` son las palabras del plan (texto sin mayusculas del preset); `rect`
+    = caja del grupo normalizada a la caja de layout 9:16 [x0, y0, x1, y1]. Sin subtitulos
+    (apagados o preset none) -> []."""
+    from motion import ctx as CX
+    from motion import render as R
+    pr = R.prepare(plan, {"fmt": fmt, "workers": 0, "quality": "final"})
+    job, tl, mods = pr["job"], pr["timeline"], pr["mods"]
+    fn = getattr(mods.get("text"), "caption_groups", None)
+    if not job.get("captions_on") or not callable(fn):
+        return []
+    # mismas frases finales que el render (tl.map_words del plan normalizado) + indice original
+    src = pr["plan"].get("phrases") or []
+    tagged = [[dict(w, _oi=(i, j)) for j, w in enumerate(ph or []) if isinstance(w, dict)]
+              for i, ph in enumerate(src)]
+    fin = tl.map_words(tagged)
+    bx, by, bw, bh = job["layout"]
+    ctx = CX.FrameCtx(W=bw, H=bh, fps=job["fps"], quality="final", seed=job["seed"],
+                      style=job["style"], words=job.get("words") or [],
+                      entities=job.get("entities") or {})
+    groups = fn(fin, job["captions"], ctx) or []
+    flat = sorted((w for ph in fin for w in ph), key=lambda w: float(w["start"]))
+    counts = [len(str(g.get("text") or "").split()) for g in groups]
+    firsts = []
+    if sum(counts) == len(flat):
+        # caso normal: los grupos parten la lista de palabras en orden
+        acc = 0
+        for c in counts:
+            firsts.append(acc)
+            acc += c
+    else:
+        # el preset descarto alguna palabra (p. ej. solo signos): cada grupo empieza 0.06 s
+        # antes de su primera palabra (text._caption_groups) -> se ubica por tiempo
+        p = 0
+        for g in groups:
+            t_first = float(g["start"]) + 0.06
+            while p < len(flat) and float(flat[p]["start"]) < t_first - 2e-3:
+                p += 1
+            firsts.append(min(p, len(flat)))
+    out = []
+    for k, g in enumerate(groups):
+        a = firsts[k]
+        b = firsts[k + 1] if k + 1 < len(firsts) else len(flat)
+        words = []
+        for w in flat[a:max(a, b)]:
+            i, j = w["_oi"]
+            ow = src[i][j]
+            d = {"text": ow.get("text", ""), "start": round(float(ow["start"]), 3),
+                 "end": round(float(ow["end"]), 3)}
+            if ow.get("kw"):
+                d["kw"] = True
+            words.append(d)
+        r = g.get("rect") or (0, 0, 0, 0)
+        out.append({"start": round(tl.inverse(float(g["start"])), 3),
+                    "end": round(tl.inverse(float(g["end"])), 3),
+                    "start_final": round(float(g["start"]), 3), "end_final": round(float(g["end"]), 3),
+                    "text": g.get("text", ""), "words": words, "lines": g.get("lines", 1),
+                    "accent": g.get("accent") or [],
+                    "rect": [round(r[0] / bw, 4), round(r[1] / bh, 4), round(r[2] / bw, 4),
+                             round(r[3] / bh, 4)]})
+    return out
+
+
+@app.post("/captions/{job_id}")
+def captions(job_id: str, body: dict = Body(default={})):
+    """Grupos REALES de subtitulos del plan (los del export) para que la vista en vivo del
+    Studio agrupe igual: body {plan?, fmt?} -> [{start, end, words, text, lines, accent, rect,
+    start_final, end_final}] en tiempo ORIGINAL (salvo *_final). Cacheado por contenido
+    (frases, subtitulos, cortes, estilo, formato); cabecera X-Captions-Ms."""
+    _job_or_404(job_id)
+    plan = _plan_from(body, job_id)
+    if not _is_v2(plan):
+        raise HTTPException(400, "Los grupos de subtitulos necesitan un plan v2 (dirigido).")
+    fmt = _fmt_of(body)
+    from motion import render as R
+    if fmt not in R.FORMAT_NAMES:
+        raise HTTPException(400, f"Formato desconocido: {fmt}.")
+    t0 = time.time()
+    fx = plan.get("fx") or {}
+    key = _sha(json.dumps([plan.get("video"), plan.get("duration"), plan.get("phrases"),
+                           plan.get("cuts"), plan.get("shots"), fx.get("captions"),
+                           (plan.get("director") or {}).get("style"), fmt],
+                          sort_keys=True, default=str))
+    with _CAPS_LOCK:
+        groups = _CAPS_CACHE.get(key)
+    if groups is None:
+        try:
+            groups = caption_groups_for(plan, fmt)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:  # noqa
+            traceback.print_exc()
+            raise HTTPException(500, f"No se pudieron calcular los subtitulos: {e}")
+        with _CAPS_LOCK:
+            _CAPS_CACHE[key] = groups
+            while len(_CAPS_CACHE) > 32:
+                _CAPS_CACHE.pop(next(iter(_CAPS_CACHE)))
+    return JSONResponse(groups, headers={"X-Captions-Ms": str(round((time.time() - t0) * 1000)),
+                                         "X-Captions-Key": key})
 
 
 def _keep_src_names(before, out):
@@ -2315,6 +2968,7 @@ def _start_direct_side(job_id, plan, d, use_llm, fmt, base_rev):
     en /status (direct_state/pct/stage/message) y cancelable. El director no se interrumpe a
     medias: si se cancela, su resultado se descarta (el plan guardado no cambia)."""
     plan = json.loads(json.dumps(plan))
+    _cancel_side(job_id, "music")            # el director genera y sincroniza su propia pista
     tok = uuid.uuid4().hex[:8]
     jobstore.side_update(job_id, "direct", replace=True, state="running", pct=0, stage="tomas",
                          tok=tok, base_rev=base_rev, message="Dirigiendo la edición…")
@@ -2337,6 +2991,12 @@ def _start_direct_side(job_id, plan, d, use_llm, fmt, base_rev):
             except Exception:  # noqa: cancelado: el director termina y se descarta
                 pass
         try:
+            # solo pruebas: demora cancelable antes del director (con heuristicas termina en
+            # milisegundos y la prueba de cancelacion quedaria en carrera con la respuesta)
+            delay = float(os.environ.get("REELFY_TEST_DIRECT_DELAY", "0") or 0)
+            if delay > 0 and ev.wait(delay):
+                tick.set(state="canceled", message="Cancelado (el plan no cambió)")
+                return
             out, warns = _direct_plan(plan, d, on_step=dstep, use_llm=use_llm)
             if ev.is_set():
                 tick.set(state="canceled", message="Cancelado (el plan no cambió)")
@@ -2355,6 +3015,10 @@ def _start_direct_side(job_id, plan, d, use_llm, fmt, base_rev):
     return {"ok": True, "state": "running", "background": True}
 
 
+# espera maxima (s) a la musica IA al re-dirigir sin `full` (ver direct())
+REDIRECT_MUSIC_WAIT_S = float(os.environ.get("REELFY_REDIRECT_MUSIC_WAIT", "1.5"))
+
+
 @app.post("/direct/{job_id}")
 def direct(job_id: str, body: dict = Body(...)):
     """Re-dirige. Con only_ids: director.redirect (rapido, sin LLM, respeta locked/user);
@@ -2371,6 +3035,13 @@ def direct(job_id: str, body: dict = Body(...)):
         raise HTTPException(409, "El director ya está trabajando en este proyecto.")
     plan = _plan_from(body, job_id)
     from motion import director
+    if "profile" in (body or {}):
+        # perfil de la persona (null = quitarlo): el director lo re-aplica al re-dirigir; lo
+        # bloqueado que mostraba el perfil anterior recibe los datos nuevos
+        from motion import profile as PR
+        old_prof = PR.normalize_profile(plan.get("profile"))
+        plan = _with_profile(plan, body.get("profile"))
+        director.retext_locked(plan, old_prof, plan.get("profile"))
     d = _director_params({k: body.get(k) for k in ("style", "intensity", "seed", "music")
                           if body.get(k) is not None} or (plan.get("director") or {}))
     if body.get("music") is None:
@@ -2393,23 +3064,62 @@ def direct(job_id: str, body: dict = Body(...)):
         if body.get("background"):
             return _start_direct_side(job_id, plan, d2, bool(body.get("use_llm", True)),
                                       _fmt_of(body), job.get("plan_rev"))
+    # re-dirigir sin `full` va en la ruta critica del Studio (cambio de estilo, regenerar). Primero
+    # SIN sincronia (music_sync=False: el director no espera ni deja un hilo ACE huerfano). Si la
+    # pista IA de la propuesta ya esta en cache se repite CON sincronia (< 1 s: la toma del cache);
+    # si hay que generarla, la genera la tarea lateral `music` (cancelable, una por trabajo) y al
+    # terminar sincroniza la propuesta sola (ver _kick_music). "Re-dirigir todo" (full) sincroniza.
+    rkw = {}
+    if _accepts(director.redirect, "music_timeout"):
+        rkw["music_timeout"] = REDIRECT_MUSIC_WAIT_S
+    can_sync = _accepts(director.redirect, "music_sync")
+    fmt = _fmt_of(body)
+    music_body = d.get("music") if body.get("music") is not None else None
+    minfo = None
     try:
         if only:
-            out = director.redirect(plan, style, intensity, seed, only_ids=list(only))
+            out = director.redirect(plan, style, intensity, seed, only_ids=list(only), **rkw)
         elif full:
+            _cancel_side(job_id, "music")        # el director genera y sincroniza su pista
             out, warns = _direct_plan(plan, d2, use_llm=bool(body.get("use_llm", True)))
             _keep_src_names(plan, out)
         else:
-            out = director.redirect(plan, style, intensity, seed)
+            if can_sync:
+                rkw["music_sync"] = False
+            out = director.redirect(plan, style, intensity, seed, **rkw)
+            if music_body is not None:
+                out = _apply_music(out, music_body)
+            if can_sync and _music_sync_ok(music_body) and \
+                    not (out.get("director") or {}).get("music_grid"):
+                minfo = _music_track(out, fmt)
+                if minfo is not None and not minfo["pending"]:
+                    rkw.update(music_sync=True,
+                               music_timeout=max(REDIRECT_MUSIC_WAIT_S, REDIRECT_CACHED_WAIT_S))
+                    out = director.redirect(plan, style, intensity, seed, **rkw)
+                    if music_body is not None:
+                        out = _apply_music(out, music_body)
+                    minfo = None
+                elif minfo is not None:
+                    dd = out.setdefault("director", {})
+                    dd["notes"] = [n for n in dd.get("notes") or [] if not (
+                        isinstance(n, str) and n.startswith("musica nueva generandose"))] + [
+                        "musica nueva generandose: la edicion se sincroniza sola con sus beats al terminar"]
+                    warns.append("La música IA nueva se está generando: la edición se sincroniza sola "
+                                  "con sus beats cuando termine.")
     except Exception as e:  # noqa
         traceback.print_exc()
         raise HTTPException(500, f"No se pudo re-dirigir: {e}")
-    if body.get("music") is not None and not full:
-        out = _apply_music(out, d.get("music"))
+    if music_body is not None and only:
+        out = _apply_music(out, music_body)     # (con full, _direct_plan ya la aplico)
     jobstore.update(job_id, plan=out)
-    _kick_analysis(job_id, out, _fmt_of(body))
-    return {"plan": out, "plan_rev": jobstore.get_light(job_id)["plan_rev"],
-            "warnings": warns, "ms": round((time.time() - t0) * 1000)}
+    rev = jobstore.get_light(job_id)["plan_rev"]
+    if minfo is not None:
+        _kick_music(job_id, out, fmt, info=minfo, target={
+            "rev": rev, "orig": json.loads(json.dumps(plan)), "style": style,
+            "intensity": intensity, "seed": seed, "music": music_body, "fmt": fmt})
+    _kick_analysis(job_id, out, fmt)
+    return {"plan": out, "plan_rev": rev, "warnings": warns, "ms": round((time.time() - t0) * 1000),
+            "music": {"pending": minfo is not None}}
 
 
 @app.get("/plan/{job_id}")
@@ -2417,6 +3127,12 @@ def get_plan(job_id: str):
     plan, rev = jobstore.get_plan(job_id)
     if plan is None:
         raise HTTPException(404, "Sin plan")
+    try:                               # proyectos de antes del proxy: se genera al abrirlos
+        j = jobstore.get_light(job_id)
+        if j and j.get("state") not in ("queued", "running"):
+            _kick_src_proxy(job_id)
+    except Exception:  # noqa
+        pass
     return {"plan": plan, "plan_rev": rev}
 
 
@@ -2436,11 +3152,31 @@ def put_plan(job_id: str, body: dict = Body(...)):
         base = int(base) if base is not None else None
     except (TypeError, ValueError):
         raise HTTPException(400, "base_rev inválido")
+    plan, prof_applied = _reapply_profile(job_id, plan)
     ok, rev = jobstore.update_plan(job_id, plan, base)
+    if ok and prof_applied:
+        # el perfil cambio en el autoguardado: rotulo, Seguir, reservas y cierre ya van con los
+        # datos nuevos (el Studio adopta `plan`)
+        if base is not None:
+            _music_superseded(job_id, plan, base, rev)
+        return {"ok": True, "plan_rev": rev, "plan": plan, "profile_applied": True}
     if not ok:
+        # la unica revision posterior es la sincronizacion automatica con la musica IA (el
+        # servidor la escribio sobre la propuesta `from_rev`): no es un conflicto real
+        ms = _music_side(job_id)
+        if ms.get("state") == "synced" and base == ms.get("from_rev") and rev == ms.get("plan_rev"):
+            if jobstore.plan_hash(plan) == ms.get("from_hash"):
+                return {"ok": True, "plan_rev": rev, "music_synced": True}   # misma propuesta
+            ok, rev2 = jobstore.update_plan(job_id, plan, rev)   # la edicion del usuario gana
+            if ok:
+                _music_superseded(job_id, plan, rev, rev2)
+                return {"ok": True, "plan_rev": rev2}
+            rev = rev2
         return JSONResponse({"ok": False, "detail": "El plan cambió en el servidor (re-dirigido "
                                                      "u otra ventana); recarga antes de guardar.",
                              "plan_rev": rev}, status_code=409)
+    if base is not None:
+        _music_superseded(job_id, plan, base, rev)
     return {"ok": True, "plan_rev": rev}
 
 
@@ -2449,7 +3185,13 @@ def analysis_start(job_id: str, body: dict = Body(default={})):
     """(Re)lanza el analisis de fondo (render.ensure_analysis) del plan dado o guardado."""
     _job_or_404(job_id)
     plan = _plan_from(body, job_id)
-    started = _kick_analysis(job_id, plan, _fmt_of(body), force=True)
+    fmt = _fmt_of(body)
+    eo = None
+    if any(k in (body or {}) for k in ENGINE_KEYS):
+        eo = _eff_engine(plan, fmt, _engine_opts(body))
+        _set_engine(job_id, eo, plan, fmt)
+    started = _kick_analysis(job_id, plan, fmt, force=True, eo=eo)
+    _kick_src_proxy(job_id)
     return {"ok": True, "started": started}
 
 
@@ -2533,11 +3275,16 @@ POPULAR_ICONS = ("dental", "map-pin", "clock", "cash", "phone", "calendar", "sta
 
 
 @app.get("/fx/icons")
-def fx_icons(q: str = "", limit: int = 40, variant: str = "outline"):
+def fx_icons(q: str = "", limit: int = 40, variant: str = "outline", names: str = ""):
+    """Iconos Tabler (SVG 24x24 currentColor). `names` = lista exacta separada por comas (p. ej.
+    los iconos de marca de las redes del perfil: brand-instagram,brand-tiktok,calendar-event)."""
     from motion import assets
     limit = max(1, min(200, int(limit)))
-    names = assets.icon_search(q, limit) if q.strip() else \
-        [n for n in POPULAR_ICONS if assets.icon_exists(n)][:limit]
+    if names.strip():
+        names = [n.strip() for n in names.split(",") if n.strip() and assets.icon_exists(n.strip())][:limit]
+    else:
+        names = assets.icon_search(q, limit) if q.strip() else \
+            [n for n in POPULAR_ICONS if assets.icon_exists(n)][:limit]
     icons = []
     for n in names:
         svg = icon_svg(n, variant if variant in ("outline", "filled") else "outline")
@@ -2614,8 +3361,19 @@ def music_gen(job_id: str, body: dict = Body(default={})):
         old.unlink(missing_ok=True)          # conserva las 4 mas recientes del trabajo
     keep = ("bpm", "drop", "source", "engine", "duration", "keyscale", "seed", "lufs",
             "hook_end", "cached", "warnings", "fallback_from", "prompt")
+
+    def times(v):
+        out = []
+        for x in v or []:
+            try:
+                out.append(round(float(x), 3))
+            except (TypeError, ValueError):
+                continue
+        return out
+    # beats/downbeats en tiempo FINAL (el de la pista): la pista Musica del Studio los dibuja
     return {"file": name, "url": f"/music-file/{name}", **{k: res.get(k) for k in keep},
-            "sections": res.get("sections") or [], "ms": round((time.time() - t0) * 1000)}
+            "sections": res.get("sections") or [], "beats": times(res.get("beats")),
+            "downbeats": times(res.get("downbeats")), "ms": round((time.time() - t0) * 1000)}
 
 
 @app.get("/music-file/{name}")
@@ -2641,10 +3399,11 @@ async def upload_logo(logo: UploadFile):
 
 @app.get("/brand/logo")
 def get_logo():
+    """Logo de la marca; 204 (sin cuerpo) si no hay: la consola del Studio queda limpia."""
     f = BRAND / "logo.png"
     if not f.exists():
-        raise HTTPException(404, "Sin logo")
-    return FileResponse(f, media_type="image/png")
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    return FileResponse(f, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/presets")
@@ -2671,10 +3430,261 @@ def delete_preset(name: str):
     return {"ok": True, "presets": list(data.keys())}
 
 
+# ================================================================ perfil de la persona (3.2)
+# Nombre, profesion, negocio y enlaces (redes, reservas, web, WhatsApp...) de quien sale en el
+# video: el director los integra (rotulo, Seguir con el @usuario, reservas, tarjeta final).
+# Perfiles reutilizables en DATA/assets/brand/profiles.json. Todo `def` (disco / LLM local).
+_PROFILES_LOCK = threading.Lock()
+
+
+def _profiles_load():
+    try:
+        data = json.loads(paths.PROFILES.read_text()) if paths.PROFILES.exists() else {}
+    except Exception:  # noqa: archivo corrupto = sin perfiles (nunca tumba el servidor)
+        data = {}
+    items = data.get("profiles") if isinstance(data, dict) else None
+    return [x for x in items or [] if isinstance(x, dict) and x.get("id")]
+
+
+def _profiles_save(items):
+    paths.PROFILES.parent.mkdir(parents=True, exist_ok=True)
+    tmp = paths.PROFILES.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps({"version": 1, "profiles": items}, ensure_ascii=False, indent=1))
+    os.replace(tmp, paths.PROFILES)
+
+
+def _profile_id(prof):
+    """Id legible y estable: 'dra-ana-ruiz' (+ sufijo si choca)."""
+    from motion import profile as PR
+    base = prof.get("name") or prof.get("business") or \
+        ((PR.primary_social(prof) or {}).get("handle") or "perfil")
+    slug = re.sub(r"[^a-z0-9]+", "-", PR.strip_accents(str(base).lower())).strip("-")[:40] or "perfil"
+    return slug
+
+
+def _saved_profile(pid):
+    pid = str(pid or "").strip()
+    return next((x for x in _profiles_load() if x.get("id") == pid), None) if pid else None
+
+
+def _profile_param(raw, pid=None):
+    """Perfil del cuerpo de /compose o /analyze (dict o JSON en texto) o el guardado `profile_id`
+    -> perfil saneado o None. Uno invalido -> 400 (el Studio lo manda armado)."""
+    from motion import profile as PR
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else None
+        except Exception:  # noqa
+            raise HTTPException(400, "Perfil inválido (JSON).")
+    if raw is None and pid:
+        raw = _saved_profile(pid)
+        if raw is None:
+            raise HTTPException(404, "Perfil guardado no encontrado.")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "Perfil inválido.")
+    return PR.normalize_profile(raw)
+
+
+def _profile_key(prof):
+    """Huella del perfil (sin id ni fecha de guardado): detecta un cambio real."""
+    if not prof:
+        return ""
+    return json.dumps({k: v for k, v in prof.items() if k not in ("id", "updated")}, sort_keys=True,
+                      ensure_ascii=False)
+
+
+def _reapply_profile(job_id, plan):
+    """PUT /plan con `plan.profile` distinto del guardado -> (plan con el perfil re-aplicado por
+    director.apply_profile, True): el autoguardado nunca deja un perfil nuevo con el rotulo del
+    anterior. Sin la clave `profile` en el plan se conserva la guardada (un cliente viejo no la
+    borra); `profile: null` la quita. -> (plan, aplicado)."""
+    from motion import profile as PR
+    try:
+        stored, _rev = jobstore.get_plan(job_id)
+    except Exception:  # noqa
+        stored = None
+    old = PR.normalize_profile((stored or {}).get("profile"))
+    if "profile" not in plan:
+        if old:
+            plan = dict(plan, profile=old)
+        return plan, False
+    new = PR.normalize_profile(plan.get("profile"))
+    if _profile_key(new) == _profile_key(old) or plan.get("version") != 2 or not isinstance(plan.get("fx"), dict):
+        return plan, False
+    from motion import director
+    base = json.loads(json.dumps(plan))
+    if old:
+        base["profile"] = old
+    else:
+        base.pop("profile", None)
+    try:
+        out = director.apply_profile(base, new)
+    except Exception:  # noqa: si falla, se guarda tal cual (nunca se pierde la edicion)
+        traceback.print_exc()
+        return plan, False
+    _keep_src_names(plan, out)
+    return out, True
+
+
+def _with_profile(plan, raw):
+    """Copia del plan con el perfil puesto (o quitado con None/vacio)."""
+    plan = json.loads(json.dumps(plan))
+    prof = _profile_param(raw) if raw is not None else None
+    if prof:
+        plan["profile"] = prof
+    else:
+        plan.pop("profile", None)
+    return plan
+
+
+@app.post("/profile/parse")
+def profile_parse(body: dict = Body(...)):
+    """Texto libre -> perfil ({text, use_llm?}): enlaces (URL, @usuario, correo, telefono)
+    reconocidos sin IA; nombre, profesion con genero y negocio por reglas + LLM local si esta.
+    -> {profile, notes, llm, ms}. No se guarda: el Studio lo muestra para confirmar."""
+    from motion import profile as PR
+    text = str((body or {}).get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "Escribe el texto del perfil.")
+    if len(text) > 4000:
+        raise HTTPException(400, "El texto es demasiado largo (máximo 4000 caracteres).")
+    t0 = time.time()
+    use_llm = bool((body or {}).get("use_llm", True)) and _ollama_up()
+    r = PR.parse_profile_text(text, use_llm=use_llm)
+    if not use_llm and (body or {}).get("use_llm", True):
+        r["notes"] = list(r.get("notes") or []) + ["IA local no disponible: nombre y profesión por reglas"]
+    return {"profile": r["profile"], "notes": list(dict.fromkeys(r.get("notes") or [])), "llm": r["llm"],
+            "ms": round((time.time() - t0) * 1000)}
+
+
+@app.get("/profile/platforms")
+def profile_platforms():
+    """Catalogo de plataformas del perfil: [{id, label, icon, kind, color, cta?, svg}]."""
+    from motion import profile as PR
+    out = []
+    for p_ in PR.platforms_catalog():
+        out.append(dict(p_, svg=icon_svg(p_["icon"])))
+    return {"platforms": out, "kinds": list(PR.KINDS), "use": dict(PR.USE_DEFAULTS)}
+
+
+@app.get("/profiles")
+def profiles_list():
+    return {"profiles": _profiles_load()}
+
+
+@app.post("/profiles")
+def profiles_save(body: dict = Body(...)):
+    """Guarda un perfil reutilizable -> {ok, id, profile, profiles, replaced}. Con `id` (o
+    `profile.id`) de uno guardado lo ACTUALIZA; sin id crea uno nuevo (id legible del nombre, con
+    sufijo -2, -3... si ya existe: nunca pisa en silencio)."""
+    from motion import profile as PR
+    raw = (body or {}).get("profile")
+    prof = PR.normalize_profile(raw)
+    if not prof:
+        raise HTTPException(400, "El perfil está vacío: agrega nombre, profesión o un enlace.")
+    with _PROFILES_LOCK:
+        items = _profiles_load()
+        # solo un `id` EXPLICITO sobrescribe (editar un perfil guardado); sin id, un nombre que ya
+        # existe crea otro con sufijo (dos personas homonimas, o guardar de nuevo sin querer
+        # pisar): nunca se reemplaza en silencio
+        pid = str((body or {}).get("id") or prof.get("id") or "").strip()
+        replaced = False
+        if re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", pid):
+            replaced = any(x.get("id") == pid for x in items)
+        else:
+            pid = _profile_id(prof)
+            if any(x.get("id") == pid for x in items):
+                k = 2
+                while any(x.get("id") == f"{pid}-{k}" for x in items):
+                    k += 1
+                pid = f"{pid}-{k}"
+        prof["id"] = pid
+        prof["updated"] = round(time.time())
+        items = [x for x in items if x.get("id") != pid] + [prof]
+        items.sort(key=lambda x: -float(x.get("updated") or 0))
+        _profiles_save(items[:100])
+    return {"ok": True, "id": pid, "profile": prof, "profiles": items[:100], "replaced": replaced}
+
+
+@app.delete("/profiles/{pid}")
+def profiles_delete(pid: str):
+    with _PROFILES_LOCK:
+        items = _profiles_load()
+        if not any(x.get("id") == pid for x in items):
+            raise HTTPException(404, "Perfil no encontrado.")
+        items = [x for x in items if x.get("id") != pid]
+        _profiles_save(items)
+    return {"ok": True, "profiles": items}
+
+
+@app.get("/profile/{job_id}")
+def profile_get(job_id: str):
+    plan, rev = jobstore.get_plan(job_id)
+    if plan is None:
+        raise HTTPException(404, "Sin plan")
+    return {"profile": plan.get("profile"), "plan_rev": rev}
+
+
+@app.put("/profile/{job_id}")
+def profile_put(job_id: str, body: dict = Body(...)):
+    """Pone (o quita con null) el perfil del proyecto y re-dirige AL INSTANTE sin LLM ni
+    re-analizar (director.apply_profile: misma revision, el resto de la edicion igual): rotulo,
+    Seguir, reservas y cierre se actualizan. {profile, plan?, base_rev?, profile_id?} ->
+    {plan, plan_rev, profile, ms}. Con `base_rev` es concurrencia optimista (409 si cambio)."""
+    job = _job_or_404(job_id)
+    _require_license()
+    if job["state"] in ("queued", "running"):
+        raise HTTPException(409, "Este proyecto está procesándose; espera a que termine.")
+    if _side_running(job_id, "direct"):
+        raise HTTPException(409, "El director ya está trabajando en este proyecto.")
+    body = body or {}
+    if "profile" not in body and not body.get("profile_id"):
+        raise HTTPException(400, "Falta el perfil (o null para quitarlo).")
+    base = body.get("base_rev")
+    try:
+        base = int(base) if base is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "base_rev inválido")
+    plan = _plan_from(body, job_id)
+    prof = _profile_param(body.get("profile"), body.get("profile_id"))
+    from motion import director
+    t0 = time.time()
+    try:
+        out = director.apply_profile(plan, prof)
+    except Exception as e:  # noqa
+        traceback.print_exc()
+        raise HTTPException(500, f"No se pudo aplicar el perfil: {e}")
+    _keep_src_names(plan, out)
+    ok, rev = jobstore.update_plan(job_id, out, base)
+    if not ok:
+        return JSONResponse({"ok": False, "detail": "El plan cambió en el servidor (re-dirigido u otra "
+                                                     "ventana); recarga antes de guardar el perfil.",
+                             "plan_rev": rev}, status_code=409)
+    _kick_analysis(job_id, out, _fmt_of(body))
+    return {"ok": True, "plan": out, "plan_rev": rev, "profile": out.get("profile"),
+            "ms": round((time.time() - t0) * 1000)}
+
+
+# capacidades de la API que el Studio puede consultar antes de usarlas
+API_FEATURES = ("captions", "source_proxy", "jobs_meta", "music_beats", "translate_texts",
+                "translate_titles", "preview_music_refresh", "music_sync", "air_optin", "media",
+                "profile")
+
+
 @app.get("/settings")
 def get_settings():
+    """Ajustes y capacidades: `pro_opts` = opciones del proyecto que el render pro aplica
+    siempre (logo, audio de estudio: la UI habilita esos controles); `pro_opts_optin` = las que
+    aplica SOLO si el cuerpo lo pide explicitamente (aire: `air_user: true`); `logo` = hay logo
+    de marca; `pro_langs` = idiomas de subtitulos de la edicion IA (/translate); `features`."""
     import broll as broll_mod
-    return {"pexels": bool(broll_mod.get_key())}
+    return {"pexels": bool(broll_mod.get_key()), "pro_opts": list(PRO_OPTS),
+            "pro_opts_optin": list(PRO_OPTS_OPTIN),
+            "logo": (BRAND / "logo.png").exists(),
+            "pro_langs": ["es"] + list(pipeline.translate_mod.LANGS),
+            "features": list(API_FEATURES)}
 
 
 @app.post("/settings")
@@ -2717,23 +3727,100 @@ def music(track: str):
     return FileResponse(f, media_type="audio/mp4", headers={"Accept-Ranges": "bytes"})
 
 
+def _plan_words(plan):
+    return [str(w.get("text", "")) for ph in (plan or {}).get("phrases") or [] if isinstance(ph, list)
+            for w in ph if isinstance(w, dict)]
+
+
+def _span_context(plan, a, b):
+    """Palabras dichas entre a y b (tiempo original), con 1.5 s de margen."""
+    try:
+        a, b = float(a) - 1.5, float(b) + 1.5
+    except (TypeError, ValueError):
+        return None
+    ws = [str(w.get("text", "")) for ph in (plan or {}).get("phrases") or [] if isinstance(ph, list)
+          for w in ph if isinstance(w, dict) and a <= float(w.get("start", -1)) <= b]
+    return " ".join(ws) or None
+
+
+def _llm_unavailable_msg(err):
+    return ("La traducción usa la IA local (Ollama), que no respondió"
+            + (f" ({err})" if err else "") +
+            f". Revisa que la IA de lenguaje ({paths.LLM_MODEL}) esté instalada y encendida.")
+
+
 @app.post("/translate/{job_id}")
 def translate(job_id: str, body: dict = Body(...)):
-    """Translate captions + short titles to EN for LIVE preview/editing in the studio.
-    The (possibly edited) EN phrases are then sent back inside the plan at export."""
+    """Traduccion con la IA local para editar EN VIVO en el Studio (no se guarda: el Studio
+    decide y la guarda en el plan). body {plan?, lang? ('en' default; en|pt|fr|de|it), texts?,
+    spans?}:
+      - `texts` [str]: SOLO esos textos (titulos y graficos del plan v2) -> texts_<lang>, 1:1.
+        Cada texto conserva su numero de lineas ('\n') y sus MAYUSCULAS; se traduce completo con
+        la frase hablada que lo cubre como contexto (`spans` [[start, end]] en tiempo original,
+        o la busqueda del titulo en la transcripcion del plan). `untranslated` = indices que
+        quedaron iguales al original. Con `phrases: true` tambien traduce los subtitulos.
+      - sin `texts`: subtitulos del plan -> phrases_<lang> (mismo timing por frase) y titulos
+        de highlights -> titles_<lang>.
+    Si la IA no tradujo NADA (Ollama caido o sin modelo) responde 503: nunca devuelve el
+    espanol como si fuera la traduccion. `def`: el LLM tarda (5-60 s) y corre en el threadpool."""
     _job_or_404(job_id)
-    plan = body.get("plan") or jobstore.get_plan(job_id)[0]
+    body = body if isinstance(body, dict) else {}
+    lang = str(body.get("lang") or "en").lower()
+    tm = pipeline.translate_mod
+    if lang != "es" and lang not in tm.LANGS:
+        raise HTTPException(400, f"Idioma no soportado: {lang}. Usa es, {', '.join(tm.LANGS)}.")
+    texts = body.get("texts")
+    if texts is not None and (not isinstance(texts, list) or
+                              not all(isinstance(x, str) for x in texts)):
+        raise HTTPException(400, "texts debe ser una lista de textos.")
+    spans = body.get("spans") if isinstance(body.get("spans"), list) else None
+    want_phrases = texts is None or bool(body.get("phrases"))
+    plan = body.get("plan") if isinstance(body.get("plan"), dict) else None
+    if (want_phrases or texts) and (plan is None or not plan.get("phrases")):
+        plan = jobstore.get_plan(job_id)[0] or plan or {}
+    out = {"lang": lang}
+    t0 = time.time()
     try:
-        phrases_en = pipeline.translate_mod.translate_phrases(plan["phrases"])
-        titles = [h.get("title", "") for h in plan.get("highlights", [])]
-        titles_en = pipeline.translate_mod.translate_texts(titles)
+        if texts is not None:
+            if lang == "es":
+                out["texts_es"], out["untranslated"] = list(texts), []
+            else:
+                words = _plan_words(plan)
+                ctx = []
+                for i, t in enumerate(texts):
+                    sp = spans[i] if spans and i < len(spans) else None
+                    c = _span_context(plan, sp[0], sp[1]) if isinstance(sp, (list, tuple)) and \
+                        len(sp) == 2 else None
+                    ctx.append(c or tm.spoken_context(t, words))
+                tr, miss, err = tm.translate_titles(list(texts), lang, ctx)
+                real = [i for i, t in enumerate(texts) if not tm.neutral(t)]
+                if real and set(real) <= set(miss):
+                    raise HTTPException(503, _llm_unavailable_msg(err) if err else
+                                        "La IA local no tradujo ningún texto; intenta de nuevo.")
+                out[f"texts_{lang}"], out["untranslated"] = tr, miss
+        if want_phrases:
+            phrases = (plan or {}).get("phrases") or []
+            titles = [h.get("title", "") for h in (plan or {}).get("highlights") or []
+                      if isinstance(h, dict)]
+            if lang == "es":
+                out["phrases_es"], out["titles_es"] = phrases, titles
+            else:
+                info = {}
+                out[f"phrases_{lang}"] = tm.translate_phrases(phrases, lang, info) if phrases else []
+                if phrases and len(info.get("untranslated") or []) >= len(phrases):
+                    raise HTTPException(503, _llm_unavailable_msg(info.get("error")) if info.get("error")
+                                        else "La IA local no tradujo los subtítulos; intenta de nuevo.")
+                out["phrases_untranslated"] = info.get("untranslated") or []
+                out[f"titles_{lang}"] = tm.translate_texts(titles, lang) if titles else []
+    except HTTPException:
+        raise
     except Exception as e:  # noqa
         msg = str(e)
         if "11434" in msg or "Connection refused" in msg or "urlopen" in msg:
-            msg = ("La traducción usa la IA local (Ollama), que no está disponible. "
-                   f"Revisa que la IA de lenguaje ({paths.LLM_MODEL}) esté instalada.")
+            msg = _llm_unavailable_msg(None)
         raise HTTPException(500, f"Traducción falló: {msg}")
-    return {"phrases_en": phrases_en, "titles_en": titles_en}
+    out["ms"] = round((time.time() - t0) * 1000)
+    return out
 
 
 _PHASE_SEEN = {}
@@ -2763,11 +3850,249 @@ def status(job_id: str, plan: int | None = None, rev: int | None = None):
     return JSONResponse(st)
 
 
+# ---- proxy del video del trabajo para el Studio (seeks rapidos) ----
+# El video del trabajo (compuesto a 1620x2880 o el 4K subido) tiene GOP largo y mucha
+# resolucion: cada seek del Studio decodifica mucho. El proxy es H.264 con el lado corto a 720,
+# GOP de ~1/3 s, mismo reloj (el Studio usa el tiempo ORIGINAL del plan), color bt709 (HDR con
+# el mismo tonemap que el render) y audio AAC. Se genera en segundo plano al llegar a review
+# (tarea lateral `proxy`) y se sirve con GET /source/{job}?proxy=1.
+PROXY_SHORT = 720
+
+
+def _src_proxy_path(job_id):
+    return paths.WORK / f"{job_id}_src720.mp4"
+
+
+def _src_proxy_ok(job_id, src):
+    """El proxy existe y corresponde a la fuente actual (tamano y fecha guardados al crearlo)."""
+    pv = _src_proxy_path(job_id)
+    meta = pv.with_suffix(".json")
+    try:
+        m = json.loads(meta.read_text())
+        st = Path(src).stat()
+        return pv.exists() and m.get("size") == st.st_size and m.get("mtime") == int(st.st_mtime)
+    except Exception:  # noqa
+        return False
+
+
+def _ff_low(cmd, total_s=None, on_pct=None, cancel=None):
+    """ffmpeg con progreso real y cancelacion (como video_io.run_ffmpeg) pero con PRIORIDAD BAJA
+    (nice -n 10, como _make_proxy): el proxy corre junto al analisis de fondo al llegar a review
+    y no debe quitarle CPU. Si falla con videotoolbox reintenta con libx264."""
+    import tempfile
+    from motion import video_io as V
+    low = ["nice", "-n", "10"] if not paths.IS_WINDOWS and shutil.which("nice") else []
+
+    def once(c):
+        full = low + [c[0], "-hide_banner", "-nostdin", "-progress", "pipe:1", "-nostats"] + c[1:]
+        with tempfile.TemporaryFile() as err:
+            pr = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=err, text=True, bufsize=1)
+            try:
+                for line in pr.stdout:
+                    if cancel and cancel():
+                        raise V.Canceled("cancelado")
+                    if on_pct and total_s and line.startswith("out_time_us="):
+                        try:
+                            on_pct(min(100.0, int(line.split("=")[1]) / 1e6 / total_s * 100))
+                        except ValueError:
+                            continue
+                pr.wait()
+            except BaseException:
+                pr.kill()
+                pr.wait()
+                raise
+            if pr.returncode != 0:
+                err.seek(0)
+                tail = err.read().decode("utf-8", "replace").strip().splitlines()[-4:]
+                raise RuntimeError("ffmpeg fallo: " + " | ".join(tail))
+    try:
+        once(cmd)
+    except RuntimeError:
+        if "h264_videotoolbox" not in cmd:
+            raise
+        once(paths._to_libx264(cmd))
+
+
+def make_src_proxy(src, dst, on_pct=None, cancel=None):
+    """Codifica el proxy de `src` en `dst` (temporal + renombrado: nunca queda a medias). Mismo
+    reloj que la fuente: `-enc_time_base demux` conserva el pts EXACTO de cada cuadro (sin eso el
+    encoder redondea a 1/fps y el primer cuadro se corria ~12 ms)."""
+    from motion import video_io as V
+    info = V.probe(src)
+    w, h = int(info.get("w") or 0), int(info.get("h") or 0)
+    if not w or not h:
+        raise RuntimeError("fuente sin video")
+    k = min(1.0, PROXY_SHORT / float(min(w, h)))
+    W, H = max(2, int(round(w * k / 2)) * 2), max(2, int(round(h * k / 2)) * 2)
+    fps = float(info.get("fps") or 30.0) or 30.0
+    gop = max(6, int(round(fps / 3)))
+    vf = ",".join([f"scale={W}:{H}:flags=bicubic"] + V.tonemap_filters(info))
+    dst = Path(dst)
+    tmp = dst.with_name(dst.stem + ".part.mp4")
+    cmd = ([str(paths.FFMPEG), "-y", "-v", "error"] + V.hwaccel_args() +
+           ["-i", str(src), "-map", "0:v:0", "-map", "0:a:0?", "-vf", vf,
+            "-enc_time_base", "demux"] +
+           V.encoder_args(W, H, fps, "draft", gop=gop) +
+           ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-movflags", "+faststart", str(tmp)])
+    try:
+        _ff_low(cmd, total_s=float(info.get("duration") or 0) or None, on_pct=on_pct, cancel=cancel)
+        tmp.replace(dst)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return {"W": W, "H": H, "gop": gop}
+
+
+def _src_sig(src):
+    try:
+        st = Path(src).stat()
+        return {"src_size": st.st_size, "src_mtime": int(st.st_mtime)}
+    except OSError:
+        return {}
+
+
+def _src_proxy_failed(job_id, src):
+    """El proxy de ESTA fuente (mismo tamano y fecha) ya fallo: no se reintenta en cada pedido."""
+    try:
+        pv = jobstore.side_get(job_id, "proxy") or {}
+    except Exception:  # noqa
+        return False
+    sig = _src_sig(src)
+    return pv.get("state") == "error" and bool(sig) and \
+        pv.get("src_size") == sig["src_size"] and pv.get("src_mtime") == sig["src_mtime"]
+
+
+def _kick_src_proxy(job_id, restart=False):
+    """Genera el proxy del trabajo en segundo plano (tarea lateral `proxy`). Una fuente cuyo
+    proxy ya fallo no se reintenta salvo con restart=True."""
+    job = jobstore.get_light(job_id)
+    if not job:
+        return False
+    src = INPUT / f"{job_id}{job['ext']}"
+    if not src.exists() or os.environ.get("REELFY_SRC_PROXY", "1") == "0":
+        return False
+    if _src_proxy_ok(job_id, src) and not restart:
+        return False
+    if _side_running(job_id, "proxy"):
+        return False
+    if not restart and _src_proxy_failed(job_id, src):
+        return False
+    tok = uuid.uuid4().hex[:8]
+    sig = _src_sig(src)
+    jobstore.side_update(job_id, "proxy", replace=True, state="queued", pct=0, tok=tok,
+                         url=None, message="En cola", **sig)
+
+    def run(jid, ev):
+        from motion import video_io as V
+        tick = _Throttle(jid, "proxy", ev, tok)
+        t0 = time.time()
+        dst = _src_proxy_path(jid)
+        try:
+            with _PROXY_SEM:           # uno a la vez (tambien los proxies de /sources)
+                if ev.is_set():
+                    raise V.Canceled("cancelado")
+                tick.set(state="running", message="Preparando el video para editar…")
+                st = src.stat()
+                info = make_src_proxy(src, dst, on_pct=lambda p: tick(pct=round(float(p), 1)),
+                                      cancel=ev.is_set)
+            dst.with_suffix(".json").write_text(json.dumps(
+                {"size": st.st_size, "mtime": int(st.st_mtime), **info}))
+            tick.set(state="done", pct=100, file=dst.name, url=f"/source/{jid}?proxy=1",
+                     t=round(time.time() - t0, 1), W=info["W"], H=info["H"], message="Listo")
+        except V.Canceled:
+            tick.set(state="canceled", message="Cancelado")
+        except Exception as e:  # noqa: el proxy es una optimizacion: el original sigue sirviendo
+            traceback.print_exc()
+            tick.set(state="error", error=str(e)[:300], message="Sin proxy (se usa el original)")
+    return _start_side(job_id, "proxy", run, key="proxy", restart=False)
+
+
 @app.get("/source/{job_id}")
-def source(job_id: str):
+def source(job_id: str, proxy: int = 0):
+    """Video del trabajo para el Studio. `?proxy=1`: el proxy H.264 720p (seeks rapidos, mismo
+    reloj) si ya esta; si no, el original y lo genera en segundo plano (cabecera
+    X-Reelfy-Proxy: ready|pending|none; `none` = no habra proxy, p. ej. ya fallo para esta
+    fuente; el avance en /status `proxy_state/proxy_pct/proxy_url`)."""
     job = _job_or_404(job_id)
     f = INPUT / f"{job_id}{job['ext']}"
-    return FileResponse(f, media_type="video/mp4", headers={"Accept-Ranges": "bytes"})
+    if not f.exists():
+        raise HTTPException(404, "No existe")
+    hdr = {"Accept-Ranges": "bytes"}
+    if proxy:
+        if _src_proxy_ok(job_id, f):
+            return FileResponse(_src_proxy_path(job_id), media_type="video/mp4",
+                                headers={**hdr, "X-Reelfy-Proxy": "ready"})
+        _kick_src_proxy(job_id)
+        hdr["X-Reelfy-Proxy"] = "pending" if _side_running(job_id, "proxy") else "none"
+    return FileResponse(f, media_type="video/mp4", headers=hdr)
+
+
+# ---- miniatura del proyecto (Proyectos recientes) ----
+def _thumb_time(plan):
+    """Instante (original) para la miniatura: ~1 s dentro del primer tramo conservado."""
+    try:
+        from motion import timeline as TL
+        tl = TL.Timeline.from_plan(plan)
+        if tl.keeps:
+            a, b = tl.keeps[0]
+            return a + min(1.0, max(0.0, (b - a) * 0.4))
+    except Exception:  # noqa
+        pass
+    return min(1.0, float((plan or {}).get("duration") or 2.0) / 2)
+
+
+_THUMB_LOCKS = {}
+
+
+def _thumb_paths(job_id):
+    return paths.WORK / f"{job_id}_thumb.jpg", paths.WORK / f"{job_id}_thumb.err"
+
+
+@app.get("/thumb/{job_id}")
+def job_thumb(job_id: str):
+    """Miniatura JPEG (alto 360) del video del trabajo; se genera una vez y se cachea. Pedidos
+    simultaneos esperan al primero (candado por trabajo); un video que no se pudo decodificar
+    deja una marca y responde 404 sin volver a lanzar ffmpeg."""
+    job = _job_or_404(job_id)
+    out, bad = _thumb_paths(job_id)
+    hdr = {"Cache-Control": "max-age=300"}
+    if out.exists():
+        return FileResponse(out, media_type="image/jpeg", headers=hdr)
+    src = INPUT / f"{job_id}{job['ext']}"
+    if not src.exists():
+        raise HTTPException(404, "Sin video")
+    with _SIDE_LOCK:
+        lock = _THUMB_LOCKS.setdefault(job_id, threading.Lock())
+    with lock:
+        if out.exists():                        # lo genero el pedido que tenia el candado
+            return FileResponse(out, media_type="image/jpeg", headers=hdr)
+        try:
+            if bad.exists() and bad.read_text().strip() == json.dumps(_src_sig(src), sort_keys=True):
+                raise HTTPException(404, "Sin miniatura")
+        except OSError:
+            pass
+        from motion import video_io as V
+        plan, _ = jobstore.get_plan(job_id)
+        tmp = out.with_name(f"{out.stem}.{uuid.uuid4().hex[:8]}.part.jpg")
+        try:
+            t = _thumb_time(plan) if plan else 1.0
+            info = V.probe(src)
+            vf = ",".join(["scale=-2:360:flags=bicubic"] + V.tonemap_filters(info))
+            subprocess.run([str(paths.FFMPEG), "-v", "error", "-y", "-ss", f"{t:.3f}", "-i", str(src),
+                            "-frames:v", "1", "-vf", vf, "-q:v", "4", str(tmp)],
+                           check=True, timeout=60, stderr=subprocess.DEVNULL)
+            if not tmp.exists() or tmp.stat().st_size == 0:
+                raise RuntimeError("ffmpeg no escribio la miniatura")
+            tmp.replace(out)
+        except Exception as e:  # noqa
+            tmp.unlink(missing_ok=True)
+            print(f"   miniatura de {job_id}: {e}")
+            try:
+                bad.write_text(json.dumps(_src_sig(src), sort_keys=True))
+            except OSError:
+                pass
+            raise HTTPException(404, "Sin miniatura")
+    return FileResponse(out, media_type="image/jpeg", headers=hdr)
 
 
 @app.get("/video/{filename}")

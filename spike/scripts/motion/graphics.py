@@ -23,7 +23,15 @@ Parametros extra (opcionales, no normativos) que entiende este modulo:
   - icon: `style` (clean|sketch), `hatch` (bool, sketch).
   - card: `accent` (color de acento), `label` (texto del boton en link), `map_label`, `days`
     (schedule: indices 0..6 disponibles), `cursor` (bool).
-  - cta: `button`, `button_done`, `subtitle`, `avatar` (initial|face).
+  - cta: `button`, `button_done`, `subtitle`, `avatar` (initial|face|image). Perfil (3.2):
+    follow con `title` (nombre) + `platform` + `handle` (icono de la red y @usuario en la segunda
+    linea), `initials` y `media` (foto de perfil: render inyecta `_media_image`); link_below con
+    `display` (texto corto del enlace en una segunda linea) y `platform`/`icon`.
+  - card: variante `booking` (reservas: encabezado con icono, `title`/`display` y boton `label`)
+    y `platform` (icono de la red en link/booking).
+  - socials (perfil): chips de plataforma con icono de marca + usuario (`links` [{platform, text}],
+    `layout` row|column, `variant` chips|watermark, `theme`, `icon_style` brand|mono, `title`,
+    `stagger`, `opacity`); entrada escalonada.
   - sticker_text: `text`, `font`, `border` (bool).
 """
 from __future__ import annotations
@@ -39,6 +47,7 @@ import skia
 
 from . import assets, ease
 from . import ctx as C
+from . import profile as PR
 
 TAU = math.tau
 
@@ -352,12 +361,24 @@ DEFAULTS = {
     # la barra usa su propia clave `bar_y` (borde superior, fraccion de H); x/y/size comunes no aplican
     "progress": {"thickness": 8.0, "bar_y": 0.0, "y": 0.0, "anim_in": "fade", "anim_out": "none"},
     "sticker_text": {"x": XC, "y": 0.35, "size": 0.062, "anim_in": "pop", "anim_out": "pop_out"},
+    # imagen o video propio en ventana (PiP), contrato de schema.py: `media` = {sid, type:
+    # image|video, name, w, h, dur} (render lo decodifica e inyecta item['_media_image']); size =
+    # ancho maximo / W (alto maximo 1.78x); aspect = ancho/alto (null = el del medio); fit
+    # cover|contain; focus [x, y] (null = centro); zoom 1..4; frame = marco blanco; radius px ref
+    # chips de redes del perfil: size = alto del chip / W
+    "socials": {"x": XC, "y": 0.62, "size": 0.074, "anim_in": "pop", "anim_out": "fade", "layout": "column",
+                "variant": "chips", "theme": "light", "icon_style": "brand", "stagger": 0.09},
+    "media": {"x": XC, "y": 0.34, "size": 0.45, "anim_in": "pop", "anim_out": "fade", "media": None,
+              "fit": "cover", "focus": None, "zoom": 1.0, "aspect": None, "frame": True, "radius": 14.0,
+              "shadow": 0.55, "rotation": 0.0, "media_in": 0.0, "loop": True},
 }
+MEDIA_FIT = ("cover", "contain")
 CTA_SIZE = {"follow": 0.72, "link_below": 0.56, "comment": 0.62, "save": 0.62, "share": 0.62}
 # rango legible por kind/variante (fraccion de W): un valor fuera de rango (p. ej. el size=0.18
 # generico del esquema) se acota en vez de dibujar algo ilegible o que se sale de SAFE
 SIZE_RANGE = {"card": (0.5, SAFE_W), "follow": (0.56, SAFE_W), "link_below": (0.4, 0.74),
-              "cta": (0.45, SAFE_W), "sticker_text": (0.035, 0.16), "lower_third": (0.03, 0.09)}
+              "cta": (0.45, SAFE_W), "sticker_text": (0.035, 0.16), "lower_third": (0.03, 0.09),
+              "media": (0.05, 1.0), "socials": (0.035, 0.14), "watermark": (0.022, 0.07)}
 
 
 def size_of(item: dict, key: str, default: float) -> float:
@@ -365,7 +386,7 @@ def size_of(item: dict, key: str, default: float) -> float:
     return _clamp(_num(item, "size", default), lo, hi)
 
 
-_COLOR_KEYS = ("color", "accent", "badge_color", "bg", "fg", "arrow_color", "button_color")
+_COLOR_KEYS = ("color", "accent", "badge_color", "bg", "fg", "arrow_color", "button_color", "border_color")
 
 
 def _color_ok(v) -> bool:
@@ -387,7 +408,7 @@ def sanitize(item: dict) -> dict:
             it.pop(k)
     for k in ("x", "y", "size", "rotation", "intensity", "stroke", "wiggle", "shadow", "thickness",
               "draw_time", "in_dur", "out_dur", "aspect", "bend", "glow", "press_at", "tilt", "bar_y", "margin",
-              "progress"):
+              "progress", "radius", "border", "stagger", "opacity", "arrow_scale", "width", "cols", "backdrop"):
         if k in it and it[k] is not None:
             try:
                 v = float(it[k])
@@ -403,10 +424,11 @@ def sanitize(item: dict) -> dict:
         except Exception:
             it["path_to"] = None
     for k in ("name", "variant", "badge", "style", "theme", "icon", "anim_in", "anim_out", "font", "avatar",
-              "anchor"):
+              "anchor", "platform", "layout", "icon_style"):
         if k in it and not isinstance(it[k], str):
             it.pop(k)
-    for k in ("title", "subtitle", "value", "label", "text", "handle", "button", "button_done", "map_label"):
+    for k in ("title", "subtitle", "value", "label", "text", "handle", "button", "button_done", "map_label",
+              "display", "initials"):
         v = it.get(k)
         if v is None:
             continue
@@ -420,6 +442,11 @@ def sanitize(item: dict) -> dict:
             if isinstance(its, (list, tuple)) else []
     if "days" in it and not isinstance(it["days"], (list, tuple)):
         it.pop("days")
+    if "links" in it:
+        lk = it["links"]
+        it["links"] = [{"platform": str(x.get("platform") or "web"), "text": str(x.get("text") or "")}
+                       for x in (lk if isinstance(lk, (list, tuple)) else [])
+                       if isinstance(x, dict) and isinstance(x.get("text", ""), (str, int, float))][:8]
     for k in ("anim_in", "anim_out"):
         if it.get(k) is not None:
             it[k] = ANIM_ALIASES.get(it[k], it[k])
@@ -1078,6 +1105,14 @@ def draw_doodle(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> 
             gp.setAlphaf(0.55 * glow * a)
             gp.setMaskFilter(blur_mask(ctx.px(14)))
             canvas.drawPath(path, gp)
+        bc = item.get("border_color")
+        if bc and not path.isEmpty():
+            # contorno (p. ej. oscuro bajo un trazo blanco sobre un fondo claro): se lee en
+            # cualquier fondo
+            bp = skia.Paint(Color=C.color(bc), AntiAlias=True, Style=skia.Paint.kStroke_Style,
+                            StrokeWidth=ctx.px(_num(item, "border", 5.0)), StrokeJoin=skia.Paint.kRound_Join)
+            bp.setAlphaf(a * 0.9)
+            canvas.drawPath(path, bp)
         if not path.isEmpty():
             p = skia.Paint(Color=col, AntiAlias=True)
             p.setAlphaf(a * (skia.ColorGetA(col) / 255.0))
@@ -1411,8 +1446,10 @@ def draw_icon(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> No
 
 # ============================================================== tarjetas (card)
 
-CARD_VARIANTS = ("price", "location", "schedule", "link", "phone", "rating", "checklist", "stat", "generic")
+CARD_VARIANTS = ("price", "location", "schedule", "link", "phone", "rating", "checklist", "stat", "generic",
+                 "booking")
 CARD_ICON = {"price": "cash", "location": "map-pin", "schedule": "calendar-event", "link": "link",
+             "booking": "calendar-event",
              "phone": "phone", "rating": "star", "checklist": "list-check", "stat": "trending-up",
              "generic": "info-circle"}
 
@@ -2058,9 +2095,20 @@ def _card_rows(item, th, F, u, inner_w, ctx) -> list[_Row]:
         if item.get("label"):
             rows.append(_row_button(item, th, F, u, inner_w, ctx, str(item["label"]), "arrow-down",
                                     cursor=bool(_g(item, "cursor", False))))
-    elif v == "link":
-        rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or "Agenda tu cita", sub))
-        rows.append(_row_button(item, th, F, u, inner_w, ctx, str(item.get("label") or value or "Agenda aqui"),
+    elif v in ("link", "booking"):
+        # link/booking con `platform`: icono de la red (insignia con su color de marca si es red
+        # social) y `display` (texto corto del enlace) como subtitulo
+        plat = item.get("platform")
+        disp = str(item.get("display") or "")
+        if plat and not item.get("icon"):
+            icon = platform_icon(plat, icon)
+        badge = _platform_badge_fn(plat, ctx) if _is_brand(plat) else None
+        rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or "Agenda tu cita", sub or disp,
+                                badge_fn=badge))
+        if v == "booking" and items:
+            rows.append(_row_chips(th, F, u, inner_w, [str(x) for x in items]))
+        rows.append(_row_button(item, th, F, u, inner_w, ctx,
+                                str(item.get("label") or value or ("Agendar cita" if v == "booking" else "Agenda aqui")),
                                 "arrow-right", cursor=bool(_g(item, "cursor", True))))
     elif v == "phone":
         rows.append(_row_header(item, th, F, u, inner_w, ctx, icon, title or "Llamanos", sub,
@@ -2347,25 +2395,35 @@ def draw_background(canvas, kind: str, colors, lt: float, ctx) -> None:
     _cu.draw_background(canvas, kind, colors, lt, ctx)
 
 
-def _avatar(canvas, cx, cy, d, initial: str, pal, a, ctx, face_img=None):
-    ring = skia.Paint(AntiAlias=True, Style=skia.Paint.kStroke_Style, StrokeWidth=d * 0.07)
-    ring.setDither(True)  # degradados sin anillos (8 bits)
-    ring.setShader(skia.GradientShader.MakeSweep(cx, cy, [C.color(pal["accent"]), C.color(pal["warm"]),
-                                                          C.color("#FF3B7F"), C.color(pal["accent"])]))
-    ring.setAlphaf(a)
-    canvas.drawCircle(cx, cy, d / 2, ring)
+IG_COLORS = ("#FEDA75", "#FA7E1E", "#D62976", "#962FBF", "#4F5BD5")
+
+
+def _avatar(canvas, cx, cy, d, initial: str, pal, a, ctx, face_img=None, ring: str | None = None,
+            photo=None):
+    """Avatar redondo con anillo de degradado. `photo` (foto de perfil, ya recortada cuadrada y
+    reducida: _avatar_photo) o `face_img` (recorte de la cara del cuadro); si no, iniciales (1-2
+    letras) sobre un degradado del estilo. `ring` = 'instagram': anillo de historia de Instagram."""
+    ring_p = skia.Paint(AntiAlias=True, Style=skia.Paint.kStroke_Style, StrokeWidth=d * 0.07)
+    ring_p.setDither(True)  # degradados sin anillos (8 bits)
+    cols = list(IG_COLORS) + [IG_COLORS[0]] if ring == "instagram" else \
+        [pal["accent"], pal["warm"], "#FF3B7F", pal["accent"]]
+    ring_p.setShader(skia.GradientShader.MakeSweep(cx, cy, [C.color(c) for c in cols]))
+    ring_p.setAlphaf(a)
+    canvas.drawCircle(cx, cy, d / 2, ring_p)
     inner = d * 0.8
-    if face_img is not None:
-        steps = 0
-        while face_img.width() / (2 ** (steps + 1)) >= inner:
-            steps += 1
-        face_img = downsample(face_img, steps)
+    img = photo if photo is not None else face_img
+    if img is not None:
+        if photo is None:
+            steps = 0
+            while img.width() / (2 ** (steps + 1)) >= inner:
+                steps += 1
+            img = downsample(img, steps)
         canvas.save()
         pth = skia.Path()
         pth.addCircle(cx, cy, inner / 2)
         canvas.clipPath(pth, skia.ClipOp.kIntersect, True)
-        canvas.drawImageRect(face_img, skia.Rect.MakeXYWH(cx - inner / 2, cy - inner / 2, inner, inner), C.SAMPLING_FAST,
-                             skia.Paint(Alphaf=a))
+        canvas.drawImageRect(img, skia.Rect.MakeXYWH(cx - inner / 2, cy - inner / 2, inner, inner),
+                             C.SAMPLING_FAST if photo is None else C.SAMPLING_CUBIC, skia.Paint(Alphaf=a))
         canvas.restore()
         return
     g = skia.Paint(AntiAlias=True)
@@ -2376,10 +2434,56 @@ def _avatar(canvas, cx, cy, d, initial: str, pal, a, ctx, face_img=None):
     g.setAlphaf(a)
     canvas.drawCircle(cx, cy, inner / 2, g)
     if initial:
-        f = font("Poppins-Bold", inner * 0.5)
-        draw_text(canvas, initial, cx, cy + inner * 0.18, f, "#FFFFFF", a, align="center")
+        k = 0.5 if len(initial) == 1 else 0.4
+        f = font("Poppins-Bold", inner * k)
+        f = fit_font("Poppins-Bold", initial, inner * k, inner * 0.78, min_px=inner * 0.25)
+        draw_text(canvas, initial, cx, cy + f.getSize() * 0.36, f, "#FFFFFF", a, align="center")
     else:
         paint_icon(canvas, "user", cx, cy, inner * 0.56, "#FFFFFF", a, 1.0, stroke_w=2.2)
+
+
+_AVATAR_CACHE = _LRU(16)
+
+
+def _avatar_photo(item: dict, d: float):
+    """Foto de perfil (medio propio `_media_image`) recortada al cuadrado (con `focus`) y reducida
+    UNA vez al diametro del avatar (cache por imagen y tamano: no se reduce en cada cuadro)."""
+    img = media_image(item)
+    if img is None or img.width() < 4 or img.height() < 4:
+        return None
+    px = max(8, int(round(d * 0.8 * 1.5)))
+    try:
+        uid = img.uniqueID()
+    except Exception:
+        uid = id(img)
+    foc = item.get("focus")
+    key = (uid, px, tuple(foc) if isinstance(foc, (list, tuple)) else None)
+
+    def build():
+        src, _dst = fit_src(img, 1.0, 1.0, "cover", foc, 1.0)
+        # reduccion en escalones de 2x (sin aliasing) y luego al tamano exacto
+        steps = 0
+        while src.width() / (2 ** (steps + 1)) >= px * 1.2:
+            steps += 1
+        sub = img
+        if steps:
+            k = 2 ** steps
+            try:
+                sub = img.makeSubset(skia.IRect.MakeXYWH(int(src.left()), int(src.top()), int(src.width()),
+                                                         int(src.height())))
+                sub = downsample(sub, steps)
+                src_r = skia.Rect.MakeWH(sub.width(), sub.height())
+            except Exception:
+                sub, src_r, k = img, src, 1
+        else:
+            src_r = src
+        surf = C.offscreen(px, px)
+        cv = surf.getCanvas()
+        cv.clear(skia.ColorTRANSPARENT)
+        cv.drawImageRect(sub, src_r, skia.Rect.MakeWH(px, px), C.SAMPLING_CUBIC, skia.Paint(AntiAlias=True))
+        return surf.makeImageSnapshot()
+
+    return _AVATAR_CACHE.get_or(key, build)
 
 
 def _face_crop(ctx) -> skia.Image | None:
@@ -2406,26 +2510,135 @@ def _cta_width(item: dict, key: str, ctx) -> float:
 
 
 def _link_below_layout(item: dict, ctx):
+    """(label, fuente, alto, icono, ancho, display, fuente_display). Con `display` (texto corto del
+    enlace: 'paseo.club/dra-demo') la pastilla es mas alta y lo lleva en una segunda linea."""
     F = _fonts(ctx)
     label = str(item.get("label") or ctx.entities.get("link_label") or "Agenda aqui")
+    disp = str(item.get("display") or "").strip()
     size = _cta_width(item, "link_below", ctx)
+    wfix = _item_width(item, ctx)             # ancho comun de la pila del cierre (0 = natural)
+    if disp:
+        h = size * LINK_TWO_LINE_H
+        ib = h * 0.36
+        # el enlace corto identifica a la persona: la pastilla crece hasta SAFE antes de achicarlo
+        room = max(size * 0.8, SAFE_W * ctx.W - (ib + h * 0.2 + h * 0.8))
+        fb = fit_font(F["title"], label, h * 0.3, room, min_px=h * 0.2)
+        label = ellipsize(fb, label, room)
+        fd = fit_font(F["body"], disp, h * 0.21, room, min_px=h * 0.13)
+        disp = ellipsize(fd, disp, room)
+        bw = max(fb.measureText(label), fd.measureText(disp)) + ib + h * 0.2 + h * 0.8
+        return label, fb, h, ib, min(SAFE_W * ctx.W, max(bw, wfix)), disp, fd
     h = size * 0.2
     fb = fit_font(F["title"], label, h * 0.38, size * 0.9, min_px=h * 0.26)
     label = ellipsize(fb, label, size * 0.9)
     ib = h * 0.42
     bw = fb.measureText(label) + ib + h * 0.2 + h * 1.0
-    return label, fb, h, ib, bw
+    return label, fb, h, ib, min(SAFE_W * ctx.W, max(bw, wfix)), "", None
+
+
+LINK_TWO_LINE_H = 0.25        # alto / ancho de la pastilla link_below con `display`
 
 
 def cta_extent(item: dict, ctx) -> float:
     """Medio ancho en px del CTA ya maquetado (para mantenerlo dentro de SAFE)."""
     v = item.get("variant") or "follow"
     if v == "follow":
-        return _cta_width(item, "follow", ctx) / 2
+        return _follow_width(item, ctx) / 2
     if v == "link_below":
         return _link_below_layout(item, ctx)[4] / 2
     lab = str(item.get("label") or _CTA_LABEL.get(v, ""))
     return _pill_layout(item, lab, ctx)[4] / 2
+
+
+FOLLOW_BTN_TITLE = (0.24, 0.46)   # (fuente, relleno) del boton Seguir con nombre de perfil (x alto)
+FOLLOW_NAME = (0.31, 0.215, 0.19)  # nombre del Seguir: nominal, minimo aceptable de una variante, ultimo recurso (x alto)
+FOLLOW_SUB = (0.22, 0.115)        # @usuario: nominal y minimo (x alto): el usuario NUNCA lleva puntos suspensivos
+FOLLOW_BADGE = 0.44               # insignia de la red sobre el avatar (x diametro del avatar)
+
+
+def _item_width(item: dict, ctx) -> float:
+    """`width` (fraccion de W) del item: ancho comun de la pila del cierre; 0/None = natural."""
+    try:
+        w = float(item.get("width") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return _clamp(w, 0.0, SAFE_W) * ctx.W
+
+
+def _follow_layout(item: dict, ctx) -> dict:
+    """Maquetacion del CTA follow (la comparten el ancho y el dibujo): pastilla que crece para
+    que el nombre y el @usuario quepan (hasta SAFE; `width` = ancho comun de la pila); el nombre
+    largo pasa a su variante corta ('Dra. Guadalupe Fernández Castañeda' -> 'Dra. Guadalupe
+    Fernández') en vez de cortarse; el @usuario se achica pero nunca se trunca; si aun no cabe,
+    el boton se compacta."""
+    F = _fonts(ctx)
+    base = _cta_width(item, "follow", ctx)
+    h = base * 0.17
+    title = str(item.get("title") or "").strip()
+    plat = item.get("platform") if item.get("platform") else None
+    if title:
+        names = PR.name_variants(title) or [title]
+        handle = str(item.get("handle") or "").strip()
+        sub = handle or str(item.get("subtitle") or "").strip()
+        is_handle = bool(handle)
+    else:
+        n0, sub = follow_texts(item, ctx)
+        names = [n0]
+        is_handle = sub.startswith("@")
+    btn_a, btn_b = str(item.get("button") or "Seguir"), str(item.get("button_done") or "Siguiendo")
+    kb, pb = FOLLOW_BTN_TITLE if title else (0.27, 0.7)
+    d = h * 0.74
+    lead = h * 0.13 + d + h * 0.22                 # borde -> inicio del texto
+    trail = h * 0.15 + h * 0.2                      # texto -> boton y boton -> borde
+    sub_font = F["label"] if (title and plat and is_handle) else F["body"]
+
+    def btn_w(k):
+        fb = font(F["title"], h * k)
+        return fb, fb.measureText(btn_a) + h * pb, fb.measureText(btn_b) + h * pb + h * 0.3
+    fb, bw_a, bw_b = btn_w(kb)
+    need_txt = max(font(F["title"], h * FOLLOW_NAME[0]).measureText(names[0]),
+                   font(sub_font, h * FOLLOW_SUB[0]).measureText(sub) if sub else 0.0)
+    if title:
+        W_ = max(base, _item_width(item, ctx), lead + need_txt + trail + max(bw_a, bw_b))
+    else:
+        W_ = max(base, _item_width(item, ctx))        # sin perfil: el ancho de `size` (como antes)
+    W_ = min(SAFE_W * ctx.W, W_)
+    maxw = W_ - lead - trail - max(bw_a, bw_b)
+    # el @usuario completo manda: si ni al minimo cabe, el boton se compacta (hasta 0.72x)
+    if sub and is_handle:
+        k = kb
+        while font(sub_font, h * FOLLOW_SUB[1]).measureText(sub) > maxw and k > kb * 0.72:
+            k *= 0.92
+            fb, bw_a, bw_b = btn_w(k)
+            maxw = W_ - lead - trail - max(bw_a, bw_b)
+        kb = k
+    name, fn_ = names[-1], None
+    for nm in names:
+        f_ = fit_font(F["title"], nm, h * FOLLOW_NAME[0], maxw, min_px=h * FOLLOW_NAME[1])
+        if f_.measureText(nm) <= maxw + 0.5:
+            name, fn_ = nm, f_
+            break
+    if fn_ is None:
+        fn_ = fit_font(F["title"], name, h * FOLLOW_NAME[0], maxw, min_px=h * FOLLOW_NAME[2])
+        name = ellipsize(fn_, name, maxw)
+    fs_ = None
+    if sub:
+        if is_handle:
+            fs_ = fit_font(sub_font, sub, h * FOLLOW_SUB[0], maxw, min_px=h * FOLLOW_SUB[1] * 0.9)
+        else:
+            fs_ = fit_font(sub_font, sub, h * FOLLOW_SUB[0], maxw, min_px=h * 0.15)
+            sub = ellipsize(fs_, sub, maxw)
+    return {"W": W_, "h": h, "d": d, "name": name, "fn": fn_, "sub": sub, "fs": fs_, "fb": fb, "kb": kb,
+            "bw_a": bw_a, "bw_b": bw_b, "maxw": maxw, "badge": plat if (title and plat and is_handle) else None,
+            "title": title}
+
+
+def _follow_width(item: dict, ctx) -> float:
+    """Ancho px del CTA follow (ver _follow_layout). El alto no cambia (el director lo estima
+    con `size`)."""
+    if not str(item.get("title") or "").strip() and not item.get("width"):
+        return _cta_width(item, "follow", ctx)
+    return _follow_layout(item, ctx)["W"]
 
 
 def follow_texts(item: dict, ctx) -> tuple[str, str]:
@@ -2436,7 +2649,7 @@ def follow_texts(item: dict, ctx) -> tuple[str, str]:
     label = str(item.get("label") or "").strip()
     name = str(item.get("handle") or ent.get("handle") or ent.get("name") or "").strip()
     if not name:
-        name = label or "Sigueme para mas"
+        name = label or "Sígueme para más"
         label = ""
     sub = str(item.get("subtitle") or "").strip()
     if not sub:
@@ -2447,50 +2660,63 @@ def follow_texts(item: dict, ctx) -> tuple[str, str]:
 
 def _cta_follow(canvas, item, lt, dur, ctx, a):
     pal = ctx.palette
-    F = _fonts(ctx)
-    name, sub = follow_texts(item, ctx)
+    L = _follow_layout(item, ctx)
+    # perfil: `title` = nombre en la primera linea; la segunda = @usuario; la insignia de la red
+    # va grande sobre el avatar (como en la app), no diminuta junto al usuario
+    title = L["title"]
+    name, sub, fn_, fs_ = L["name"], L["sub"], L["fn"], L["fs"]
+    plat = item.get("platform") if item.get("platform") else None
     btn_a, btn_b = str(item.get("button") or "Seguir"), str(item.get("button_done") or "Siguiendo")
-    W_ = _cta_width(item, "follow", ctx)
-    h = W_ * 0.17
+    h = L["h"]
+    W_ = L["W"]
     btn_col = item.get("button_color") or item.get("color") or "#FF3B5C"
     if C.luminance(btn_col) > 0.85:  # blanco (default del esquema) no sirve de boton sobre pastilla blanca
         btn_col = "#FF3B5C"
     btn_fg = "#141418" if C.luminance(btn_col) > 0.6 else "#FFFFFF"
-    initial = re.sub(r"^(Dra?\.?|Lic\.?|Ing\.?|Mtr[oa]\.?)\s+", "", name.lstrip("@")).strip()[:1].upper()
+    initial = str(item.get("initials") or "").strip()[:2].upper()
+    if not initial:
+        initial = PR.initials(title) if title else \
+            re.sub(r"^(Dra?\.?|Lic\.?|Ing\.?|Mtr[oa]\.?)\s+", "", name.lstrip("@")).strip()[:1].upper()
     press_at = _num(item, "press_at", 1.05)
     rr = skia.RRect.MakeRectXY(skia.Rect.MakeXYWH(-W_ / 2, -h / 2, W_, h), h / 2, h / 2)
     soft_shadow(canvas, rr, ctx, a)
     canvas.drawRRect(rr, C.fill("#FFFFFF", a))
-    d = h * 0.74
+    d = L["d"]
     ax = -W_ / 2 + h * 0.13 + d / 2
     face = _face_crop(ctx) if item.get("avatar") == "face" else None
+    photo = _avatar_photo(item, d) if face is None and item.get("avatar") != "initial" else None
     ae = spring(lt - 0.03, 3.0, 0.5)  # el contenido entra casi con la pastilla (sin 'placeholder')
     if ae > 0.01:
         canvas.save()
         canvas.translate(ax, 0)
         canvas.scale(ae, ae)
-        _avatar(canvas, 0, 0, d, initial, pal, a, ctx, face)
+        _avatar(canvas, 0, 0, d, initial, pal, a, ctx, face, ring=plat, photo=photo)
         canvas.restore()
+    if L["badge"]:
+        # insignia de la red en la esquina del avatar, con aro blanco (~0.44 del avatar)
+        be_ = spring(lt - 0.22, 3.0, 0.5)
+        if be_ > 0.01:
+            bd = d * FOLLOW_BADGE
+            bx_, by_ = ax + d * 0.36, d * 0.33
+            canvas.save()
+            canvas.translate(bx_, by_)
+            canvas.scale(be_, be_)
+            canvas.drawCircle(0, 0, bd / 2 + max(1.5, h * 0.028), C.fill("#FFFFFF", a))
+            draw_platform_badge(canvas, L["badge"], 0, 0, bd, a, ctx, shadow=False)
+            canvas.restore()
     done = lt >= press_at + 0.08
-    fb = font(F["title"], h * 0.27)
-    bw_a = fb.measureText(btn_a) + h * 0.7
-    bw_b = fb.measureText(btn_b) + h * 0.7 + h * 0.3
+    fb = L["fb"]
+    bw_a, bw_b = L["bw_a"], L["bw_b"]
     tb = ease.out_cubic(_clamp((lt - press_at - 0.08) / 0.3))
     bw = bw_a + (bw_b - bw_a) * tb
     bh = h * 0.56
     bx = W_ / 2 - h * 0.2 - bw
     tx = ax + d / 2 + h * 0.22
-    # el texto se ajusta al boton en su ancho maximo ('Siguiendo'): no cambia al presionar
-    maxw = (W_ / 2 - h * 0.2 - max(bw_a, bw_b)) - tx - h * 0.15
-    fn_ = fit_font(F["title"], name, h * 0.31, maxw, min_px=h * 0.2)
-    name = ellipsize(fn_, name, maxw)
-    fs_ = fit_font(F["body"], sub, h * 0.22, maxw, min_px=h * 0.15) if sub else None
-    if sub:
-        sub = ellipsize(fs_, sub, maxw)
     te = ease.out_cubic(_clamp((lt - 0.08) / 0.35))
     if sub:
-        draw_text(canvas, name, tx + (1 - te) * h * 0.2, -h * 0.02, fn_, "#15151B", a * te)
-        draw_text(canvas, sub, tx + (1 - te) * h * 0.2, h * 0.25, fs_, "#6C6D7A", a * te)
+        ox = tx + (1 - te) * h * 0.2
+        draw_text(canvas, name, ox, -h * 0.02, fn_, "#15151B", a * te)
+        draw_text(canvas, sub, ox, h * 0.25, fs_, "#55566A" if L["badge"] else "#6C6D7A", a * te)
     else:
         draw_text(canvas, name, tx + (1 - te) * h * 0.2, h * 0.1, fn_, "#15151B", a * te)
     pr = lt - press_at
@@ -2532,7 +2758,7 @@ def _cta_link_below(canvas, item, lt, dur, ctx, a):
     F = _fonts(ctx)
     acc = item.get("color") or pal["accent"]
     on = "#141418" if C.luminance(acc) > 0.55 else "#FFFFFF"
-    label, fb, h, ib, bw = _link_below_layout(item, ctx)
+    label, fb, h, ib, bw, disp, fd = _link_below_layout(item, ctx)
     br = skia.Rect.MakeXYWH(-bw / 2, -h / 2, bw, h)
     rr = skia.RRect.MakeRectXY(br, h / 2, h / 2)
     soft_shadow(canvas, rr, ctx, a)
@@ -2549,10 +2775,20 @@ def _cta_link_below(canvas, item, lt, dur, ctx, a):
                                                      C.color("#FFFFFF", 0)]))
         canvas.drawRect(br, gp)
         canvas.restore()
-    x1 = -(fb.measureText(label) + ib + h * 0.2) / 2
-    paint_icon(canvas, item.get("icon") or "calendar-event", x1 + ib / 2, 0, ib, on, a,
-               _clamp((lt - 0.15) / 0.5), stroke_w=2.3)
-    draw_text(canvas, label, x1 + ib + h * 0.2, fb.getSize() * 0.36, fb, on, a)
+    icon = item.get("icon") or (platform_icon(item.get("platform"), "calendar-event") if item.get("platform")
+                                else "calendar-event")
+    if disp:
+        tw = max(fb.measureText(label), fd.measureText(disp))
+        x1 = -(tw + ib + h * 0.2) / 2
+        paint_icon(canvas, icon, x1 + ib / 2, 0, ib, on, a, _clamp((lt - 0.15) / 0.5), stroke_w=2.3)
+        tx = x1 + ib + h * 0.2
+        draw_text(canvas, label, tx, -h * 0.03, fb, on, a)
+        de = ease.out_cubic(_clamp((lt - 0.2) / 0.35))
+        draw_text(canvas, disp, tx, h * 0.27, fd, on, a * 0.78 * de)
+    else:
+        x1 = -(fb.measureText(label) + ib + h * 0.2) / 2
+        paint_icon(canvas, icon, x1 + ib / 2, 0, ib, on, a, _clamp((lt - 0.15) / 0.5), stroke_w=2.3)
+        draw_text(canvas, label, x1 + ib + h * 0.2, fb.getSize() * 0.36, fb, on, a)
     # flecha dibujada a mano que rebota hacia abajo; hereda el alpha del CTA (fade de salida)
     ap = _clamp((lt - 0.25) / 0.4)
     # `arrow_scale` (0.4..1): flecha mas corta cuando abajo hay subtitulos; 0 = sin flecha
@@ -2778,6 +3014,382 @@ def draw_sticker_text(canvas: skia.Canvas, item: dict, lt: float, dur: float, ct
         draw_text(canvas, text, 0, fnt.getSize() * 0.35, fnt, fg, a, align="center")
 
 
+def media_image(item: dict):
+    """Imagen del medio propio que inyecta render (`_media_image`: skia.Image o RGBA numpy) o None."""
+    img = item.get("_media_image")
+    if img is None:
+        return None
+    if isinstance(img, np.ndarray):
+        try:
+            arr = img if img.shape[-1] == 4 else np.dstack([img, np.full(img.shape[:2], 255, np.uint8)])
+            return C.image_from_rgba(np.ascontiguousarray(arr.astype(np.uint8)))
+        except Exception:
+            return None
+    return img if hasattr(img, "width") else None
+
+
+def media_box(item: dict, img, W: float) -> tuple[float, float]:
+    """(ancho, alto) px de la ventana: como la vista en vivo del Studio y el respaldo del motor.
+    Ancho maximo size*W y alto maximo 1.78x ese ancho; sin `aspect` toma la proporcion del medio
+    (o la de media.w/h si aun no hay imagen); con `aspect` (ancho/alto) usa esa."""
+    size = _clamp(_num(item, "size", DEFAULTS["media"]["size"]), 0.05, 1.0)
+    maxw, maxh = size * W, size * W * 1.78
+    asp = _num(item, "aspect", 0.0) if item.get("aspect") is not None else 0.0
+    if asp > 0:
+        asp = _clamp(asp, 0.3, 3.0)
+        w = min(maxw, maxh * asp)
+        return w, w / asp
+    iw = ih = 0.0
+    if img is not None:
+        iw, ih = float(img.width()), float(img.height())
+    else:
+        m = item.get("media") if isinstance(item.get("media"), dict) else {}
+        try:
+            iw, ih = float(m.get("w") or 0), float(m.get("h") or 0)
+        except (TypeError, ValueError):
+            iw = ih = 0.0
+    if iw <= 0 or ih <= 0:
+        iw, ih = 4.0, 5.0
+    k = min(maxw / iw, maxh / ih)
+    return iw * k, ih * k
+
+
+def fit_src(img, dst_w: float, dst_h: float, fit: str = "cover", focus=None, zoom: float = 1.0) -> tuple:
+    """(rect fuente, rect destino centrado en 0) para dibujar `img` en una ventana dst_w x dst_h.
+    cover: recorta y llena, centrado en `focus` [x, y] (normalizado; None = centro) y acercado
+    `zoom`; contain: cabe entera (con zoom > 1 se acerca igual)."""
+    iw, ih = float(img.width()), float(img.height())
+    z = _clamp(float(zoom or 1.0), 1.0, 4.0)
+    fx, fy = 0.5, 0.5
+    if isinstance(focus, (list, tuple)) and len(focus) >= 2:
+        try:
+            fx, fy = _clamp(float(focus[0])), _clamp(float(focus[1]))
+        except (TypeError, ValueError):
+            pass
+    if fit == "contain" and z <= 1.0:
+        k = min(dst_w / iw, dst_h / ih)
+        w, h = iw * k, ih * k
+        return skia.Rect.MakeWH(iw, ih), skia.Rect.MakeXYWH(-w / 2, -h / 2, w, h)
+    ar = dst_w / max(1e-6, dst_h)
+    if iw / ih > ar:
+        sw, sh = ih * ar, ih
+    else:
+        sw, sh = iw, iw / ar
+    sw, sh = sw / z, sh / z
+    x = _clamp(fx * iw - sw / 2, 0, iw - sw)
+    y = _clamp(fy * ih - sh / 2, 0, ih - sh)
+    return skia.Rect.MakeXYWH(x, y, sw, sh), skia.Rect.MakeXYWH(-dst_w / 2, -dst_h / 2, dst_w, dst_h)
+
+
+def draw_media(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> None:
+    """Imagen o video propio en ventana (picture in picture), contrato de schema.py: esquinas
+    redondeadas (`radius`), marco blanco (`frame`), doble sombra suave (`shadow`) y un brillo de
+    vidrio sutil; entra con resorte. Sin imagen (medio aun sin decodificar o archivo borrado)
+    dibuja un marcador con el icono de foto para que se vea en la edicion."""
+    item = sanitize(item)
+    img = media_image(item)
+    w, h = media_box(item, img, ctx.W)
+    c = center_of(item, ctx, XC, DEFAULTS["media"]["y"])
+    if c is None:
+        return
+    cx, cy = c
+    cx = safe_cx(cx, w / 2, ctx)
+    inten = _clamp(_num(item, "intensity", 1.0))
+    anim_in = item.get("anim_in") or "pop"
+    anim_out = item.get("anim_out") or "fade"
+    tin, tout = _num(item, "in_dur", 0.35), _num(item, "out_dur", 0.25)
+    _, pout = ease.envelope(lt, dur, tin, tout)
+    st = enter_state(anim_in, lt, tin, ctx, inten, big=True) * exit_state(anim_out, pout, ctx)
+    st.r += _num(item, "rotation", 0.0)
+    if not _visible(st):
+        return
+    rad = ctx.px(_clamp(_num(item, "radius", 14.0), 0.0, 80.0))
+    bw = ctx.px(max(4.0, min(w, h) / ctx.px(1) * 0.018)) if bool(_g(item, "frame", True)) else 0.0
+    rect = skia.Rect.MakeXYWH(-w / 2, -h / 2, w, h)
+    with group(canvas, cx, cy, st):
+        a = st.a
+        outer = skia.RRect.MakeRectXY(rect.makeOutset(bw, bw), rad + bw, rad + bw)
+        sh = _clamp(_num(item, "shadow", 0.55))
+        if sh > 0:
+            soft_shadow(canvas, outer, ctx, a * sh, key=0.34, amb=0.26, spread=1.3)
+        if bw > 0:
+            canvas.drawRRect(outer, C.fill("#FFFFFF", a))
+        inner = skia.RRect.MakeRectXY(rect, rad, rad)
+        canvas.save()
+        canvas.clipRRect(inner, skia.ClipOp.kIntersect, True)
+        if img is not None:
+            fit = "contain" if item.get("fit") == "contain" else "cover"
+            src, dst = fit_src(img, w, h, fit, item.get("focus"), _num(item, "zoom", 1.0))
+            if fit == "contain":
+                canvas.drawRect(rect, C.fill("#101014", a))
+            canvas.drawImageRect(img, src, dst, C.SAMPLING_FAST if ctx.draft else C.SAMPLING_CUBIC,
+                                 skia.Paint(Alphaf=a, AntiAlias=True))
+            # brillo de vidrio arriba (sutil)
+            hl = skia.Paint(AntiAlias=True)
+            hl.setDither(True)  # degradados sin anillos (8 bits)
+            hl.setShader(skia.GradientShader.MakeLinear(
+                [skia.Point(0, -h / 2), skia.Point(0, -h / 2 + h * 0.35)],
+                [C.color("#FFFFFF", 0.1 * a), C.color("#FFFFFF", 0.0)]))
+            canvas.drawRect(rect, hl)
+        else:
+            canvas.drawRect(rect, C.fill("#2A2A33", a))
+            paint_icon(canvas, "photo", 0, 0, min(w, h) * 0.32, "#FFFFFF", a * 0.75, 1.0, stroke_w=2.0)
+        canvas.restore()
+        canvas.drawRRect(inner, C.stroke("#000000", max(1.0, ctx.px(1.2)), 0.12 * a))
+
+
+# ============================================================== perfil: redes y marcas
+
+
+def platform_icon(platform: str | None, fallback: str = "world") -> str:
+    """Icono Tabler de una plataforma del perfil (brand-instagram, calendar-event, world...)."""
+    meta = PR.PLATFORMS.get(platform or "")
+    return meta["icon"] if meta else fallback
+
+
+def _is_brand(platform: str | None) -> bool:
+    """Red o mensajeria con color de marca propio (insignia de color); reservas/web usan el acento."""
+    meta = PR.PLATFORMS.get(platform or "")
+    return bool(meta) and meta["kind"] in ("social", "messaging")
+
+
+def _initials(name: str) -> str:
+    return PR.initials(name)
+
+
+def draw_platform_badge(canvas, platform: str | None, cx: float, cy: float, d: float, a: float, ctx,
+                        style: str = "brand", shadow: bool = True, icon: str | None = None,
+                        fill: str | None = None):
+    """Insignia redonda de una plataforma: color de marca (Instagram con su degradado, Snapchat
+    amarillo con icono negro) e icono blanco. style 'mono' = disco oscuro. Reservas, web, correo,
+    telefono y mapa usan `fill` (el acento del estilo) con el icono en su color legible."""
+    meta = PR.PLATFORMS.get(platform or "") or PR.PLATFORMS["web"]
+    ic = icon or meta["icon"]
+    r = skia.Rect.MakeXYWH(cx - d / 2, cy - d / 2, d, d)
+    if shadow:
+        soft_shadow(canvas, skia.RRect.MakeOval(r), ctx, a, key=0.18, amb=0.1, spread=d / ctx.px(150),
+                    circle=(cx, cy, d / 2))
+    fg = "#FFFFFF"
+    if style == "mono":
+        col = fill or "#15151B"
+        canvas.drawCircle(cx, cy, d / 2, C.fill(col, a))
+        fg = "#141418" if C.luminance(col) > 0.55 else "#FFFFFF"
+    elif platform == "instagram":
+        g = skia.Paint(AntiAlias=True)
+        g.setDither(True)  # degradados sin anillos (8 bits)
+        g.setShader(skia.GradientShader.MakeLinear(
+            [skia.Point(cx - d * 0.45, cy + d * 0.5), skia.Point(cx + d * 0.45, cy - d * 0.5)],
+            [C.color(c) for c in IG_COLORS], [0.0, 0.25, 0.55, 0.8, 1.0]))
+        g.setAlphaf(a)
+        canvas.drawCircle(cx, cy, d / 2, g)
+    elif _is_brand(platform):
+        col = meta["color"]
+        canvas.drawCircle(cx, cy, d / 2, C.fill(col, a))
+        fg = "#141418" if C.luminance(col) > 0.6 else "#FFFFFF"
+        if platform == "tiktok":
+            # eco cian/rojo del logo de TikTok detras del icono blanco
+            for dx, c2 in ((-0.035, "#25F4EE"), (0.035, "#FE2C55")):
+                paint_icon(canvas, ic, cx + d * dx, cy + d * dx * 0.6, d * 0.56, c2, a * 0.9, 1.0,
+                           stroke_w=2.3)
+    else:
+        col = fill or ctx.palette["accent"]
+        canvas.drawCircle(cx, cy, d / 2, C.fill(col, a))
+        fg = "#141418" if C.luminance(col) > 0.55 else "#FFFFFF"
+    paint_icon(canvas, ic, cx, cy, d * 0.56, fg, a, 1.0, stroke_w=2.3)
+
+
+def _platform_badge_fn(platform: str | None, ctx):
+    """badge_fn de _row_header: insignia de la red (color de marca) en el encabezado de una tarjeta."""
+    def fn(cv, cx, cy, bs, t, a):
+        e = spring(t - 0.05, 3.0, 0.5)
+        if e <= 0.01:
+            return
+        cv.save()
+        cv.translate(cx, cy)
+        cv.scale(e, e)
+        draw_platform_badge(cv, platform, 0, 0, bs * 0.78, a, ctx, shadow=False)
+        cv.restore()
+    return fn
+
+
+def socials_links(item: dict) -> list[dict]:
+    """Chips del item: `links` [{platform, text}] (texto vacio = etiqueta de la red)."""
+    out = []
+    for l in item.get("links") or []:
+        plat = l.get("platform") if l.get("platform") in PR.PLATFORMS else "web"
+        text = str(l.get("text") or "").strip() or PR.PLATFORMS[plat]["label"]
+        out.append({"platform": plat, "text": text})
+    return out[:8]
+
+
+def _socials_layout(item: dict, ctx):
+    """Maquetacion de los chips -> (chips [(plat, texto, fuente, ancho)], filas [[indices]],
+    alto del chip, separacion, ancho total, alto total, cabecera (texto, fuente) o None)."""
+    F = _fonts(ctx)
+    wm = item.get("variant") == "watermark"
+    h = size_of(item, "watermark" if wm else "socials", 0.034 if wm else DEFAULTS["socials"]["size"]) * ctx.W
+    maxw = SAFE_W * ctx.W
+    chips = []
+    for l in socials_links(item):
+        if wm:
+            fnt = fit_font(F["label"], l["text"], h * 0.62, maxw - h * 1.4, min_px=h * 0.35)
+            txt = ellipsize(fnt, l["text"], maxw - h * 1.4)
+            w = h * 1.05 + fnt.measureText(txt)
+        else:
+            fnt = fit_font(F["title"], l["text"], h * 0.36, maxw - h * 1.35, min_px=h * 0.24)
+            txt = ellipsize(fnt, l["text"], maxw - h * 1.35)
+            w = h * 0.14 + h * 0.72 + h * 0.2 + fnt.measureText(txt) + h * 0.42
+        chips.append((l["platform"], txt, fnt, w))
+    gap = h * (0.3 if wm else 0.22)
+    rows: list[list[int]] = []
+    if item.get("layout") == "grid" and not wm and chips:
+        # rejilla de `cols` columnas con chips del MISMO ancho (el de la pila del cierre si hay
+        # `width`; si no, el del chip mas ancho): se ve ordenada, como una tarjeta de contacto
+        try:
+            cols = int(item.get("cols") or 2)
+        except (TypeError, ValueError):
+            cols = 2
+        cols = max(1, min(4, cols, len(chips)))
+        wfix = _item_width(item, ctx)
+        cw = (wfix - gap * (cols - 1)) / cols if wfix else max(c[3] for c in chips)
+        cw = min(cw, (maxw - gap * (cols - 1)) / cols)
+        room = max(h, cw - h * 1.48)
+        out = []
+        for l in socials_links(item):
+            fnt = fit_font(F["title"], l["text"], h * 0.36, room, min_px=h * 0.2)
+            out.append((l["platform"], ellipsize(fnt, l["text"], room), fnt, cw))
+        chips = out
+        rows = [list(range(i, min(i + cols, len(chips)))) for i in range(0, len(chips), cols)]
+    elif item.get("layout") == "row" or wm:
+        cur, cw = [], 0.0
+        for i, (_p, _t, _f, w) in enumerate(chips):
+            if cur and cw + gap + w > maxw:
+                rows.append(cur)
+                cur, cw = [], 0.0
+            cw = cw + (gap if cur else 0.0) + w
+            cur.append(i)
+        if cur:
+            rows.append(cur)
+    else:
+        rows = [[i] for i in range(len(chips))]
+    tot_w = max([sum(chips[i][3] for i in r) + gap * (len(r) - 1) for r in rows] or [0.0])
+    tot_h = len(rows) * h + max(0, len(rows) - 1) * gap
+    head = None
+    title = str(item.get("title") or "").strip()
+    if title and not wm:
+        fh = fit_font(F["label"], title.upper(), h * 0.3, maxw, min_px=h * 0.2)
+        head = (ellipsize(fh, title.upper(), maxw, fh.getSize() * 0.12), fh)
+        tot_h += h * 0.52
+    return chips, rows, h, gap, tot_w, tot_h, head
+
+
+def socials_extent(item: dict, ctx) -> tuple[float, float]:
+    """(ancho, alto) px del grupo de chips (para que el director lo acomode)."""
+    item = sanitize(item)
+    r = _socials_layout(item, ctx)
+    return float(r[4]), float(r[5])
+
+
+def draw_socials(canvas: skia.Canvas, item: dict, lt: float, dur: float, ctx) -> None:
+    """Redes del perfil: chips (pastilla con la insignia de la red a color + @usuario o texto
+    corto) en fila o columna, que entran escalonados con resorte; `variant` watermark = marca de
+    agua sutil (icono + usuario, sin pastilla, `opacity`). (x, y) = centro del grupo."""
+    item = sanitize(item)
+    chips, rows, h, gap, tot_w, tot_h, head = _socials_layout(item, ctx)
+    if not chips:
+        return
+    c = center_of(item, ctx, XC, DEFAULTS["socials"]["y"])
+    if c is None:
+        return
+    cx, cy = c
+    cx = safe_cx(cx, tot_w / 2, ctx)
+    cy = _clamp(cy, C.SAFE["top"] * ctx.H + tot_h / 2, C.SAFE["bottom"] * ctx.H - tot_h / 2) \
+        if tot_h < (C.SAFE["bottom"] - C.SAFE["top"]) * ctx.H else cy
+    wm = item.get("variant") == "watermark"
+    inten = _clamp(_num(item, "intensity", 1.0))
+    anim_in = item.get("anim_in") or "pop"
+    anim_out = item.get("anim_out") or "fade"
+    tin, tout = _num(item, "in_dur", 0.4), _num(item, "out_dur", 0.25)
+    _, pout = ease.envelope(lt, dur, tin, tout)
+    st_out = exit_state(anim_out, pout, ctx)
+    st_out.r += _num(item, "rotation", 0.0)
+    if not _visible(st_out):
+        return
+    stagger = _clamp(_num(item, "stagger", DEFAULTS["socials"]["stagger"]), 0.0, 0.5)
+    dark = item.get("theme") == "dark"
+    mono = item.get("icon_style") == "mono"
+    acc = item.get("color") if item.get("color") and C.luminance(item["color"]) < 0.92 else ctx.palette["accent"]
+    with group(canvas, cx, cy, st_out):
+        a0 = st_out.a
+        y = -tot_h / 2
+        if head is not None:
+            txt, fh = head
+            e = ease.out_cubic(_clamp(lt / 0.3))
+            trk = fh.getSize() * 0.12
+            sh = C.fill("#000000", 0.45 * a0 * e)
+            sh.setMaskFilter(blur_mask(ctx.px(6)))
+            draw_text(canvas, txt, 0, y + h * 0.3, fh, "#000000", a0 * e, align="center", tracking=trk, paint=sh)
+            draw_text(canvas, txt, 0, y + h * 0.3, fh, "#FFFFFF", a0 * e, align="center", tracking=trk)
+            y += h * 0.52
+        k = 0
+        for row in rows:
+            rw = sum(chips[i][3] for i in row) + gap * (len(row) - 1)
+            x = -rw / 2
+            for i in row:
+                plat, txt, fnt, w = chips[i]
+                tl = lt - k * stagger
+                k += 1
+                if tl < 0:
+                    x += w + gap
+                    continue
+                st = enter_state(anim_in, tl, tin, ctx, inten, big=True)
+                if not _visible(st):
+                    x += w + gap
+                    continue
+                a = a0 * st.a
+                ccx, ccy = x + w / 2, y + h / 2
+                with group(canvas, ccx, ccy, st):
+                    if wm:
+                        sh = C.fill("#000000", 0.5 * a)
+                        sh.setMaskFilter(blur_mask(ctx.px(5)))
+                        op = _clamp(_num(item, "opacity", 0.72), 0.15, 1.0)
+                        bk = _clamp(_num(item, "backdrop", 0.34), 0.0, 1.0)
+                        if bk > 0.01:
+                            # pastilla translucida: el usuario se lee tambien sobre un fondo claro
+                            pr_ = skia.RRect.MakeRectXY(skia.Rect.MakeXYWH(-w / 2 - h * 0.28, -h * 0.62,
+                                                                           w + h * 0.56, h * 1.24),
+                                                        h * 0.62, h * 0.62)
+                            canvas.drawRRect(pr_, C.fill("#000000", bk * a))
+                        ib = h * 0.78
+                        ix = -w / 2 + ib / 2
+                        paint_icon(canvas, platform_icon(plat), ix, 0, ib, "#000000", a * op * 0.5, 1.0,
+                                   stroke_w=2.4, blur=ctx.px(3))
+                        paint_icon(canvas, platform_icon(plat), ix, 0, ib, "#FFFFFF", a * op, 1.0, stroke_w=2.4)
+                        draw_text(canvas, txt, -w / 2 + h * 1.05, fnt.getSize() * 0.36, fnt, "#000000", a,
+                                  paint=sh)
+                        draw_text(canvas, txt, -w / 2 + h * 1.05, fnt.getSize() * 0.36, fnt, "#FFFFFF", a * op)
+                    else:
+                        rr = skia.RRect.MakeRectXY(skia.Rect.MakeXYWH(-w / 2, -h / 2, w, h), h / 2, h / 2)
+                        soft_shadow(canvas, rr, ctx, a * (1.1 if dark else 0.9))
+                        canvas.drawRRect(rr, C.fill("#111116" if dark else "#FFFFFF", (0.86 if dark else 1.0) * a))
+                        if not dark:
+                            canvas.drawRRect(rr, C.stroke("#000000", max(1.0, ctx.px(1.0)), 0.06 * a))
+                        d = h * 0.72
+                        be = spring(tl - 0.04, 3.0, 0.5)
+                        if be > 0.01:
+                            canvas.save()
+                            canvas.translate(-w / 2 + h * 0.14 + d / 2, 0)
+                            canvas.scale(be, be)
+                            draw_platform_badge(canvas, plat, 0, 0, d, a, ctx, "mono" if mono else "brand",
+                                                shadow=False, fill=acc)
+                            canvas.restore()
+                        te = ease.out_cubic(_clamp((tl - 0.08) / 0.3))
+                        draw_text(canvas, txt, -w / 2 + h * 0.14 + d + h * 0.2 + (1 - te) * h * 0.15,
+                                  fnt.getSize() * 0.36, fnt, "#FFFFFF" if dark else "#15151B", a * te)
+                x += w + gap
+            y += h + gap
+
+
 RENDERERS = {
     "doodle": draw_doodle,
     "icon": draw_icon,
@@ -2786,4 +3398,6 @@ RENDERERS = {
     "cta": draw_cta,
     "progress": draw_progress,
     "sticker_text": draw_sticker_text,
+    "media": draw_media,
+    "socials": draw_socials,
 }

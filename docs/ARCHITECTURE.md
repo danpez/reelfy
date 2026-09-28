@@ -63,9 +63,13 @@ activo el modelo devuelve la respuesta vacia en modo JSON). Usos, **todos degrad
 a heurística local** si el LLM no está disponible:
 - **Highlights** (`scripts/highlights.py`): elige los mejores fragmentos → shorts (el "nº de shorts" que pides).
 - **Resaltado inteligente** (`scripts/captionsmart.py`): por frase, qué keywords resaltar + qué emojis poner (con densidad configurable).
-- **Traducción** (`scripts/translate.py`): subtítulos ES→EN manteniendo el timing, en chunks para no desbordar el contexto.
+- **Traducción** (`scripts/translate.py`): subtítulos ES→EN/PT/FR/DE/IT manteniendo el timing, en chunks para no desbordar el contexto; titulos del plan v2 completos (sus lineas son partes de una frase) con el mismo numero de lineas y la frase hablada como contexto. El idioma destino se nombra en su lengua ("português do Brasil": nombrado en espanol el modelo mezclaba gallego) y una salida con palabras de otro idioma se reintenta. Sin la IA, `/translate` responde 503 (nunca devuelve espanol como traduccion).
 - **Director** (v0.5, `scripts/motion/director.py`): describe cada toma (VLM) y entiende el
   guion (estructura, entidades, enfasis) para coreografiar la edicion.
+- **Perfil de la persona** (`scripts/motion/profile.py`, `POST /profile/parse`): del texto libre
+  ("ella es la Dra. X, es odontologa, su instagram es @x y agenda en paseo.club/...") saca nombre,
+  profesion con su genero y negocio (reglas + LLM validado contra el texto); los enlaces (redes,
+  reservas, web, WhatsApp, mapa) se reconocen sin IA.
 En la app, una instalacion NUEVA baja `qwen3.5:4b` (~3.4 GB) en el setup obligatorio. Al
 **actualizar de v0.4** (ya hay `qwen2.5:3b` en el ollama embebido) la app NO se bloquea: sigue
 con `qwen2.5:3b` (solo texto; la vision del director queda en heuristicas porque
@@ -119,9 +123,12 @@ video(s) ──▶ [editor de línea de tiempo]  ← PRIMER paso obligatorio (mo
 Endpoints clave (`spike/app/server.py`): `/sources` (subida multi-archivo),
 `/compose` (monta timeline → analiza con IA: `glossary`→subtítulos, `highlights`→nº
 shorts), `/analyze` (ruta rápida un-video), `/status/{job}`, `/setup` (estado del
-motor/modelos), `/tracks` (catálogo de música), `/brand/logo`, `/settings`. Los del motor
-pro (`/direct`, `/frame`, `/preview` pro, `/render` v2, `/music`, `/fx/*`) estan en
-`docs/MOTION-ENGINE.md` seccion 6.1.
+motor/modelos), `/tracks` (catálogo de música), `/brand/logo` (204 sin logo), `/settings`
+(capacidades: `pro_opts`, `pro_langs`, `features`), `/jobs` (proyectos recientes con tema,
+duracion, version y miniatura `/thumb/{job}`). Los del motor pro (`/direct`, `/frame`,
+`/preview` pro, `/render` v2, `/music`, `/captions`, `/translate`, `/source?proxy=1`, `/fx/*`,
+y el perfil de la persona: `/profile/parse`, `/profile/platforms`, `/profiles`, `PUT /profile/{job}`)
+estan en `docs/MOTION-ENGINE.md` seccion 6.1.
 
 ---
 
@@ -202,6 +209,14 @@ Studio: /frame (cuadro exacto) · /preview pro (draft 540p con audio) · /direct
 - **Plan v2**: cada decision de la IA es un item con `enabled` y parametros (texto, graficos,
   escenas, efectos, transiciones, SFX, musica, color); el Studio lo edita y el render lo
   respeta. Sin LLM/VLM el director usa heuristicas; nunca tumba el analisis.
+- **Perfil** (`plan.profile`): nombre, profesion, negocio y enlaces de quien sale en el video
+  (perfiles reutilizables en `DATA/assets/brand/profiles.json`). Manda sobre lo que el director
+  infiere (nunca el nombre de un letrero): rotulo con nombre + profesion (+ negocio si cabe),
+  Seguir con la red y el @usuario (foto de perfil o iniciales), pastilla de reservas con su enlace
+  corto cuando la voz invita de verdad ("link aqui abajo", "agenda", "pide tu cita"), y tarjeta
+  final >= 2.2 s con la pila alineada (ubicacion, Seguir, chips de redes, reservas) o, si a camara
+  no cabe, una escena corta con el video desenfocado. `PUT /profile/{job}` lo cambia y re-dirige
+  al instante sin re-analizar (tambien se re-aplica si el autoguardado `PUT /plan` trae otro perfil).
 - **Render pro**: video base cacheado (reencuadre, tonemap HDR, cortes), pista de rostro
   (YuNet), recorte de sujeto (MODNet) solo donde se pide, compositor Skia en N procesos,
   mezcla voz + musica + SFX a -14 LUFS / -1.5 dBTP, H.264 bt709 y shorts de los highlights.
@@ -222,10 +237,39 @@ Studio: /frame (cuadro exacto) · /preview pro (draft 540p con audio) · /direct
   previa y el export esperan y reutilizan el que esta en curso con la misma base.
 - **Musica elegida por el usuario** (fuente procedural/biblioteca/ninguna o prompt, bpm o
   semilla propios): entra ANTES de sincronizar la coreografia; el director no genera ni
-  sincroniza a la pista IA (`music_sync=False`) y re-dirigir conserva esa eleccion.
+  sincroniza a la pista IA (`music_sync=False`) y re-dirigir conserva esa eleccion. Re-dirigir
+  sin `full` (cambio de estilo, regenerar) nunca espera a ACE: con la pista en cache sincroniza
+  en la misma respuesta (< 1 s); una pista nueva la genera la tarea lateral `music` y al
+  terminar el servidor guarda la propuesta sincronizada a los beats (si nadie la edito; si no,
+  `music_resync: available`).
+- **Una generacion de musica IA por trabajo** (tarea lateral `music`): siempre la de la edicion
+  vigente; otra pista cancela la anterior (mata ace-synth). El analisis de fondo y la vista
+  previa ya no la precalientan en el motor (aquel hilo no se podia cancelar: cuatro cambios de
+  estilo dejaban cuatro generaciones de 40-55 s, todas obsoletas menos una). La vista previa
+  que sono con la musica provisional espera a esa tarea y se rehace sola; la provisional queda
+  servible (`prev_file`) hasta la siguiente vista previa.
 - **Procesos hijos**: el compositor usa procesos `spawn`; el servidor oculta su `__file__` al
   arrancar y no ejecuta nada si se reimporta como `__mp_main__` (un hijo nunca corre
   `recover()` ni workers).
+- **Opciones del proyecto en el render pro**: logo de la marca (esquina, tamano, opacidad),
+  aire (margen desenfocado, solo con fuentes mas anchas que la salida y OPT-IN: solo con
+  `air_user: true`; el default va a sangre completa, `/settings.pro_opts_optin`) y audio de estudio viajan
+  con `/frame`, `/preview` y `/render` y el motor los aplica igual en cuadro exacto, vista previa
+  y export; el servidor recuerda las del ultimo pedido (o las que llegan con `/compose` o
+  `/analyze`) y el analisis de fondo las usa (el aire y el audio de estudio cambian el video
+  base y la voz; con una fuente vertical el aire se descarta y las caches se comparten).
+- **Studio rapido**: proxy H.264 720p del video del trabajo (`/source?proxy=1`, GOP ~1/3 s, mismo
+  reloj exacto, prioridad baja, generado en segundo plano al llegar a review o al abrir un
+  proyecto viejo; una fuente que no decodifica no se reintenta) para seeks rapidos; grupos REALES de
+  subtitulos (`/captions`, los mismos del export) para que la vista en vivo agrupe igual; la
+  vista previa real que sono con musica provisional (IA aun generandose) se rehace sola con la
+  pista IA y publica el archivo nuevo.
+- **Medios propios**: imagenes o clips subidos por `/sources` y usados en el plan (`{sid}`); el
+  motor los resuelve en `DATA/input/sources` (`opts.media_root`, nunca rutas del plan) y la
+  limpieza del disco no borra una fuente que un plan referencia.
+- **App de escritorio**: ventana de 1340x940 con minimo 1200x760 (por debajo el lienzo 9:16 y
+  las pistas del Studio no caben), ajustados al area util del monitor (en 1280x800 el minimo
+  mas la barra de titulo no cabia); `cargo test --lib` lo prueba en el CI.
 
 ### 6.1 Modelos, assets y licencias (todo local)
 
@@ -248,17 +292,33 @@ Studio: /frame (cuadro exacto) · /preview pro (draft 540p con audio) · /direct
 - `pytest spike/tests` (unidad + integracion). Del servidor: `test_server_api.py` levanta un
   servidor real aislado con un video sintetico y recorre la API 6.1 (incluye: editar un texto
   no cancela el analisis, cancelar la vista previa no mata el export, export cancelado ->
-  review, PUT /plan con base_rev, /music tras el render es acierto de cache, /direct en segundo
-  plano); `test_server_setup.py` (actualizacion de v0.4 con un ollama falso, musica elegida
-  antes de sincronizar, barra monotona, reanudar la musica IA, recoleccion de basura, clave
-  del analisis, hijo spawn que reimporta el servidor); `test_jobstore.py`;
+  review, PUT /plan con base_rev, /music tras el render es acierto de cache con beats, /direct
+  en segundo plano, logo en el cuadro exacto, /captions igual al render, proxy 720p con GOP
+  corto y mismo reloj exacto, fuente que no decodifica sin reintentos, miniatura con pedidos
+  simultaneos, /jobs con miniatura, /translate 503 sin la IA, aire opt-in en una fuente
+  horizontal); `test_translate.py` (titulos con sus lineas, gallego/contexto colado,
+  Ollama caido, endpoint con IA falsa); `test_server_setup.py` (actualizacion de
+  v0.4 con un ollama falso, musica elegida antes de sincronizar, barra monotona, reanudar la
+  musica IA, recoleccion de basura (tambien fuentes usadas por un plan), clave del analisis con
+  aire/audio de estudio (opt-in, comparacion efectiva), vista previa que se rehace con la
+  musica IA sin borrar la provisional, re-dirigir con una generacion por trabajo y sincronia
+  automatica, cancelar el export sin tocar la vista previa, hijo spawn que reimporta el
+  servidor); `test_jobstore.py` (tambien el resumen del plan para /jobs);
   `test_compose_shots.py` (limites, lienzo, montaje en paralelo).
 - E2E real: `spike/tests/e2e_pro.sh [puerto] [datos]` (o `REELFY_E2E=1 pytest
   tests/test_e2e_pro.py`): sube los clips crudos de prueba, compone, dirige, pide cuadros,
   vista previa y export con shorts, y valida duracion, 1080x1920, -14 LUFS con true peak
   <= -1.0, musica en la mezcla y nada omitido, barra monotona (y que el montaje avance),
-  orientacion (cabeza y pies como en la fuente), overlays y que `/frame` coincida con el
-  export. Avisa (sin fallar) si el VLM cayo a heuristicas o si los recortes de la IA
-  eliminaron una toma completa. `--label frio|caliente` para reportar tiempos por separado.
-  Salidas en `spike/work/e2e/` (ignorado por git).
+  orientacion (cabeza y pies como en la fuente), overlays, que `/frame` coincida con el
+  export, el logo de marca en el export (y que el aire no rehaga el base de una fuente
+  vertical), `/captions`, el proxy 720p, `/jobs` + miniatura, `/music` con beats, `/translate`
+  de titulos a pt y de (traducidos, mismas lineas, sin gallego ni espanol), si la vista previa
+  sono con musica provisional que se rehaga con la IA sin borrar la provisional, un cambio de
+  estilo que queda sincronizado solo con la musica IA nueva y una fuente HORIZONTAL sintetica
+  (flujo real) donde el default va sin aire. Avisa
+  (sin fallar) si el VLM cayo a heuristicas o si los recortes de la IA eliminaron una toma
+  completa. `--label frio|caliente` para reportar tiempos por separado. Con
+  `REELFY_PLAYWRIGHT` (ruta de playwright-core) corre despues la E2E del Studio en Chrome real
+  (`tests/studio_smoke.mjs`) sobre el mismo trabajo. Salidas en `spike/work/e2e/` (ignorado
+  por git).
 

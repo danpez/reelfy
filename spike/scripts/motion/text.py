@@ -1461,7 +1461,9 @@ def _unit_times(norms: list[str], spoken: list | None, dur: float, step: float,
 
 
 def _get_times(item: dict, P: dict, B: _B, dur: float, preset: str) -> list[float]:
-    spoken = item.get("_words") or None
+    # word_sync: false = el bloque entra con SU animacion al inicio del item, sin esperar a que se
+    # diga cada palabra (la palabra gigante del director aterriza con el golpe, no al final)
+    spoken = (item.get("_words") or None) if item.get("word_sync", True) is not False else None
     sig = tuple((w.get("text"), round(float(w.get("start", 0)), 3)) for w in spoken) if spoken else ()
     key = (B.extra.get("key"), round(dur, 3), sig)
     step = float(P.get("step", 0.12))
@@ -2352,7 +2354,8 @@ def kicker(canvas, item, lt, dur, ctx):
             return
         l, t, r, b = ln.ink
         cx = (l + r) / 2 if P["align"] == "center" else (l if P["align"] == "left" else r)
-        w = (r - l) * p
+        # la pastilla arranca en ~40% de su ancho (nunca una pastilla vacia que crece desde 0)
+        w = (r - l) * (0.4 + 0.6 * p)
         x0 = cx - w / 2 if P["align"] == "center" else (l if P["align"] == "left" else r - w)
         rect = skia.Rect.MakeLTRB(x0, t + ody, x0 + w, b + ody)
         rad = rect.height() / 2
@@ -2360,7 +2363,7 @@ def kicker(canvas, item, lt, dur, ctx):
         sh.setMaskFilter(_blur(0.35 * ln.size))
         canvas.drawRRect(skia.RRect.MakeRectXY(rect.makeOffset(0, 0.12 * ln.size), rad, rad), sh)
         canvas.drawRRect(skia.RRect.MakeRectXY(rect, rad, rad), C.fill(pill_col, oa))
-        la = ease.out_cubic((u - 0.16) / 0.3) * oa
+        la = ease.out_cubic((u - 0.04) / 0.26) * oa
         if la <= 0:
             return
         canvas.save()
@@ -2652,7 +2655,9 @@ def _caption_groups(phrases: list, cfg: dict, ctx) -> list[_Group]:
     for gi, g in enumerate(gws):
         start = g[0]["start"] - 0.06
         nxt = gws[gi + 1][0]["start"] - 0.06 if gi + 1 < len(gws) else None
-        hold = 0.45
+        # tras la ultima palabra el grupo se queda poco: un subtitulo que ya se dijo y sigue en
+        # pantalla (o se desvanece lento) se lee como un fantasma de la frase
+        hold = 0.34
         end = g[-1]["end"] + hold
         fade = True
         if nxt is not None and nxt - g[-1]["end"] < 0.5:
@@ -2741,7 +2746,7 @@ def draw_captions(canvas, phrases_final, cfg, t, ctx) -> None:
     """Subtitulos por preset. `t` = tiempo final absoluto (s)."""
     if not cfg or not cfg.get("enabled", True) or (cfg.get("preset") or "clean_bold") == "none":
         return
-    ha = _hide_alpha(t, cfg.get("_hide"))
+    ha = min(_hide_alpha(t, cfg.get("_hide")), _yr_hide_alpha(cfg, ctx))
     if ha <= 0.003:
         return
     groups = _CAPS.get_or(_caps_key(phrases_final, cfg, ctx), lambda: _caption_groups(phrases_final, cfg, ctx))
@@ -2782,6 +2787,24 @@ def draw_captions(canvas, phrases_final, cfg, t, ctx) -> None:
         canvas.restore()
 
 
+def _yr_hide_alpha(cfg: dict, ctx, fade: float = 0.12) -> float:
+    """Tramos de `y_ranges` con `hide: true` (tiempo ORIGINAL, ctx.t_orig): sin subtitulos, con
+    un fundido corto (el CTA final de un primer plano ocupa la franja de los subtitulos)."""
+    t = getattr(ctx, "t_orig", None)
+    if t is None:
+        return 1.0
+    rows = [r for r in cfg.get("y_ranges") or [] if isinstance(r, dict) and r.get("hide")]
+    a = 1.0
+    for r in rows:
+        try:
+            s, e = float(r["start"]), float(r["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        d = max(s - float(t), float(t) - e)
+        a = min(a, ease.clamp(d / fade) if d > 0 else 0.0)
+    return a
+
+
 def _cap_dy(cfg: dict, D: dict, ctx) -> float:
     """Desplazamiento vertical (px) de los subtitulos por tramo: `y_ranges` = [{start, end, y}]
     en tiempo ORIGINAL (como todo el plan; se compara con ctx.t_orig). Sirve para subirlos al
@@ -2794,6 +2817,8 @@ def _cap_dy(cfg: dict, D: dict, ctx) -> float:
         return 0.0
     for r in yr:
         try:
+            if r.get("hide"):
+                continue
             if float(r["start"]) <= float(t) < float(r["end"]):
                 return (float(r["y"]) - D["y"]) * ctx.H
         except (KeyError, TypeError, ValueError):
@@ -2826,22 +2851,52 @@ def _recenter_dx(g: _Group, t: float) -> dict:
 
 def _draw_group(canvas, g: _Group, D: dict, t: float, ctx, ha: float, gi: int, exit_p: float = 0.0) -> None:
     fs = g.fs
-    final = not ctx.draft
-    look = _Look(shadow=D["shadow"], stroke=2.0 * ctx.px(D["stroke"]), stroke_color="#000000")
-    look.boost = _bg_boost(ctx, g.rect, D["color"])
     # salida del grupo (solo si hay pausa despues)
     ga = ha
     gdy = 0.0
+    gsc = 1.0
     if g.fade_out:
-        po = ease.clamp((t - (g.end - 0.16)) / 0.16)
+        # salida corta y limpia: se apaga en 0.11 s con un leve encogimiento (sin arrastre)
+        po = ease.clamp((t - (g.end - 0.11)) / 0.11)
         ga *= 1 - ease.in_quad(po)
-        gdy = -0.12 * fs * ease.in_cubic(po)
+        gsc = 1.0 - 0.04 * ease.in_quad(po)
     if exit_p > 0:
         ga *= 1 - ease.out_quad(exit_p)
         gdy -= 0.45 * fs * ease.out_cubic(exit_p)
         t = min(t, g.end - 1e-3)
     if ga <= 0.003:
         return
+    # el grupo se desvanece COMO UNA PIEZA (una capa): sombra, contorno y relleno de cada
+    # palabra no se transparentan por separado (eso dejaba una copia oscura, un 'fantasma')
+    layer = ga < 0.985
+    if layer or gsc != 1.0:
+        r_ = g.rect
+        pad = 0.9 * fs
+        canvas.save()
+        if gsc != 1.0:
+            canvas.translate(r_.centerX(), r_.centerY() + gdy)
+            canvas.scale(gsc, gsc)
+            canvas.translate(-r_.centerX(), -(r_.centerY() + gdy))
+        if layer:
+            canvas.saveLayerAlpha(skia.Rect.MakeLTRB(r_.left() - pad, r_.top() - pad + gdy,
+                                                     r_.right() + pad, r_.bottom() + pad * 1.4 + gdy),
+                                  int(ga * 255 + 0.5))
+        try:
+            _draw_group_body(canvas, g, D, t, ctx, 1.0 if layer else ga, gi, gdy, exit_p)
+        finally:
+            if layer:
+                canvas.restore()
+            canvas.restore()
+        return
+    _draw_group_body(canvas, g, D, t, ctx, ga, gi, gdy, exit_p)
+
+
+def _draw_group_body(canvas, g: _Group, D: dict, t: float, ctx, ga: float, gi: int, gdy: float,
+                     exit_p: float) -> None:
+    fs = g.fs
+    final = not ctx.draft
+    look = _Look(shadow=D["shadow"], stroke=2.0 * ctx.px(D["stroke"]), stroke_color="#000000")
+    look.boost = _bg_boost(ctx, g.rect, D["color"])
     reveal, anim, active = D["reveal"], D["anim"], D["active"]
     # entrada del grupo completo (karaoke / boxed)
     if reveal == "group" and exit_p <= 0:

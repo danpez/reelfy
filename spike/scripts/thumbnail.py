@@ -9,9 +9,37 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-SPIKE = Path(__file__).resolve().parent.parent
+try:  # dentro del motor: respeta REELFY_HOME (app empaquetada en Windows/Linux/Mac)
+    import paths as _paths
+    SPIKE = Path(_paths.SPIKE)
+except Exception:  # pragma: no cover - uso aislado
+    SPIKE = Path(__file__).resolve().parent.parent
 YUNET = SPIKE / "models/face_detection_yunet_2023mar.onnx"
-FONT = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+# fuente del propio motor (OFL, viaja con la app): antes Arial de macOS, que no existe en
+# Windows ni Linux y tumbaba la miniatura de cada short
+FONTS_DIR = SPIKE / "assets" / "motion" / "fonts"
+FONT_CANDIDATES = ("Poppins-ExtraBold.ttf", "Poppins-Black.ttf", "Anton-Regular.ttf",
+                   "Poppins-Bold.ttf")
+
+
+def _font_path():
+    """Primera fuente del motor que exista (None si no hay ninguna)."""
+    for name in FONT_CANDIDATES:
+        p = FONTS_DIR / name
+        if p.exists():
+            return str(p)
+    return None
+
+
+def _font(size):
+    """Fuente bold del motor; sin assets (instalacion rota), la de PIL escalable."""
+    fp = _font_path()
+    if fp:
+        return ImageFont.truetype(fp, size)
+    try:
+        return ImageFont.load_default(size)
+    except TypeError:  # pragma: no cover - PIL viejo
+        return ImageFont.load_default()
 
 
 def _best_frame(video):
@@ -57,7 +85,7 @@ def make_thumbnail(video, out_jpg, title):
                   fill=(8, 10, 16, int(210 * (i / gh) ** 1.35)))
     # wrapped uppercase hook
     size = max(28, int(W * 0.088))
-    font = ImageFont.truetype(FONT, size)
+    font = _font(size)
     lines, cur = [], ""
     for word in (title or "").upper().split():
         t = (cur + " " + word).strip()

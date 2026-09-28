@@ -13,6 +13,58 @@ use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const PORT: u16 = 8317;
 
+/// Tamaño inicial y mínimo del Studio (puntos lógicos, sin la barra de título).
+const START_W: f64 = 1340.0;
+const START_H: f64 = 940.0;
+const MIN_W: f64 = 1200.0;
+const MIN_H: f64 = 760.0;
+/// Alto de la barra de título de la ventana (macOS ~28 pt) más un margen.
+const TITLE_H: f64 = 32.0;
+
+/// Mínimo y tamaño inicial que caben en el área útil del monitor (sin barra de menús ni Dock),
+/// en puntos lógicos: en una pantalla de 1280x800 el mínimo de 1200x760 más la barra de título
+/// (~788) no cabía en el alto útil (~775 o menos con el Dock) y la ventana no se podía achicar.
+/// -> ((min_w, min_h), (w, h)).
+fn fit_sizes(work_w: f64, work_h: f64) -> ((f64, f64), (f64, f64)) {
+    let avail_w = (work_w - 8.0).max(640.0);
+    let avail_h = (work_h - TITLE_H).max(480.0);
+    let min = (MIN_W.min(avail_w), MIN_H.min(avail_h));
+    let start = (START_W.min(avail_w).max(min.0), START_H.min(avail_h).max(min.1));
+    (min, start)
+}
+
+fn fit_to_monitor(win: &WebviewWindow) {
+    let Ok(Some(mon)) = win.current_monitor() else { return };
+    let sf = mon.scale_factor().max(0.5);
+    let wa = mon.work_area();
+    let ((mw, mh), (w, h)) = fit_sizes(wa.size.width as f64 / sf, wa.size.height as f64 / sf);
+    if mw < MIN_W || mh < MIN_H {
+        let _ = win.set_min_size(Some(tauri::LogicalSize::new(mw, mh)));
+    }
+    if w < START_W || h < START_H {
+        let _ = win.set_size(tauri::LogicalSize::new(w, h));
+        let _ = win.center();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn el_minimo_cabe_en_pantallas_chicas() {
+        // 1280x800 con barra de menus (775 utiles): el alto minimo baja para caber
+        let ((mw, mh), (w, h)) = fit_sizes(1280.0, 775.0);
+        assert!(mh + TITLE_H <= 775.0 && mw <= 1280.0);
+        assert!(w <= 1280.0 && h + TITLE_H <= 775.0 && w >= mw && h >= mh);
+        // con el Dock abajo (~705 utiles)
+        let ((_, mh), _) = fit_sizes(1280.0, 705.0);
+        assert!(mh + TITLE_H <= 705.0);
+        // pantalla grande: el minimo y el inicial de siempre
+        assert_eq!(fit_sizes(1728.0, 1080.0), ((MIN_W, MIN_H), (START_W, START_H)));
+    }
+}
+
 /// Proceso del motor, para matarlo al salir.
 struct Engine(Mutex<Option<Child>>);
 
@@ -152,10 +204,13 @@ pub fn run() {
 
             // Ventana creada desde Rust para poder enganchar el manejo de descargas:
             // el Studio descarga el video con <a download> -> lo guardamos en Downloads.
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Reelfy Studio")
-                .inner_size(1340.0, 940.0)
-                .min_inner_size(980.0, 680.0)
+                .inner_size(START_W, START_H)
+                // minimo del Studio: por debajo el lienzo 9:16 y las pistas no caben (en
+                // 980x680 el lienzo quedaba en 155x276 y solo 3-4 pistas visibles). Se ajusta
+                // abajo al area util del monitor.
+                .min_inner_size(MIN_W, MIN_H)
                 .center()
                 .on_download(|webview, event| {
                     if let DownloadEvent::Requested { destination, .. } = event {
@@ -182,6 +237,7 @@ pub fn run() {
                     true
                 })
                 .build()?;
+            fit_to_monitor(&win);
 
             let handle = app.handle().clone();
 

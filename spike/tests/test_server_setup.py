@@ -109,6 +109,7 @@ def test_actualizacion_de_v04_no_bloquea_y_baja_el_llm_nuevo_en_segundo_plano(tm
     fake_bin = tmp_path / "bin" / "ollama-runtime" / "ollama"      # marca de ollama embebido
     code = FAKE_OLLAMA + '''
 import server as S
+S._disk_free_gb = lambda: 100.0     # el espacio real del disco compartido no es parte de esta prueba
 assert S.BUNDLED_OLLAMA and S.TARGET_LLM == "qwen3.5:4b"
 assert not S._needs_setup(), "el LLM viejo no debe bloquear"
 S._refresh_llm()
@@ -271,6 +272,10 @@ for jid, sid in zip(ids, srcs):
 # fuentes sin trabajo: una vieja (se borra) y una recien subida (espera su /compose)
 for suf in (".mov", "_t.jpg"):
     touch(S.SOURCES / f"5ce0000000aa{suf}", old); touch(S.SOURCES / f"5ce0000000bb{suf}")
+# medio propio (imagen vieja) que el PLAN de un trabajo vivo referencia: no se borra
+touch(S.SOURCES / "5ce0000000cc.png", old); touch(S.SOURCES / "5ce0000000cc_t.jpg", old)
+jobstore.update(ids[2], plan={"version": 2, "fx": {"graphics": [
+    {"id": "g1", "kind": "media", "media": {"sid": "5ce0000000cc", "type": "image"}}]}})
 # huerfanos (trabajos que ya no estan en la base): viejo se borra, reciente no
 touch(S.INPUT / "dead00000000.mp4", old); touch(S.OUTPUT / "dead00000000_123456.mp4", old)
 touch(S.INPUT / "dead00000001.mp4")
@@ -286,6 +291,7 @@ for jid in ids[1:]:
 assert not (S.SOURCES / f"{srcs[0]}.mov").exists()          # su trabajo se purgo
 assert (S.SOURCES / f"{srcs[1]}.mov").exists() and (S.SOURCES / f"{srcs[2]}_proxy.mp4").exists()
 assert not (S.SOURCES / "5ce0000000aa.mov").exists() and (S.SOURCES / "5ce0000000bb.mov").exists()
+assert (S.SOURCES / "5ce0000000cc.png").exists() and (S.SOURCES / "5ce0000000cc_t.jpg").exists()
 assert not (S.INPUT / "dead00000000.mp4").exists() and not (S.OUTPUT / "dead00000000_123456.mp4").exists()
 assert (S.INPUT / "dead00000001.mp4").exists()
 # exports: solo los 2 mas recientes del trabajo (con shorts, miniaturas y stats)
@@ -342,6 +348,41 @@ p3 = copy.deepcopy(plan)
 p3["cuts"] = [{{"start": 1.0, "end": 1.3, "enabled": True, "id": "c1"}}]
 assert S._analysis_keys(p3, "9:16")[0] != b1
 assert S._analysis_keys(plan, "1:1")[0] != b1
+# opciones del proyecto: sin audio de estudio es otra voz (otra base); el aire en una fuente
+# vertical se descarta antes (no cambia el base) y el logo nunca cuenta
+assert S._analysis_keys(plan, "9:16", {{"enhance_audio": True}}) == (b1, k1)
+assert S._analysis_keys(plan, "9:16", {{"enhance_audio": False}})[0] != b1
+eo = S._eff_engine(plan, "9:16", S._engine_opts({{"air": 0.16, "air_user": True, "logo": {{"pos": "tl"}}}}))
+assert "air" not in eo and S._analysis_keys(plan, "9:16", eo) == (b1, k1)
+# el aire es opt-in: el default del Studio (AIR=0.16 sin air_user) no lo activa
+assert "air" not in S._engine_opts({{"air": 0.16}}) and "air" not in S._engine_opts({{"air": 0.16, "air_user": 1}})
+assert S._engine_opts({{"air": 0.16, "air_user": True}})["air"] == 0.16
+# registro por trabajo: solo un cambio de aire/audio de estudio relanza el analisis
+import jobstore
+jobstore.create("0123456789ab", kind="analyze", ext=".mp4", plan=plan)
+assert S._get_engine("0123456789ab") == {{"enhance_audio": True}}
+assert S._set_engine("0123456789ab", {{"enhance_audio": True}}) is False
+assert S._set_engine("0123456789ab", {{"enhance_audio": True, "logo": {{"path": "x"}}}}) is False
+assert jobstore.side_get("0123456789ab", "engine")["logo"] is True
+assert S._set_engine("0123456789ab", {{"enhance_audio": False}}) is True
+assert S._get_engine("0123456789ab") == {{"enhance_audio": False}}
+S._ENGINE.clear()                                    # tras un reinicio: lo guardado
+assert S._get_engine("0123456789ab") == {{"enhance_audio": False}}
+# opciones conocidas al crear el trabajo (/compose, /analyze `engine`): el primer analisis las usa
+S._initial_engine("0123456789ab", '{{"air": 0.2, "air_user": true, "enhance_audio": true}}')
+assert S._get_engine("0123456789ab") == {{"air": 0.2, "enhance_audio": True}}
+S._initial_engine("0123456789ab", "no es json")          # se ignora
+assert S._get_engine("0123456789ab") == {{"air": 0.2, "enhance_audio": True}}
+# con el plan (fuente VERTICAL) se comparan las opciones EFECTIVAS: el aire crudo guardado no
+# aplica, asi que no cuenta como cambio del base (antes relanzaba el analisis y /status mostraba
+# un aire que nunca se aplico); lo guardado pasa a ser lo efectivo
+assert S._set_engine("0123456789ab", {{"air": 0.2, "enhance_audio": True}}, plan, "9:16") is False
+assert S._get_engine("0123456789ab") == {{"enhance_audio": True}}
+assert "air" not in jobstore.side_get("0123456789ab", "engine")
+# un aire guardado por una version anterior (sin air_user: era el default del Studio) no vale
+jobstore.side_update("0123456789ab", "engine", replace=True, air=0.16, enhance_audio=True)
+S._ENGINE.clear()
+assert S._get_engine("0123456789ab") == {{"enhance_audio": True}}
 print("OK")
 '''
     _run(code, tmp_path, timeout=300)
@@ -367,3 +408,239 @@ assert not any(t.name.startswith("reelfy-worker") for t in _t.enumerate())
 print("OK")
 '''
     _run(code, tmp_path)
+
+
+# musica IA falsa para las pruebas de la tarea lateral `music` y de la vista previa: una pista por
+# prompt; get_music espera su compuerta (sondeando la cancelacion como music._lock) y deja la
+# pista "en cache"; pending() dice si falta generarla
+FAKE_MUSIC = """
+import copy
+from motion import render as R, music as MU, director
+CACHED, GATES, CALLS, CANCELED = set(), {}, [], []
+def gate(k):
+    return GATES.setdefault(k, threading.Event())
+def fake_pending(cfg, dur, style="dinamico", seed=7, cache_dir=None):
+    return cfg.get("prompt") not in CACHED
+def fake_get_music(cfg, dur, style="dinamico", seed=7, on_pct=None, cache_dir=None):
+    k = cfg.get("prompt")
+    CALLS.append(k)
+    try:
+        while k not in CACHED and not gate(k).wait(0.05):
+            if on_pct:
+                on_pct(10)
+    except BaseException:
+        CANCELED.append(k)
+        raise
+    CACHED.add(k)
+    return {"source": "ai", "wav": "x", "gen_s": 1.0, "bpm": 100.0}
+MU.music_ready = lambda: True
+MU.pending = fake_pending
+MU.get_music = fake_get_music
+R.prepare = lambda plan, opts=None: {"plan": plan, "timeline": None, "job": {
+    "final_duration": 10.0, "style": (plan.get("director") or {}).get("style", "dinamico"), "seed": 7}}
+R.music_cfg = lambda plan, job, tl, skipped=None: (
+    {"source": "ai", "enabled": True, "prompt": plan["fx"]["music"]["prompt"]}, True)
+S._music_gen_key = lambda MU_, cfg, dur, style, seed: cfg["prompt"]
+S._analysis_keys = lambda plan, fmt, eo=None: ("b", "k")
+RED = []
+def fake_redirect(plan, style=None, intensity=None, seed=None, only_ids=None, use_llm=False,
+                  music_sync=None, music_timeout=12.0):
+    RED.append({"style": style, "sync": music_sync, "timeout": music_timeout, "only": only_ids})
+    out = copy.deepcopy(plan)
+    d = out.setdefault("director", {})
+    st = style or d.get("style") or "dinamico"
+    d.update(style=st, rev=int(d.get("rev", 0)) + 1)
+    d.pop("music_grid", None)
+    out["fx"]["music"] = {"source": "ai", "enabled": True, "prompt": "p_" + st}
+    if music_sync and ("p_" + st) in CACHED:
+        d["music_grid"] = {"bpm": 100.0, "beats": [0.5, 1.1], "key": "p_" + st}
+    return out
+director.redirect = fake_redirect
+JOB = "0123456789ab"
+PLAN = {"version": 2, "video": "no.mp4", "duration": 10.0,
+        "fx": {"text": [{"id": "t1"}], "music": {"source": "ai", "enabled": True, "prompt": "p_dinamico"}},
+        "director": {"style": "dinamico", "rev": 1}}
+jobstore.create(JOB, kind="analyze", ext=".mp4", plan=PLAN)
+jobstore.update(JOB, state="review", phase="review")
+def side(name):
+    return jobstore.status(JOB).get(name) or {}
+def until(name, cond, t=20):
+    t0 = time.time()
+    while time.time() - t0 < t:
+        if cond(side(name)):
+            return side(name)
+        time.sleep(0.05)
+    raise AssertionError((name, side(name)))
+"""
+
+PREVIEW_CODE = """
+calls = []
+def fake_draft(plan, out, opts):
+    k = plan["fx"]["music"]["prompt"]
+    calls.append(k)
+    assert opts.get("prefetch_music") is False           # la genera la tarea `music`, no el motor
+    Path(out).write_bytes(b"x" * 10)
+    opts["on_pct"]("render", 50.0)
+    return {"duration": 3.0, "music_pending": k not in CACHED, "warnings": []}
+R.render_draft = fake_draft
+S._start_preview_pro(JOB, PLAN, "9:16", {})
+p1 = until("preview", lambda p: p.get("state") == "done" and p.get("music_refresh") == "waiting")
+assert p1["music_pending"] is True and p1["pct"] == 100 and "provisional" in p1["message"]
+f1 = p1["file"]
+assert (S.OUTPUT / f1).exists()
+assert until("music", lambda m: m.get("state") == "generating")["key"] == "p_dinamico"
+gate("p_dinamico").set()
+p2 = until("preview", lambda p: p.get("music_refresh") == "done")
+assert p2["file"] != f1 and p2["music_pending"] is False and p2["state"] == "done" and p2["pct"] == 100
+assert (S.OUTPUT / p2["file"]).exists()
+assert p2["prev_file"] == f1 and (S.OUTPUT / f1).exists()     # la provisional sigue servible
+assert jobstore.status(JOB)["preview_music_pending"] is False
+assert CALLS == ["p_dinamico"], CALLS                        # una sola generacion
+# la siguiente vista previa ya la borra
+S._start_preview_pro(JOB, PLAN, "9:16", {})
+p3 = until("preview", lambda p: p.get("state") == "done")
+assert not (S.OUTPUT / f1).exists() and not (S.OUTPUT / p2["file"]).exists() and p3["prev_file"] is None
+# cancelar mientras espera la musica: la primera se queda y el mensaje no promete nada
+P2 = json.loads(json.dumps(PLAN)); P2["fx"]["music"]["prompt"] = "p_otra"
+S._start_preview_pro(JOB, P2, "9:16", {})
+p4 = until("preview", lambda p: p.get("state") == "done" and p.get("music_refresh") == "waiting")
+S._cancel_side(JOB, "preview", wait=5.0)
+p5 = until("preview", lambda p: p.get("music_refresh") == "canceled")
+assert p5["file"] == p4["file"] and (S.OUTPUT / p4["file"]).exists()
+assert "se canceló" in p5["message"] and "actualizará" not in p5["message"], p5["message"]
+# la edicion cambio (otra pista): la vista previa en espera termina 'superseded'
+P3 = json.loads(json.dumps(PLAN)); P3["fx"]["music"]["prompt"] = "p_tercera"
+S._start_preview_pro(JOB, P3, "9:16", {})
+until("preview", lambda p: p.get("state") == "done" and p.get("music_refresh") == "waiting")
+until("music", lambda m: m.get("key") == "p_tercera" and m.get("state") == "generating")
+P4 = json.loads(json.dumps(PLAN)); P4["fx"]["music"]["prompt"] = "p_cuarta"
+S._kick_music(JOB, P4, "9:16")
+p6 = until("preview", lambda p: p.get("music_refresh") == "superseded")
+assert "cambió" in p6["message"]
+t0 = time.time()
+while "p_tercera" not in CANCELED and time.time() - t0 < 10:
+    time.sleep(0.05)
+assert "p_tercera" in CANCELED
+# con un export en curso no rehace el draft (el export ya lleva la musica IA)
+P5 = json.loads(json.dumps(PLAN)); P5["fx"]["music"]["prompt"] = "p_quinta"
+S._start_preview_pro(JOB, P5, "9:16", {})
+until("preview", lambda p: p.get("state") == "done" and p.get("music_refresh") == "waiting")
+S._EXPORTING.add(JOB)
+n = len(calls)
+gate("p_quinta").set()
+p7 = until("preview", lambda p: p.get("music_refresh") == "skipped")
+S._EXPORTING.discard(JOB)
+assert len(calls) == n and "export" in p7["message"]
+print("OK")
+"""
+
+REDIRECT_CODE = """
+CACHED.add("p_dinamico")
+# 1) pista nueva: responde sin sincronia y sin esperar; la genera la tarea `music`
+r1 = S.direct(JOB, {"plan": PLAN, "style": "elegante"})
+assert RED[-1]["sync"] is False and len(RED) == 1
+assert r1["music"]["pending"] is True and "music_grid" not in r1["plan"]["director"]
+assert any("sincroniza sola" in n for n in r1["plan"]["director"]["notes"]) and r1["warnings"]
+assert until("music", lambda m: m.get("state") == "generating")["key"] == "p_elegante"
+# 2) otro cambio de estilo antes de que termine: cancela la generacion anterior
+r2 = S.direct(JOB, {"plan": PLAN, "style": "minimal"})
+until("music", lambda m: m.get("key") == "p_minimal" and m.get("state") == "generating")
+t0 = time.time()
+while "p_elegante" not in CANCELED and time.time() - t0 < 10:
+    time.sleep(0.05)
+assert "p_elegante" in CANCELED and "p_elegante" not in CACHED
+# 3) la pista termina: la propuesta se guarda sincronizada (misma peticion, con rejilla)
+gate("p_minimal").set()
+m = until("music", lambda m: m.get("state") == "synced")
+plan, rev = jobstore.get_plan(JOB)
+assert plan["director"]["music_grid"]["key"] == "p_minimal" and plan["director"]["style"] == "minimal"
+assert rev == r2["plan_rev"] + 1 and m["plan_rev"] == rev and m["from_rev"] == r2["plan_rev"]
+assert RED[-1]["sync"] is True and RED[-1]["style"] == "minimal"
+assert S._synced_plan(JOB, r2["plan"]) == plan                  # vista previa/export: la sincronizada
+edited = json.loads(json.dumps(r2["plan"])); edited["fx"]["text"][0]["x"] = 0.3
+assert S._synced_plan(JOB, edited) is edited
+# 4) el autoguardado del Studio con la propuesta tal cual: se queda la sincronizada (sin 409)
+r = S.put_plan(JOB, {"plan": r2["plan"], "base_rev": r2["plan_rev"]})
+assert r["ok"] and r["plan_rev"] == rev and jobstore.get_plan(JOB)[0]["director"].get("music_grid")
+# ... y con una edicion encima: gana el usuario y se avisa que se puede re-sincronizar
+r = S.put_plan(JOB, {"plan": edited, "base_rev": r2["plan_rev"]})
+assert r["ok"] and r["plan_rev"] == rev + 1
+m = side("music")
+assert m["state"] == "superseded" and m["resync"] == "available"
+assert jobstore.status(JOB)["music_resync"] == "available"
+# 5) el usuario edita mientras se genera: no se pisa su plan (music_resync='available')
+r3 = S.direct(JOB, {"plan": PLAN, "style": "energetico"})
+until("music", lambda m: m.get("key") == "p_energetico" and m.get("state") == "generating")
+e2 = json.loads(json.dumps(r3["plan"])); e2["fx"]["text"][0]["x"] = 0.7
+assert S.put_plan(JOB, {"plan": e2, "base_rev": r3["plan_rev"]})["ok"]
+gate("p_energetico").set()
+m = until("music", lambda m: m.get("state") == "ready" and m.get("resync") == "available")
+assert jobstore.get_plan(JOB)[0]["fx"]["text"][0]["x"] == 0.7
+assert "music_grid" not in jobstore.get_plan(JOB)[0]["director"]
+# 6) pista ya en cache: sincroniza en la misma respuesta (segunda pasada con music_sync)
+n = len(RED)
+r4 = S.direct(JOB, {"plan": PLAN, "style": "dinamico"})
+assert [x["sync"] for x in RED[n:]] == [False, True] and r4["music"]["pending"] is False
+assert r4["plan"]["director"]["music_grid"]["key"] == "p_dinamico"
+assert RED[-1]["timeout"] >= S.REDIRECT_MUSIC_WAIT_S and S.REDIRECT_MUSIC_WAIT_S <= 2.0
+# 7) regenerar un item (only_ids) no toca la musica
+n = len(RED)
+S.direct(JOB, {"plan": PLAN, "only_ids": ["t1"]})
+assert RED[n]["only"] == ["t1"] and len(RED) == n + 1
+# 8) cancelar la generacion (/cancel?only=music o "Re-dirigir todo")
+S.direct(JOB, {"plan": PLAN, "style": "elegante"})
+until("music", lambda m: m.get("key") == "p_elegante" and m.get("state") == "generating")
+assert S.cancel(JOB, only="music")["side"] == 1
+until("music", lambda m: m.get("state") == "canceled")
+print("OK")
+"""
+
+
+def test_vista_previa_se_actualiza_sola_con_la_musica_ia(tmp_path):
+    """Draft con la musica IA aun generandose (stats.music_pending): la vista previa queda lista
+    con la procedural; la tarea lateral `music` (la unica generacion del trabajo) genera la pista
+    y el servidor rehace el draft y publica el archivo nuevo en la misma tarea. La provisional NO
+    se borra (el Studio puede estar reproduciendola: prev_file) hasta la siguiente vista previa.
+    Cancelada, superada por otra edicion o con un export en curso, el mensaje dice la verdad."""
+    code = "import server as S, jobstore\nfrom pathlib import Path\n" + FAKE_MUSIC + PREVIEW_CODE
+    _run(code, tmp_path, {"REELFY_WORKERS": "0", "REELFY_BG_ANALYSIS": "0", "REELFY_SRC_PROXY": "0"})
+
+
+def test_redirigir_sin_full_sincroniza_con_la_musica_de_la_propuesta(tmp_path):
+    """/direct sin `full` (cambio de estilo, regenerar) va en la ruta critica del Studio: nunca
+    espera a ACE ni deja un hilo huerfano (music_sync=False). Con la pista en cache sincroniza en
+    la misma respuesta; si hay que generarla, la tarea lateral `music` la genera (una por trabajo:
+    el siguiente cambio de estilo CANCELA la anterior) y al terminar guarda la propuesta
+    sincronizada si nadie la edito (si no: music_resync='available'). El autoguardado del Studio
+    sobre la propuesta sin sincronia no choca (409) con esa escritura del servidor, y la vista
+    previa/export de la propuesta usan la version sincronizada."""
+    code = "import server as S, jobstore\n" + FAKE_MUSIC + REDIRECT_CODE
+    _run(code, tmp_path, {"REELFY_WORKERS": "0", "REELFY_BG_ANALYSIS": "0", "REELFY_SRC_PROXY": "0"})
+
+
+def test_cancelar_sin_only_con_export_conserva_la_vista_previa(tmp_path):
+    """El 'Cancelar export' del Studio hace POST /cancel sin `only`: con un export en curso se
+    cancelan el export, el analisis de fondo y re-dirigir, pero no la vista previa (ni su
+    actualizacion con la musica IA) ni la generacion de la musica."""
+    code = """
+import server as S, jobstore
+JOB = "0123456789ab"
+jobstore.create(JOB, kind="render", ext=".mp4", plan={"version": 2, "fx": {}})
+jobstore.update(JOB, state="running", phase="rendering")
+def idle(jid, ev):
+    ev.wait(30)
+for name in ("preview", "analysis", "direct", "music"):
+    S._start_side(JOB, name, idle)
+S._EXPORTING.add(JOB)
+r = S.cancel(JOB)
+assert r["ok"] and r["side"] == 2, r
+alive = {k[1] for k, v in S._SIDE.items() if k[0] == JOB and not v["cancel"].is_set()}
+assert alive == {"preview", "music"}, alive
+assert jobstore.get_light(JOB)["cancel"]
+S._EXPORTING.discard(JOB)
+jobstore.update(JOB, state="review", phase="review", kind="analyze")
+S.cancel(JOB)                                            # sin export: todo
+assert not any(not v["cancel"].is_set() for k, v in S._SIDE.items() if k[0] == JOB)
+print("OK")
+"""
+    _run(code, tmp_path, {"REELFY_WORKERS": "0", "REELFY_BG_ANALYSIS": "0", "REELFY_SRC_PROXY": "0"})

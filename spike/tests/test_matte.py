@@ -610,13 +610,9 @@ def test_background_rgba_grano_en_cualquier_cuadro():
 
 
 def _load_factor() -> float:
-    """Holgura por carga (maquina compartida): con load > nucleos los tiempos suben en
-    proporcion; el limite se escala igual (tope 4x) en vez de fallar en falso."""
-    import os
-    try:
-        return min(4.0, max(1.0, os.getloadavg()[0] / (os.cpu_count() or 8)))
-    except OSError:
-        return 1.0
+    """Holgura por carga comun a la suite (conftest.load_factor)."""
+    from conftest import load_factor
+    return load_factor()
 
 
 def test_cache_coreml_por_forma_con_limite(tmp_path):
@@ -749,3 +745,46 @@ def test_save_meta_concurrente_no_lanza(tmp_path):
     import json
     d = json.loads((mps[0].dir / "meta.json").read_text())["ranges"]
     assert len(d) == 160 and not list(mps[0].dir.glob("*.tmp*"))
+
+
+def test_json_de_caras_y_meta_tolera_numpy(tmp_path):
+    """Pedido del director (ola 2): 'caras del rango ... fallaron: Object of type float32 is not
+    JSON serializable'. Cualquier escalar o arreglo de numpy que llegue a faces.json o meta.json
+    se escribe como numero de Python (y las caras recien detectadas quedan en float)."""
+    import json
+    mp = matte.MatteProvider(tmp_path / "x.mp4", 40, 60, 10, [(0, 5)], tmp_path, "final")
+    mp.dir.mkdir(parents=True, exist_ok=True)
+    f32 = np.float32
+    mp._faces = {0: [(f32(0.5), f32(0.25), f32(0.2), f32(0.1), f32(0.9))], 3: None,
+                 6: [tuple(np.array([0.4, 0.3, 0.1, 0.1, 0.8], np.float32))]}
+    mp._save_faces()
+    d = json.loads((mp.dir / "faces.json").read_text())
+    assert d["faces"]["0"][0] == pytest.approx([0.5, 0.25, 0.2, 0.1, 0.9], abs=1e-6)
+    assert d["faces"]["3"] is None and d["faces"]["6"][0][0] == pytest.approx(0.4, abs=1e-6)
+    mp.stats["0-5"] = {"quality": np.float32(0.93), "dims": np.array([64, 96]), "crop": [np.int64(3), 0, 40, 60]}
+    mp._save_meta()
+    m = json.loads((mp.dir / "meta.json").read_text())["ranges"]["0-5"]
+    assert m["quality"] == pytest.approx(0.93, abs=1e-6) and m["dims"] == [64, 96] and m["crop"][0] == 3
+    assert not list(mp.dir.glob("*.tmp*"))
+
+
+# ---------------------------------------------------------------- QA final: el hook desde el cuadro 0
+def test_no_fade_in_means_full_effect_on_the_first_frame():
+    """fade_in 0 (el fondo del hook del director): el efecto esta completo en lt = 0. Antes
+    ease.envelope acotaba tin a 1 ms y en lt = 0 daba 0: el cuadro 0 del video (la portada)
+    salia con el cuarto real en vez del fondo del hook."""
+    W, H = 120, 200
+    a = np.full((H, W, 4), 200, np.uint8)
+    m = np.zeros((H, W), np.float32)
+    m[70:190, 45:75] = 1.0
+    c = C.FrameCtx(W=W, H=H, fps=30, n=0, face=(0.5, 0.3, 0.12, 0.06))
+    c._matte_fn = lambda: m
+    it = {"background": "color", "bg_colors": ["#2040C0", "#2040C0"], "vignette": 0.0, "grain": 0.0,
+          "fade_in": 0.0}
+    o = C.image_to_rgba(matte.bg_replace(C.image_from_rgba(a), it, 0.0, 2.0, c))
+    assert o[5, 5, 2] > o[5, 5, 0] + 40                                  # fondo nuevo en el cuadro 0
+    soft = {k: v for k, v in it.items() if k != "fade_in"}               # con revelado (default)
+    o2 = C.image_to_rgba(matte.bg_replace(C.image_from_rgba(a), soft, 0.0, 2.0, c))
+    assert np.abs(o2[5, 5, :3].astype(int) - 200).max() <= 3             # aun no revela
+    assert matte._env({"fade_in": 0.0}, 0.0, 2.0) == pytest.approx(1.0)
+    assert matte._env({}, 0.0, 2.0) == pytest.approx(0.0)

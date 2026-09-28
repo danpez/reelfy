@@ -1119,3 +1119,87 @@ def _render_caps(ph, cfg, t, t_orig):
     ctx.t_orig = t_orig
     T.draw_captions(cv, ph, cfg, t, ctx)
     return arr
+
+
+# ---------------------------------------------------------------- ola 3: salida de los subtitulos
+def test_caption_exit_is_short_and_fades_as_one_piece():
+    """Un grupo seguido de una pausa se queda ~0.34 s tras su ultima palabra y se apaga en ~0.11 s
+    COMO UNA PIEZA: sombra y relleno no se transparentan por separado (eso dejaba una copia oscura
+    del subtitulo, un 'fantasma'). A media salida la tinta clara es la mezcla lineal esperada."""
+    ph = [[{"text": "Arboleda.", "start": 1.0, "end": 1.5}], [{"text": "Mira", "start": 4.0, "end": 4.3}]]
+    cfg = _cfg()
+    g = T.caption_groups(ph, cfg, _ctx())[0]
+    assert abs(g["end"] - (1.5 + 0.34)) < 1e-6
+    bg = np.full((H, W, 4), (96, 96, 96, 255), np.uint8)
+
+    def frame(t):
+        arr, surf = C.new_frame(W, H)
+        arr[:] = bg
+        T.draw_captions(surf.getCanvas(), ph, cfg, t, _ctx(t))
+        return arr[..., :3].astype(np.float32).mean(axis=2)
+
+    full = frame(g["end"] - 0.2)                         # quieto, opaco
+    mid_t = g["end"] - 0.055                             # a media salida (po = 0.5 -> alpha 0.75)
+    mid = frame(mid_t)
+    after = frame(g["end"] + 0.01)
+    assert np.abs(after - 96).max() < 1.0                # ya no queda nada
+    a = 0.75
+    ink = full > 200                                     # relleno blanco del texto
+    assert ink.sum() > 300
+    exp = 96 + (full[ink] - 96) * a
+    # capa unica: el relleno queda en la mezcla lineal (con partes separadas la sombra de debajo
+    # lo oscurecia ~30 niveles)
+    assert float(np.percentile(mid[ink], 50)) >= float(np.percentile(exp, 50)) - 12
+
+
+# ---------------------------------------------------------------- ola 3 (revision del critico)
+def test_captions_hide_rows_in_y_ranges():
+    """`y_ranges` con hide:true (tiempo original): sin subtitulos en ese tramo (el CTA final de
+    un primer plano ocupa su franja) y con fundido en el borde; sin mover el resto."""
+    ph = _phrases()
+    cfg = _cfg("clean_bold", y_ranges=[{"start": 1.5, "end": 2.0, "y": 0.73, "hide": True}])
+    arr, cv = _canvas()
+    T.draw_captions(cv, ph, cfg, 1.7, _ctx(1.7))
+    assert (arr[..., 3] > 0).sum() == 0
+    arr, cv = _canvas()
+    T.draw_captions(cv, ph, cfg, 1.35, _ctx(1.35))
+    assert (arr[..., 3] > 0).sum() > 800
+    assert 0.0 < T._yr_hide_alpha(cfg, _ctx(1.45)) < 1.0
+    assert T._cap_dy(cfg, {"y": 0.73}, _ctx(1.7)) == 0.0          # una fila hide no desplaza
+
+
+def test_kicker_pill_never_starts_empty():
+    """La pastilla del kicker arranca en ~40% de su ancho y la etiqueta entra casi con ella:
+    nunca una pastilla vacia que crece desde ancho 0 (se veia como una falla sobre la cara)."""
+    blue = "#2255FF"
+    item = {"id": "k6", "preset": "kicker", "kicker": "Perfumería", "text": "nombres en inglés", "box": blue,
+            "anim_in": "fade", "anim_out": "none"}
+    P, B = T._get_block(item, "kicker", _ctx())
+    pill = B.lines[0]
+    full_w = pill.ink[2] - pill.ink[0]
+    arr, cv = _canvas()
+    T.RENDERERS["kicker"](cv, item, 0.04, 2.4, _ctx(0.04))
+    bl = _near(arr, blue, 60, 120)
+    cols = np.nonzero(bl[int(pill.ink[1]):int(pill.ink[3]) + 1, :].any(axis=0))[0]
+    assert len(cols) and (cols.max() - cols.min()) >= 0.4 * full_w * 0.9
+    arr, cv = _canvas()
+    T.RENDERERS["kicker"](cv, item, 0.12, 2.4, _ctx(0.12))
+    # la etiqueta (blanca sobre el azul) ya asoma a 0.12 s: pixeles claros dentro de la pastilla
+    sub = arr[int(pill.ink[1]):int(pill.ink[3]) + 1, int(pill.ink[0]):int(pill.ink[2]), :3].astype(int)
+    light = (sub.min(axis=2) > 90) & (arr[int(pill.ink[1]):int(pill.ink[3]) + 1,
+                                          int(pill.ink[0]):int(pill.ink[2]), 3] > 10)
+    assert light.sum() > 30
+
+
+def test_word_sync_false_enters_whole_at_start():
+    """word_sync: false (palabra gigante del director): entra entera con su animacion al inicio
+    del item aunque la voz la diga despues; por defecto espera a que se diga."""
+    item = _item("stack", text="DIENTES", anim_in="pop", anim_out="none", size=0.14)
+    item["_words"] = [{"text": "dientes", "start": 1.2, "end": 1.6}]
+    arr, cv = _canvas()
+    T.RENDERERS["stack"](cv, dict(item), 0.5, 2.0, _ctx(0.5))
+    synced = int((arr[..., 3] > 40).sum())
+    arr, cv = _canvas()
+    T.RENDERERS["stack"](cv, dict(item, word_sync=False), 0.5, 2.0, _ctx(0.5))
+    free = int((arr[..., 3] > 40).sum())
+    assert synced < 200 and free > 2000, (synced, free)

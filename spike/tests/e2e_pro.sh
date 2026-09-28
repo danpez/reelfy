@@ -6,6 +6,9 @@
 # Salidas en spike/work/e2e/ (ignorado por git): plan, cuadros, vista previa, video final,
 # shorts, hoja de contacto, e2e_result.json (tiempos por etapa y validaciones).
 # Medios: REELFY_TEST_MEDIA o spike/work/media (6 IMG_*.MOV). Sin medios: sale con 77 (skip).
+# Con REELFY_PLAYWRIGHT (ruta de playwright-core) corre ademas la E2E del Studio en un navegador
+# real (tests/studio_smoke.mjs, con export) sobre el MISMO trabajo, con REELFY_PW_CHANNEL
+# (default chrome: decodifica H.264). Capturas en $OUT/smoke; resultado en e2e_result.json.
 set -uo pipefail
 SPIKE="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${1:-${REELFY_E2E_PORT:-8013}}"
@@ -35,4 +38,26 @@ cd "$SPIKE"
 .venv/bin/python -u tests/e2e_pro.py --base "http://127.0.0.1:$PORT" --media "$MEDIA" --out "$OUT" "${@:3}"
 RC=$?
 echo "e2e_pro: fin rc=$RC, carga $(uptime | sed 's/.*load/load/')"
+# E2E del Studio (navegador real) sobre el trabajo de la prueba HTTP
+if [ -n "${REELFY_PLAYWRIGHT:-}" ] && [ -f "$SPIKE/tests/studio_smoke.mjs" ] && command -v node >/dev/null; then
+  JOB=$(.venv/bin/python -c "import json,sys; print(json.load(open(sys.argv[1])).get('job') or '')" "$OUT/e2e_result.json" 2>/dev/null)
+  if [ -n "$JOB" ]; then
+    mkdir -p "$OUT/smoke"
+    echo "e2e_pro: studio_smoke sobre $JOB, carga $(uptime | sed 's/.*load/load/')"
+    REELFY_PW_CHANNEL="${REELFY_PW_CHANNEL:-chrome}" REELFY_SMOKE_OUT="$OUT/smoke" \
+      node "$SPIKE/tests/studio_smoke.mjs" "http://127.0.0.1:$PORT/?job=$JOB" 2>&1 | tee "$OUT/smoke/log.txt"
+    SRC=${PIPESTATUS[0]}
+    .venv/bin/python - "$OUT/e2e_result.json" "$SRC" <<'PY'
+import json, sys
+p, rc = sys.argv[1], int(sys.argv[2])
+d = json.load(open(p))
+d["studio_smoke"] = {"rc": rc, "ok": rc == 0}
+json.dump(d, open(p, "w"), indent=1, default=str)
+PY
+    echo "e2e_pro: studio_smoke rc=$SRC, carga $(uptime | sed 's/.*load/load/')"
+    [ "$SRC" -ne 0 ] && [ "$RC" -eq 0 ] && RC=1
+  else
+    echo "e2e_pro: sin trabajo para studio_smoke"
+  fi
+fi
 exit $RC

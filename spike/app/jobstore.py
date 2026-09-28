@@ -24,10 +24,13 @@ Motor pro (v0.5):
     sigue siendo valido y el proyecto no aparece como error.
   - `side`: tareas laterales del mismo trabajo que NO mueven su fase (vista previa real,
     analisis en segundo plano, musica): {nombre: {state, pct, stage, file, error, ...}}.
+  - `meta`: resumen liviano del plan (tema, duracion, version) que se recalcula en cada
+    escritura del plan: "Proyectos recientes" (GET /jobs) no deserializa planes.
 """
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -43,14 +46,69 @@ _handlers: dict = {}
 _wake = threading.Event()
 _side_lock = threading.Lock()   # lectura-modificacion-escritura atomica de `side`
 
-_JSON_COLS = ("params", "plan", "clips", "warnings", "side")
+_JSON_COLS = ("params", "plan", "clips", "warnings", "side", "meta")
 _COLS = ("id", "kind", "state", "phase", "pct", "message", "eta", "elapsed",
          "ext", "params", "plan", "clips", "error", "created", "updated",
-         "stage", "warnings", "plan_rev", "side", "plan_hash")
+         "stage", "warnings", "plan_rev", "side", "plan_hash", "meta")
 # columnas agregadas despues de v0.4 (migracion en caliente de un jobs.db existente)
 _NEW_COLS = {"stage": "TEXT", "warnings": "TEXT", "plan_rev": "INTEGER DEFAULT 0",
-             "side": "TEXT", "plan_hash": "TEXT"}
+             "side": "TEXT", "plan_hash": "TEXT", "meta": "TEXT"}
 CANCELED_EXPORT_MSG = "Export cancelado. Tu edición sigue aquí."
+# claves de las tareas laterales que /status aplana como <tarea>_<clave>
+SIDE_FLAT = ("state", "pct", "file", "stage", "error", "done", "t", "message", "music_pending",
+             "url", "resync", "prev_file")
+
+
+def _final_duration(dur, cuts):
+    """Duracion final aproximada (duracion menos los cortes habilitados, fusionados)."""
+    rs = []
+    for c in cuts or []:
+        if not isinstance(c, dict) or c.get("enabled") is False:
+            continue
+        try:
+            a, b = max(0.0, float(c["start"])), min(dur, float(c["end"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if b > a:
+            rs.append((a, b))
+    rs.sort()
+    cut, end = 0.0, -1.0
+    for a, b in rs:
+        if a > end:
+            cut += b - a
+            end = b
+        elif b > end:
+            cut += b - end
+            end = b
+    return max(0.0, dur - cut)
+
+
+def plan_meta(plan):
+    """Resumen del plan para listados: {version, topic, duration, final_duration, style,
+    shots}. `topic` = tema que entendio el director (o el primer titulo de highlight)."""
+    if plan is None:
+        return None
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except Exception:  # noqa
+            return None
+    if not isinstance(plan, dict):
+        return None
+    d = plan.get("director") if isinstance(plan.get("director"), dict) else {}
+    sc = d.get("script") if isinstance(d.get("script"), dict) else {}
+    topic = sc.get("topic") or plan.get("topic")
+    if not topic:
+        hl = [h for h in plan.get("highlights") or [] if isinstance(h, dict) and h.get("title")]
+        topic = hl[0]["title"] if hl else None
+    try:
+        dur = float(plan.get("duration") or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    return {"version": plan.get("version") or 1, "topic": str(topic)[:120] if topic else None,
+            "duration": round(dur, 2),
+            "final_duration": round(_final_duration(dur, plan.get("cuts")), 2) if dur else None,
+            "style": d.get("style"), "shots": len(plan.get("shots") or [])}
 
 
 def plan_hash(plan):
@@ -171,13 +229,15 @@ def create(job_id, kind, ext, params=None, plan=None, phase="analyzing",
            message="En cola…"):
     now = time.time()
     cx = _cx()
+    meta = plan_meta(plan)
     cx.execute("""INSERT INTO jobs (id, kind, state, phase, pct, message, ext,
-                  params, plan, created, updated, plan_rev, plan_hash)
-                  VALUES (?,?, 'queued', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  params, plan, created, updated, plan_rev, plan_hash, meta)
+                  VALUES (?,?, 'queued', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                (job_id, kind, phase, message, ext,
                 json.dumps(params or {}),
                 json.dumps(plan) if plan is not None else None, now, now,
-                1 if plan is not None else 0, plan_hash(plan)))
+                1 if plan is not None else 0, plan_hash(plan),
+                json.dumps(meta) if meta is not None else None))
     cx.commit()
     _wake.set()
 
@@ -188,6 +248,7 @@ def requeue(job_id, kind, params=None, plan=None, phase="rendering",
     solo si el plan cambia de contenido (un export del plan identico no obliga a la UI a
     bajarlo de nuevo)."""
     h = plan_hash(plan)
+    meta = plan_meta(plan)
     kw = _dump(dict(params=params or {}, plan=plan))
     cx = _cx()
     cx.execute("""UPDATE jobs SET kind=?, state='queued', phase=?, pct=0, message=?,
@@ -195,10 +256,10 @@ def requeue(job_id, kind, params=None, plan=None, phase="rendering",
                   warnings=NULL, plan=COALESCE(?, plan),
                   plan_rev=COALESCE(plan_rev, 0) + (CASE WHEN ? IS NULL OR
                       plan_hash IS ? THEN 0 ELSE 1 END),
-                  plan_hash=COALESCE(?, plan_hash),
+                  plan_hash=COALESCE(?, plan_hash), meta=COALESCE(?, meta),
                   updated=? WHERE id=?""",
                (kind, phase, message, kw["params"], kw.get("plan"), h, h, h,
-                time.time(), job_id))
+                json.dumps(meta) if meta is not None else None, time.time(), job_id))
     cx.commit()
     _wake.set()
 
@@ -207,6 +268,8 @@ def update(job_id, **kw):
     """Actualiza columnas. Si trae `plan` y su contenido cambio, sube `plan_rev` (la UI sabe
     que cambio)."""
     h = plan_hash(kw["plan"]) if kw.get("plan") is not None else None
+    if h is not None:
+        kw["meta"] = plan_meta(kw["plan"])
     kw = _dump(kw)
     sets = ", ".join(f"{k}=?" for k in kw)
     vals = list(kw.values())
@@ -237,8 +300,8 @@ def update_plan(job_id, plan, base_rev=None):
             return False, rev
         if row["plan_hash"] == h:
             return True, rev
-        cx.execute("UPDATE jobs SET plan=?, plan_hash=?, plan_rev=?, updated=? WHERE id=?",
-                   (raw, h, rev + 1, time.time(), job_id))
+        cx.execute("UPDATE jobs SET plan=?, plan_hash=?, plan_rev=?, meta=?, updated=? WHERE id=?",
+                   (raw, h, rev + 1, json.dumps(plan_meta(plan)), time.time(), job_id))
     return True, rev + 1
 
 
@@ -300,7 +363,7 @@ def status(job_id, with_plan=False):
             continue
         out[name] = t
         # aplanado para la UI (contrato 6.1: preview_pct, preview_file)
-        for k in ("state", "pct", "file", "stage", "error", "done", "t", "message"):
+        for k in SIDE_FLAT:
             if k in t:
                 out[f"{name}_{k}"] = t[k]
     if with_plan:
@@ -337,10 +400,46 @@ def side_get(job_id, name):
 
 
 def recent(limit=20):
-    rows = _cx().execute(
-        "SELECT id, kind, state, phase, pct, message, error, created, updated "
-        "FROM jobs ORDER BY created DESC LIMIT ?", (limit,)).fetchall()
-    return [dict(r) for r in rows]
+    """Trabajos mas recientes con el resumen de su plan (sin deserializar planes: `meta` se
+    calcula al escribir el plan; las filas de antes de la columna se completan una vez)."""
+    cx = _cx()
+    rows = cx.execute(
+        "SELECT id, kind, state, phase, pct, message, error, created, updated, plan_rev, meta, "
+        "ext, LENGTH(plan) AS plan_len FROM jobs ORDER BY created DESC LIMIT ?", (limit,)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        meta = None
+        if d.get("meta"):
+            try:
+                meta = json.loads(d["meta"])
+            except Exception:  # noqa
+                meta = None
+        if meta is None and d.get("plan_len"):
+            row = cx.execute("SELECT plan FROM jobs WHERE id=?", (d["id"],)).fetchone()
+            meta = plan_meta(row["plan"]) if row else None
+            if meta is not None:
+                cx.execute("UPDATE jobs SET meta=? WHERE id=?", (json.dumps(meta), d["id"]))
+                cx.commit()
+        d.pop("meta", None)
+        d["has_plan"] = bool(d.pop("plan_len", None))
+        d["plan_rev"] = int(d.get("plan_rev") or 0)
+        d.update(meta or {"version": None, "topic": None, "duration": None,
+                          "final_duration": None, "style": None, "shots": 0})
+        out.append(d)
+    return out
+
+
+_SID_RE = re.compile(r'"sid"\s*:\s*"([0-9a-f]{12})"')
+
+
+def referenced_sids():
+    """Fuentes subidas (/sources) que algun PLAN referencia como medio propio ({sid, ...}):
+    la limpieza del disco no debe borrarlas."""
+    out = set()
+    for r in _cx().execute("SELECT plan FROM jobs WHERE plan LIKE '%\"sid\"%'").fetchall():
+        out.update(_SID_RE.findall(r["plan"] or ""))
+    return out
 
 
 # ---- cancelación cooperativa ----

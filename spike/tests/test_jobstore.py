@@ -180,3 +180,47 @@ def test_status_aplana_tiempo_y_mensaje_de_tareas_laterales(store):
     store.side_update("k6", "analysis", state="done", t=3.2, message="listo")
     st = store.status("k6")
     assert st["analysis_t"] == 3.2 and st["analysis_message"] == "listo"
+
+
+def test_resumen_del_plan_para_proyectos_recientes(store):
+    """`meta` se recalcula en cada escritura del plan; recent() no deserializa planes y completa
+    una vez las filas viejas (sin la columna)."""
+    plan = {"version": 2, "duration": 20.0, "shots": [{}, {}],
+            "cuts": [{"start": 1, "end": 3}, {"start": 2, "end": 4}, {"start": 10, "end": 11, "enabled": False}],
+            "director": {"style": "elegante", "script": {"topic": "Pan de caja artesanal"}}}
+    store.create("m1", kind="compose", ext=".mp4", plan=plan)
+    r = store.recent()[0]
+    assert r["id"] == "m1" and r["topic"] == "Pan de caja artesanal" and r["version"] == 2
+    assert r["duration"] == 20.0 and r["final_duration"] == 17.0 and r["style"] == "elegante"
+    assert r["shots"] == 2 and r["has_plan"] and r["plan_rev"] == 1 and r["ext"] == ".mp4"
+    store.update_plan("m1", dict(plan, director={"script": {"topic": "Otro tema"}}))
+    assert store.recent()[0]["topic"] == "Otro tema"
+    store.update("m1", plan={"version": 1, "duration": 8.0,
+                             "highlights": [{"title": "Titulo del momento"}]})
+    r = store.recent()[0]
+    assert r["topic"] == "Titulo del momento" and r["version"] == 1 and r["final_duration"] == 8.0
+    # fila de antes de la columna `meta`: se completa al listar
+    store._cx().execute("UPDATE jobs SET meta=NULL WHERE id='m1'")
+    store._cx().commit()
+    assert store.recent()[0]["topic"] == "Titulo del momento"
+    assert store._cx().execute("SELECT meta FROM jobs WHERE id='m1'").fetchone()[0]
+    store.create("m2", kind="analyze", ext=".mov")
+    r = store.recent()[0]
+    assert r["id"] == "m2" and not r["has_plan"] and r["topic"] is None
+
+
+def test_fuentes_referenciadas_por_planes(store):
+    store.create("s1", kind="compose", ext=".mp4", plan={"version": 2, "fx": {"graphics": [
+        {"id": "g", "media": {"sid": "0123456789ab", "type": "image"}}],
+        "cutaways": [{"id": "c", "media": {"sid": "abcdefabcdef", "type": "video"}}]}})
+    store.create("s2", kind="compose", ext=".mp4", plan={"version": 2, "fx": {}})
+    assert store.referenced_sids() == {"0123456789ab", "abcdefabcdef"}
+
+
+def test_status_aplana_musica_pendiente_de_la_vista_previa(store):
+    store.create("p1", kind="analyze", ext=".mp4")
+    store.side_update("p1", "preview", state="done", file="a.mp4", music_pending=True)
+    st = store.status("p1")
+    assert st["preview_music_pending"] is True and st["preview_file"] == "a.mp4"
+    store.side_update("p1", "proxy", state="done", url="/source/p1?proxy=1")
+    assert store.status("p1")["proxy_url"] == "/source/p1?proxy=1"

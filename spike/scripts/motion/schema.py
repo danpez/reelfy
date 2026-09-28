@@ -28,6 +28,8 @@ import json
 import re
 from typing import Any
 
+from . import profile as _profile
+
 VERSION = 2
 
 # ---------------------------------------------------------------- defaults (seccion 3)
@@ -70,12 +72,13 @@ TEXT_ANIM_IN = ["pop", "rise", "slide_left", "slide_right", "type", "mask", "fad
                 "word_stagger", "letter_stagger"]
 TEXT_ANIM_OUT = ["fade", "pop_out", "slide_up", "none"]
 CAPTION_PRESETS = ["clean_bold", "karaoke", "boxed", "minimal_small", "bold_caps", "none"]
-GRAPHIC_KINDS = ["doodle", "icon", "card", "lower_third", "cta", "progress", "sticker_text"]
+GRAPHIC_KINDS = ["doodle", "icon", "card", "lower_third", "cta", "progress", "sticker_text", "media",
+                 "socials"]
 DOODLES = ["sparkle", "star4", "star5", "burst", "rays", "arrow_curve", "arrow_straight",
            "arrow_down", "circle_scribble", "underline", "squiggle", "dotted_path", "heart",
            "check", "cross", "exclaim", "question", "swirl", "lightning", "loop"]
 CARD_VARIANTS = ["price", "location", "schedule", "link", "phone", "rating", "checklist", "stat",
-                 "generic"]
+                 "generic", "booking"]
 CTA_VARIANTS = ["follow", "link_below", "comment", "save", "share"]
 GRAPHIC_ANIM_IN = ["pop", "draw", "fade", "rise", "scale_down", "slide_left", "slide_right", "none"]
 GRAPHIC_ANIM_OUT = ["fade", "pop_out", "slide_up", "none"]
@@ -93,6 +96,8 @@ SFX_NAMES = ["whoosh_soft", "whoosh_fast", "swoosh_up", "swoosh_down", "whip", "
              "pen_scribble", "heartbeat", "record_stop"]
 LOOKS = ["natural", "warm_clean", "cinematic", "bright_pop", "moody", "bw_contrast"]
 STYLES = ["dinamico", "elegante", "minimal", "energetico"]
+# plataformas del perfil (motion/profile.py): icono de marca de chips, CTA y tarjetas
+PLATFORM_IDS = list(_profile.PLATFORMS)
 # transiciones que MEZCLAN A (congelado) con B: su ventana siempre empieza en la union
 # (transitions.MIXERS); `align` solo aplica a las centradas
 TRANSITION_MIXERS = ["film_burn", "torn_paper", "circle", "slide"]
@@ -111,7 +116,70 @@ except Exception:  # pragma: no cover
 
 # ---------------------------------------------------------------- helpers de esquema
 # `lines`: lista de objetos {text, scale, font, color, italic} (sus campos van en `fields`)
-KINDS_TYPES = ("num", "text", "color", "select", "bool", "seg", "font", "icon", "lines", "rows")
+# `media`: medio propio subido por POST /sources: {sid, type: image|video, name, w, h, dur}
+#          (+ thumb, que el motor ignora). render lo resuelve por sid (render.media_path).
+KINDS_TYPES = ("num", "text", "color", "select", "bool", "seg", "font", "icon", "lines", "rows",
+               "media")
+
+# ortografia de las etiquetas del catalogo (UTF-8). Red de seguridad para etiquetas que
+# publican los modulos duenos en ASCII: accent_es() corrige solo palabras conocidas y respeta
+# Mayuscula inicial y TODO MAYUSCULAS (idempotente: una palabra ya acentuada no cambia).
+_ACCENTS = {
+    "accion": "acción", "ademas": "además", "alineacion": "alineación",
+    "amortiguacion": "amortiguación", "angulo": "ángulo", "animacion": "animación",
+    "animo": "ánimo", "anticipacion": "anticipación", "aspero": "áspero",
+    "automatica": "automática", "automatico": "automático", "boton": "botón", "caida": "caída",
+    "calido": "cálido", "camara": "cámara", "cancion": "canción", "catalogo": "catálogo",
+    "circulo": "círculo", "codigo": "código", "descripcion": "descripción", "detras": "detrás",
+    "dinamico": "dinámico", "direccion": "dirección", "dramatica": "dramática",
+    "dramatico": "dramático", "dramaticos": "dramáticos", "dueno": "dueño",
+    "duracion": "duración", "energetico": "energético", "espanol": "español",
+    "exposicion": "exposición", "frio": "frío", "grafico": "gráfico", "graficos": "gráficos",
+    "inclinacion": "inclinación", "informacion": "información", "linea": "línea",
+    "lineas": "líneas", "maquina": "máquina", "maxima": "máxima", "maximas": "máximas",
+    "maximo": "máximo", "mayusculas": "mayúsculas", "minima": "mínima", "minimo": "mínimo",
+    "modulo": "módulo", "musica": "música", "numero": "número", "opcion": "opción",
+    "parametro": "parámetro", "parametros": "parámetros", "pelicula": "película",
+    "posicion": "posición", "proporcion": "proporción", "rapido": "rápido",
+    "reproduccion": "reproducción", "rotacion": "rotación", "rotulo": "rótulo",
+    "saturacion": "saturación", "segun": "según", "separacion": "separación",
+    "sobreexposicion": "sobreexposición", "subtitulo": "subtítulo", "subtitulos": "subtítulos",
+    "tamano": "tamaño", "tambien": "también", "telefono": "teléfono", "titulo": "título",
+    "titulos": "títulos", "transicion": "transición", "ubicacion": "ubicación",
+    "ultima": "última", "ultimo": "último", "union": "unión", "vacia": "vacía", "vacio": "vacío",
+    "vacios": "vacíos", "valido": "válido", "variacion": "variación", "vinieta": "viñeta",
+}
+_WORD = re.compile(r"[A-Za-zÀ-ÿ0-9_]+")        # con _ y digitos: los identificadores no cambian
+
+
+def accent_es(s: Any) -> Any:
+    """Etiqueta con su ortografia en espanol (solo palabras del mapa)."""
+    if not isinstance(s, str):
+        return s
+
+    def fix(m):
+        w = m.group(0)
+        a = _ACCENTS.get(w.lower()) if w.isalpha() else None
+        if a is None:
+            return w
+        if len(w) > 1 and w.isupper():
+            return a.upper()
+        return a[0].upper() + a[1:] if w[0].isupper() else a
+    return _WORD.sub(fix, s)
+
+
+def _accent_catalog(o: Any) -> Any:
+    """Aplica accent_es a label/hint/desc de todo el catalogo (en sitio)."""
+    if isinstance(o, list):
+        for x in o:
+            _accent_catalog(x)
+    elif isinstance(o, dict):
+        for k, v in o.items():
+            if k in ("label", "hint", "desc") and isinstance(v, str):
+                o[k] = accent_es(v)
+            else:
+                _accent_catalog(v)
+    return o
 
 
 def P(k: str, type: str, label: str, default: Any = None, **kw) -> dict:
@@ -145,23 +213,23 @@ COMMON_EVENT = [
 
 # ---------------------------------------------------------------- text
 TEXT_COMMON = [
-    P("text", "text", "Texto (Enter = nueva linea)", "", multiline=True),
-    num("x", "Posicion X", 0.5, 0.0, 1.0, 0.005),
-    num("y", "Posicion Y", 0.3, 0.0, 1.0, 0.005),
-    num("size", "Tamano", 0.09, 0.02, 0.45, 0.005),
+    P("text", "text", "Texto (Enter = nueva línea)", "", multiline=True),
+    num("x", "Posición X", 0.5, 0.0, 1.0, 0.005),
+    num("y", "Posición Y", 0.3, 0.0, 1.0, 0.005),
+    num("size", "Tamaño", 0.09, 0.02, 0.45, 0.005),
     P("font", "font", "Fuente", "Poppins-Black", opts=FONTS),
     P("color", "color", "Color", "#FFFFFF"),
     P("accent", "color", "Color de acento", "#FFD23F"),
     P("accent_words", "text", "Palabras en acento", [], list=True),
-    sel("align", "Alineacion", ["left", "center", "right"], "center", seg=True),
+    sel("align", "Alineación", ["left", "center", "right"], "center", seg=True),
     num("stroke", "Contorno", 0.0, 0.0, 24.0, 0.5, unit="px"),
     num("shadow", "Sombra", 0.35, 0.0, 1.0, 0.05),
-    sel("anim_in", "Animacion de entrada", TEXT_ANIM_IN, "pop"),
-    sel("anim_out", "Animacion de salida", TEXT_ANIM_OUT, "fade"),
-    P("behind", "bool", "Detras de la persona", False),
+    sel("anim_in", "Animación de entrada", TEXT_ANIM_IN, "pop"),
+    sel("anim_out", "Animación de salida", TEXT_ANIM_OUT, "fade"),
+    P("behind", "bool", "Detrás de la persona", False),
     P("box", "color", "Caja de fondo", None, nullable=True),
     # lineas con estilo propio (contrato 3.1): reemplazan a `text` si vienen
-    P("lines", "lines", "Lineas con estilo propio", None, nullable=True, list=True,
+    P("lines", "lines", "Líneas con estilo propio", None, nullable=True, list=True,
       fields=[P("text", "text", "Texto", ""), num("scale", "Escala", 1.0, 0.2, 4.0, 0.05),
               P("font", "font", "Fuente", None, opts=FONTS, nullable=True),
               P("color", "color", "Color", None, nullable=True),
@@ -169,7 +237,7 @@ TEXT_COMMON = [
 ]
 LINE_FIELDS = {"text", "scale", "font", "color", "italic"}
 TEXT_PRESET_DEFAULTS = {
-    "title_pop":        {"label": "Titulo pop", "font": "Poppins-Black", "size": 0.09, "y": 0.26,
+    "title_pop":        {"label": "Título pop", "font": "Poppins-Black", "size": 0.09, "y": 0.26,
                          "anim_in": "pop"},
     "stack":            {"label": "Apilado bold", "font": "Anton", "size": 0.11, "y": 0.28,
                          "anim_in": "word_stagger"},
@@ -179,11 +247,11 @@ TEXT_PRESET_DEFAULTS = {
                          "y": 0.24, "anim_in": "rise"},
     "script_accent":    {"label": "Manuscrita", "font": "Caveat-Bold", "size": 0.08, "y": 0.3,
                          "anim_in": "mask"},
-    "behind_giant":     {"label": "Gigante detras", "font": "Anton", "size": 0.3, "y": 0.3,
+    "behind_giant":     {"label": "Gigante detrás", "font": "Anton", "size": 0.3, "y": 0.3,
                          "behind": True, "anim_in": "scale_down"},
     "highlight_marker": {"label": "Marcador", "font": "Poppins-ExtraBold", "size": 0.065,
                          "y": 0.3, "box": "#FFD23F", "color": "#111111", "anim_in": "mask"},
-    "typewriter":       {"label": "Maquina de escribir", "font": "SpaceMono-Bold", "size": 0.055,
+    "typewriter":       {"label": "Máquina de escribir", "font": "SpaceMono-Bold", "size": 0.055,
                          "y": 0.3, "anim_in": "type"},
     "counter":          {"label": "Contador", "font": "Poppins-Black", "size": 0.14, "y": 0.3,
                          "anim_in": "pop"},
@@ -195,47 +263,56 @@ TEXT_PRESET_EXTRA = {
                 P("prefix", "text", "Prefijo", "$"), P("suffix", "text", "Sufijo", ""),
                 num("decimals", "Decimales", 0, 0, 3, 1),
                 P("sep", "text", "Separador de miles", ","),
-                sel("anchor", "Crece desde", ["right", "center", "left"], "right", seg=True)],
+                sel("anchor", "Crece desde", ["right", "center", "left"], "right", seg=True),
+                # text._counter_state: vacio = min(1.3, max(0.4, 0.55 * duracion del item))
+                num("count_dur", "Duración del conteo", None, 0.1, 5.0, 0.05, unit="s",
+                    nullable=True, hint="Vacío = automático (según la duración)")],
 }
 
 # ---------------------------------------------------------------- captions
 CAPTIONS_PARAMS = [
-    P("enabled", "bool", "Subtitulos", True),
+    P("enabled", "bool", "Mostrar subtítulos", True),
     sel("preset", "Estilo", CAPTION_PRESETS, "clean_bold"),
-    num("y", "Posicion Y", 0.72, 0.1, 0.9, 0.005),
-    num("size", "Tamano", 0.052, 0.02, 0.12, 0.002),
+    num("y", "Posición Y", 0.72, 0.1, 0.9, 0.005),
+    num("size", "Tamaño", 0.052, 0.02, 0.12, 0.002),
     P("font", "font", "Fuente", "Poppins-ExtraBold", opts=FONTS),
     P("color", "color", "Color", "#FFFFFF"),
     P("accent", "color", "Color palabra activa", "#FFD23F"),
-    sel("case", "Mayusculas", ["none", "upper", "lower", "title"], "none", seg=True),
-    num("max_words", "Palabras por linea", 4, 1, 8, 1),
-    P("hide_during_titles", "bool", "Ocultar durante titulos", True),
+    sel("case", "Mayúsculas", ["none", "upper", "lower", "title"], "none", seg=True),
+    num("max_words", "Palabras por línea", 4, 1, 8, 1),
+    P("hide_during_titles", "bool", "Ocultar durante títulos", True),
     # finos (null = lo que dicta el estilo)
-    num("x", "Posicion X", 0.5, 0.1, 0.9, 0.005),
-    num("max_lines", "Lineas maximas", None, 1, 4, 1, nullable=True),
+    num("x", "Posición X", 0.5, 0.1, 0.9, 0.005),
+    num("max_lines", "Líneas máximas", None, 1, 4, 1, nullable=True),
     P("kw_accent", "bool", "Palabra clave en acento", None, nullable=True),
     P("recenter", "bool", "Recentrar al entrar palabras", None, nullable=True),
     num("stroke", "Contorno", None, 0.0, 12.0, 0.5, unit="px", nullable=True),
     num("shadow", "Sombra", None, 0.0, 1.0, 0.05, nullable=True),
     P("box", "color", "Caja de fondo", None, nullable=True),
     P("highlight", "color", "Color de resaltado", None, nullable=True),
+    # altura por tramos (text._cap_dy): [{start, end, y}] en tiempo ORIGINAL; p. ej. subirlos
+    # al pecho en tomas de cuerpo completo. Fuera de los tramos manda `y`.
+    P("y_ranges", "rows", "Altura por tramos", [], hint="Fuera de los tramos se usa Posición Y",
+      fields=[num("start", "Inicio", None, 0.0, 36000.0, 0.01, unit="s", req=True, nullable=True),
+              num("end", "Fin", None, 0.0, 36000.0, 0.01, unit="s", req=True, nullable=True),
+              num("y", "Posición Y", 0.6, 0.1, 0.9, 0.005)]),
 ]
 
 # ---------------------------------------------------------------- graphics
 GRAPHIC_COMMON = [
     # x/y vacios + `anchor` = junto a la cara (graficos que lo soportan)
-    num("x", "Posicion X", 0.5, 0.0, 1.0, 0.005, nullable=True),
-    num("y", "Posicion Y", 0.3, 0.0, 1.0, 0.005, nullable=True),
-    num("size", "Tamano", 0.18, 0.02, 1.0, 0.005),
+    num("x", "Posición X", 0.5, 0.0, 1.0, 0.005, nullable=True),
+    num("y", "Posición Y", 0.3, 0.0, 1.0, 0.005, nullable=True),
+    num("size", "Tamaño", 0.18, 0.02, 1.0, 0.005),
     P("color", "color", "Color", "#FFFFFF"),
-    sel("anim_in", "Animacion de entrada", GRAPHIC_ANIM_IN, "pop"),
-    sel("anim_out", "Animacion de salida", GRAPHIC_ANIM_OUT, "fade"),
-    num("rotation", "Rotacion", 0.0, -180.0, 180.0, 1.0, unit="grados"),
-    num("in_dur", "Duracion de la entrada", None, 0.05, 3.0, 0.05, unit="s", nullable=True),
-    num("out_dur", "Duracion de la salida", None, 0.05, 3.0, 0.05, unit="s", nullable=True),
+    sel("anim_in", "Animación de entrada", GRAPHIC_ANIM_IN, "pop"),
+    sel("anim_out", "Animación de salida", GRAPHIC_ANIM_OUT, "fade"),
+    num("rotation", "Rotación", 0.0, -180.0, 180.0, 1.0, unit="grados"),
+    num("in_dur", "Duración de la entrada", None, 0.05, 3.0, 0.05, unit="s", nullable=True),
+    num("out_dur", "Duración de la salida", None, 0.05, 3.0, 0.05, unit="s", nullable=True),
 ]
 _ANCHOR = sel("anchor", "Junto a la cara (sin X/Y)", FACE_ANCHORS, None, nullable=True,
-              hint="Deja X e Y vacios para que siga a la cara")
+              hint="Deja X e Y vacíos para que siga a la cara")
 GRAPHIC_KIND_PARAMS = {
     "doodle": {"label": "Garabato", "params": [
         sel("name", "Figura", DOODLES, "sparkle", req=True),
@@ -261,39 +338,105 @@ GRAPHIC_KIND_PARAMS = {
         num("shadow", "Sombra", 0.6, 0.0, 1.0, 0.05)]},
     "card": {"label": "Tarjeta", "params": [
         sel("variant", "Tipo", CARD_VARIANTS, "generic", req=True),
-        P("title", "text", "Titulo", ""), P("subtitle", "text", "Subtitulo", ""),
+        P("title", "text", "Título", ""), P("subtitle", "text", "Subtítulo", ""),
         P("value", "text", "Valor", ""), P("items", "text", "Elementos", [], list=True),
         P("icon", "icon", "Icono", ""),
         sel("theme", "Tema", ["light", "dark", "brand"], "light", seg=True),
         P("accent", "color", "Color de acento", None, nullable=True),
-        P("label", "text", "Texto del boton", "")]},
-    "lower_third": {"label": "Rotulo (lower third)", "params": [
-        P("title", "text", "Titulo", "", req=True), P("subtitle", "text", "Subtitulo", ""),
+        P("label", "text", "Texto del botón", ""),
+        sel("platform", "Plataforma (icono)", PLATFORM_IDS, None, nullable=True,
+            hint="Enlace o reservas: icono de la red o de la página"),
+        P("display", "text", "Enlace corto", "", hint="p. ej. paseo.club/tu-nombre (subtítulo si no hay)")]},
+    "lower_third": {"label": "Rótulo (lower third)", "params": [
+        P("title", "text", "Título", "", req=True), P("subtitle", "text", "Subtítulo", ""),
         sel("theme", "Tema", ["dark", "light"], "dark", seg=True),
         P("accent", "color", "Color de acento", None, nullable=True)]},
-    "cta": {"label": "Llamada a la accion", "params": [
+    "cta": {"label": "Llamada a la acción", "params": [
         sel("variant", "Tipo", CTA_VARIANTS, "follow", req=True),
+        P("title", "text", "Nombre", "", hint="Seguir: nombre arriba y la red + @usuario abajo"),
         P("label", "text", "Texto", ""), P("handle", "text", "Usuario", ""),
-        P("subtitle", "text", "Subtitulo", ""),
-        P("button", "text", "Boton", "Seguir"),
-        P("button_done", "text", "Boton pulsado", "Siguiendo"),
-        P("button_color", "color", "Color del boton", None, nullable=True),
-        sel("avatar", "Avatar", ["initial", "face"], "initial", seg=True)]},
+        sel("platform", "Red", PLATFORM_IDS, None, nullable=True,
+            hint="Icono de la red junto al usuario (Seguir) o del enlace"),
+        P("display", "text", "Enlace corto", "", hint="Link abajo: segunda línea (paseo.club/tu-nombre)"),
+        P("subtitle", "text", "Subtítulo", ""),
+        P("icon", "icon", "Icono", None, nullable=True),
+        P("button", "text", "Botón", "Seguir"),
+        P("button_done", "text", "Botón pulsado", "Siguiendo"),
+        P("button_color", "color", "Color del botón", None, nullable=True),
+        sel("avatar", "Avatar", ["initial", "face", "image"], "initial", seg=True),
+        P("initials", "text", "Iniciales", "", hint="Vacío = del nombre"),
+        P("media", "media", "Foto de perfil", None, nullable=True, accept=["image"],
+          hint="Imagen de perfil (si no, iniciales)"),
+        num("width", "Ancho de la pastilla", None, 0.3, 0.82, 0.01, nullable=True,
+            hint="Seguir y Link abajo: ancho común de la tarjeta final (vacío = el natural)")]},
     "progress": {"label": "Barra de progreso", "params": [
         num("thickness", "Grosor", 8.0, 2.0, 30.0, 0.5, unit="px"),
-        num("bar_y", "Posicion vertical", 0.0, 0.0, 1.0, 0.005),
+        num("bar_y", "Posición vertical", 0.0, 0.0, 1.0, 0.005),
         num("margin", "Margen", 0.0, 0.0, 200.0, 1.0, unit="px")]},
     "sticker_text": {"label": "Etiqueta", "params": [
         P("text", "text", "Texto", "", req=True), P("bg", "color", "Fondo", "#FFD23F"),
         P("fg", "color", "Texto", "#111111"),
         P("font", "font", "Fuente", None, opts=FONTS, nullable=True),
         P("border", "bool", "Borde", True)]},
+    # redes del perfil: chips con el icono de marca + @usuario (fila o columna, escalonados) o
+    # marca de agua sutil
+    "socials": {"label": "Redes sociales", "params": [
+        P("links", "rows", "Redes", [], fields=[
+            sel("platform", "Red", PLATFORM_IDS, "instagram"),
+            P("text", "text", "Usuario o enlace", "")]),
+        sel("layout", "Disposición", ["column", "row", "grid"], "column", seg=True,
+            hint="grid = rejilla de chips del mismo ancho"),
+        num("cols", "Columnas (rejilla)", 2, 1, 4, 1),
+        num("width", "Ancho de la rejilla", None, 0.3, 0.82, 0.01, nullable=True,
+            hint="Vacío = el del chip más ancho"),
+        sel("variant", "Tipo", ["chips", "watermark"], "chips", seg=True,
+            hint="watermark = marca de agua sutil con el usuario"),
+        sel("theme", "Tema", ["light", "dark"], "light", seg=True),
+        sel("icon_style", "Iconos", ["brand", "mono"], "brand", seg=True,
+            hint="brand = colores de cada red"),
+        P("title", "text", "Encabezado", "", hint="p. ej. Encuéntrame en"),
+        num("stagger", "Escalonado", 0.09, 0.0, 0.5, 0.01, unit="s"),
+        num("opacity", "Opacidad (marca de agua)", 0.72, 0.15, 1.0, 0.05),
+        num("backdrop", "Fondo translúcido (marca de agua)", 0.34, 0.0, 1.0, 0.02,
+            hint="Pastilla oscura detrás del usuario: se lee sobre fondos claros")]},
+    # imagen o clip del usuario flotando sobre el video (picture in picture). render resuelve
+    # `media.sid`, decodifica el cuadro del tiempo local e inyecta item['_media_image']
+    "media": {"label": "Imagen o video propio", "params": [
+        P("media", "media", "Archivo", None, nullable=True, accept=["image", "video"],
+          hint="Sube una imagen o un clip, o suéltalo sobre la pista"),
+        num("aspect", "Proporción (ancho/alto)", None, 0.3, 3.0, 0.01, nullable=True,
+            hint="Vacío = la del archivo")]},
 }
+# parametros de encuadre del medio (compartidos por graphics.media y las escenas con medio)
+MEDIA_FIT = [
+    sel("fit", "Ajuste", ["cover", "contain"], "cover", seg=True,
+        hint="cover = llena el hueco recortando; contain = completo"),
+    num("focus", "Punto de interés", None, 0.0, 1.0, 0.005, len=2, nullable=True,
+        hint="Qué parte del archivo queda a la vista al recortar (vacío = el centro)"),
+    num("zoom", "Acercamiento", 1.0, 1.0, 4.0, 0.01, unit="x"),
+]
+MEDIA_CLIP = [
+    num("media_in", "Inicio del clip", 0.0, 0.0, 36000.0, 0.05, unit="s",
+        hint="Desde dónde se reproduce el clip propio"),
+    P("loop", "bool", "Repetir el clip", True, hint="Si es más corto que el elemento; si no, se congela"),
+]
+GRAPHIC_KIND_PARAMS["media"]["params"] += MEDIA_FIT + [
+    P("frame", "bool", "Marco blanco", True),
+    num("radius", "Esquinas redondeadas", 14.0, 0.0, 80.0, 0.5, unit="px"),
+    num("shadow", "Sombra", 0.55, 0.0, 1.0, 0.05)] + MEDIA_CLIP
+# defaults de los parametros comunes por kind. El PiP nace sin posicion (x/y null): render lo
+# coloca solo lejos de la cara y de los subtitulos (render.media_auto_place, doc 4.2b) y lo
+# achica si no cabe; con x/y el usuario manda.
+GRAPHIC_KIND_DEFAULTS = {"media": {"x": None, "y": None, "size": 0.36}}
+GRAPHIC_KIND_HINTS = {"media": {
+    "x": "Vacío = automático: lejos de la cara y de los subtítulos",
+    "y": "Vacío = automático: lejos de la cara y de los subtítulos",
+    "size": "Ancho máximo de la tarjeta (en automático puede achicarse para no tapar la cara)"}}
 # la barra de progreso solo usa color/animaciones propias y su `bar_y` (x/y/size no aplican)
 PROGRESS_COMMON = [
     P("color", "color", "Color", "#FFFFFF"),
-    sel("anim_in", "Animacion de entrada", ["fade", "none"], "fade", seg=True),
-    sel("anim_out", "Animacion de salida", ["none", "fade"], "none", seg=True),
+    sel("anim_in", "Animación de entrada", ["fade", "none"], "fade", seg=True),
+    sel("anim_out", "Animación de salida", ["none", "fade"], "none", seg=True),
 ]
 
 # ---------------------------------------------------------------- cutaways
@@ -302,32 +445,37 @@ CUTAWAY_COMMON = [
     P("bg_colors", "color", "Colores del fondo", [], list=True),
     P("text.text", "text", "Texto", "", multiline=True),
     sel("text.preset", "Estilo del texto", TEXT_PRESETS, "title_pop"),
-    num("in_dur", "Duracion de la entrada", None, 0.05, 2.0, 0.05, unit="s", nullable=True),
-    num("out_dur", "Duracion de la salida", None, 0.05, 2.0, 0.05, unit="s", nullable=True),
+    num("in_dur", "Duración de la entrada", None, 0.05, 2.0, 0.05, unit="s", nullable=True),
+    num("out_dur", "Duración de la salida", None, 0.05, 2.0, 0.05, unit="s", nullable=True),
 ]
 CUTAWAY_KIND_PARAMS = {
-    "title_card": {"label": "Tarjeta de titulo", "params": []},
-    "info_card": {"label": "Tarjeta de informacion", "params": [
+    "title_card": {"label": "Tarjeta de título", "params": []},
+    "info_card": {"label": "Tarjeta de información", "params": [
         sel("variant", "Tarjeta propia", CARD_VARIANTS, None, nullable=True,
-            hint="Vacio = la tarjeta va en graficos"),
-        P("title", "text", "Titulo", ""), P("subtitle", "text", "Subtitulo", ""),
+            hint="Vacío = la tarjeta va en gráficos"),
+        P("title", "text", "Título", ""), P("subtitle", "text", "Subtítulo", ""),
         P("value", "text", "Valor", ""), P("items", "text", "Elementos", [], list=True)]},
     "photo": {"label": "Foto / cuadro congelado", "params": [
+        P("media", "media", "Foto o clip propio", None, nullable=True, accept=["image", "video"],
+          hint="Vacío = un cuadro congelado del video"),
         P("caption", "text", "Pie de foto", ""),
-        num("tilt", "Inclinacion", None, -20.0, 20.0, 0.5, unit="grados", nullable=True),
-        num("size", "Tamano", 0.72, 0.3, 0.8, 0.01)]},
+        num("tilt", "Inclinación", None, -20.0, 20.0, 0.5, unit="grados", nullable=True),
+        num("size", "Tamaño", 0.72, 0.3, 0.8, 0.01)] + MEDIA_FIT + MEDIA_CLIP},
     "self_broll": {"label": "Toma propia (B-roll)", "params": [
+        P("media", "media", "Clip o imagen propia", None, nullable=True, accept=["video", "image"],
+          hint="Vacío = otro momento del mismo video (Tiempo del material)"),
         num("src_t", "Tiempo del material", 0.0, 0.0, 36000.0, 0.01, unit="s", req=True),
         num("zoom_from", "Zoom inicial", 1.0, 1.0, 4.0, 0.01, unit="x"),
         num("zoom_to", "Zoom final", 1.15, 1.0, 4.0, 0.01, unit="x"),
-        num("pan", "Desplazamiento", [0.0, 0.0], -1.0, 1.0, 0.01, len=2)]},
+        num("pan", "Desplazamiento", [0.0, 0.0], -1.0, 1.0, 0.01, len=2)]
+        + [q for q in MEDIA_FIT if q["k"] != "zoom"] + MEDIA_CLIP},
 }
 
 # ---------------------------------------------------------------- effects
 _CENTER = num("center", "Centro fijo", None, 0.0, 1.0, 0.005, len=2, nullable=True,
-              hint="Vacio = la cara")
+              hint="Vacío = la cara")
 _TARGET = num("target", "Llevar la cara a", None, 0.0, 1.0, 0.005, len=2, nullable=True,
-              hint="Reencuadre: a donde llega la cara en el zoom maximo")
+              hint="Reencuadre: a donde llega la cara en el zoom máximo")
 
 
 def _fades(tin: float, tout: float) -> list[dict]:
@@ -343,20 +491,20 @@ EFFECT_KIND_PARAMS = {
         dict(_TARGET), dict(_CENTER)]},
     "punch": {"label": "Punch-in", "params": [
         num("amount", "Cantidad", 0.12, 0.0, 1.5, 0.01),
-        num("hold", "Duracion del golpe", None, 0.0, 10.0, 0.05, unit="s", nullable=True,
-            hint="Vacio = hasta el final del efecto"),
+        num("hold", "Duración del golpe", None, 0.0, 10.0, 0.05, unit="s", nullable=True,
+            hint="Vacío = hasta el final del efecto"),
         sel("mode", "Entrada", ["spring", "cut"], "spring", seg=True,
             hint="spring = resorte con rebote; cut = golpe seco"),
         sel("release", "Salida", ["smooth", "cut"], "smooth", seg=True),
         num("attack", "Ataque", 0.0, 0.0, 2.0, 0.01, unit="s", hint="0 = resorte natural"),
         num("freq", "Frecuencia del resorte", 4.2, 0.5, 20.0, 0.1, unit="Hz"),
-        num("damping", "Amortiguacion del resorte", 0.5, 0.05, 0.99, 0.01),
+        num("damping", "Amortiguación del resorte", 0.5, 0.05, 0.99, 0.01),
         dict(_TARGET), dict(_CENTER)]},
     "shake": {"label": "Sacudida", "params": [
         num("amp", "Amplitud", 10.0, 0.0, 200.0, 0.5, unit="px"),
         num("freq", "Frecuencia", 12.0, 0.2, 60.0, 0.5, unit="Hz"),
-        num("decay", "Amortiguacion", 0.6, 0.0, 1.0, 0.05, hint="0 = constante; 1 = muere en ~0.3 s"),
-        num("rot", "Rotacion maxima", 0.8, 0.0, 10.0, 0.1, unit="grados"),
+        num("decay", "Amortiguación", 0.6, 0.0, 1.0, 0.05, hint="0 = constante; 1 = muere en ~0.3 s"),
+        num("rot", "Rotación máxima", 0.8, 0.0, 10.0, 0.1, unit="grados"),
         num("attack", "Ataque", 0.0, 0.0, 2.0, 0.01, unit="s")]},
     "kenburns": {"label": "Ken Burns", "params": [
         num("from", "Desde", 1.0, 1.0, 4.0, 0.01, unit="x"),
@@ -368,7 +516,7 @@ EFFECT_KIND_PARAMS = {
         num("contrast", "Contraste", 1.2, 0.5, 2.0, 0.05),
         P("subject_color", "bool", "Persona a color", False),
         sel("tone", "Tono", BW_TONES, "neutral", seg=True),
-        num("vignette", "Vinieta", 0.55, 0.0, 1.0, 0.05),
+        num("vignette", "Viñeta", 0.55, 0.0, 1.0, 0.05),
         num("lift", "Levantar negros", 0.06, 0.0, 0.2, 0.01),
         num("fade", "Fundido de entrada/salida", 0.06, 0.0, 2.0, 0.01, unit="s")]},
     "color_pop": {"label": "Color pop (fondo gris)", "params": [
@@ -380,22 +528,22 @@ EFFECT_KIND_PARAMS = {
         sel("background", "Fondo", BACKGROUNDS, "gradient"),
         P("bg_colors", "color", "Colores del fondo", [], list=True),
         num("grain", "Grano del fondo", 0.025, 0.0, 0.3, 0.005),
-        num("vignette", "Vinieta del fondo", 0.22, 0.0, 1.0, 0.01)] + _fades(0.45, 0.3)},
+        num("vignette", "Viñeta del fondo", 0.22, 0.0, 1.0, 0.01)] + _fades(0.45, 0.3)},
     "subject_outline": {"label": "Contorno de la persona", "params": [
         P("color", "color", "Color", "#FFFFFF"),
         num("width", "Grosor", 8.0, 0.0, 80.0, 0.5, unit="px"),
         num("glow", "Brillo", 0.5, 0.0, 1.0, 0.05)]},
-    "rgb_split": {"label": "Separacion RGB", "params": [
+    "rgb_split": {"label": "Separación RGB", "params": [
         num("amount", "Cantidad", 8.0, 0.0, 200.0, 0.5, unit="px"),
-        num("angle", "Angulo", 0.0, -180.0, 180.0, 1.0, unit="grados"),
+        num("angle", "Ángulo", 0.0, -180.0, 180.0, 1.0, unit="grados"),
         num("radial", "Radial", 0.35, 0.0, 1.0, 0.05),
-        num("jitter", "Variacion por cuadro", 0.0, 0.0, 1.0, 0.05),
+        num("jitter", "Variación por cuadro", 0.0, 0.0, 1.0, 0.05),
         num("attack", "Ataque", 0.04, 0.0, 2.0, 0.01, unit="s"),
-        P("hold", "bool", "Sostener (sin caida)", False)]},
+        P("hold", "bool", "Sostener (sin caída)", False)]},
     "flash_frame": {"label": "Destello", "params": [
         P("color", "color", "Color", "#FFFFFF"),
-        num("peak", "Intensidad maxima", 0.95, 0.0, 1.0, 0.05),
-        num("bloom", "Sobreexposicion", 0.8, 0.0, 2.0, 0.05),
+        num("peak", "Intensidad máxima", 0.95, 0.0, 1.0, 0.05),
+        num("bloom", "Sobreexposición", 0.8, 0.0, 2.0, 0.05),
         num("attack", "Ataque", 0.035, 0.0, 2.0, 0.005, unit="s")]},
 }
 MATTE_EFFECTS = ("color_pop", "bg_blur", "bg_replace", "subject_outline")
@@ -403,29 +551,41 @@ MATTE_EFFECTS = ("color_pop", "bg_blur", "bg_replace", "subject_outline")
 # ---------------------------------------------------------------- transitions / sfx
 TRANSITION_PARAMS = [
     sel("kind", "Tipo", TRANSITION_KINDS, "flash", req=True),
-    num("dur", "Duracion", 0.35, 0.05, 2.0, 0.01, unit="s", req=True),
-    sel("dir", "Direccion", ["left", "right", "up", "down"], "left", seg=True),
+    num("dur", "Duración", 0.35, 0.05, 2.0, 0.01, unit="s", req=True),
+    sel("dir", "Dirección", ["left", "right", "up", "down"], "left", seg=True),
     P("color", "color", "Color", "#FFFFFF"),
-    sel("align", "Alineacion con la union", ["auto", "center", "start", "end"], "auto", seg=True),
+    sel("align", "Alineación con la unión", ["auto", "center", "start", "end"], "auto", seg=True),
 ]
 TRANSITION_LABELS = {"cut": "Corte", "flash": "Destello", "light_leak": "Fuga de luz",
                      "whip": "Barrido (whip)", "zoom_blur": "Zoom con desenfoque",
-                     "glitch": "Glitch", "film_burn": "Quemado de pelicula",
-                     "torn_paper": "Papel rasgado", "circle": "Circulo", "slide": "Empuje"}
+                     "glitch": "Glitch", "film_burn": "Quemado de película",
+                     "torn_paper": "Papel rasgado", "circle": "Círculo", "slide": "Empuje"}
 SFX_PARAMS = [
     sel("name", "Sonido", SFX_NAMES, "whoosh_soft", req=True),
     num("gain_db", "Volumen", -6.0, -40.0, 12.0, 0.5, unit="dB", hint="0 = pico al nivel de la voz"),
     num("pan", "Paneo", 0.0, -1.0, 1.0, 0.05),
-    num("variant", "Variante", None, 0, 9, 1, nullable=True, hint="Vacio = automatica"),
+    num("variant", "Variante", None, 0, 9, 1, nullable=True, hint="Vacío = automática"),
     num("pitch", "Tono", None, -12.0, 12.0, 0.5, unit="st", nullable=True,
-        hint="Vacio = afinado a la tonalidad de la musica"),
-    num("dur", "Duracion", None, 0.05, 10.0, 0.05, unit="s", nullable=True,
-        hint="Risers: anticipacion; continuos: recorta o repite"),
+        hint="Vacío = afinado a la tonalidad de la música"),
+    num("dur", "Duración", None, 0.05, 10.0, 0.05, unit="s", nullable=True,
+        hint="Risers: anticipación; continuos: recorta o repite"),
 ]
+SFX_LABELS = {
+    "whoosh_soft": "Whoosh suave", "whoosh_fast": "Whoosh rápido", "swoosh_up": "Swoosh arriba",
+    "swoosh_down": "Swoosh abajo", "whip": "Latigazo", "pop": "Pop", "pop_soft": "Pop suave",
+    "bubble": "Burbuja", "click": "Clic", "tick": "Tic", "typing": "Tecleo", "ding": "Ding",
+    "bell": "Campana", "chime": "Campanitas", "sparkle": "Destello", "cash": "Caja registradora",
+    "coin": "Moneda", "riser_short": "Subida corta", "riser_long": "Subida larga",
+    "impact_soft": "Impacto suave", "impact_boom": "Impacto fuerte", "sub_drop": "Caída grave",
+    "glitch": "Glitch", "shutter": "Obturador", "notification": "Notificación",
+    "success": "Éxito", "swipe": "Deslizar", "scratch": "Scratch de disco",
+    "paper_rip": "Papel rasgado", "pen_scribble": "Trazo de pluma", "heartbeat": "Latido",
+    "record_stop": "Disco que frena",
+}
 MUSIC_MOODS = ["upbeat", "chill", "inspiring", "corporate", "playful", "dramatic"]
 STOP_FIELDS = [
     num("at", "Momento", None, 0.0, 36000.0, 0.01, unit="s", req=True, nullable=True),
-    num("dur", "Duracion del silencio", None, 0.05, 10.0, 0.05, unit="s", nullable=True),
+    num("dur", "Duración del silencio", None, 0.05, 10.0, 0.05, unit="s", nullable=True),
     sel("mode", "Tipo", ["tape", "cut"], "tape", seg=True,
         hint="tape = la cancion se frena; cut = corte seco"),
     num("fade", "Frenado / fundido", None, 0.0, 2.0, 0.01, unit="s", nullable=True),
@@ -438,16 +598,16 @@ SWELL_FIELDS = [
     num("ramp", "Rampa", None, 0.0, 3.0, 0.05, unit="s", nullable=True),
 ]
 MUSIC_PARAMS = [
-    P("enabled", "bool", "Musica", True),
+    P("enabled", "bool", "Música activa", True),
     sel("source", "Origen", ["ai", "procedural", "library", "file", "none"], "ai", seg=True),
     P("track", "text", "Pista de biblioteca", None, nullable=True),
     P("file", "text", "Archivo propio (origen: file)", None, nullable=True),
-    P("prompt", "text", "Descripcion para la IA", ""),
-    sel("mood", "Animo", MUSIC_MOODS, None, nullable=True),
-    num("bpm", "BPM (0 = automatico)", 0, 0, 180, 1),
-    P("bpm_lock", "bool", "Forzar BPM", False, hint="Sin esto, 110 tambien cuenta como automatico"),
+    P("prompt", "text", "Descripción para la IA", ""),
+    sel("mood", "Ánimo", MUSIC_MOODS, None, nullable=True),
+    num("bpm", "BPM (0 = automático)", 0, 0, 180, 1),
+    P("bpm_lock", "bool", "Forzar BPM", False, hint="Sin esto, 110 también cuenta como automático"),
     P("keyscale", "text", "Tonalidad (p. ej. A major)", None, nullable=True),
-    num("seed", "Variacion", None, 0, 999999, 1, nullable=True, hint="Otra musica con el mismo pedido"),
+    num("seed", "Variación", None, 0, 999999, 1, nullable=True, hint="Otra música con el mismo pedido"),
     sel("ending", "Final", ["auto", "natural", "hit", "fade"], "auto", seg=True),
     num("drop_at", "Golpe principal en", None, 0.0, 36000.0, 0.01, unit="s", nullable=True),
     num("gain_db", "Volumen bajo la voz", -17.0, -40.0, 0.0, 0.5, unit="dB"),
@@ -457,22 +617,22 @@ MUSIC_PARAMS = [
     num("intro_fade", "Entrada suave", 0.0, 0.0, 5.0, 0.05, unit="s",
         hint="0 = entra con su arranque (golpe incluido); > 0 = sube en ese tiempo"),
     num("fade_out", "Cola final", 1.5, 0.6, 3.0, 0.05, unit="s",
-        hint="Donde cae el golpe/desvanecido final antes del ultimo cuadro"),
-    P("stops", "rows", "Silencios dramaticos", [], fields=STOP_FIELDS),
+        hint="Donde cae el golpe/desvanecido final antes del último cuadro"),
+    P("stops", "rows", "Silencios dramáticos", [], fields=STOP_FIELDS),
     P("swells", "rows", "Subidas de volumen", [], fields=SWELL_FIELDS),
 ]
 GRADE_PARAMS = [
-    P("enabled", "bool", "Color", True),
+    P("enabled", "bool", "Corrección de color", True),
     sel("look", "Look", LOOKS, "warm_clean"),
     P("match_shots", "bool", "Igualar tomas", True),
     num("strength", "Fuerza del look", 1.0, 0.0, 1.5, 0.05),
-    num("exposure", "Exposicion", 0.0, -1.0, 1.0, 0.05, unit="EV"),
+    num("exposure", "Exposición", 0.0, -1.0, 1.0, 0.05, unit="EV"),
     num("temperature", "Temperatura", 0.0, -1.0, 1.0, 0.05, hint="+ calido / - frio"),
     num("tint", "Tinte", 0.0, -1.0, 1.0, 0.05, hint="+ magenta / - verde"),
-    num("saturation", "Saturacion", 1.0, 0.0, 2.0, 0.05),
+    num("saturation", "Saturación", 1.0, 0.0, 2.0, 0.05),
     num("contrast", "Contraste", 0.0, -0.5, 0.5, 0.05),
-    num("clarity", "Claridad", None, 0.0, 1.0, 0.05, nullable=True, hint="Vacio = la del look"),
-    num("vignette", "Vinieta", 0.15, 0.0, 1.0, 0.01),
+    num("clarity", "Claridad", None, 0.0, 1.0, 0.05, nullable=True, hint="Vacío = la del look"),
+    num("vignette", "Viñeta", 0.15, 0.0, 1.0, 0.01),
     num("grain", "Grano", 0.025, 0.0, 0.3, 0.005),
     num("sharpen", "Nitidez", 0.15, 0.0, 1.0, 0.01),
 ]
@@ -483,12 +643,14 @@ DIRECTOR_PARAMS = [
 ]
 
 
-def _with_defaults(params: list[dict], overrides: dict) -> list[dict]:
+def _with_defaults(params: list[dict], overrides: dict, hints: dict | None = None) -> list[dict]:
     out = []
     for p in params:
         q = dict(p)
         if p["k"] in overrides:
             q["default"] = overrides[p["k"]]
+        if hints and p["k"] in hints:
+            q["hint"] = hints[p["k"]]
         out.append(q)
     return out
 
@@ -501,7 +663,10 @@ def _build_kinds() -> dict:
         text_presets[name] = {"label": label,
                               "params": _with_defaults(TEXT_COMMON, d) + TEXT_PRESET_EXTRA.get(name, [])}
     graphics = {k: {"label": v["label"],
-                    "params": (PROGRESS_COMMON if k == "progress" else GRAPHIC_COMMON) + v["params"]}
+                    "params": (PROGRESS_COMMON if k == "progress" else
+                               _with_defaults(GRAPHIC_COMMON, GRAPHIC_KIND_DEFAULTS.get(k, {}),
+                                              GRAPHIC_KIND_HINTS.get(k)))
+                    + v["params"]}
                 for k, v in GRAPHIC_KIND_PARAMS.items()}
     cutaways = {k: {"label": v["label"], "params": CUTAWAY_COMMON + v["params"]}
                 for k, v in CUTAWAY_KIND_PARAMS.items()}
@@ -514,7 +679,7 @@ def _build_kinds() -> dict:
         "common": {"range": COMMON_RANGE, "event": COMMON_EVENT},
         "tracks": {
             "text": {"label": "Texto", "key": "preset", "items": text_presets, "common": "range"},
-            "graphics": {"label": "Graficos", "key": "kind", "items": graphics, "common": "range"},
+            "graphics": {"label": "Gráficos", "key": "kind", "items": graphics, "common": "range"},
             "cutaways": {"label": "Escenas", "key": "kind", "items": cutaways, "common": "range"},
             "effects": {"label": "Efectos", "key": "kind", "items": effects, "common": "range"},
             "transitions": {"label": "Transiciones", "key": "kind", "common": "event",
@@ -525,11 +690,12 @@ def _build_kinds() -> dict:
                                                              and k in TRANSITION_MIXERS)]}
                                       for k in TRANSITION_KINDS}},
             "sfx": {"label": "SFX", "key": "name", "common": "event",
-                    "items": {k: {"label": k.replace("_", " "), "params": SFX_PARAMS[1:]}
+                    "items": {k: {"label": SFX_LABELS.get(k, k.replace("_", " ")),
+                                  "params": SFX_PARAMS[1:]}
                               for k in SFX_NAMES}},
         },
-        "captions": {"label": "Subtitulos", "params": CAPTIONS_PARAMS},
-        "music": {"label": "Musica", "params": MUSIC_PARAMS},
+        "captions": {"label": "Subtítulos", "params": CAPTIONS_PARAMS},
+        "music": {"label": "Música", "params": MUSIC_PARAMS},
         "grade": {"label": "Color", "params": GRADE_PARAMS},
         "director": {"label": "Director", "params": DIRECTOR_PARAMS},
     }
@@ -581,8 +747,8 @@ def _convert_param(k: str, spec: dict, label: str) -> dict | None:
     return None
 
 
-_LABELS = {"dur": "Duracion", "color": "Color", "intensity": "Intensidad", "dir": "Direccion",
-           "gate": "Solo en la union", "x": "Centro X", "y": "Centro Y", "avoid": "Zona a evitar",
+_LABELS = {"dur": "Duración", "color": "Color", "intensity": "Intensidad", "dir": "Dirección",
+           "gate": "Solo en la unión", "x": "Centro X", "y": "Centro Y", "avoid": "Zona a evitar",
            "mode": "Modo"}
 
 
@@ -629,6 +795,8 @@ def _adopt_modules(kinds: dict) -> list[str]:
                     prm["opts"] = list(ain)
                 elif prm["k"] == "anim_out":
                     prm["opts"] = list(aout)
+                if prm["k"] in GRAPHIC_KIND_DEFAULTS.get(kind, {}):
+                    continue                    # colocacion del motor (PiP automatico)
                 v = (defs.get(kind) or {}).get(prm["k"])
                 if v is not None:
                     _set_default(prm, v)
@@ -677,7 +845,7 @@ def _adopt_modules(kinds: dict) -> list[str]:
             own_align = next((q for q in params if q["k"] == "align"), None)
             params = [q for q in params if q["k"] != "align"]
             if not any(q["k"] == "dur" for q in params):
-                params.insert(0, num("dur", "Duracion", 0.0, 0.0, 2.0, 0.05, unit="s"))
+                params.insert(0, num("dur", "Duración", 0.0, 0.0, 2.0, 0.05, unit="s"))
             spec["mixer"] = kind in mixers
             if kind not in mixers:              # en las mezclas A->B `align` no aplica
                 params.append(own_align or dict(align))
@@ -735,7 +903,7 @@ def _adopt_music() -> None:
                         q["max"] = max(q["max"], hi)
         except Exception:  # formato inesperado: catalogo base
             MUSIC_PARAMS[:] = json.loads(snap)
-        KINDS["music"]["params"] = json.loads(json.dumps(MUSIC_PARAMS))
+        KINDS["music"]["params"] = _accent_catalog(json.loads(json.dumps(MUSIC_PARAMS)))
         KINDS.setdefault("adopted", []).append("music")
     except Exception:  # pragma: no cover
         return
@@ -910,6 +1078,63 @@ def _fix_param(item: dict, p: dict, fill: bool) -> None:
         _set(item, k, _norm_lines(v))
     elif typ == "rows":
         _set(item, k, _norm_rows(v, p.get("fields") or []))
+    elif typ == "media":
+        _set(item, k, norm_media(v))
+
+
+_SID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def norm_media(v: Any) -> dict | None:
+    """Medio propio -> {sid, type?, name?, w?, h?, dur?, thumb?, crop?} saneado, o None.
+
+    `sid` es obligatorio (id de POST /sources: letras, numeros, _ y -); nunca se acepta una
+    ruta. `crop` = [x0, y0, x1, y1] normalizado (render lo valida). Claves desconocidas se
+    descartan."""
+    if not isinstance(v, dict):
+        return None
+    sid = v.get("sid")
+    if not isinstance(sid, str) or not _SID.match(sid.strip()):
+        return None
+    d: dict[str, Any] = {"sid": sid.strip()}
+    if v.get("type") in ("image", "video"):
+        d["type"] = v["type"]
+    if isinstance(v.get("name"), str):
+        d["name"] = v["name"][:200]
+    for k in ("w", "h"):
+        f = _num(v.get(k))
+        if f is not None and f >= 0:
+            d[k] = int(round(f))
+    f = _num(v.get("dur"))
+    if f is not None and f >= 0:
+        d["dur"] = round(f, 4)
+    if isinstance(v.get("thumb"), str):
+        d["thumb"] = v["thumb"][:300]
+    c = v.get("crop")
+    if isinstance(c, (list, tuple)) and len(c) == 4 and all(_num(x) is not None for x in c):
+        d["crop"] = [min(1.0, max(0.0, float(x))) for x in c]
+    return d
+
+
+def _norm_y_ranges(cap: dict, duration: float | None) -> None:
+    """captions.y_ranges: filas {start < end, y en [0.1, 0.9]} en tiempo ORIGINAL, ordenadas.
+    Las invalidas se descartan (un dato malo nunca tumba el render)."""
+    out = []
+    for r in cap.get("y_ranges") if isinstance(cap.get("y_ranges"), list) else []:
+        if not isinstance(r, dict):
+            continue
+        a, b, y = _num(r.get("start")), _num(r.get("end")), _num(r.get("y"))
+        if a is None or b is None or y is None:
+            continue
+        if b < a:
+            a, b = b, a
+        a = max(0.0, a)
+        if duration:
+            b = min(b, duration)
+        if b - a < MIN_ITEM:
+            continue
+        out.append(dict(r, start=round(a, 4), end=round(b, 4), y=round(min(0.9, max(0.1, y)), 4)))
+    cap["y_ranges"] = sorted(out, key=lambda r: r["start"])
 
 
 def _norm_rows(v: Any, fields: list[dict]) -> list[dict]:
@@ -1134,7 +1359,15 @@ def normalize(plan: dict, fill: bool = False) -> dict:
     for k in DEFAULT_ENTITIES:
         v = p["entities"].get(k)
         p["entities"][k] = "" if v is None else str(v)
+    # perfil de la persona (3.2): saneado; vacio o invalido se quita del plan
+    if "profile" in p:
+        prof = _profile.normalize_profile(p.get("profile"))
+        if prof:
+            p["profile"] = prof
+        else:
+            p.pop("profile", None)
     _norm_music(fx["music"], dur)
+    _norm_y_ranges(fx["captions"], dur)
 
     # pistas de items
     for track in LIST_TRACKS:
@@ -1235,6 +1468,9 @@ def _check_param(errs: list, where: str, item: dict, prm: dict) -> None:
                                     f"[{f['min']}, {f['max']}]")
                 elif f["type"] in ("select", "seg") and fv not in f["opts"]:
                     errs.append(f"{where}: '{k}[{i}].{f['k']}'={fv!r} no es una opcion valida")
+    elif t == "media":
+        if norm_media(v) is None:
+            errs.append(f"{where}: '{k}' debe ser un medio con 'sid' valido")
     elif t == "lines":
         if not isinstance(v, list) or not all(isinstance(ln, (dict, str)) for ln in v):
             errs.append(f"{where}: '{k}' debe ser una lista de lineas")
@@ -1266,6 +1502,8 @@ def validate(plan: dict) -> list[str]:
     dur = _num(plan.get("duration"))
     if not plan.get("video"):
         errs.append("falta 'video' (ruta de la fuente)")
+    if plan.get("profile") is not None and not isinstance(plan.get("profile"), dict):
+        errs.append("profile: debe ser un objeto (perfil de la persona) o no venir")
     for key, params in (("captions", CAPTIONS_PARAMS), ("music", MUSIC_PARAMS),
                         ("grade", GRADE_PARAMS)):
         blk = fx.get(key)
@@ -1349,3 +1587,8 @@ try:
     KINDS["adopted"] = _adopt_modules(KINDS)
 except Exception:  # pragma: no cover - nunca romper el catalogo base
     KINDS["adopted"] = []
+# ortografia final (tambien de lo que adoptaron los modulos) y marca de mezcla en TODAS las
+# transiciones (el Studio no duplica la lista MIXERS)
+_accent_catalog(KINDS)
+for _k, _spec in KINDS["tracks"]["transitions"]["items"].items():
+    _spec["mixer"] = bool(_spec.get("mixer", _k in TRANSITION_MIXERS))

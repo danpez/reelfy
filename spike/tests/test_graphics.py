@@ -55,7 +55,8 @@ def _changed(arr):
 
 # -------------------------------------------------------------- contrato / catalogo
 def test_renderers_registry():
-    assert set(G.RENDERERS) == {"doodle", "icon", "card", "lower_third", "cta", "progress", "sticker_text"}
+    assert set(G.RENDERERS) == {"doodle", "icon", "card", "lower_third", "cta", "progress", "sticker_text",
+                                "media", "socials"}
     for fn in G.RENDERERS.values():
         assert callable(fn)
 
@@ -739,3 +740,62 @@ def test_gradients_are_dithered():
     import inspect
     src = inspect.getsource(G)
     assert src.count("setShader(skia.GradientShader") == src.count("setDither(True)")
+
+
+# -------------------------------------------------------------- medios propios (graphics.media)
+def _media_img(w=600, h=400):
+    a = np.zeros((h, w, 4), np.uint8)
+    a[..., 3] = 255
+    a[:, : w // 2, 0] = 230            # mitad izquierda roja, derecha azul
+    a[:, w // 2:, 2] = 230
+    return a
+
+
+def test_media_pip_draws_the_image_framed_and_rounded():
+    """PiP del medio propio (render inyecta _media_image): imagen dentro de la ventana, marco blanco
+    (frame), esquinas redondeadas (la esquina exacta queda con el fondo) y respeta la proporcion
+    del medio (ancho size*W)."""
+    it = {"id": "m1", "kind": "media", "x": 0.47, "y": 0.4, "size": 0.5, "_media_image": _media_img(),
+          "media": {"sid": "a1b2c3", "type": "image", "w": 600, "h": 400}, "radius": 40, "frame": True}
+    arr = _draw("media", it, 1.0)
+    ys, xs = np.nonzero(_diff(arr, BG) > 0)
+    w_px, h_px = xs.max() - xs.min(), ys.max() - ys.min()
+    assert 0.46 * W <= w_px <= 0.62 * W                      # ancho ~ size (+ marco y sombra)
+    cx, cy = int(0.47 * W), int(0.4 * H)
+    assert arr[cy, cx - int(0.1 * W), 0] > 180 and arr[cy, cx + int(0.1 * W), 2] > 180
+    # marco blanco justo fuera de la imagen (arriba al centro)
+    top = min(y for y in range(int(0.2 * H), cy) if arr[y, cx, :3].min() > 235)
+    assert arr[top, cx, :3].min() > 235
+    # proporcion 3:2 del medio (alto ~ 2/3 del ancho), con aspect se fuerza otra
+    it2 = dict(it, aspect=1.0, frame=False, shadow=0.0)
+    a2 = _draw("media", it2, 1.0)
+    ys2, xs2 = np.nonzero(_diff(a2, BG) > 0)
+    assert abs((ys2.max() - ys2.min()) - (xs2.max() - xs2.min())) <= 0.06 * W
+
+
+def test_media_without_image_draws_placeholder_and_photo_uses_media():
+    it = {"id": "m2", "kind": "media", "x": 0.47, "y": 0.4, "size": 0.4,
+          "media": {"sid": "a1b2c3", "type": "video", "w": 1080, "h": 1920}}
+    arr = _draw("media", it, 1.0)
+    assert _changed(arr) > 2000                               # marcador visible (sin medio aun)
+    from motion import cutaways as CU
+    fr, surf = C.new_frame(W, H)
+    ctx = _ctx(1.2)
+    CU.draw_photo(surf.getCanvas(), {"id": "p", "kind": "photo", "background": "paper",
+                                     "_media_image": _media_img(), "fit": "cover"}, 1.2, 3.0, ctx)
+    reds = ((fr[..., 0] > 180) & (fr[..., 1] < 80) & (fr[..., 2] < 80)).sum()
+    blues = ((fr[..., 2] > 180) & (fr[..., 0] < 80) & (fr[..., 1] < 80)).sum()
+    assert reds > 5000 and blues > 5000                       # la foto es el medio del usuario
+    assert G.DEFAULTS["media"]["size"] == 0.45 and "media" in G.DEFAULTS["media"]
+
+
+# -------------------------------------------------------------- ola 3: contorno de garabatos
+def test_doodle_border_color_outlines_white_strokes():
+    """Un garabato blanco sobre un fondo blanco (gabinetes) se lee gracias a `border_color`:
+    un contorno oscuro alrededor del trazo; sin el, casi desaparece."""
+    item = {"kind": "doodle", "name": "arrow_curve", "x": 0.5, "y": 0.4, "size": 0.3, "color": "#FFFFFF",
+            "shadow": 0.0, "anim_in": "none", "draw": False}
+    plain = _draw("doodle", item, 2.0, bg="#F2F2F2")
+    outl = _draw("doodle", dict(item, border_color="#161616"), 2.0, bg="#F2F2F2")
+    dark = lambda a: int((a[..., :3].max(axis=2) < 90).sum())
+    assert dark(plain) < 50 and dark(outl) > 150

@@ -500,10 +500,6 @@ def test_perf_single_thread_worker():
 
 
 def _load_factor() -> float:
-    """Holgura por carga (maquina compartida): con load > nucleos los tiempos suben en
-    proporcion; el limite se escala igual (tope 4x) en vez de fallar en falso."""
-    import os
-    try:
-        return min(4.0, max(1.0, os.getloadavg()[0] / (os.cpu_count() or 8)))
-    except OSError:
-        return 1.0
+    """Holgura por carga comun a la suite (conftest.load_factor)."""
+    from conftest import load_factor
+    return load_factor()

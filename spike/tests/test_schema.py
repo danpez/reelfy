@@ -189,7 +189,8 @@ def test_kinds_json_y_tipos():
     js = json.dumps(S.KINDS)
     k = json.loads(js)
     types = set(k["types"])
-    assert types == {"num", "text", "color", "select", "bool", "seg", "font", "icon", "lines", "rows"}
+    assert types == {"num", "text", "color", "select", "bool", "seg", "font", "icon", "lines", "rows",
+                     "media"}
     count = 0
     for track, t in k["tracks"].items():
         assert t["items"], track
@@ -442,3 +443,120 @@ def test_sfx_con_alias_se_resuelve_en_vez_de_descartarse():
     assert sf["c"]["name"] == "pop" and sf["c"]["variant"] == 0      # la variante explicita gana
     assert "d" not in sf
     assert S.resolve_sfx_name("campana")[0] in ("bell", "ding", "chime")
+
+
+# ---------------------------------------------------------------- ola 3: pedidos al catalogo
+def _walk_labels(o, out):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k in ("label", "hint", "desc") and isinstance(v, str):
+                out.append(v)
+            else:
+                _walk_labels(v, out)
+    elif isinstance(o, list):
+        for x in o:
+            _walk_labels(x, out)
+    return out
+
+
+def test_etiquetas_con_acentos_utf8():
+    """El catalogo sale con su ortografia (UTF-8): el Studio ya no necesita su mapa de
+    respaldo. Ninguna palabra del mapa queda sin acento, tampoco en lo que adoptan los modulos."""
+    import re
+    labels = _walk_labels(S.schema(), [])
+    assert len(labels) > 200
+    sin = sorted({w for s in labels for w in re.findall(r"[A-Za-z]+", s) if w.lower() in S._ACCENTS})
+    assert sin == [], sin
+    common = {p["k"]: p["label"] for p in S.item_params("text", "title_pop")}
+    assert common["size"] == "Tamaño" and common["x"] == "Posición X"
+    assert S.KINDS["tracks"]["graphics"]["label"] == "Gráficos"
+    assert S.KINDS["tracks"]["transitions"]["items"]["circle"]["label"] == "Círculo"
+    # accent_es es idempotente y respeta mayusculas
+    assert S.accent_es("Duracion de la animacion") == "Duración de la animación"
+    assert S.accent_es(S.accent_es("TITULO")) == "TÍTULO"
+    assert S.accent_es("dinamico_x") == "dinamico_x"          # identificadores intactos
+    # el bloque y su interruptor no repiten la misma etiqueta
+    for blk in ("captions", "music", "grade"):
+        en = next(p for p in S.KINDS[blk]["params"] if p["k"] == "enabled")
+        assert en["label"] != S.KINDS[blk]["label"], blk
+    json.dumps(S.schema(), ensure_ascii=False)
+
+
+def test_mixer_marcado_en_todas_las_transiciones():
+    from motion import transitions as TR
+    items = S.schema()["tracks"]["transitions"]["items"]
+    assert set(items) == set(S.TRANSITION_KINDS)
+    for k, spec in items.items():
+        assert isinstance(spec["mixer"], bool), k
+        assert spec["mixer"] == (k in set(getattr(TR, "MIXERS", S.TRANSITION_MIXERS))), k
+
+
+def test_count_dur_y_y_ranges_expuestos_y_normalizados():
+    cnt = {p["k"]: p for p in S.item_params("text", "counter")}
+    assert cnt["count_dur"]["default"] is None and cnt["count_dur"]["nullable"]
+    cap = {p["k"]: p for p in S.schema()["captions"]["params"]}
+    yr = cap["y_ranges"]
+    assert yr["type"] == "rows" and {f["k"] for f in yr["fields"]} == {"start", "end", "y"}
+    p = S.normalize({"video": "x", "duration": 10.0, "fx": {
+        "captions": {"y_ranges": [{"start": 6, "end": 4, "y": 0.55}, {"start": 1, "end": 2, "y": 3},
+                                  {"start": "a", "end": 2, "y": 0.5}, "basura",
+                                  {"start": 8, "end": 8.01, "y": 0.5}, {"start": 9, "end": 30, "y": 0.4}]},
+        "text": [{"preset": "counter", "start": 1, "end": 3, "to": 500, "count_dur": 99}]}})
+    rows = p["fx"]["captions"]["y_ranges"]
+    assert [(r["start"], r["end"], r["y"]) for r in rows] == [(1.0, 2.0, 0.9), (4.0, 6.0, 0.55),
+                                                              (9.0, 10.0, 0.4)]
+    assert p["fx"]["text"][0]["count_dur"] == 5.0
+    assert S.validate(p) == []
+    # sin el campo: lista vacia (el renderer usa `y` fijo)
+    assert S.normalize({"video": "x", "duration": 5.0})["fx"]["captions"]["y_ranges"] == []
+
+
+def test_normalize_conserva_music_grid_y_entities_extra():
+    """El director guarda la rejilla de la musica y el nombre por confirmar: normalize no los
+    toca (antes solo se probaba a mano)."""
+    grid = {"bpm": 112, "beats": [0.5, 1.03], "downbeats": [0.5], "drop": 9.1, "key": "A minor",
+            "_music_key": "abc"}
+    plan = {"video": "x", "duration": 12.0, "version": 2,
+            "director": {"style": "elegante", "music_grid": grid, "notes": ["n1"]},
+            "entities": {"name": "", "name_candidate": "Dra. Ficticia", "name_src": "letrero",
+                         "name_confirmed": False, "role": "Dentista"}}
+    n = S.normalize(plan)
+    assert n["director"]["music_grid"] == grid and n["director"]["notes"] == ["n1"]
+    e = n["entities"]
+    assert e["name_candidate"] == "Dra. Ficticia" and e["name_src"] == "letrero"
+    assert e["name_confirmed"] is False and e["role"] == "Dentista" and e["name"] == ""
+    assert S.normalize(n) == n                                   # idempotente
+
+
+def test_medios_propios_en_el_catalogo_y_normalize():
+    tr = S.schema()["tracks"]
+    assert "media" in tr["graphics"]["items"]
+    for track, kind in (("graphics", "media"), ("cutaways", "photo"), ("cutaways", "self_broll")):
+        ps = {p["k"]: p for p in S.item_params(track, kind)}
+        assert ps["media"]["type"] == "media" and ps["media"]["nullable"], (track, kind)
+        assert {"fit", "focus", "media_in", "loop"} <= set(ps), (track, kind)
+    pip = {p["k"]: p for p in S.item_params("graphics", "media")}
+    assert pip["size"]["default"] == 0.36 and {"frame", "radius", "shadow", "aspect", "zoom"} <= set(pip)
+    # sin posicion por defecto: el motor lo coloca lejos de la cara (render.media_auto_place);
+    # el default de graphics.DEFAULTS (del renderer) no pisa la colocacion del motor
+    assert pip["x"]["default"] is None and pip["y"]["default"] is None
+    assert "automático" in pip["x"]["hint"] and pip["x"]["nullable"] and pip["y"]["nullable"]
+    # los demas graficos conservan su default comun
+    assert {p["k"]: p for p in S.item_params("graphics", "sticker_text")}["size"]["default"] != 0.45 \
+        or "graphics" in S.KINDS.get("adopted", [])
+    good = {"sid": "a1b2c3d4e5f6", "type": "video", "name": "clip.mov", "w": 1080, "h": 1920,
+            "dur": 4.5, "thumb": "/tlsource/a1b2c3d4e5f6/thumb", "raro": 1}
+    p = S.normalize({"video": "x", "duration": 10.0, "fx": {
+        "graphics": [{"kind": "media", "start": 1, "end": 3, "media": good, "fit": "otra"},
+                     {"kind": "media", "start": 4, "end": 5, "media": {"sid": "../../etc/passwd"}},
+                     {"kind": "media", "start": 6, "end": 7, "media": "/ruta/local.png"}],
+        "cutaways": [{"kind": "photo", "start": 2, "end": 4, "media": dict(good, type="image")}]}})
+    g = p["fx"]["graphics"]
+    assert g[0]["media"] == {k: v for k, v in good.items() if k != "raro"}
+    assert g[0]["fit"] == "cover"                               # opcion invalida -> default
+    assert g[1]["media"] is None and g[2]["media"] is None      # nunca una ruta
+    assert p["fx"]["cutaways"][0]["media"]["type"] == "image"
+    assert S.validate(p) == []
+    bad = copy.deepcopy(p)
+    bad["fx"]["graphics"][0]["media"] = {"sid": "x/y"}
+    assert any("medio" in e for e in S.validate(bad))

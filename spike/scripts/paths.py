@@ -29,6 +29,7 @@ INPUT = DATA / "input"
 OUTPUT = DATA / "output"
 WORK = DATA / "work"
 BRAND = DATA / "assets/brand"
+PROFILES = BRAND / "profiles.json"      # perfiles de persona guardados (nombre, profesion, redes)
 LOGS = DATA / "logs"
 OLLAMA_MODELS = DATA / "ollama"          # modelos del LLM embebido (fuera del ~/.ollama del sistema)
 for _d in (INPUT, OUTPUT, WORK, BRAND, LOGS, OLLAMA_MODELS):

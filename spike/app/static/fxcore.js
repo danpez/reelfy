@@ -379,6 +379,168 @@
     return groups.map(g => ({ words: g, start: +g[0].start, end: +g[g.length - 1].end }));
   }
 
+  // ------------------------------------------------------------------ subtitulos: geometria del render
+  /** Espejo de text.CAPTION_PRESETS (una prueba lo compara con el motor): escala del tamano,
+      espacio entre palabras, separacion entre lineas (em), crecimiento de la palabra activa, lineas
+      maximas, contorno, sombra, revelado y mayusculas. */
+  const CAPTION_PRESETS = {
+    clean_bold: { scale: 1.0, space: 1.3, gap: 0.16, active_scale: 0.03, max_lines: 1, max_words: 4, stroke: 0.0, shadow: 0.95, reveal: "word", anim: "pop", active: "color" },
+    karaoke: { scale: 1.0, space: 1.2, gap: 0.16, active_scale: 0.0, max_lines: 1, max_words: 4, stroke: 0.0, shadow: 0.95, reveal: "group", anim: "rise", active: "wipe" },
+    boxed: { scale: 1.0, space: 1.75, gap: 0.34, active_scale: 0.0, max_lines: 1, max_words: 4, stroke: 0.0, shadow: 0.9, reveal: "group", anim: "rise", active: "pill" },
+    minimal_small: { scale: 0.74, space: 1.15, gap: 0.2, active_scale: 0.0, max_lines: 2, max_words: 5, stroke: 0.0, shadow: 1.0, reveal: "word", anim: "fade", active: "none", font: "Poppins-SemiBold" },
+    bold_caps: { scale: 1.28, space: 1.3, gap: 0.06, active_scale: 0.0, max_lines: 2, max_words: 3, stroke: 5.0, shadow: 0.8, reveal: "word", anim: "pop_strong", active: "color", case: "upper" },
+  };
+  /** Palabras que no deben cerrar una linea (text._FUNC_END, normalizadas). */
+  const FUNC_END = new Set(("de del la las el los al a y e o u en con por para que te tu tus mi mis se su sus un una unos "
+    + "unas lo le les me nos ya no si sin como muy mas pero es son como cuando donde porque cual cuanto cuanta al del tan "
+    + "sobre entre hasta desde hacia sin ante tras segun mientras aunque ni").split(" "));
+  /** Configuracion efectiva de los subtitulos (text._cap_cfg): preset, fuente, tamano (size*scale),
+      espacio, lineas, mayusculas, contorno y sombra. `titleFont` = fuente de titulo del estilo
+      (bold_caps la usa si el plan no fija otra). */
+  function captionCfg(cfg, titleFont) {
+    const c = cfg || {}, preset = CAPTION_PRESETS[c.preset] ? c.preset : "clean_bold", P = CAPTION_PRESETS[preset];
+    let font = c.font;
+    if (preset === "minimal_small" && (!font || font === "Poppins-ExtraBold")) font = P.font;
+    else if (preset === "bold_caps" && (!font || font === "Poppins-ExtraBold")) font = titleFont || "Poppins-Black";
+    else font = font || "Poppins-ExtraBold";
+    const cs = c.case && c.case !== "none" ? c.case : (P.case || "none");
+    const mw = Math.min(+c.max_words || P.max_words, preset === "bold_caps" ? 3 : 99);
+    return Object.assign({}, P, { preset, font, case: cs, max_words: mw,
+      size: (+c.size || 0.052) * P.scale, x: c.x != null ? +c.x : 0.5, y: c.y != null ? +c.y : 0.72,
+      max_lines: c.max_lines != null ? Math.max(1, Math.floor(+c.max_lines)) : P.max_lines,
+      stroke: c.stroke != null ? +c.stroke : P.stroke, shadow: c.shadow != null ? +c.shadow : P.shadow,
+      kw_accent: c.kw_accent != null ? !!c.kw_accent : preset === "clean_bold",
+      recenter: c.recenter != null ? !!c.recenter : ["clean_bold", "minimal_small", "bold_caps"].includes(preset) });
+  }
+  /** Ancho util (fraccion de W) de un bloque centrado en x (text._usable con width 0.96). */
+  function captionUsable(x) {
+    const xc = Math.min(Math.max(+x, SAFE.left), SAFE.right);
+    return Math.max(0.3, 2 * Math.min(xc - SAFE.left, SAFE.right - xc)) * 0.96;
+  }
+  /** text._balanced_split: parte las palabras (anchos de avance) en k lineas minimizando la mas
+      ancha; una linea (salvo la ultima) no termina en palabra funcional. -> inicio de cada linea. */
+  function balancedSplit(widths, space, k, words) {
+    const n = widths.length;
+    k = Math.max(1, Math.min(k, n));
+    if (k === 1) return [0];
+    const pre = [0]; widths.forEach(w => pre.push(pre[pre.length - 1] + w));
+    const lw = (i, j) => pre[j] - pre[i] + space * (j - i - 1);
+    const func = (words && words.length === n ? words : []).map(w => FUNC_END.has(normWord(w)));
+    const avg = lw(0, n) / k;
+    let best = null, bc = Infinity;
+    const cuts = [];
+    const rec = (from, left) => {
+      if (!left) {
+        const b = [0].concat(cuts, [n]), ws = [];
+        for (let q = 0; q < b.length - 1; q++) ws.push(lw(b[q], b[q + 1]));
+        // mismo orden de operaciones que el motor (empates identicos)
+        let cost = Math.max(...ws), even = 0, pen = 0;
+        for (let m = 0; m < k; m += 2) even += ws[m];
+        cost += 1e-4 * even;
+        cuts.forEach(c => { if (func[c - 1]) pen += 0.45 * avg; });
+        cost += pen;
+        if (cost < bc) { bc = cost; best = [0].concat(cuts); }
+        return;
+      }
+      for (let c = from; c <= n - left; c++) { cuts.push(c); rec(c + 1, left - 1); cuts.pop(); }
+    };
+    rec(1, k - 1);
+    return best;
+  }
+  /** Geometria de un grupo de subtitulos como text._layout_group: tamano del preset, espacio entre
+      palabras, envoltura balanceada (hasta max_lines, o las `lines` que dio /captions) y reduccion
+      de la linea que no cabe. `measure(txt, px)` -> {adv, l, r, asc, desc} (avance y tinta relativa
+      al origen). Con `rect` (el de POST /captions, fraccion de la caja) el tamano se calibra para
+      que la linea mas ancha mida lo del export y el bloque queda en su lugar exacto.
+      -> {fs, sp, cx, top, height, rows: [{a, b, sc, x0, base, w}], xs: [x de cada palabra]} en px. */
+  function captionLayout(texts, cfg, W, H, measure, o) {
+    const opt = o || {}, D = captionCfg(cfg, opt.titleFont), n = (texts || []).length;
+    if (!n) return null;
+    const fs = D.size * W;
+    const M = texts.map(t => measure(t, fs)), sp = measure(" ", fs).adv * D.space;
+    const maxw = captionUsable(D.x) * W;
+    const inkW = (a, b) => { let x = 0, l = null, r = 0; for (let i = a; i < b; i++) { if (l == null) l = x + M[i].l; r = x + M[i].r; x += M[i].adv + sp; } return r - (l || 0); };
+    const adv = M.map(m => m.adv);
+    const rowsOf = k => { const st = balancedSplit(adv, sp, k, texts); return st.map((a, i) => [a, i + 1 < st.length ? st[i + 1] : n]); };
+    let rows;
+    if (opt.lines) rows = rowsOf(Math.max(1, Math.min(n, Math.floor(opt.lines))));
+    else {
+      rows = [[0, n]];
+      if (inkW(0, n) > maxw && n > 1 && D.max_lines > 1) {
+        rows = rowsOf(2);
+        if (Math.max(...rows.map(r => inkW(r[0], r[1]))) > maxw && n > 2 && D.max_lines > 2) rows = rowsOf(3);
+      }
+    }
+    // la linea que no cabe se reduce (text._layout_group: *0.995)
+    const out = rows.map(([a, b]) => { const w = inkW(a, b); return { a, b, sc: w > maxw ? maxw / w * 0.995 : 1, w }; });
+    // calibracion con el rect del export: misma anchura de la linea mas ancha
+    let k = 1;
+    const rect = Array.isArray(opt.rect) && opt.rect.length >= 4 && +opt.rect[2] > +opt.rect[0] ? opt.rect.map(Number) : null;
+    const widest = Math.max(...out.map(r => r.w * r.sc));
+    if (rect && widest > 1) k = Math.min(2, Math.max(0.5, (rect[2] - rect[0]) * W / widest));
+    const cx = rect ? (rect[0] + rect[2]) / 2 * W : D.x * W;
+    const xs = new Array(n).fill(0);
+    let hsum = 0;
+    out.forEach(r => {
+      r.sc *= k;
+      let x = 0, asc = 0, desc = 0;
+      for (let i = r.a; i < r.b; i++) { xs[i] = x; x += (M[i].adv + sp) * r.sc; asc = Math.max(asc, M[i].asc || 0); desc = Math.max(desc, M[i].desc || 0); }
+      const l = M[r.a].l * r.sc, rr = xs[r.b - 1] + M[r.b - 1].r * r.sc;
+      r.w = rr - l; r.x0 = cx - (l + rr) / 2;
+      r.asc = asc * r.sc; r.desc = desc * r.sc; hsum += r.asc + r.desc;
+    });
+    // lineas apiladas por tinta con `gap` em entre ellas (text._stack); con rect, su alto exacto
+    let gap = D.gap * fs * k, height = hsum + gap * (out.length - 1), top;
+    if (rect) {
+      const rh = (rect[3] - rect[1]) * H;
+      if (out.length > 1) gap = Math.max(0, (rh - hsum) / (out.length - 1));
+      height = rh; top = rect[1] * H;
+    } else top = D.y * H - height / 2;
+    let y = 0;
+    out.forEach(r => { r.base = y + r.asc; y += r.asc + r.desc + gap; });
+    return { fs: fs * k, sp: sp * k, cx, top, height, rows: out, xs, cfg: D, M };
+  }
+  /** text._active_bump: 0..1..0 mientras la palabra se pronuncia (sube en ~80 ms, baja en 0.16 s). */
+  function activeBump(t, w) {
+    const a = ease("out_cubic", (t - +w.start + 0.03) / 0.08);
+    const b = t > +w.end ? 1 - ease("in_out_quad", (t - +w.end) / 0.16) : 1;
+    return Math.max(0, Math.min(a, b));
+  }
+
+  // ------------------------------------------------------------------ titulos: geometria del render
+  /** Espejo de text.PRESETS (una prueba lo compara): altura por defecto, alineacion, espacio entre
+      palabras, separacion entre lineas (em), tamanos maximo/minimo, caracteres por linea, lineas
+      maximas, deriva y mayusculas. */
+  const TEXT_PRESETS = {
+    title_pop: { y: 0.2, align: "center", space: 1.12, gap: 0.13, max_size: 0.125, min_size: 0.06, cpl: 13, max_lines: 3 },
+    stack: { y: 0.62, align: "center", space: 1.1, gap: 0.13, max_size: 0.24, min_size: 0.05, cpl: 12, max_lines: 4 },
+    cascade: { y: 0.2, align: "left", space: 1.0, gap: 0.1, max_size: 0.095, min_size: 0.05, cpl: 12, max_lines: 4 },
+    serif_elegant: { y: 0.15, align: "center", space: 1.0, gap: 0.06, max_size: 0.135, min_size: 0.06, cpl: 15, max_lines: 3 },
+    script_accent: { y: 0.5, align: "center", space: 1.0, gap: 0.02, max_size: 0.24, min_size: 0.08, cpl: 14, max_lines: 2 },
+    behind_giant: { y: 0.3, align: "center", space: 1.0, gap: 0.035, max_size: 0.46, min_size: 0.12, cpl: 9, max_lines: 2, drift: 0.04, case: "upper" },
+    highlight_marker: { y: 0.66, align: "center", space: 1.25, gap: 0.24, max_size: 0.1, min_size: 0.05, cpl: 16, max_lines: 3 },
+    typewriter: { y: 0.7, align: "center", space: 1.0, gap: 0.28, max_size: 0.07, min_size: 0.04, cpl: 18, max_lines: 4 },
+    counter: { y: 0.45, align: "center", space: 1.0, gap: 0.12, max_size: 0.24, min_size: 0.08, cpl: 14, max_lines: 3 },
+    kicker: { y: 0.22, align: "center", space: 1.1, gap: 0.12, max_size: 0.12, min_size: 0.055, cpl: 13, max_lines: 3 },
+  };
+  const TEXT_PRESET_Y = {};
+  Object.keys(TEXT_PRESETS).forEach(k => { TEXT_PRESET_Y[k] = TEXT_PRESETS[k].y; });
+  /** text._ITALIC: variante italica real de una fuente (si no hay, oblicua sintetica). */
+  const ITALIC = { DMSerifDisplay: "DMSerifDisplay-Italic", InstrumentSerif: "InstrumentSerif-Italic", "Poppins-Black": "Poppins-BlackItalic" };
+  /** text._italic -> {font, synth}: synth = sin variante real (se inclina en el navegador). */
+  function italicOf(font) {
+    const f = String(font || "");
+    if (ITALIC[f]) return { font: ITALIC[f], synth: false };
+    if (/Italic$/.test(f)) return { font: f, synth: false };
+    return { font: f, synth: true };
+  }
+  /** Ancho util de un titulo (text._usable): segun x, alineacion, `width` y la deriva del preset. */
+  function textUsable(x, align, width, drift) {
+    const xc = Math.min(Math.max(+x, SAFE.left), SAFE.right);
+    const w = align === "left" ? SAFE.right - xc : align === "right" ? xc - SAFE.left : 2 * Math.min(xc - SAFE.left, SAFE.right - xc);
+    return Math.max(0.3, w) * (width != null && +width > 0 ? +width : 1) / (1 + Math.max(0, +drift || 0));
+  }
+
   // ------------------------------------------------------------------ texto: aparicion por palabra
   /** Igual que text._norm: minusculas, sin acentos ni puntuacion (letras y digitos Unicode). */
   function normWord(s) { return String(s || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\p{L}\p{N}]/gu, ""); }
@@ -511,27 +673,106 @@
   /** Espejo de render.build_job: los subtitulos se ocultan mientras haya CUALQUIER titulo activo
       (salvo keep_captions; tambien los de detras y los kicker, sin importar y) o una escena con
       texto, si hide_during_titles (default true). t en tiempo original. */
-  function captionsHiddenAt(fx, t) {
+  function captionsHiddenAt(fx, t, boxAspect) {
     const cap = (fx && fx.captions) || {};
+    const on = it => it && it.enabled !== false && t >= +it.start && t < +it.end;
+    // foto con pie sin lugar para los subtitulos (render.caption_layout: "hide")
+    if (photoCaptionRows(fx, boxAspect).some(r => r.hide && r.start <= t && t < r.end)) return true;
     const h = Object.prototype.hasOwnProperty.call(cap, "hide_during_titles") ? cap.hide_during_titles : true;
     if (!h) return false;
-    const on = it => it && it.enabled !== false && t >= +it.start && t < +it.end;
     if (((fx && fx.text) || []).some(it => on(it) && !it.keep_captions)) return true;
     return ((fx && fx.cutaways) || []).some(it => on(it) && it.text && typeof it.text === "object" && String(it.text.text || "").trim() !== "");
+  }
+  /** Grupo de subtitulos del render (POST /captions: tiempo original) activo en t: el ultimo que
+      ya empezo, mientras no termine (text.draw_captions). */
+  function capGroupAt(groups, t) {
+    const gs = groups || [];
+    let lo = 0, hi = gs.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (+gs[m].start <= t) lo = m + 1; else hi = m; }
+    const g = gs[lo - 1];
+    return g && t < +g.end ? g : null;
   }
 
   /** text.draw_captions: si el grupo ya estaba oculto al empezar (inicio + 0.13 s y su ultima
       palabra caen tapados por un titulo) no vuelve a salir al terminar el titulo. */
-  function captionGroupSuppressed(fx, g, t) {
+  function captionGroupSuppressed(fx, g, t, aspect) {
     if (!g || !g.words || !g.words.length) return false;
     const s0 = +g.start + 0.13, last = Math.max(+g.start, +g.words[g.words.length - 1].start);
-    return t > s0 && captionsHiddenAt(fx, s0) && captionsHiddenAt(fx, last);
+    return t > s0 && captionsHiddenAt(fx, s0, aspect) && captionsHiddenAt(fx, last, aspect);
   }
-  /** Altura (0..1) de los subtitulos en t (original): `y_ranges` [{start, end, y}] la cambia por tramo. */
+  /** Altura (0..1) de los subtitulos en t (original): `y_ranges` [{start, end, y}] la cambia por
+      tramo (las filas `hide` no cuentan: ocultan, ver captionRangeAlpha). */
   function captionY(cfg, t) {
     const c = cfg || {};
-    const r = (Array.isArray(c.y_ranges) ? c.y_ranges : []).find(x => x && +x.start <= t && t < +x.end && x.y != null);
+    const r = (Array.isArray(c.y_ranges) ? c.y_ranges : []).find(x => x && !x.hide && +x.start <= t && t < +x.end && x.y != null);
     return r ? +r.y : (c.y != null ? +c.y : 0.72);
+  }
+  /** Filas de `y_ranges` con `hide: true` (tiempo original): sin subtitulos en ese tramo, con un
+      fundido de 0.12 s (text._yr_hide_alpha). -> alfa 0..1. */
+  function captionRangeAlpha(cfg, t, fade) {
+    const f = fade == null ? 0.12 : fade;
+    let a = 1;
+    ((cfg && cfg.y_ranges) || []).forEach(r => {
+      if (!r || !r.hide) return;
+      const s = +r.start, e = +r.end;
+      if (!isFinite(s) || !isFinite(e)) return;
+      const d = Math.max(s - t, t - e);
+      a = Math.min(a, d > 0 ? Math.max(0, Math.min(1, d / f)) : 0);
+    });
+    return a;
+  }
+
+  // ------------------------------------------------------------------ foto con pie: subtitulos que se mueven
+  const CAPTION_HALF = 0.05, PHOTO_SIZE = 0.72, PHOTO_Y = 0.46;
+  function photoCaptionText(it) {
+    let cap = it && it.caption;
+    if (cap == null && it && typeof it.text === "string") cap = it.text;
+    return cap != null && typeof cap !== "object" && typeof cap !== "boolean" ? String(cap).trim() : "";
+  }
+  /** Espejo de render.photo_caption_y: donde van los subtitulos durante una escena photo con pie.
+      null = el pie no toca su franja; un numero = se mueven ahi; "hide" = no hay lugar. */
+  function photoCaptionY(it, capY, boxAspect) {
+    const S = SAFE, asp = boxAspect || 9 / 16;
+    const num = (v, d) => (v == null || !isFinite(+v) ? d : +v);
+    const pw = Math.min(0.8, Math.max(0.3, num(it.size, PHOTO_SIZE))) * asp;
+    const y = num(it.y, PHOTO_Y);
+    const cMid = y + 0.559 * pw, cHalf = 0.075 * pw + 0.015;
+    if (Math.abs(cMid - capY) >= cHalf + CAPTION_HALF) return null;
+    const half = 0.6745 * pw, bottom = 0.2 * pw;
+    const lo = S.top + CAPTION_HALF, hi = S.bottom - CAPTION_HALF + 0.03;
+    const below = y + half + 0.02 + CAPTION_HALF + 0.01;
+    const over = y + half - bottom - 0.012 - CAPTION_HALF;
+    const above = y - half - 0.035 * pw - 0.02 - CAPTION_HALF - 0.01;
+    const r4 = v => Math.round(v * 1e4) / 1e4;
+    if (lo <= below && below <= hi) return r4(below);
+    if (lo <= over && over <= hi && over - CAPTION_HALF >= y - half + 0.2 * pw) return r4(over);
+    if (lo <= above && above <= hi) return r4(above);
+    return "hide";
+  }
+  /** Filas automaticas de render.caption_layout (escenas photo con pie que chocarian con los
+      subtitulos): [{start, end, y | hide, id}] en tiempo original. */
+  function photoCaptionRows(fx, boxAspect) {
+    const cap = (fx && fx.captions) || {};
+    const user = (Array.isArray(cap.y_ranges) ? cap.y_ranges : []).filter(r => r && !r._auto && !r.hide);
+    const out = [];
+    ((fx && fx.cutaways) || []).forEach(it => {
+      if (!it || it.enabled === false || it.kind !== "photo" || it.keep_captions || !photoCaptionText(it)) return;
+      const t0 = +it.start || 0;
+      let cy = cap.y != null ? +cap.y : 0.72;
+      const u = user.find(r => +r.start <= t0 && t0 < +r.end && r.y != null);
+      if (u) cy = +u.y;
+      const v = photoCaptionY(it, cy, boxAspect);
+      if (v === "hide") out.push({ start: t0, end: +it.end, hide: true, id: it.id });
+      else if (v != null) out.push({ start: t0, end: +it.end, y: v, id: it.id });
+    });
+    return out;
+  }
+  /** Altura de los subtitulos en t como el render: primero las filas automaticas de la foto con pie,
+      luego las del usuario (y_ranges), luego captions.y. */
+  function captionYAt(fx, t, boxAspect) {
+    const cfg = (fx && fx.captions) || {};
+    const auto = photoCaptionRows(fx, boxAspect).find(r => r.y != null && r.start <= t && t < r.end);
+    return auto ? auto.y : captionY(cfg, t);
   }
 
   // ------------------------------------------------------------------ iman: objetivos
@@ -596,11 +837,33 @@
       el item NUEVO de la misma pista que mas se solapa con el original y que no duplica algo que ya
       existe. Lo demas que el director haya agregado o cambiado se ignora.
       -> {fx, results: [{id, track, status: "changed"|"replaced"|"same"|"none", newId}]} */
+  /** Piezas LIGADAS a los items pedidos que el director puede cambiar al regenerarlos (y que el
+      Studio adopta junto con ellos): el SFX emparejado de una transicion (mismo evento, +-0.2 s),
+      los acentos de un titulo (garabatos, iconos y etiquetas de la IA que se solapan con el) y las
+      piezas de una composicion (tx_bghero_s<N>, tx_bghero_s<N>b y fx_bgswap_s<N>). Lo bloqueado o
+      creado por el usuario nunca es pieza ligada. -> Map id -> track. */
+  function regenCompanions(fx, ids) {
+    const out = new Map(), want = new Set(ids || []);
+    const free = it => it && it.id && !want.has(it.id) && !it.locked && it.src !== "user";
+    const anchor = id => { const m = /^(?:tx_bghero|fx_bgswap)_s(\d+)/.exec(String(id || "")); return m ? m[1] : null; };
+    (ids || []).forEach(id => {
+      const f = findItem(fx, id); if (!f) return;
+      const it = f.item;
+      if (f.track === "transitions") ((fx && fx.sfx) || []).forEach(s => { if (free(s) && Math.abs((+s.at || 0) - (+it.at || 0)) <= 0.2) out.set(s.id, "sfx"); });
+      if (f.track === "text") ((fx && fx.graphics) || []).forEach(g => {
+        if (free(g) && ["doodle", "icon", "sticker_text"].includes(g.kind) && Math.min(+g.end, +it.end) - Math.max(+g.start, +it.start) > 0) out.set(g.id, "graphics");
+      });
+      const a = anchor(id);
+      if (a != null) TRACKS.forEach(tk => ((fx && fx[tk]) || []).forEach(o => { if (free(o) && anchor(o.id) === a) out.set(o.id, tk); }));
+    });
+    return out;
+  }
   function mergeRegenerate(localFx, serverFx, ids) {
     const fx = clone(localFx) || {};
     const known = allIds(localFx);
     const used = new Set();
     const results = [];
+    const comps = regenCompanions(localFx, ids);
     (ids || []).forEach(id => {
       const loc = findItem(fx, id);
       if (!loc) return;
@@ -626,7 +889,16 @@
       }
       results.push({ id, track, status, newId: pick ? pick.id : id });
     });
-    return { fx, results };
+    // piezas ligadas: se adopta su version nueva (o se quitan si el director las apago/borro)
+    const linked = [];
+    comps.forEach((track, id) => {
+      const arr = fx[track] || [], k = arr.findIndex(x => x && x.id === id);
+      if (k < 0) return;
+      const s = ((serverFx && serverFx[track]) || []).find(x => x && x.id === id);
+      if (!s) { arr.splice(k, 1); linked.push({ id, track, status: "removed" }); }
+      else if (!sameVisual(arr[k], s)) { arr[k] = clone(s); linked.push({ id, track, status: "changed" }); }
+    });
+    return { fx, results, linked };
   }
 
   // ------------------------------------------------------------------ duplicados tras re-dirigir
@@ -638,43 +910,62 @@
     // graficos: tambien la posicion (dos destellos iguales en lugares distintos son decoracion, no copia)
     if (track === "graphics") return `g:${it.kind}:${normText(it.name || it.title || it.label || it.text || it.variant || "")}:${it.x == null ? "a" : Math.round(+it.x * 20)}:${it.y == null ? "a" : Math.round(+it.y * 20)}`;
     if (track === "cutaways") return `c:${it.kind}:${normText(getPath(it, "text.text") || it.caption || "")}`;
-    if (track === "sfx") return `s:${it.name}`;
-    return `${track}:${it.kind}`;
+    // efectos, transiciones y SFX: el tipo Y sus parametros (dos zooms distintos que se enciman son
+    // una decision del director, no una copia: solo se quita el duplicado exacto)
+    const o = {};
+    Object.keys(it).sort().forEach(k => { if (!SIG_SKIP[k] && k[0] !== "_") o[k] = it[k]; });
+    return `${track}:${JSON.stringify(o)}`;
   }
+  const SIG_SKIP = { id: 1, src: 1, locked: 1, start: 1, end: 1, at: 1, enabled: 1 };
   function overlapFrac(track, a, b) {
     if (isEvent(track)) return Math.abs((+a.at || 0) - (+b.at || 0)) < 0.15 ? 1 : 0;
     const o = overlap(track, a, b), L = Math.min(+a.end - +a.start, +b.end - +b.start);
     return L > 1e-6 ? o / L : 0;
   }
-  /** Quita (en sitio) los items NO bloqueados que repiten el contenido de uno bloqueado y se
-      solapan con el mas de la mitad (el director a veces vuelve a generar un titulo que el usuario
-      bloqueo), y los duplicados exactos entre items de la IA. -> [{track, id, of}] quitados. */
+  /** Quita (en sitio) los items de la IA (no bloqueados ni del usuario) que repiten el contenido de
+      uno BLOQUEADO o creado por el usuario y se solapan con el mas de la mitad (el director a veces
+      vuelve a generar un titulo que el usuario bloqueo). Lo que la IA propone entre si NO se toca
+      (tampoco los efectos que re-emite con sufijo, fx_hookbg_s0b...): la propuesta debe quedar
+      identica a la que guardo el servidor para que la sincronizacion con la musica IA sea
+      automatica (esas copias son un defecto del director y se reportan alla). El Studio aplica este
+      filtro ANTES de tomar nota del plan del servidor, asi que no cuenta como edicion.
+      -> [{track, id, of}] quitados. */
   function dedupeFx(fx) {
     const removed = [];
     if (!fx) return removed;
     TRACKS.forEach(tk => {
       const arr = fx[tk] || [];
-      const keep = [];
-      arr.forEach(it => {
-        if (!it || it.locked || it.src === "user") { keep.push(it); return; }
-        const sig = contentSig(tk, it);
-        const dup = keep.find(k => k && contentSig(tk, k) === sig && (k.enabled !== false || it.enabled === false)
-          && overlapFrac(tk, it, k) > (k.locked || k.src === "user" ? 0.5 : 0.9));
-        if (dup) removed.push({ track: tk, id: it.id, of: dup.id });
-        else keep.push(it);
-      });
-      // un item de la IA que quedo ANTES que el bloqueado que duplica tambien se quita
-      const locked = keep.filter(k => k && (k.locked || k.src === "user"));
-      const out = keep.filter(it => {
+      const mine = arr.filter(k => k && (k.locked || k.src === "user"));
+      if (!mine.length) return;
+      const out = arr.filter(it => {
         if (!it || it.locked || it.src === "user") return true;
         const sig = contentSig(tk, it);
-        const dup = locked.find(k => contentSig(tk, k) === sig && overlapFrac(tk, it, k) > 0.5);
+        const dup = mine.find(k => contentSig(tk, k) === sig && overlapFrac(tk, it, k) > 0.5);
         if (dup) { removed.push({ track: tk, id: it.id, of: dup.id }); return false; }
         return true;
       });
       if (out.length !== arr.length) fx[tk] = out;
     });
     return removed;
+  }
+
+  /** Efectos que el director RE-EMITE con sufijo sobre el mismo tramo (fx_hookbg_s0, fx_hookbg_s0b...:
+      la pieza vieja queda por su grupo bloqueado y la coreografia agrega otra). Solo se quitan de la
+      COPIA del plan que se manda a re-dirigir (asi no se acumulan en cada re-direccion); la propuesta
+      que vuelve se adopta intacta. -> fx nuevo (copia superficial por pista) y los ids quitados. */
+  function dropReemitted(fx) {
+    const out = Object.assign({}, fx || {}), removed = [];
+    const stem = id => { const m = /^(.*_s\d+)[a-z]?$/.exec(String(id || "")); return m ? m[1] : null; };
+    const firsts = new Map();
+    out.effects = ((fx && fx.effects) || []).filter(it => {
+      if (!it || it.src === "user" || it.locked) return true;
+      const k = stem(it.id); if (!k) return true;
+      const key = `${k}|${it.kind}`, f = firsts.get(key);
+      if (!f) { firsts.set(key, it); return true; }
+      if (overlapFrac("effects", it, f) > 0.9) { removed.push(it.id); return false; }
+      return true;
+    });
+    return { fx: out, removed };
   }
 
   // ------------------------------------------------------------------ geometria (espejo del render)
@@ -712,6 +1003,106 @@
     return [x == null ? (dx == null ? 0.5 : dx) : +x, y == null ? (dy == null ? 0.5 : dy) : +y];
   }
 
+  // ------------------------------------------------------------------ PiP (graphics.media) automatico
+  /* Contrato compartido con render.media_auto_place (doc 4.2b): un PiP con x/y vacios se coloca
+     lejos de la cara, dentro de SAFE, arriba de los subtitulos y esquivando textos y graficos. */
+  const PIP_MARGIN = 0.015, PIP_SCALES = [1.0, 0.85, 0.72, 0.6];
+  /** Tarjeta del PiP en px (graphics.media_box / render._pip_card): ancho max size*W, alto max
+      1.78x ese ancho; sin `aspect` toma la proporcion del medio (cw x ch). */
+  function pipCard(size, aspect, cw, ch, W) {
+    const maxw = Math.min(1, Math.max(0.05, +size || 0.36)) * W, maxh = maxw * 1.78;
+    let asp = +aspect || 0;
+    if (asp > 0) { asp = Math.min(3, Math.max(0.3, asp)); const w = Math.min(maxw, maxh * asp); return [w, w / asp]; }
+    const iw = +cw > 0 ? +cw : 4, ih = +ch > 0 ? +ch : 5;
+    const k = Math.min(maxw / iw, maxh / ih);
+    return [iw * k, ih * k];
+  }
+  function ovl(a, b) { return Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) * Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1])); }
+  /** Port exacto de render.media_auto_place -> [cx, cy, escala] (fracciones de la caja). */
+  function mediaAutoPlace(face, w, h, capTop, avoid) {
+    const S = SAFE, m = PIP_MARGIN;
+    const bottom = capTop ? Math.min(S.bottom, capTop) : S.bottom;
+    const mid = (S.left + S.right) / 2;
+    const av = (avoid || []).map(r => r.slice(0, 4).map(Number));
+    const fit = (cx, cy, ww, hh) => {
+      const lx = S.left + ww / 2 + m, hx = S.right - ww / 2 - m, ly = S.top + hh / 2 + m, hy = bottom - hh / 2 - m;
+      return [lx > hx ? mid : Math.min(Math.max(cx, lx), hx), ly > hy ? (S.top + bottom) / 2 : Math.min(Math.max(cy, ly), hy)];
+    };
+    let zone = null, order;
+    if (!face) order = () => [[1.0, 0.0], [0.0, 0.0], [1.0, 1.0]];
+    else {
+      const [fx, fy, fw, fh] = face.map(Number);
+      zone = [fx - fw / 2 - 0.03, fy - fh / 2 - 0.05, fx + fw / 2 + 0.03, fy + fh / 2 + 0.03];
+      const first = fx >= mid ? -1 : 1;
+      order = (ww, hh) => {
+        const side = [zone[0] - m - ww / 2, zone[2] + m + ww / 2];
+        const [a, b] = first < 0 ? [side[0], side[1]] : [side[1], side[0]];
+        return [[a, zone[1] + hh / 2], [b, zone[1] + hh / 2], [fx, zone[3] + m + hh / 2], [fx, zone[1] - m - hh / 2]];
+      };
+    }
+    let free = null, bestFace = null;
+    const r4 = v => Math.round(v * 1e4) / 1e4;
+    for (const s of PIP_SCALES) {
+      const ww = w * s, hh = h * s;
+      for (const [x0, y0] of order(ww, hh)) {
+        const [cx, cy] = fit(x0, y0, ww, hh);
+        const r = [cx - ww / 2, cy - hh / 2, cx + ww / 2, cy + hh / 2];
+        const fo = zone ? ovl(r, zone) : 0, ao = av.reduce((q, a) => q + ovl(r, a), 0);
+        if (fo <= 1e-9 && ao <= 1e-9) return [r4(cx), r4(cy), s];
+        if (fo <= 1e-9 && (free == null || ao < free[0] - 1e-9)) free = [ao, cx, cy, s];
+        if (bestFace == null || fo < bestFace[0] - 1e-9) bestFace = [fo, cx, cy, s];
+      }
+    }
+    const p = free || bestFace;
+    return [r4(p[1]), r4(p[2]), p[3]];
+  }
+  /** render._overlay_boxes: textos activos en [t0, t1) = franja de 0.16 en su y (o la del preset) a
+      lo ancho de SAFE; graficos con x/y = cuadrado de `size` (sin medios ni barra). boxAspect = W/H. */
+  function overlayBoxes(fx, t0, t1, boxAspect) {
+    const S = SAFE, asp = boxAspect || 9 / 16, out = [];
+    const on = it => it && it.enabled !== false && +it.end > t0 && +it.start < t1;
+    ((fx && fx.text) || []).forEach(it => {
+      if (!on(it)) return;
+      let y = it.y != null ? +it.y : TEXT_PRESET_Y[it.preset];
+      if (y == null || !isFinite(y)) y = 0.3;
+      out.push([S.left, y - 0.08, S.right, y + 0.08]);
+    });
+    ((fx && fx.graphics) || []).forEach(it => {
+      if (!on(it) || it.kind === "media" || it.kind === "progress" || it.x == null || it.y == null) return;
+      const half = (it.size != null ? +it.size : 0.18) / 2, x = +it.x, y = +it.y;
+      out.push([x - half, y - half * asp, x + half, y + half * asp]);
+    });
+    return out;
+  }
+  /** Cara mediana en [t0, t1) (tiempo original) con la pista de rostro de las tomas
+      (shots[].face_track [[t, cx, cy, w, h], ...]); sin muestras, la cara de la toma en t0. */
+  function faceMedian(shots, t0, t1) {
+    const rows = [];
+    (shots || []).forEach(sh => (sh && Array.isArray(sh.face_track) ? sh.face_track : []).forEach(r => {
+      if (Array.isArray(r) && r.length >= 5 && +r[0] >= t0 - 1e-6 && +r[0] < t1 && r.slice(1, 5).every(v => isFinite(+v))) rows.push(r.slice(1, 5).map(Number));
+    }));
+    if (!rows.length) {
+      const sh = (shots || []).find(x => x && t0 >= +x.start && t0 < +x.end);
+      return sh && Array.isArray(sh.face) ? sh.face.map(Number) : null;
+    }
+    const med = k => { const v = rows.map(r => r[k]).sort((a, b) => a - b), n = v.length; return n % 2 ? v[(n - 1) / 2] : (v[n / 2 - 1] + v[n / 2]) / 2; };
+    return [med(0), med(1), med(2), med(3)];
+  }
+  /** Posicion efectiva de un PiP (render.set_media_auto): con x/y vacios lo coloca con la cara de la
+      toma (face = [cx, cy, w, h] o null); `cw, ch` = dims del medio. -> {x, y, size, auto}. */
+  function pipPlace(fx, it, face, cw, ch, boxW, boxH) {
+    const size = it.size != null ? +it.size : 0.36;
+    if (it.x != null && it.y != null) return { x: +it.x, y: +it.y, size, auto: false };
+    const cap = (fx && fx.captions) || {};
+    const capOn = cap.enabled !== false && cap.preset !== "none";
+    const capTop = capOn ? (cap.y != null ? +cap.y : 0.72) - CAPTION_HALF - 0.01 : null;
+    const [pw, ph] = pipCard(size, it.aspect, cw, ch, boxW);
+    const [cx, cy, s0] = mediaAutoPlace(face, pw * 1.06 / boxW, ph * 1.06 / boxH, capTop,
+      overlayBoxes(fx, +it.start, +it.end, boxW / boxH));
+    const s = it.x != null || it.y != null ? 1 : s0;
+    return { x: it.x != null ? +it.x : cx, y: it.y != null ? +it.y : cy, size: Math.round(size * s * 1e4) / 1e4, auto: true };
+  }
+
   // ------------------------------------------------------------------ transiciones lejos de una union
   /** Transiciones que MEZCLAN el plano anterior con el siguiente (espejo de transitions.MIXERS):
       lejos de una union se ven como una mezcla del plano consigo mismo y el render avisa. */
@@ -728,12 +1119,22 @@
   }
 
   // ------------------------------------------------------------------ idioma del plan que viaja
-  const PRO_LANGS = ["es", "en"];
+  /** Idiomas de subtitulos de la edicion IA (GET /settings.pro_langs; el servidor traduce con
+      /translate). Se actualiza en sitio con setProLangs. */
+  const PRO_LANGS = ["es", "en", "pt", "fr", "de", "it"];
+  function setProLangs(list) {
+    const l = (Array.isArray(list) ? list : []).map(String).filter(Boolean);
+    if (!l.length) return PRO_LANGS;
+    if (!l.includes("es")) l.unshift("es");
+    PRO_LANGS.splice(0, PRO_LANGS.length, ...l);
+    return PRO_LANGS;
+  }
   /** Plan que se manda a /frame, /preview y /render con el idioma elegido: subtitulos traducidos
-      (phrases_en). Los textos de titulos/graficos ya van en el plan (se traducen en sitio). */
+      (phrases_<lang>). Los textos de titulos/graficos ya van en el plan (se traducen en sitio). */
   function planForLang(plan, lang) {
-    if (!plan) return plan;
-    if (lang === "en" && Array.isArray(plan.phrases_en) && plan.phrases_en.length) return Object.assign({}, plan, { phrases: plan.phrases_en });
+    if (!plan || !lang || lang === "es") return plan;
+    const ph = plan[`phrases_${lang}`];
+    if (Array.isArray(ph) && ph.length) return Object.assign({}, plan, { phrases: ph });
     return plan;
   }
   /** Textos traducibles de fx (titulos, graficos, escenas): [{track, id, path, text}]. */
@@ -760,6 +1161,106 @@
     return fx;
   }
 
+  /* Traduccion de titulos y graficos por ITEM (no por ruta): plan.studio.texts =
+     {lang, src: {id: campos originales}, out: {id: campos tal como quedaron traducidos}, untranslated}.
+     Los campos son el item completo de texto (`text` y `lines` enteros; titulo/subtitulo/etiqueta de
+     un grafico; texto de una escena): corregir a mano una traduccion con menos lineas no pierde nada
+     al volver al original, y re-traducir respeta lo editado a mano salvo que se pida. */
+  const TEXT_TRACKS = ["text", "graphics", "cutaways"];
+  /** Campos de texto de un item (instantanea completa) o null si no tiene texto traducible. */
+  function textFields(track, it) {
+    if (!it) return null;
+    if (track === "text") {
+      if (it.preset === "counter" || !titleText(it).trim()) return null;
+      return { text: it.text == null ? null : it.text, lines: hasLines(it) ? clone(it.lines) : null };
+    }
+    if (track === "graphics") {
+      const o = {}; let any = false;
+      ["title", "subtitle", "label", "text"].forEach(k => { if (typeof it[k] === "string") { o[k] = it[k]; if (it[k].trim()) any = true; } });
+      return any ? o : null;
+    }
+    if (track === "cutaways") { const t = getPath(it, "text.text"); return typeof t === "string" && t.trim() ? { "text.text": t } : null; }
+    return null;
+  }
+  function setTextFields(it, f) {
+    Object.keys(f || {}).forEach(k => {
+      if (k === "lines") { if (f.lines) it.lines = clone(f.lines); else if (hasLines(it)) it.lines = null; }
+      else setPath(it, k, f[k] == null ? undefined : f[k]);
+    });
+    return it;
+  }
+  function eachTextItem(fx, fn) {
+    TEXT_TRACKS.forEach(tk => ((fx && fx[tk]) || []).forEach(it => { const f = it && it.id ? textFields(tk, it) : null; if (f) fn(tk, it, f); }));
+  }
+  /** Estado de la traduccion guardada (acepta el formato anterior: src = [{id, path, text}]). */
+  function textState(st, fx) {
+    if (!st || typeof st !== "object") return null;
+    if (!Array.isArray(st.src)) return st;
+    // formato anterior (por ruta): el original de cada item = el actual con sus rutas originales
+    const src = {};
+    st.src.forEach(s => {
+      const f = findItem(fx, s && s.id); if (!f || src[s.id]) return;
+      const tmp = clone(f.item);
+      st.src.filter(x => x.id === s.id).forEach(x => applyFxTexts({ [f.track]: [tmp] }, [{ id: x.id, path: x.path, to: x.text }]));
+      const tf = textFields(f.track, tmp); if (tf) src[s.id] = tf;
+    });
+    return { lang: st.lang, src, out: {}, untranslated: st.untranslated || [] };
+  }
+  /** Clasifica los textos contra la traduccion guardada: traducidos (igual a lo que se tradujo),
+      editados a mano despues de traducir, y nuevos (nunca traducidos). -> {translated, edited, fresh, total} (ids). */
+  function textStatus(fx, st0) {
+    const st = textState(st0, fx), r = { translated: [], edited: [], fresh: [], total: 0 };
+    eachTextItem(fx, (tk, it, cur) => {
+      r.total++;
+      const o = st && st.out && st.out[it.id];
+      if (!o) r.fresh.push(it.id);
+      else if (sameVal(cur, o)) r.translated.push(it.id);
+      else r.edited.push(it.id);
+    });
+    return r;
+  }
+  /** Que traducir a `lang`: cada item parte de su ORIGINAL (nunca de otra traduccion). Lo ya
+      traducido a ese idioma se omite; lo editado a mano tras traducir se respeta salvo `edited`;
+      `all` fuerza todo. -> {items: [{track, id, orig}], list: [{track, id, path, text}], kept: [ids editados]} */
+  function translationRequest(fx, st0, lang, opts) {
+    const o = opts || {}, st = textState(st0, fx), items = [], kept = [];
+    eachTextItem(fx, (track, it, cur) => {
+      const out = st && st.out && st.out[it.id];
+      const edited = !!(out && !sameVal(cur, out));
+      if (edited && !o.edited && !o.all) { kept.push(it.id); return; }
+      if (!o.all && !edited && out && st.lang === lang) return;       // ya esta en ese idioma
+      const orig = st && st.src && st.src[it.id] ? clone(st.src[it.id]) : cur;
+      items.push({ track, id: it.id, orig });
+    });
+    const list = [];
+    items.forEach(x => {
+      const tmp = setTextFields(clone(findItem(fx, x.id).item), x.orig);
+      fxTexts({ [x.track]: [tmp] }).forEach(y => list.push(y));
+    });
+    return { items, list, kept };
+  }
+  /** Aplica la traduccion (textos en el orden de req.list) EN SITIO: cada item vuelve a su original
+      y recibe su traduccion por linea. -> estado nuevo para plan.studio.texts. */
+  function applyTranslation(fx, st0, req, texts, lang, untranslated) {
+    const st = textState(st0, fx);
+    req.items.forEach(x => { const f = findItem(fx, x.id); if (f) setTextFields(f.item, x.orig); });
+    applyFxTexts(fx, req.list.map((x, i) => Object.assign({}, x, { to: texts[i] })));
+    const src = Object.assign({}, st && st.src), out = Object.assign({}, st && st.out);
+    req.items.forEach(x => {
+      const f = findItem(fx, x.id); if (!f) return;
+      src[x.id] = x.orig; out[x.id] = textFields(x.track, f.item);
+    });
+    return { lang, src, out, untranslated: Array.isArray(untranslated) ? untranslated : [] };
+  }
+  /** "Volver a los textos originales": cada item traducido recupera su texto original COMPLETO
+      (todas sus lineas, aunque se hayan editado). -> numero de items restaurados. */
+  function restoreOriginalTexts(fx, st0) {
+    const st = textState(st0, fx); let n = 0;
+    if (!st || !st.src) return 0;
+    Object.keys(st.src).forEach(id => { const f = findItem(fx, id); if (f) { setTextFields(f.item, st.src[id]); n++; } });
+    return n;
+  }
+
   // ------------------------------------------------------------------ musica: que la cambia
   /** Firma de lo que cambia el ARCHIVO de musica (no el volumen de mezcla): si cambia, la musica
       generada queda desactualizada. keeps = tramos conservados (la duracion final la cambia). */
@@ -776,6 +1277,48 @@
     return kindParams(schema, track, kind).find(p => p.type === "media") || null;
   }
   function mediaKinds(schema, track) { return kinds(schema, track).filter(k => mediaParam(schema, track, k)); }
+  /** Kind con el que se agrega un medio propio en una pista: graphics -> PiP (`media`), escenas ->
+      foto (`photo`); si el esquema no los trae, el primero que acepte medios de ese tipo. */
+  function mediaKindFor(schema, track, type) {
+    const pref = { graphics: ["media"], cutaways: ["photo", "self_broll"] }[track] || [];
+    const ok = k => { const p = mediaParam(schema, track, k); return p && (!type || !p.accept || p.accept.includes(type)); };
+    return pref.find(ok) || mediaKinds(schema, track).find(k => k !== "cta" && ok(k)) || null;
+  }
+
+  // ------------------------------------------------------------------ avisos del render en lenguaje humano
+  /* Codigos de `skipped` y `warnings` del render (stats del export y de la vista previa; en el
+     export llegan como "omitido: <codigo>"). -> {msg, id, level}; id = item del plan si aplica. */
+  const SKIP_MSG = {
+    nombre_desconocido: "el sonido no existe en el catálogo",
+    dato_invalido: "tiene un dato inválido",
+    ilegible: "el archivo no se pudo leer (quedó fuera del export)",
+    no_encontrado: "no se encontró el archivo",
+    sin_medio: "no tiene archivo elegido",
+    sin_union: "cae lejos de un corte: se ve como una mezcla sobre el mismo plano",
+    sin_tiempo: "no tiene momento",
+    fuera_del_video: "cae fuera del video",
+    calidad_baja: "el recorte de la persona salió con poca calidad",
+  };
+  const TRACK_ES = { sfx: "SFX", media: "Medio propio", avatar: "Foto de perfil", transitions: "Transición", text: "Título",
+    effects: "Efecto", graphics: "Gráfico", cutaways: "Escena", music: "Música", matte: "Recorte de la persona",
+    audio: "Audio", captions: "Subtítulos", logo: "Logo" };
+  function humanSkip(code, plan) {
+    let c = String(code == null ? "" : code).trim(), level = "warn";
+    if (/^omitido:\s*/i.test(c)) { c = c.replace(/^omitido:\s*/i, ""); level = "skip"; }
+    const parts = c.split(":");
+    const tk = parts[0], mid = parts.length >= 3 ? parts.slice(1, -1).join(":") : parts[1], why = parts.length >= 3 ? parts[parts.length - 1] : null;
+    const f = mid && plan && plan.fx ? findItem(plan.fx, mid) : null;
+    const name = f ? itemLabel(null, f.track, f.item) : null;
+    const what = TRACK_ES[tk] || tk;
+    let msg;
+    if (tk === "matte" && /^\d/.test(mid || "")) msg = `${what} (${mid.replace("-", " a ")} s del video final): ${SKIP_MSG[why] || why || "aviso"}`;
+    else if (why && SKIP_MSG[why]) msg = `${what}${name ? ` "${name}"` : !f && tk === "music" ? ` (${mid})` : ""}: ${SKIP_MSG[why]}`;
+    else if (why == null && mid && ["error", "modulo", "archivo", "draw_captions", "MatteProvider"].includes(mid))
+      msg = `${what}: ${mid === "archivo" ? "no se encontró el archivo" : mid === "error" ? "falló (se omitió)" : "no está disponible en este equipo"}`;
+    else if (why == null && mid) msg = `${what}: tipo "${mid}" no disponible en este motor (se omitió)`;
+    else msg = c;
+    return { code: c, msg, id: f ? f.item.id : null, track: f ? f.track : null, level };
+  }
 
   return {
     MIN_KEEP, MIN_FRAG, SNAP_S, TRACKS, EVENT_TRACKS, RULER_STEPS, SAFE, PRO_LANGS, MIXERS,
@@ -786,7 +1329,14 @@
     packRows, snapTo, rulerStep, fmtClock, round3, zoomFromSlider, sliderFromZoom,
     captionGroups, ease, cameraAt, normWord, wordMatch, unitTimes,
     accentEs, hasLines, titleText, setTitleText, clearLineStyles, captionsHiddenAt, captionGroupSuppressed, captionY, snapTargets,
-    sameVisual, mergeRegenerate, normText, contentSig, dedupeFx, iconGeom, kickerSplit, anchorXY,
-    transitionOffJoin, planForLang, fxTexts, applyFxTexts, musicSig, mediaParam, mediaKinds,
+    captionRangeAlpha, capGroupAt, photoCaptionY, photoCaptionRows, captionYAt,
+    sameVisual, regenCompanions, mergeRegenerate, normText, contentSig, dedupeFx, iconGeom, kickerSplit, anchorXY,
+    pipCard, mediaAutoPlace, overlayBoxes, pipPlace, faceMedian,
+    transitionOffJoin, setProLangs, planForLang, fxTexts, applyFxTexts, musicSig, mediaParam, mediaKinds, mediaKindFor,
+    humanSkip,
+    CAPTION_PRESETS, TEXT_PRESETS, TEXT_PRESET_Y, ITALIC, FUNC_END, captionCfg, captionUsable, balancedSplit, captionLayout,
+    activeBump, italicOf, textUsable,
+    textFields, setTextFields, textState, textStatus, translationRequest, applyTranslation, restoreOriginalTexts,
+    dropReemitted,
   };
 });

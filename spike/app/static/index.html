@@ -375,7 +375,7 @@
   .dl:hover{text-decoration:underline}
   .err{color:#ff8a8a;font-size:13.5px}
 </style>
-<link rel="stylesheet" href="/static/fx.css?v=ec2d9076">
+<link rel="stylesheet" href="/static/fx.css?v=0b4f1b3d">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute">
@@ -399,6 +399,7 @@
     <g id="i-undo"><path d="M8.5 13.5L4 9l4.5-4.5"/><path d="M4 9h10.5a5 5 0 0 1 0 10H11"/></g>
     <g id="i-redo"><path d="M15.5 13.5L20 9l-4.5-4.5"/><path d="M20 9H9.5a5 5 0 0 0 0 10H13"/></g>
     <g id="i-zoom"><circle cx="11" cy="11" r="6.5"/><path d="M20.5 20.5L16 16M8.5 11h5M11 8.5v5"/></g>
+    <g id="i-link"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1.2 1.2"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2"/></g>
     <g id="i-layers"><path d="M12 3.5l8.5 4.5L12 12.5 3.5 8z"/><path d="M3.5 12.5L12 17l8.5-4.5"/></g>
     <g id="i-check"><circle cx="12" cy="12" r="8.5"/><path d="M8.3 12.4l2.5 2.6 4.9-5.4"/></g>
     <g id="i-alert"><path d="M12 4L2.8 19.5h18.4z"/><path d="M12 10v4M12 16.8v.4"/></g>
@@ -441,6 +442,7 @@
     <div class="logo"><img src="/static/reelfy-mark.png" alt="" style="height:24px;width:auto;margin-right:10px;align-self:center">Reel<span class="fy">fy</span><span class="st">STUDIO</span></div>
     <span class="tag">Procesa con IA · ajusta todo en tiempo real · exporta</span>
     <div class="edacts" id="edActs">
+      <span class="langwarn v2only" id="langWarn" role="status"></span>
       <span class="savehint v2only" id="saveHint" aria-live="polite"></span>
       <button class="btn ghost mini" id="cancel" title="Volver al inicio para procesar otro video (tu edición queda guardada)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-plus"/></svg>Nuevo video</button>
       <button class="btn mini" id="render"><svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg>Exportar</button>
@@ -466,6 +468,7 @@
         <input type="text" id="glossary" placeholder="Ej: Keruvin Store, Al Haramain, Oud"></div>
       <div class="row"><div><label>Shorts por video</label>
         <input type="number" id="highlights" value="2" min="1" max="5"></div><div></div></div>
+      <div id="homeProfile" class="pfhome"></div>
     </div>
     <div id="licGate" style="display:none;margin-top:20px;border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--panel2)">
       <div style="font-size:13px;font-weight:600;margin-bottom:10px"><svg class="ic" viewBox="0 0 24 24"><use href="#i-tag"/></svg> Activa tu licencia</div>
@@ -539,6 +542,7 @@
     <div class="actionbar">
       <button class="btn ghost" id="asmBack">← Atrás</button>
       <span style="flex:1"></span>
+      <span id="asmProfile" class="asmprof"></span>
       <input type="text" id="asmGloss" class="selinp" placeholder="Nombres/tema (mejora la IA)" style="max-width:230px">
       <select id="asmStyle" class="selinp" title="Cómo edita la IA: estilo del Director (todo queda editable) o solo subtítulos">
         <option value="dinamico" selected>Edición IA: Dinámico</option><option value="elegante">Edición IA: Elegante</option>
@@ -588,6 +592,7 @@
           <div id="dirBody"></div>
           <div class="subgroup v2only"><h5><svg class="ic" viewBox="0 0 24 24"><use href="#i-music"/></svg>Música</h5><div id="musBody"></div></div>
         </div>
+        <div class="pgroup v2only" id="profGroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-user"/></svg>Perfil <span class="info" data-tip="Quién sale en el video y sus enlaces. Cambiarlo actualiza al instante el rótulo, el botón Seguir, la invitación a reservar y la tarjeta final.">i</span></h4><div id="profBody"></div></div>
         <div class="pgroup v2only"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-type"/></svg>Subtítulos</h4><div id="capProBody"></div></div>
         <div class="pgroup v2only"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-contrast"/></svg>Color</h4><div id="gradeBody"></div></div>
         <div class="pgroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>Formato</h4>
@@ -609,6 +614,7 @@
             <div id="airRow"><label>Aire <span id="airLbl">16%</span> <span class="info" data-tip="Margen desenfocado alrededor de un video horizontal al pasarlo a vertical.">i</span></label><input type="range" id="air" class="rng" min="0" max="30" value="16"></div>
             <div class="v1only"><label>Zoom énfasis <span id="zoomLbl">10%</span></label><input type="range" id="zoomAmt" class="rng" min="0" max="25" value="10"></div>
           </div>
+          <div class="hint pronote" id="airNote"></div>
         </div>
         <div class="pgroup v1only"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-type"/></svg>Estilo de subtítulos</h4>
           <div class="optrow">
@@ -768,6 +774,7 @@
   <section class="screen" id="s-results"><div class="card">
     <h3><svg class="ic" viewBox="0 0 24 24" style="color:var(--ok)"><use href="#i-check"/></svg>Listo</h3>
     <div class="clips" id="clips"></div>
+    <div class="warnlist" id="resWarn"></div>
     <div style="margin-top:18px">
       <button class="btn ghost" id="backEditor"><svg class="ic" viewBox="0 0 24 24"><use href="#i-undo"/></svg>Volver al editor</button>
       <button class="btn ghost" id="again">Procesar más videos</button>
@@ -791,13 +798,15 @@
   <div class="bar pvprog"><i id="pvmFill"></i></div>
   <video id="pvmVid" controls playsinline></video>
   <div class="cap" id="pvmMsg"></div>
+  <div class="warnlist" id="pvmWarn"></div>
   <div class="btnrow" style="margin-top:12px"><button class="btn ghost mini" id="pvmCancel"><svg class="ic" viewBox="0 0 24 24"><use href="#i-x"/></svg>Cancelar</button></div>
 </div></div>
 
 <video id="srcVid" style="display:none" playsinline></video>
 
-<script src="/static/fxcore.js?v=ec2d9076"></script>
-<script src="/static/fx.js?v=ec2d9076"></script>
+<script src="/static/fxcore.js?v=0b4f1b3d"></script>
+<script src="/static/fx.js?v=0b4f1b3d"></script>
+<script src="/static/profile.js?v=0b4f1b3d"></script>
 <script>
 const $=s=>document.querySelector(s);
 /* tooltips flotantes (position:fixed) para que NO se corten dentro de paneles con overflow */
@@ -822,7 +831,7 @@ let CAPC=null, CAPF="Arial", CAPS=1.0, CAPPOS=null, ZAMT=0.10, AIR=0.16;
 const PLAT_POS={none:0.776,tiktok:0.72,reels:0.68,shorts:0.74};
 const capPos=()=>CAPPOS||PLAT_POS[PLATFORM]||0.776;
 let LOGO_ON=false, LOGO_POS="br", LOGO_SIZE=0.14, logoImg=null;
-const P=()=>LANG==="en"&&PLAN.phrases_en?PLAN.phrases_en:PLAN.phrases;
+const P=()=>(LANG!=="es"&&PLAN["phrases_"+LANG])||PLAN.phrases;
 const musOpts=()=>({music:$("#music").checked,music_track:$("#mtrack").value||"ambient",music_volume:(+$("#mvol").value)/100});
 let BASEC=null, KWC=null, EFFECT="none", CASE="none", OUTLINE=null, SHADOW=null, MARGIN=null;
 const customOpts=()=>({cap_color:CAPC,cap_font:CAPF!=="Arial"?CAPF:null,cap_scale:CAPS,cap_pos:CAPPOS,
@@ -1271,6 +1280,10 @@ async function asmApply(){
     overlays:ASM.overlays.map(o=>({sid:o.sid,type:o.type,start:o.start,dur:o.dur,pos:o.pos,size:o.size})),
     glossary:$("#asmGloss").value||"", highlights:Math.max(1,Math.min(5,parseInt($("#highlights").value,10)||2)),
     director:($("#asmStyle").value==="none"?false:{style:$("#asmStyle").value,intensity:0.75}) };
+  // perfil de la persona elegido antes de analizar: el director lo integra (rotulo, Seguir, reservas, cierre)
+  const prof=window.PF&&PF.forCompose(); if(prof&&body.director) body.profile=prof;
+  // opciones del proyecto que el Studio ya conoce: el primer analisis prepara el video base con ellas
+  body.engine={enhance_audio:$("#enhance")?$("#enhance").checked:true};
   show("#s-analyzing"); setBar("#a-fill",2); $("#a-msg").textContent="Montando tu línea de tiempo…";
   let resp; try{ resp=await fetch("/compose",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); }
   catch(e){ return fail("No se pudo iniciar el procesamiento."); }
@@ -1347,6 +1360,7 @@ initSetup();
 async function runSingle(){
   const fd=new FormData();
   fd.append("video",FILES[0]); fd.append("glossary",$("#glossary").value); fd.append("highlights",$("#highlights").value);
+  const prof=window.PF&&PF.forCompose(); if(prof) fd.append("profile",JSON.stringify(prof));
   show("#s-analyzing");
   let resp; try{ resp=await fetch("/analyze",{method:"POST",body:fd}); }
   catch(e){ return fail("No se pudo iniciar el procesamiento."); }
@@ -1361,13 +1375,13 @@ async function poll(){
   if(j.phase==="analyzing"){ setBar("#a-fill",j.pct); $("#a-msg").textContent=j.message; }
   else if(j.phase==="review"){
     if(!PLAN&&!j.plan){ try{ j.plan=(await(await fetch("/plan/"+JOB)).json()).plan; }catch(e){ return setTimeout(poll,1200); } }
-    if(!PLAN){ PLAN=j.plan; if(j.plan_rev!=null) FX.serverRev=j.plan_rev; openEditor(); }
+    if(!PLAN){ PLAN=j.plan; if(j.plan_rev!=null) FX.serverRev=j.plan_rev; FX.restoreEngine(j.engine); openEditor(); FX.watchStatus(j); }
     else if(!$("#s-editor").classList.contains("on")){ backToEditor(); if(window.RENDER_CANCELED){ window.RENDER_CANCELED=false; FX.toast("Export cancelado.","alert"); } }
     return; }
   else if(j.phase==="rendering"){ show("#s-rendering"); setBar("#r-fill",j.pct);
     $("#r-msg").textContent=j.message||"Montando…"; $("#r-pct").textContent=Math.round(j.pct)+"%";
     $("#r-el").textContent=(j.elapsed||0)+"s"; $("#r-eta").textContent=j.eta!=null?j.eta+"s":"calculando…"; FX.renderStatus(j); }
-  else if(j.phase==="done"){ addResults(j.clips); return showResults(); }
+  else if(j.phase==="done"){ FX.lastWarnings=j.warnings||[]; addResults(j.clips); return showResults(); }
   else if(j.phase==="error"){
     if(PLAN&&(window.RENDER_CANCELED||/cancel/i.test(j.error||""))){ window.RENDER_CANCELED=false; backToEditor(); FX.toast("Export cancelado. Tu edición sigue aquí.","alert"); return; }
     return fail(j.error); }
@@ -1382,6 +1396,8 @@ let UNDO=[], REDO=[];
 function mut(){ UNDO.push(JSON.stringify(PLAN)); if(UNDO.length>80)UNDO.shift(); REDO=[]; updUndo(); }
 function restore(s){
   PLAN=JSON.parse(s);
+  // el idioma elegido no se deshace (es del proyecto, como el formato): se conserva en el plan
+  if(PLAN&&((PLAN.studio&&PLAN.studio.lang)||"es")!==LANG) PLAN.studio=Object.assign({},PLAN.studio,{lang:LANG});
   const legacy=SEL&&!["fx","music","captions"].includes(SEL.type);
   if(legacy) SEL=null;
   FX.afterPlanReplaced();
@@ -1492,7 +1508,8 @@ function openEditor(){
   FX.syncMode();
   if(!EDITOR_WIRED){ wireEditorOnce(); EDITOR_WIRED=true; }
   if(EDITOR_JOB!==JOB){
-    V.src="/source/"+JOB; EDITOR_JOB=JOB; UNDO=[]; REDO=[];
+    langFromPlan();
+    FX.openSource(); EDITOR_JOB=JOB; UNDO=[]; REDO=[];
     // sin un seek el navegador no decodifica ningun cuadro: arranca en el primer tramo conservado
     V.addEventListener("loadeddata",()=>{ if(V.currentTime<0.001){ const k=FXCore.keepsFromCuts(PLAN.cuts||[],PLAN.duration||0); V.currentTime=(k.length?k[0][0]:0)+0.001; } },{once:true});
   }
@@ -1528,8 +1545,9 @@ function wireEditorOnce(){
   $("#capShadow").oninput=e=>{SHADOW=+e.target.value; $("#shLbl").textContent=e.target.value;};
   $("#capMargin").oninput=e=>{MARGIN=+e.target.value; $("#marLbl").textContent=e.target.value;};
   $("#capFont").onchange=e=>CAPF=e.target.value;
-  $("#air").oninput=e=>{AIR=(+e.target.value)/100; $("#airLbl").textContent=e.target.value+"%";};
-  $("#air").onchange=()=>FX.planDirty();
+  // en la edicion IA el aire es OPT-IN: cuenta solo cuando el usuario mueve el control (air_user)
+  $("#air").oninput=e=>{AIR=(+e.target.value)/100; FX.airUser=true; $("#airLbl").textContent=e.target.value+"%";};
+  $("#air").onchange=()=>{ FX.airUser=true; FX.syncProControls(); FX.planDirty(); };
   $("#zoomAmt").oninput=e=>{ZAMT=(+e.target.value)/100; $("#zoomLbl").textContent=e.target.value+"%";};
   $("#logoOn").onchange=e=>{ LOGO_ON=e.target.checked; FX.planDirty(); };
   $("#logoSize").oninput=e=>LOGO_SIZE=(+e.target.value)/100;
@@ -1836,21 +1854,36 @@ function applyPreset(name){
 
 /* ---- language ---- */
 async function setLang(v){
-  if(FX.isPro()&&!FXCore.PRO_LANGS.includes(v)){ segSet("#segLang",LANG); FX.toast("En la edición IA por ahora: español e inglés.","alert"); return; }
-  if(v==="en"&&!PLAN.phrases_en){
-    chip("Traduciendo al inglés…");
+  const pro=FX.isPro();
+  if(pro&&!FXCore.PRO_LANGS.includes(v)){ segSet("#segLang",LANG); FX.toast("Este idioma aún no está disponible en la edición IA.","alert"); return; }
+  // subtitulos traducidos con la IA local (la edicion IA en cualquier idioma; el modo clasico
+  // pre-traduce solo el ingles: los demas los traduce el export)
+  if(v!=="es"&&(pro||v==="en")&&!PLAN["phrases_"+v]){
+    chip(`Traduciendo los subtítulos al ${FX.langName(v)}…`);
     try{
-      const r=await(await fetch("/translate/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({plan:PLAN})})).json();
-      if(r.detail) throw new Error(r.detail);
-      PLAN.phrases_en=r.phrases_en; PLAN.titles_en=r.titles_en;
-    }catch(e){ chip(null); alert("No se pudo traducir: "+(e.message||e)); segSet("#segLang","es"); return; }
+      const resp=await fetch("/translate/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({plan:PLAN,lang:v})});
+      const r=await resp.json().catch(()=>({}));
+      if(!resp.ok||r.detail) throw new Error(r.detail||("Error "+resp.status));
+      if(!Array.isArray(r["phrases_"+v])) throw new Error("respuesta incompleta");
+      PLAN["phrases_"+v]=r["phrases_"+v]; if(r["titles_"+v]) PLAN["titles_"+v]=r["titles_"+v];
+    }catch(e){ chip(null); FX.toast("No se pudo traducir: "+(e.message||e),"alert"); segSet("#segLang",LANG); return; }
     chip(null);
   }
   LANG=v; segSet("#segLang",v);
-  $("#subsLbl").textContent=v==="en"?"— English, editable, se exporta tal cual":"— clic para corregir";
+  // el idioma elegido vive en el plan (plan.studio.lang): sobrevive a recargar y a reabrir
+  if(PLAN&&((PLAN.studio&&PLAN.studio.lang)||"es")!==v) PLAN.studio=Object.assign({},PLAN.studio,{lang:v});
+  $("#subsLbl").textContent=v!=="es"?`— ${FX.langName(v)}, editable, se exporta tal cual`:"— clic para corregir";
   flatWords=P().flat(); liveWordEl=null;
   renderSubs(); renderTL(); FX.planDirty(); FX.syncLangNote();
+}
+/** Idioma guardado en el plan al abrir un proyecto: se usa si sus subtitulos ya estan traducidos
+    (phrases_<lang>); si no, espanol (y el aviso junto a Exportar dice si los titulos van en otro). */
+function langFromPlan(){
+  const l=PLAN&&PLAN.studio&&PLAN.studio.lang;
+  const ok=l&&l!=="es"&&Array.isArray(PLAN["phrases_"+l])&&PLAN["phrases_"+l].length&&(!FX.isPro()||FXCore.PRO_LANGS.includes(l));
+  LANG=ok?l:"es"; segSet("#segLang",LANG);
+  const sl=$("#subsLbl"); if(sl) sl.textContent=LANG!=="es"?`— ${FX.langName(LANG)}, editable, se exporta tal cual`:"— clic para corregir";
 }
 
 /* ---- WebAudio ---- */
@@ -1936,7 +1969,7 @@ function draw(){
     // ---- encuadre: fondo desenfocado + aire + tracking + zoom (como el export) ----
     const srcAr=vw/vh, outAr=CW/CH;
     let fw,fh;
-    const air=pro&&!FX.proOpts().has("air")?0:AIR;      // el render pro sin 'air' no deja margen
+    const air=pro&&!FX.airActive()?0:AIR;      // el render pro solo deja margen con aire pedido (air_user)
     if(Math.abs(srcAr/outAr-1)<0.05||air<0.005){ fw=CW; fh=CH; }
     else if(srcAr>outAr){ fw=CW*(1-air); fh=CH; }
     else { fw=CW; fh=CH*(1-air); }
@@ -2087,7 +2120,7 @@ function drawHook(t){
   const idx=(PLAN.highlights||[]).findIndex(h=>h.enabled&&t>=h.start&&t<h.start+3.4);
   if(idx<0) return;
   const h=PLAN.highlights[idx];
-  const title=((LANG==="en"&&PLAN.titles_en&&PLAN.titles_en[idx])||h.title||"").toUpperCase();
+  const title=((LANG!=="es"&&PLAN["titles_"+LANG]&&PLAN["titles_"+LANG][idx])||h.title||"").toUpperCase();
   if(!title) return;
   const age=t-h.start;
   const scale=popScale(age);
@@ -2371,6 +2404,7 @@ async function runBatch(){
       els[i].className="brow act";
       const fd=new FormData();
       fd.append("video",FILES[i]); fd.append("glossary",$("#glossary").value); fd.append("highlights",$("#highlights").value);
+      const prof=window.PF&&PF.forCompose(); if(prof) fd.append("profile",JSON.stringify(prof));
       st.textContent="subiendo…";
       const r=await(await fetch("/analyze",{method:"POST",body:fd})).json();
       if(r.detail) throw new Error(r.detail);
@@ -2417,6 +2451,8 @@ function showResults(){
     });
   });
   $("#backEditor").style.display=PLAN?"inline-flex":"none";
+  // avisos del render (medio ilegible, SFX desconocido, transicion lejos de un corte...) con "Ver"
+  const rw=$("#resWarn"); rw.innerHTML=FX.isPro()?FX.warningsHtml(FX.lastWarnings||[]):""; FX.wireWarnings(rw);
   show("#s-results");
 }
 $("#backEditor").onclick=()=>{ RESULTS=[]; backToEditor(); };
@@ -2460,23 +2496,29 @@ if(location.hash==="#demo"){
   openEditor();
 }
 /* proyectos recientes en la pantalla inicial: en la app de escritorio no hay barra de URL, asi
-   que esta es la forma de volver a un proyecto (GET /jobs + el tema y la duracion de su plan) */
+   que esta es la forma de volver a un proyecto. GET /jobs ya trae el resumen de cada plan (tema,
+   duracion final, estilo, miniatura): una sola peticion, sin leer los planes. */
 (async function recentProjects(){
   if(new URLSearchParams(location.search).get("job")||location.hash==="#demo") return;
-  let list=[]; try{ list=await(await fetch("/jobs")).json(); }catch(e){ return; }
-  list=(Array.isArray(list)?list:[]).filter(j=>j&&["review","done"].includes(j.phase)).slice(0,6);
+  let list=[]; try{ list=await(await fetch("/jobs?limit=12")).json(); }catch(e){ return; }
+  list=(Array.isArray(list)?list:[]).filter(j=>j&&j.has_plan!==false&&["review","done"].includes(j.phase)).slice(0,6);
   const box=$("#recent"); if(!list.length||!box) return;
   const ago=t=>{ const d=Math.max(0,Date.now()/1000-(+t||0)); return d<90?"hace un momento":d<3600?`hace ${Math.round(d/60)} min`:d<86400?`hace ${Math.round(d/3600)} h`:`hace ${Math.round(d/86400)} d`; };
-  box.innerHTML=`<h5>${ICO("layers")}Proyectos recientes</h5>`+list.map(j=>`<button class="rrow" data-id="${j.id}">${ICO("film")}`
-    +`<span class="rn" id="rn-${j.id}">Proyecto ${j.id.slice(0,6)}</span><span class="rs">${j.phase==="done"?"exportado":"en edición"} · ${ago(j.updated||j.created)}</span>`
-    +`<span class="ro">Abrir${ICO("toend")}</span></button>`).join("");
+  const STY={dinamico:"Dinámico",elegante:"Elegante",minimal:"Minimal",energetico:"Energético"};
+  const esc=x=>String(x==null?"":x).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  box.innerHTML=`<h5>${ICO("layers")}Proyectos recientes</h5>`+list.map(j=>{
+    const name=j.topic?String(j.topic):`Proyecto ${j.id.slice(0,6)}`;
+    const d=j.final_duration!=null?j.final_duration:j.duration;
+    const meta=[d?fmtT(d):"",j.version===2?("edición IA"+(STY[j.style]?" · "+STY[j.style]:"")):"clásico",j.shots>1?`${j.shots} tomas`:""].filter(Boolean).join(" · ");
+    return `<button class="rrow" data-id="${esc(j.id)}">`
+      +(j.thumb?`<img class="rth" src="${esc(j.thumb)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'rth none'}))">`:`<span class="rth none"></span>`)
+      +`<span class="rtx"><span class="rn">${esc(name)}</span><span class="rs">${esc(meta)}</span><span class="rs">${j.phase==="done"?"exportado":"en edición"} · ${ago(j.updated||j.created)}</span></span>`
+      +`<span class="ro">Abrir${ICO("toend")}</span></button>`;
+  }).join("");
   box.querySelectorAll(".rrow").forEach(b=>b.onclick=()=>{ location.search="?job="+encodeURIComponent(b.dataset.id); });
-  list.forEach(async j=>{ try{
-    const d=await(await fetch("/plan/"+j.id)).json(); const p=d&&d.plan; if(!p) return;
-    const topic=p.director&&p.director.script&&p.director.script.topic;
-    const el=document.getElementById("rn-"+j.id); if(el) el.textContent=`${topic||"Proyecto "+j.id.slice(0,6)} · ${fmtT(p.duration||0)}${p.version===2?" · edición IA":""}`;
-  }catch(e){ /* sin plan */ } });
 })();
+/* perfil de la persona para el proximo video (pantalla inicial y ensamblado) */
+PF.mountPicker($("#homeProfile")); PF.mountPicker($("#asmProfile"),true);
 /* reabrir un proyecto existente con ?job=ID (tambien sobrevive a recargar la pagina) */
 (async function reopenJob(){
   const id=new URLSearchParams(location.search).get("job");
@@ -2487,7 +2529,7 @@ if(location.hash==="#demo"){
   JOB=id;
   if(j.phase==="analyzing"){ show("#s-analyzing"); poll(); return; }
   if(!j.plan){ if(j.phase==="error") fail(j.error); return; }
-  PLAN=j.plan; if(j.plan_rev!=null) FX.serverRev=j.plan_rev; openEditor();
+  PLAN=j.plan; if(j.plan_rev!=null) FX.serverRev=j.plan_rev; FX.restoreEngine(j.engine); openEditor(); FX.watchStatus(j);
   if(j.phase==="rendering"){ show("#s-rendering"); poll(); }
 })();
 </script>

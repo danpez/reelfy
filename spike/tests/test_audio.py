@@ -408,14 +408,14 @@ def test_musica_vacia_o_corta_no_cuelga(tmp_path):
     for k in (0, 1, 200):
         p = tmp_path / f"m{k}.wav"
         sf.write(str(p), np.zeros((k, 2), np.float32) + 0.1, SR, subtype="FLOAT")
-        with _limite(30):
+        with _limite(30 * _load_factor()):
             t0 = time.perf_counter()
             info = A.mix(None, 20.0, [], {"wav": str(p)}, out)
             assert time.perf_counter() - t0 < 5.0 * _load_factor()
         assert info.get("music_skipped") == "muy corta" and "music" not in info
     rng = np.random.default_rng(15)
     p = _write(tmp_path / "corta.wav", _music(0.6, rng))
-    with _limite(30):
+    with _limite(30 * _load_factor()):
         t0 = time.perf_counter()
         info = A.mix(None, 60.0, [], {"wav": str(p), "offset": 0.05}, out, stems_dir=tmp_path / "st")
         assert time.perf_counter() - t0 < 5.0 * _load_factor()
@@ -430,7 +430,7 @@ def test_musica_vacia_o_corta_no_cuelga(tmp_path):
 def test_loop_fit_lineal_y_continuo():
     rng = np.random.default_rng(16)
     m = _music(1.0, rng)
-    with _limite(30):
+    with _limite(30 * _load_factor()):
         y = A._loop_fit(m, int(120 * SR))
     assert y.shape == (int(120 * SR), 2) and y.dtype == np.float32
     # union con fundido de igual potencia: sin huecos de nivel
@@ -694,10 +694,6 @@ def test_intro_fade_explicito_se_respeta_con_arranque_horneado(tmp_path):
 
 
 def _load_factor() -> float:
-    """Holgura por carga (maquina compartida con otros renders): con load > nucleos los
-    tiempos suben en proporcion; el limite se escala igual (tope 4x) en vez de fallar en falso."""
-    import os
-    try:
-        return min(4.0, max(1.0, os.getloadavg()[0] / (os.cpu_count() or 8)))
-    except OSError:
-        return 1.0
+    """Holgura por carga comun a la suite (conftest.load_factor)."""
+    from conftest import load_factor
+    return load_factor()

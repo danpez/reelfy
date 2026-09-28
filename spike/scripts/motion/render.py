@@ -45,7 +45,9 @@ Opciones (`opts`):
   on_pct(stage, pct_total), on_step(msg), cancel() -> bool, strict (errores de renderer
   se propagan), keep_chunks (debug), cache_keep, prefetch_music (ensure_analysis; True),
   threads (hilos de cv2/OMP por worker; default cpu//workers),
-  draft_wait_music (False: en draft se mezcla con la procedural si la IA aun se genera).
+  draft_wait_music (False: en draft se mezcla con la procedural si la IA aun se genera),
+  media_root (carpeta(s) de los medios propios; default paths.INPUT/sources), media_resolver
+  (callable media -> ruta), media_bg (True: /frame normaliza en segundo plano un clip sin cache).
 """
 from __future__ import annotations
 
@@ -62,6 +64,7 @@ import pickle
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -140,13 +143,14 @@ def _reg(mod, attr: str) -> dict:
 
 def registries(mods: dict) -> dict:
     cam, grade, matte = mods.get("camera"), mods.get("grade"), mods.get("matte")
+    gfx = dict(_reg(mods.get("graphics"), "RENDERERS"))
     return {
         "matrix": _reg(cam, "MATRIX_EFFECTS"),
         "post": _reg(cam, "POST_EFFECTS"),
         "grade_fx": _reg(grade, "RENDERERS"),
         "matte_fx": _reg(matte, "RENDERERS"),
         "text": _reg(mods.get("text"), "RENDERERS"),
-        "graphics": _reg(mods.get("graphics"), "RENDERERS"),
+        "graphics": gfx,
         "cutaways": _reg(mods.get("cutaways"), "RENDERERS"),
         "transitions": _reg(mods.get("transitions"), "RENDERERS"),
         "windows": _reg(mods.get("transitions"), "WINDOWS"),
@@ -188,6 +192,31 @@ def layout_box(W: int, H: int) -> tuple[int, int, int, int]:
     return (W - bw) // 2, 0, bw, H
 
 
+# opciones del proyecto (fuera del plan) que render_pro, render_draft y render_frame aplican:
+# el servidor las anuncia en GET /settings (pro_opts) y el Studio habilita sus controles
+PRO_OPTS = ("logo", "air", "enhance_audio")
+LOGO_POS = {"tl": "tl", "tr": "tr", "bl": "bl", "br": "br", "top-left": "tl", "top-right": "tr",
+            "bottom-left": "bl", "bottom-right": "br"}
+
+
+def logo_cfg(v: Any) -> dict | None:
+    """Marca de agua del proyecto -> {path, pos, size, opacity} saneado, o None.
+
+    Acepta None/False (sin logo), True (logo de la marca con los defaults) o un dict como el
+    del Studio {pos: tl|tr|bl|br, size: fraccion del ancho de la caja, opacity}. `path`
+    default = la marca del usuario (paths.BRAND/logo.png). Misma geometria que el legado: margen
+    del 3 % de la caja de layout."""
+    if not v:
+        return None
+    d = dict(v) if isinstance(v, dict) else {}
+    if d.get("enabled") is False:
+        return None
+    pos = LOGO_POS.get(str(d.get("pos") or "br").strip().lower(), "br")
+    return {"path": str(d.get("path") or (paths.BRAND / "logo.png")), "pos": pos,
+            "size": min(0.5, max(0.03, _num_or(d.get("size"), 0.14))),
+            "opacity": min(1.0, max(0.0, _num_or(d.get("opacity"), 0.9)))}
+
+
 def _resolve_opts(opts: dict | None, src_info: dict | None = None) -> dict:
     o = dict(opts or {})
     fmt = o.get("fmt") or "9:16"
@@ -205,7 +234,18 @@ def _resolve_opts(opts: dict | None, src_info: dict | None = None) -> dict:
     o["base_W"], o["base_H"] = bW - bW % 2, bH - bH % 2
     o["fps"] = float(o.get("fps") or 30)
     o.setdefault("cache_dir", str(paths.WORK / "motion_cache"))
-    o.setdefault("enhance_audio", True)
+    # enhance_audio: None (el Studio sin el control) = True; air: margen desenfocado 0..0.35
+    o["enhance_audio"] = True if o.get("enhance_audio") is None else bool(o["enhance_audio"])
+    air = _num_or(o.get("air"), 0.0)
+    o["air"] = round(min(0.35, max(0.0, air)), 4) or None
+    if o["air"] and src_info:
+        # solo una fuente mas ANCHA que la salida lleva margen: en el resto el aire no cambia la
+        # imagen y se descarta (la clave del base no cambia y su cache se reutiliza)
+        try:
+            if not V.reframe_mode(src_info, o["base_W"], o["base_H"], o["air"])[0].endswith("+air"):
+                o["air"] = None
+        except Exception:  # noqa: sin dims de la fuente se conserva
+            pass
     o.setdefault("modules", {})
     o.setdefault("sys_path", [])
     o.setdefault("dither", 1.0)
@@ -402,7 +442,35 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
             out.append(it)
         return out
 
-    graphics = by_registry("graphics", "kind", reg["graphics"])
+    def with_media(track, items):
+        """Medios propios: `_media` (archivo resuelto por sid) en los kinds que los aceptan;
+        un medio que no esta en disco omite el item (aviso en skipped)."""
+        out = []
+        for it in items:
+            if it.get("kind") not in MEDIA_KINDS.get(track, ()):
+                out.append(it)
+                continue
+            spec = media_spec(it, opts)
+            optional = it.get("kind") in OPTIONAL_MEDIA.get(track, ())
+            if optional and spec is not None and not spec.get("missing") and spec.get("type") != "image":
+                spec = None                       # avatar: solo imagen (un clip no aplica)
+            if spec is None:
+                if track == "graphics" and not optional:   # PiP sin medio: nada que dibujar
+                    skip(f"media:{it.get('id')}:sin_medio")
+                    continue
+            elif spec.get("missing"):
+                if optional:                      # foto de perfil borrada: iniciales, con aviso
+                    skip(f"avatar:{it.get('id')}:no_encontrado")
+                    out.append(it)
+                    continue
+                skip(f"media:{it.get('id')}:no_encontrado")
+                continue
+            else:
+                it["_media"] = spec
+            out.append(it)
+        return out
+
+    graphics = with_media("graphics", by_registry("graphics", "kind", reg["graphics"]))
     if opts.get("progress") and "progress" in reg["graphics"] and \
             not any(g.get("kind") == "progress" for g in graphics):
         graphics.append({"id": "gr_progress", "kind": "progress", "enabled": True, "src": "auto",
@@ -412,11 +480,13 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
         it["_behind"] = _is_behind(it, "text", mods)
     for it in graphics:
         it["_behind"] = _is_behind(it, "graphics", mods)
-    cutaways = by_registry("cutaways", "kind", reg["cutaways"])
+    cutaways = with_media("cutaways", by_registry("cutaways", "kind", reg["cutaways"]))
     freq = getattr(mods.get("cutaways"), "frame_request", None) if mods.get("cutaways") else None
     for it in cutaways:
         if not callable(freq):
             break
+        if it.get("_media"):                      # el medio del usuario reemplaza al cuadro
+            continue
         try:
             r = freq(it)
         except Exception:
@@ -478,18 +548,12 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
                  _dur_final=(F1 - F0) / fps, _snapped=snapped)
         transitions.append(d)
 
-    # ---- captions (+ rangos ocultos durante titulos)
+    # ---- captions (rangos ocultos durante titulos y movidos por fotos con pie: caption_layout)
     cap = copy.deepcopy(fx.get("captions") or {})
     captions_on = bool(cap.get("enabled", True)) and cap.get("preset") != "none"
     if captions_on and reg["captions"] is None:
         skip("captions:draw_captions")
         captions_on = False
-    hide = []
-    if cap.get("hide_during_titles", True):
-        hide += [(it["_fs"], it["_fe"]) for it in text if not it.get("keep_captions")]
-        hide += [(it["_fs"], it["_fe"]) for it in cutaways
-                 if isinstance(it.get("text"), dict) and str(it["text"].get("text") or "").strip()]
-    cap["_hide"] = _merge_ranges(hide)
 
     # ---- matte: rangos (cuadros finales) que necesitan al sujeto
     need = []
@@ -511,13 +575,10 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
     director = plan.get("director") or {}
     shots = sorted(tl.map_shots(plan.get("shots") or []), key=lambda s: s["start"])
     grade_cfg = copy.deepcopy(fx.get("grade") or {})
-    logo = opts.get("logo")
-    if logo:
-        logo = dict(logo)
-        logo.setdefault("path", str(paths.BRAND / "logo.png"))
-        if not Path(logo["path"]).exists():
-            skip("logo:archivo")
-            logo = None
+    logo = logo_cfg(opts.get("logo"))
+    if logo is not None and not Path(logo["path"]).exists():
+        skip("logo:archivo")
+        logo = None
     cuts_frames = sorted(set(tl.join_frames(fps)) | set(tl.shot_change_frames(plan.get("shots"), fps)))
     job = {
         "W": W, "H": H, "fps": fps, "quality": opts["quality"], "n_frames": n_frames,
@@ -534,6 +595,7 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
         "modules": dict(opts.get("modules") or {}), "sys_path": list(opts.get("sys_path") or []),
         "strict": bool(opts.get("strict")),
     }
+    caption_layout(job)
     return job, skipped
 
 
@@ -576,6 +638,7 @@ def set_anchors(job: dict, face: np.ndarray | None, mods: dict) -> None:
     item encuadra igual en todos los procesos."""
     rows = _face_rows(face, job["n_frames"]) if face is not None else None
     set_face0(job, rows, mods)
+    set_media_auto(job, rows, mods)
     cam = mods.get("camera")
     fn = getattr(cam, "item_anchor", None) if cam is not None else None
     if not callable(fn):
@@ -592,6 +655,1071 @@ def set_anchors(job: dict, face: np.ndarray | None, mods: dict) -> None:
             it["_anchor"] = [round(float(a[0]), 5), round(float(a[1]), 5)]
         else:
             it.pop("_anchor", None)
+
+
+# ================================================================ medios propios
+# Imagen o clip del usuario (subido por POST /sources) en un item del plan:
+#   item["media"] = {sid, type: image|video, name, w, h, dur}   (+ thumb, lo ignora el motor)
+# en graphics.media (PiP), cutaways.photo (la foto de la escena) y cutaways.self_broll (toma a
+# pantalla completa). Ajustes del item: `fit` (cover|contain), `focus` [x, y] (punto del medio
+# que queda a la vista al recortar; null = centro), `zoom` (1..4 sobre el recorte), `crop`
+# [x0, y0, x1, y1] normalizado a la fuente (opcional; no se expone en el inspector), y en video
+# `media_in` (s: desde donde se reproduce) y `loop` (repetir [media_in, fin] si el clip es mas
+# corto que el item; si no, se congela el ultimo cuadro). El audio del clip no se mezcla.
+#
+# Resolucion sid -> archivo (en este orden): opts["media_resolver"](media) -> ruta | None;
+# opts["media_root"] (carpeta o lista de carpetas; el archivo es <root>/<sid>.<ext>); default
+# paths.INPUT/"sources" (la carpeta de POST /sources del servidor).
+#
+# render normaliza cada medio UNA vez en la cache, al tamano del EXPORT (el draft lo lee
+# escalado): imagen -> media_<clave>.png (orientacion EXIF/irot, HEIC en rejilla, perfil de color
+# a sRGB, recorte, cabe en la caja de layout); clip -> media_<clave>.mp4 con los cuadros
+# [media_in, media_in + duracion del item] a los fps del job (recorte, tonemap HDR) al tamano
+# que pide su hueco (tarjeta del PiP, hueco de la foto, o la caja completa en self_broll cover,
+# con el recorte del `focus` ya aplicado). Un medio que no se puede leer se recuerda (no se
+# reintenta en cada cuadro) y en el export su item se omite (`media:<id>:ilegible`); en /frame
+# se dibuja un marcador para que se vea en la edicion. En cada cuadro el compositor inyecta:
+#   item["_media_image"]  skia.Image del medio en el tiempo local (sin ajustar al hueco; los
+#                         renderers lo ajustan con graphics.fit_src o render.fit_media)
+#   self_broll:           item["_src_image"] el medio ya ajustado a la caja de layout
+MEDIA_KINDS = {"graphics": ("media", "cta"), "cutaways": ("photo", "self_broll")}
+# kinds cuyo medio es OPCIONAL (foto de perfil del CTA Seguir, doc 3.2): solo imagen; sin medio,
+# con el archivo ausente o ilegible el item se dibuja igual (iniciales) y nunca se omite
+OPTIONAL_MEDIA = {"graphics": ("cta",)}
+MEDIA_IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".avif", ".bmp", ".gif",
+                   ".tif", ".tiff")
+MEDIA_VIDEO_EXT = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi")
+MEDIA_VERSION = 2
+_HEIF_EXT = (".heic", ".heif", ".avif")
+# hueco de la foto de cutaways.photo: ancho 0.91*pw y alto 1.104*pw (borde 4.5 % y marco)
+PHOTO_ASPECT = 0.91 / 1.104
+PHOTO_SIZE, PHOTO_Y = 0.72, 0.46          # defaults de cutaways.photo (tamano y centro)
+_SID = __import__("re").compile(r"^[A-Za-z0-9_-]{1,64}$")
+_MEDIA_FAILS: dict[str, str] = {}         # clave de fallo -> motivo (por proceso)
+_MEDIA_BG: set[str] = set()               # clips normalizandose en segundo plano (/frame)
+_MEDIA_LOCK = threading.Lock()
+
+
+def _media_roots(opts: dict) -> list[Path]:
+    r = opts.get("media_root")
+    if r is None:
+        return [paths.INPUT / "sources"]
+    return [Path(x) for x in (r if isinstance(r, (list, tuple)) else [r]) if x]
+
+
+def media_path(media: Any, opts: dict | None = None) -> Path | None:
+    """Archivo local de un medio del plan ({sid, ...}) o None si no existe. Solo por `sid`
+    (nunca una ruta que venga en el plan): resolver inyectable o <media_root>/<sid>.<ext>."""
+    o = opts or {}
+    if not isinstance(media, dict):
+        return None
+    fn = o.get("media_resolver")
+    if callable(fn):
+        try:
+            p = fn(media)
+        except Exception:  # noqa: un resolver roto equivale a "no existe"
+            p = None
+        return Path(p) if p and Path(p).is_file() else None
+    sid = str(media.get("sid") or "").strip()
+    if not _SID.match(sid):
+        return None
+    for root in _media_roots(o):
+        for ext in MEDIA_IMAGE_EXT + MEDIA_VIDEO_EXT:
+            for e in (ext, ext.upper()):
+                p = root / f"{sid}{e}"
+                if p.is_file():
+                    return p
+    return None
+
+
+def _media_type(media: dict, path: Path) -> str:
+    t = str(media.get("type") or "").lower()
+    if t in ("image", "video"):
+        return t
+    return "image" if path.suffix.lower() in MEDIA_IMAGE_EXT else "video"
+
+
+def _norm_crop(v: Any) -> list[float] | None:
+    """[x0, y0, x1, y1] normalizado y valido (lado minimo 5 %), o None (sin recorte)."""
+    if not isinstance(v, (list, tuple)) or len(v) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = (min(1.0, max(0.0, float(c))) for c in v)
+    except (TypeError, ValueError):
+        return None
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if y1 < y0:
+        y0, y1 = y1, y0
+    if x1 - x0 < 0.05 or y1 - y0 < 0.05 or (x0, y0, x1, y1) == (0.0, 0.0, 1.0, 1.0):
+        return None
+    return [round(x0, 5), round(y0, 5), round(x1, 5), round(y1, 5)]
+
+
+def _focus(it: dict):
+    f = it.get("focus")
+    if isinstance(f, (list, tuple)) and len(f) == 2:
+        try:
+            return min(1.0, max(0.0, float(f[0]))), min(1.0, max(0.0, float(f[1])))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def media_spec(it: dict, opts: dict) -> dict | None:
+    """Datos serializables del medio de un item para el job (`_media`), o None si el item no
+    trae medio. {'missing': True} si trae medio pero el archivo no esta."""
+    media = it.get("media")
+    if not isinstance(media, dict) or not media.get("sid"):
+        return None
+    p = media_path(media, opts)
+    if p is None:
+        return {"missing": True}
+    kind = it.get("kind")
+    foc = _focus(it)
+    try:
+        mw, mh = int(media.get("w") or 0), int(media.get("h") or 0)
+    except (TypeError, ValueError):
+        mw = mh = 0
+    return {"src": str(p), "type": _media_type(media, p), "kind": kind,
+            "crop": _norm_crop(it.get("crop") or media.get("crop")),
+            "media_in": max(0.0, _num_or(it.get("media_in"), 0.0)),
+            "loop": bool(it.get("loop", True)),
+            "fit": "contain" if it.get("fit") == "contain" else "cover",
+            "focus": list(foc) if foc else None,
+            "zoom": 1.0 if kind == "self_broll" else min(4.0, max(1.0, _num_or(it.get("zoom"), 1.0))),
+            "hint_wh": [mw, mh] if mw > 0 and mh > 0 else None}
+
+
+def _media_box(job: dict) -> tuple[int, int]:
+    box = job.get("layout") or (0, 0, job["W"], job["H"])
+    return int(box[2]), int(box[3])
+
+
+def _export_box(job: dict) -> tuple[int, int]:
+    """Caja de layout al tamano del EXPORT: los medios se normalizan a ese tamano y el draft
+    (mitad de resolucion) lee los mismos archivos escalados (sin normalizar dos veces)."""
+    bs = job.get("base_size")
+    if bs and int(bs[0]) >= int(job["W"]):
+        b = layout_box(int(bs[0]), int(bs[1]))
+        return int(b[2]), int(b[3])
+    return _media_box(job)
+
+
+def _media_dims(sw: int, sh: int, crop, maxw: int, maxh: int) -> tuple[int, int]:
+    """Tamano normalizado de una imagen: el recorte de la fuente cabe en (maxw, maxh) sin
+    ampliar (pares)."""
+    x0, y0, x1, y1 = crop or (0.0, 0.0, 1.0, 1.0)
+    cw, ch = max(2.0, sw * (x1 - x0)), max(2.0, sh * (y1 - y0))
+    s = min(1.0, maxw / cw, maxh / ch)
+    return _even(cw * s), _even(ch * s)
+
+
+def _media_key(m: dict, extra: list) -> str:
+    return hashlib.sha1(json.dumps([MEDIA_VERSION, V._file_sig(m["src"]), m["type"], m.get("crop")]
+                                   + list(extra), default=str).encode()).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------- imagenes
+def _ffmpeg_png(src) -> bytes:
+    """Imagen -> PNG por ffmpeg SIN filtros. Los HEIC del iPhone son una rejilla de teselas que
+    ffmpeg une con su propio filtergraph (un -vf choca con el: 'Simple and complex filtering
+    cannot be used together'); la rotacion (irot/EXIF) ya sale aplicada."""
+    r = subprocess.run([V.FFMPEG, "-v", "error", "-nostdin", "-i", str(src), "-frames:v", "1",
+                        "-c:v", "png", "-compression_level", "1", "-pred", "none",
+                        "-f", "image2pipe", "pipe:1"], capture_output=True, timeout=180)
+    if r.returncode != 0 or not r.stdout.startswith(b"\x89PNG"):
+        raise RuntimeError("imagen ilegible: " + r.stderr.decode("utf-8", "replace")[-200:])
+    return r.stdout
+
+
+def _heif_color(src) -> tuple[str, Any] | None:
+    """Perfil de color de un HEIC/HEIF (caja 'colr' de ipco): ('icc', bytes) o ('nclx',
+    primarias ISO 23091-2). ffmpeg no lo pasa al PNG. Lee solo el inicio (la caja meta)."""
+    try:
+        with open(src, "rb") as f:
+            data = f.read(4 << 20)
+    except OSError:
+        return None
+    i = data.find(b"colrprof")
+    if i >= 4:
+        size = int.from_bytes(data[i - 4:i], "big")
+        icc = data[i + 8:i - 4 + size]
+        if size > 12 and len(icc) >= 128:
+            return ("icc", icc)
+    i = data.find(b"colrnclx")
+    if i >= 0 and len(data) >= i + 10:
+        return ("nclx", int.from_bytes(data[i + 8:i + 10], "big"))
+    return None
+
+
+# Display P3 (D65) lineal -> sRGB lineal (misma curva de transferencia sRGB)
+_P3_TO_SRGB = np.array([[1.2249401, -0.2249404, 0.0], [-0.0420569, 1.0420571, 0.0],
+                        [-0.0196376, -0.0786361, 1.0982735]], np.float32)
+
+
+def _p3_to_srgb(arr: np.ndarray) -> np.ndarray:
+    """RGBA uint8 en Display P3 -> sRGB (primarias con recorte de gamut; alfa intacto)."""
+    x = np.arange(256, dtype=np.float32) / 255.0
+    lin = np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4).astype(np.float32)
+    rgb = np.clip(lin[arr[..., :3]] @ _P3_TO_SRGB.T, 0.0, 1.0)
+    enc = np.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * np.power(rgb, 1 / 2.4) - 0.055)
+    out = arr.copy()
+    out[..., :3] = np.clip(enc * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    return out
+
+
+def _icc_to_srgb(im, icc: bytes | None):
+    """PIL Image RGB/RGBA con perfil ICC (Display P3 del iPhone, Adobe RGB...) -> sRGB con
+    gestion de color (littlecms). Sin perfil, ya sRGB o si falla, la devuelve igual."""
+    if not icc or im.mode not in ("RGB", "RGBA"):
+        return im
+    try:
+        import io
+        from PIL import Image, ImageCms
+        prof = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+        if "srgb" in (ImageCms.getProfileDescription(prof) or "").lower():
+            return im
+        alpha = im.getchannel("A") if im.mode == "RGBA" else None
+        rgb = ImageCms.profileToProfile(im.convert("RGB"), prof, ImageCms.createProfile("sRGB"),
+                                        outputMode="RGB")
+        if alpha is None:
+            return rgb
+        out = rgb.convert("RGBA")
+        out.putalpha(alpha)
+        return out
+    except Exception:  # noqa: perfil roto o de otro espacio (gris): sin conversion
+        return im
+
+
+def _open_image(src):
+    """(PIL Image con la orientacion aplicada, icc | None, es_p3). PIL para lo que abre; HEIC/
+    HEIF/AVIF (sin pillow-heif) y lo que PIL no abra, por ffmpeg en dos pasos."""
+    import io
+    from PIL import Image, ImageOps
+    ext = Path(src).suffix.lower()
+    if ext not in _HEIF_EXT:
+        try:
+            im = Image.open(src)
+            im.load()
+            icc = im.info.get("icc_profile")
+            if im.mode == "CMYK":                  # CMYK con su perfil -> sRGB antes de todo
+                if icc:
+                    try:
+                        from PIL import ImageCms
+                        im = ImageCms.profileToProfile(
+                            im, ImageCms.ImageCmsProfile(io.BytesIO(icc)),
+                            ImageCms.createProfile("sRGB"), outputMode="RGB")
+                    except Exception:  # noqa
+                        im = im.convert("RGB")
+                    icc = None
+                else:
+                    im = im.convert("RGB")
+            return ImageOps.exif_transpose(im), icc, False
+        except Exception:  # noqa: formato que PIL no abre -> ffmpeg
+            pass
+    im = Image.open(io.BytesIO(_ffmpeg_png(src)))
+    im.load()
+    col = _heif_color(src) if ext in _HEIF_EXT else None
+    icc = col[1] if col and col[0] == "icc" else None
+    return im, icc, bool(col and col[0] == "nclx" and col[1] in (11, 12))
+
+
+def _decode_image_rgba(src: str, crop, maxw: int, maxh: int) -> np.ndarray:
+    """Imagen -> RGBA uint8 sRGB con la orientacion aplicada, recortada y reducida para caber
+    en (maxw, maxh). HEIC en rejilla de teselas por ffmpeg (sus dims reales, no las de una
+    tesela); perfil ICC o nclx Display P3 convertido a sRGB (skia asume sRGB)."""
+    from PIL import Image
+    im, icc, p3 = _open_image(src)
+    im = im.convert("RGBA")
+    sw, sh = im.size
+    if not sw or not sh:
+        raise RuntimeError("imagen ilegible")
+    if crop:
+        im = im.crop((int(round(crop[0] * sw)), int(round(crop[1] * sh)),
+                      int(round(crop[2] * sw)), int(round(crop[3] * sh))))
+    w, h = _media_dims(sw, sh, crop, maxw, maxh)
+    if (w, h) != im.size:
+        im = im.resize((w, h), Image.LANCZOS)
+    im = _icc_to_srgb(im, icc)                  # despues de reducir: barato
+    arr = np.ascontiguousarray(np.asarray(im.convert("RGBA"), np.uint8))
+    return _p3_to_srgb(arr) if p3 else arr
+
+
+def decode_image(src, max_w: int = 4096, max_h: int = 4096, crop=None) -> np.ndarray:
+    """API publica: imagen del usuario -> RGBA uint8 sRGB (EXIF/irot aplicados, HEIC en
+    rejilla, perfil de color) que cabe en (max_w, max_h) sin ampliar."""
+    return _decode_image_rgba(str(src), _norm_crop(crop), int(max_w), int(max_h))
+
+
+def image_size(src) -> tuple[int, int]:
+    """(ancho, alto) de DISPLAY de una imagen (orientacion aplicada). Barato (cabecera) con PIL;
+    HEIC/HEIF: el tamano de la rejilla completa (ffprobe da el de UNA tesela, p. ej. 512x512)."""
+    from PIL import Image
+    ext = Path(src).suffix.lower()
+    if ext not in _HEIF_EXT:
+        try:
+            with Image.open(src) as im:
+                w, h = im.size
+                o = im.getexif().get(0x0112)
+            return (h, w) if o in (5, 6, 7, 8) else (w, h)
+        except Exception:  # noqa
+            pass
+    try:
+        r = subprocess.run([V.FFPROBE, "-v", "error", "-show_stream_groups", "-show_streams",
+                            "-of", "json", str(src)], capture_output=True, text=True, timeout=60)
+        d = json.loads(r.stdout or "{}")
+        w = h = rot = 0
+
+        def rotation(sdl):
+            for sd in sdl or []:
+                if "rotation" in sd:
+                    return int(round(float(sd["rotation"])))
+            return 0
+        for g in d.get("stream_groups") or []:        # rejilla: dims y rotacion del grupo
+            for c in g.get("components") or []:
+                if int(c.get("width") or 0) * int(c.get("height") or 0) > w * h:
+                    w, h = int(c.get("width") or 0), int(c.get("height") or 0)
+                    rot = rotation(c.get("side_data_list"))
+        if not w:
+            for s in d.get("streams") or []:
+                if s.get("codec_type") == "video":
+                    w, h = int(s.get("width") or 0), int(s.get("height") or 0)
+                    rot = rotation(s.get("side_data_list"))
+                    break
+        if w and h:
+            return (h, w) if abs(rot) % 180 == 90 else (w, h)
+    except Exception:  # noqa
+        pass
+    arr = _decode_image_rgba(str(src), None, 1 << 15, 1 << 15)
+    return arr.shape[1], arr.shape[0]
+
+
+def image_thumb(src, out, width: int = 320, quality: int = 85) -> tuple[int, int]:
+    """Miniatura JPEG de una imagen del usuario (EXIF, HEIC en rejilla y color como el
+    render). Devuelve las dims de DISPLAY de la imagen completa. Para POST /sources."""
+    from PIL import Image
+    im, icc, p3 = _open_image(str(src))
+    W0, H0 = im.size
+    im = im.convert("RGBA")
+    w = max(2, min(int(width), W0))
+    h = max(2, int(round(H0 * w / W0)))
+    im = _icc_to_srgb(im.resize((w, h), Image.LANCZOS), icc)
+    arr = np.asarray(im.convert("RGBA"), np.uint8)
+    if p3:
+        arr = _p3_to_srgb(arr)
+    rgb = Image.fromarray(np.ascontiguousarray(arr[..., :3]))
+    tmp = V._tmp_path(Path(out))
+    rgb.save(str(tmp), "JPEG", quality=int(quality))
+    os.replace(tmp, out)
+    return W0, H0
+
+
+# ---------------------------------------------------------------- clips
+def _crop_filter(crop) -> list[str]:
+    if not crop:
+        return []
+    x0, y0, x1, y1 = crop
+    return [f"crop=w=trunc(iw*{x1 - x0:.5f}/2)*2:h=trunc(ih*{y1 - y0:.5f}/2)*2:"
+            f"x=trunc(iw*{x0:.5f}):y=trunc(ih*{y0:.5f})"]
+
+
+def _pip_card(size: float, asp: float | None, cw: float, ch: float, bw: float) -> tuple[float, float]:
+    """Tarjeta del PiP en px (como graphics.media_box): ancho max size*bw, alto max 1.78x ese
+    ancho; sin `aspect` toma la proporcion del medio."""
+    maxw = min(1.0, max(0.05, size)) * bw
+    maxh = maxw * 1.78
+    if asp and asp > 0:
+        asp = min(3.0, max(0.3, asp))
+        w = min(maxw, maxh * asp)
+        return w, w / asp
+    k = min(maxw / cw, maxh / ch)
+    return cw * k, ch * k
+
+
+def _clip_target(it: dict, m: dict, sw: int, sh: int, box: tuple[int, int]):
+    """Tamano (px, pares) y recorte efectivo del clip normalizado segun el hueco donde se
+    dibuja, al tamano del export -> (w, h, crop, baked).
+
+    self_broll cover: la caja completa con el recorte del `focus` ya aplicado (baked: el cuadro
+    va tal cual, sin ajuste por cuadro); contain: cabe en la caja (se amplia si hace falta).
+    photo y graphics.media: lo justo para cubrir (o caber en) su hueco con su `zoom`, sin
+    ampliar; el renderer ajusta con focus/zoom sobre el cuadro de la misma proporcion."""
+    bw, bh = box
+    crop = m.get("crop")
+    x0, y0, x1, y1 = crop or (0.0, 0.0, 1.0, 1.0)
+    cw, ch = max(2.0, sw * (x1 - x0)), max(2.0, sh * (y1 - y0))
+    fit, zoom = m.get("fit", "cover"), float(m.get("zoom") or 1.0)
+    kind = m.get("kind")
+    if kind == "self_broll":
+        if fit == "cover":
+            r = _fit_rect(cw, ch, bw, bh, "cover", m.get("focus"))
+            eff = [x0 + r.x() / sw, y0 + r.y() / sh, x0 + r.right() / sw, y0 + r.bottom() / sh]
+            eff = [round(min(1.0, max(0.0, v)), 5) for v in eff]
+            return _even(bw), _even(bh), (None if eff == [0.0, 0.0, 1.0, 1.0] else eff), True
+        s = min(bw / cw, bh / ch)
+        return _even(cw * s), _even(ch * s), crop, False
+    if kind == "photo":
+        pw = bw * min(0.8, max(0.3, _num_or(it.get("_size0", it.get("size")), PHOTO_SIZE)))
+        tw, th = pw * 0.91, pw * 1.104
+    else:
+        size = _num_or(it.get("_size0", it.get("size")), schema.GRAPHIC_KIND_DEFAULTS["media"]["size"])
+        asp = _num_or(it.get("aspect"), 0.0) if it.get("aspect") is not None else 0.0
+        tw, th = _pip_card(size, asp, cw, ch, bw)
+    s = (max if fit == "cover" else min)(tw / cw, th / ch) * zoom
+    s = min(1.0, s)
+    return max(16, _even(cw * s)), max(16, _even(ch * s)), crop, False
+
+
+def _clip_window(m: dict, info: dict, fps: float, n: int) -> tuple[float, int]:
+    """(inicio efectivo en la fuente, cuadros utiles del clip desde ahi, <= n)."""
+    dur = float(info.get("duration") or 0.0)
+    t0 = float(m.get("media_in") or 0.0)
+    if dur > 0.2 and t0 >= dur - 0.5 / fps:
+        t0 = (t0 % dur) if m.get("loop", True) else max(0.0, dur - 1.0 / fps)
+    if dur <= 0:
+        return t0, n
+    return t0, max(1, min(n, int(math.floor((dur - t0) * fps + 0.5))))
+
+
+def _media_video_cmd(m: dict, info: dict, w: int, h: int, fps: float, n: int, t0: float,
+                     out, single: bool = False) -> list[str]:
+    """ffmpeg: clip del usuario desde t0 -> hasta n cuadros a fps (los que tenga), recortado,
+    escalado a (w, h) y normalizado a SDR bt709 (tonemap si es HDR). El loop y el congelado
+    del ultimo cuadro los resuelve la lectura (_MediaFrames), no el archivo."""
+    chain = [f"fps=fps={fps}:round=near"] + _crop_filter(m.get("crop_eff", m.get("crop"))) \
+        + [f"scale={w}:{h}:flags=bicubic+accurate_rnd+full_chroma_int"] + V.tonemap_filters(info)
+    if single:
+        # misma conversion a RGBA que FrameReader sobre el clip (bt709, rango tv): el cuadro
+        # suelto de /frame y el export se ven iguales
+        chain += [f"scale={w}:{h}:in_color_matrix=bt709:in_range=tv:"
+                  "flags=bicubic+accurate_rnd+full_chroma_int", "format=rgba"]
+    # decodificacion por hardware en Mac (HEVC 4K HLG del iPhone: ~3x mas rapido)
+    cmd = [V.FFMPEG, "-y", "-v", "error", "-nostdin"] + V.hwaccel_args()
+    cmd += ["-ss", f"{max(0.0, t0):.6f}", "-i", str(m["src"]), "-map", "0:v:0", "-an", "-sn", "-dn",
+            "-vf", ",".join(chain), "-frames:v", str(int(n))]
+    if single:
+        return cmd + ["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"]
+    return cmd + ["-r", str(fps)] + V.encoder_args(w, h, fps, "inter") + [str(out)]
+
+
+def _item_frames(it: dict, fps: float) -> int:
+    return max(1, int(math.ceil((it["_fe"] - it["_fs"]) * fps - 1e-6)) + 1)
+
+
+def _clip_meta(out: Path, w: int, h: int) -> int:
+    """Cuadros del clip normalizado en cache (0 si no esta o no coincide)."""
+    mp_ = out.with_suffix(out.suffix + ".json")
+    if not (out.exists() and mp_.exists()):
+        return 0
+    try:
+        d = json.loads(mp_.read_text())
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if int(d.get("W") or 0) != w or int(d.get("H") or 0) != h:
+        return 0
+    return max(0, int(d.get("frames") or 0))
+
+
+def _normalize_clip(m: dict, info: dict, out: Path, cancel=None) -> int:
+    """Genera el clip normalizado (lock por archivo; otro proceso/hilo que ya lo hizo gana).
+    Devuelve sus cuadros."""
+    w, h = int(m["nw"]), int(m["nh"])
+    with V.FileLock(out, cancel):
+        got = _clip_meta(out, w, h)
+        if got:
+            return got
+        tmp = V._tmp_path(out)
+        try:
+            V.run_ffmpeg_fallback(_media_video_cmd(m, info, w, h, m["fps"], m["n_seg"], m["t0"], tmp),
+                                  cancel=cancel)
+            got = V.count_frames(tmp)
+            if got < 1:
+                raise RuntimeError("clip sin cuadros")
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        os.replace(tmp, out)
+        V._write_meta(out, {"frames": got, "W": w, "H": h, "fps": m["fps"], "req": m["n_seg"]})
+    return got
+
+
+def _fail_key(m: dict) -> str:
+    return hashlib.sha1(json.dumps([MEDIA_VERSION, V._file_sig(m["src"]), m["type"]]).encode()) \
+        .hexdigest()[:16]
+
+
+def _known_failure(key: str, cache: Path) -> str | None:
+    if key in _MEDIA_FAILS:
+        return _MEDIA_FAILS[key]
+    f = cache / f"media_{key}.failed"
+    if f.exists():
+        try:
+            msg = f.read_text()[:200] or "ilegible"
+        except OSError:
+            msg = "ilegible"
+        _MEDIA_FAILS[key] = msg
+        return msg
+    return None
+
+
+def _remember_failure(key: str, cache: Path, msg: str) -> None:
+    """Un medio ilegible no se reintenta (ni por cuadro en /frame ni en cada export): se
+    recuerda por firma del archivo (ruta, tamano, mtime) y version de la normalizacion."""
+    _MEDIA_FAILS[key] = msg
+    try:
+        f = cache / f"media_{key}.failed"
+        tmp = V._tmp_path(f)
+        tmp.write_text(msg)
+        os.replace(tmp, f)
+    except OSError:
+        pass
+
+
+def _normalize_bg(m: dict, info: dict, out: Path, cache: Path) -> None:
+    """/frame con un clip aun sin normalizar: lo normaliza en un hilo de fondo (una vez por
+    archivo destino); mientras tanto cada cuadro se decodifica suelto de la fuente."""
+    key = str(out)
+    with _MEDIA_LOCK:
+        if key in _MEDIA_BG:
+            return
+        _MEDIA_BG.add(key)
+    mm = dict(m)
+
+    def run():
+        try:
+            _normalize_clip(mm, info, out)
+        except Exception as e:  # noqa
+            _log(f"medio {mm.get('src')}: normalizacion de fondo fallo: {e}")
+            _remember_failure(_fail_key(mm), cache, str(e)[:200])
+        finally:
+            with _MEDIA_LOCK:
+                _MEDIA_BG.discard(key)
+    threading.Thread(target=run, name="reelfy-media-norm", daemon=True).start()
+
+
+def prepare_media(job: dict, opts: dict, cancel=None, only_images: bool = False) -> list[str]:
+    """Normaliza en la cache los medios de los items del job (una vez; lock por archivo) y
+    completa item['_media'] (file, w/h de lectura, n, n_eff, t0...). Devuelve avisos.
+
+    `only_images` (render_frame): los clips sin cache no se esperan; se normalizan en segundo
+    plano (opts.media_bg, default True) y el cuadro pedido se decodifica suelto."""
+    cache = Path(opts["cache_dir"])
+    cache.mkdir(parents=True, exist_ok=True)
+    fps = job["fps"]
+    ebox = _export_box(job)
+    rw_box = _media_box(job)[0]
+    scale = rw_box / max(1, ebox[0])
+    warns = []
+    for it in _media_items(job):
+        m = it["_media"]
+        fk = _fail_key(m)
+        err = _known_failure(fk, cache)
+        if err:
+            m["failed"] = err
+            warns.append(f"media:{it.get('id')}:ilegible")
+            continue
+        try:
+            if m["type"] == "image":
+                out = cache / f"media_{_media_key(m, list(ebox))}.png"
+                if not out.exists():
+                    arr = _decode_image_rgba(m["src"], m.get("crop"), *ebox)
+                    with V.FileLock(out, cancel):
+                        if not out.exists():
+                            from PIL import Image
+                            tmp = V._tmp_path(out)
+                            Image.fromarray(arr, "RGBA").save(str(tmp), "PNG", compress_level=1)
+                            os.replace(tmp, out)
+                m.update(file=str(out))
+                V.touch(out)
+                continue
+            info = V.probe(m["src"])
+            sw, sh = int(info.get("w") or 0), int(info.get("h") or 0)
+            if not sw or not sh:
+                raise RuntimeError("clip ilegible")
+            nw, nh, crop, baked = _clip_target(it, m, sw, sh, ebox)
+            n = _item_frames(it, fps)
+            t0, n_seg = _clip_window(m, info, fps, n)
+            m.update(nw=nw, nh=nh, w=max(2, _even(nw * scale)), h=max(2, _even(nh * scale)),
+                     crop_eff=crop, baked=baked, n=n, n_seg=n_seg, t0=round(t0, 4), fps=fps,
+                     info_dur=float(info.get("duration") or 0.0))
+            out = cache / f"media_{_media_key(m, [nw, nh, fps, n_seg, round(t0, 3), crop])}.mp4"
+            got = _clip_meta(out, nw, nh)
+            if not got and not only_images:
+                got = _normalize_clip(m, info, out, cancel)
+            if got:
+                m.update(file=str(out), n_eff=got)
+                V.touch(out)
+            else:
+                m["n_eff"] = n_seg
+                if opts.get("media_bg", True):
+                    _normalize_bg(m, info, out, cache)
+        except V.Canceled:
+            raise
+        except Exception as e:  # noqa: un medio ilegible se omite con aviso (no tumba el render)
+            _log(f"medio {it.get('id')} no disponible: {e}")
+            m["failed"] = str(e)[:200] or "ilegible"
+            _remember_failure(fk, cache, m["failed"])
+            warns.append(f"media:{it.get('id')}:ilegible")
+    return warns
+
+
+def _media_items(job: dict) -> list[dict]:
+    return [it for tr in MEDIA_KINDS for it in job.get(tr) or []
+            if isinstance(it.get("_media"), dict) and not it["_media"].get("missing")]
+
+
+def drop_failed_media(job: dict) -> list[str]:
+    """Quita del job los items cuyo medio no se pudo leer (export: ni el marcador gris del PiP
+    ni una escena de foto con la persona y el pie del usuario). Devuelve sus ids."""
+    ids = []
+    for tr in MEDIA_KINDS:
+        keep = []
+        for it in job.get(tr) or []:
+            m = it.get("_media")
+            if isinstance(m, dict) and m.get("failed") and it.get("kind") not in OPTIONAL_MEDIA.get(tr, ()):
+                ids.append(str(it.get("id")))
+                continue
+            keep.append(it)
+        job[tr] = keep
+    if ids:
+        caption_layout(job)
+    return ids
+
+
+def media_signature(job: dict) -> str | None:
+    """Firma de lo que produce prepare_media (archivos, recortes, tiempos, huecos), o None si el
+    job no tiene medios propios. Cambia al agregar/cambiar un medio; mover el item no."""
+    items = _media_items(job)
+    if not items:
+        return None
+    rows = []
+    for it in sorted(items, key=lambda x: str(x.get("id"))):
+        m = it["_media"]
+        rows.append([str(it.get("id")), it.get("kind"), V._file_sig(m["src"]), m["type"], m.get("crop"),
+                     round(m.get("media_in", 0.0), 3), m.get("loop"), m.get("fit"), m.get("focus"),
+                     m.get("zoom"), it.get("_size0", it.get("size")), it.get("aspect"),
+                     round(it["_fe"] - it["_fs"], 3)])
+    return hashlib.sha1(json.dumps([MEDIA_VERSION, job["fps"], list(_export_box(job)), rows],
+                                   default=str).encode()).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------- ajuste al hueco
+def _fit_rect(iw: float, ih: float, dw: float, dh: float, fit: str, focus=None,
+              zoom: float = 1.0) -> skia.Rect:
+    """Rect FUENTE (en px de la imagen) que se dibuja en un destino dw x dh: cover = recorte
+    que llena (centrado en `focus`), contain = la imagen completa (el destino la encaja)."""
+    zoom = max(1.0, float(zoom or 1.0))
+    if fit == "contain":
+        sw, sh = iw / zoom, ih / zoom
+    else:
+        ar = dw / max(1e-6, dh)
+        sw, sh = (ih * ar, ih) if iw / ih > ar else (iw, iw / ar)
+        sw, sh = sw / zoom, sh / zoom
+    fx, fy = focus if focus else (0.5, 0.5)
+    x = min(max(0.0, fx * iw - sw / 2), iw - sw)
+    y = min(max(0.0, fy * ih - sh / 2), ih - sh)
+    return skia.Rect.MakeXYWH(x, y, sw, sh)
+
+
+def _sampling(src_w: float, dst_w: float, dst_px: float = 0.0):
+    """Muestreo segun la escala. 1:1 o ampliar: lineal (a 1:1 es copia exacta; bicubico en CPU
+    cuesta ~30 ms por cuadro de 1080x1920); reducir hasta 2x: bicubico solo en destinos chicos
+    (<= 0.4 MP), si no mipmaps; mas de 2x: mipmaps (sin aliasing en fotos de 12 MP)."""
+    r = dst_w / max(1e-6, src_w)
+    if r >= 0.99:
+        return C.SAMPLING_FAST
+    if r < 0.5 or dst_px > 400_000:
+        return C.SAMPLING
+    return C.SAMPLING_CUBIC
+
+
+def fit_media(img: skia.Image, dw: int, dh: int, fit: str = "cover", focus=None,
+              zoom: float = 1.0, fill: str = "blur") -> skia.Image:
+    """El medio ajustado a un hueco de dw x dh px: cover (llena recortando) o contain (entero,
+    con el resto relleno por la misma imagen desenfocada y oscurecida, calculada a 1/8)."""
+    dw, dh = max(2, int(round(dw))), max(2, int(round(dh)))
+    s = C.offscreen(dw, dh)
+    c = s.getCanvas()
+    c.clear(skia.ColorBLACK)
+    iw, ih = img.width(), img.height()
+    dst = skia.Rect.MakeWH(dw, dh)
+    if fit == "contain":
+        if fill == "blur":
+            sw, sh = max(8, dw // 8), max(8, dh // 8)
+            small = C.offscreen(sw, sh)
+            sc = small.getCanvas()
+            sig = max(1.5, 0.04 * max(sw, sh))
+            sc.drawImageRect(img, _fit_rect(iw, ih, sw, sh, "cover"), skia.Rect.MakeWH(sw, sh),
+                             C.SAMPLING, skia.Paint(ImageFilter=skia.ImageFilters.Blur(
+                                 sig, sig, skia.TileMode.kClamp)))
+            c.drawImageRect(small.makeImageSnapshot(), dst, C.SAMPLING_FAST)
+            c.drawPaint(skia.Paint(Color=skia.ColorSetARGB(90, 0, 0, 0)))
+        src = _fit_rect(iw, ih, dw, dh, "contain", focus, zoom)
+        k = min(dw / src.width(), dh / src.height())
+        w, h = src.width() * k, src.height() * k
+        c.drawImageRect(img, src, skia.Rect.MakeXYWH((dw - w) / 2, (dh - h) / 2, w, h),
+                        _sampling(src.width(), w, w * h), None)
+    else:
+        src = _fit_rect(iw, ih, dw, dh, "cover", focus, zoom)
+        c.drawImageRect(img, src, dst, _sampling(src.width(), dw, dw * dh), None)
+    return s.makeImageSnapshot()
+
+
+def _placeholder_image(w: int, h: int) -> skia.Image:
+    """Marcador de un medio ilegible (solo /frame: en el export el item se omite): gris oscuro
+    con el icono de una foto tachada."""
+    w, h = max(8, int(w)), max(8, int(h))
+    s = C.offscreen(w, h)
+    c = s.getCanvas()
+    c.clear(C.color("#2A2A33"))
+    u = min(w, h) * 0.16
+    cx, cy = w / 2, h / 2
+    p = C.stroke("#FFFFFF", max(2.0, u * 0.12), 0.75)
+    c.drawRoundRect(skia.Rect.MakeXYWH(cx - u, cy - u * 0.75, 2 * u, 1.5 * u), u * 0.15, u * 0.15, p)
+    c.drawCircle(cx - u * 0.4, cy - u * 0.3, u * 0.17, p)
+    path = skia.Path()
+    path.moveTo(cx - u, cy + u * 0.55)
+    path.lineTo(cx - u * 0.2, cy - u * 0.05)
+    path.lineTo(cx + u * 0.3, cy + u * 0.35)
+    path.lineTo(cx + u * 0.55, cy + u * 0.15)
+    path.lineTo(cx + u, cy + u * 0.55)
+    c.drawPath(path, p)
+    c.drawLine(cx - u * 1.25, cy + u * 1.0, cx + u * 1.25, cy - u * 1.0, p)
+    return s.makeImageSnapshot()
+
+
+class _MediaFrames:
+    """Cuadros de los medios del usuario en un proceso: imagenes (PNG normalizado, una vez) y
+    clips (lectura SECUENCIAL por item: los chunks son contiguos; un salto reabre el lector).
+    El cuadro local k se mapea al clip normalizado: con loop k % n_eff (repite [media_in, fin]),
+    sin loop min(k, n_eff - 1) (congela el ultimo)."""
+
+    def __init__(self):
+        self.images: dict[str, skia.Image] = {}
+        self.readers: dict[str, list] = {}      # id -> [FrameReader, siguiente k, ultimo k, img]
+        self.fitted: dict[tuple, skia.Image] = {}
+        self.placeholders: dict[tuple, skia.Image] = {}
+
+    @staticmethod
+    def local_frame(m: dict, lt: float, fps: float) -> int:
+        k = min(max(0, int(math.floor(lt * fps + 1e-6))), max(0, int(m.get("n") or 1) - 1))
+        ne = max(1, int(m.get("n_eff") or m.get("n") or 1))
+        return (k % ne) if m.get("loop", True) else min(k, ne - 1)
+
+    def image(self, it: dict, lt: float, fps: float) -> skia.Image | None:
+        m = it.get("_media") or {}
+        if m.get("failed") or m.get("missing"):
+            return None
+        if m["type"] == "image":
+            f = m.get("file")
+            if not f:
+                return None
+            img = self.images.get(f)
+            if img is None:
+                img = skia.Image.MakeFromEncoded(skia.Data.MakeFromFileName(f))
+                if img is None:
+                    return None
+                if len(self.images) > 8:
+                    self.images.pop(next(iter(self.images)))
+                self.images[f] = img
+            return img
+        k = self.local_frame(m, lt, fps)
+        iid = str(it.get("id"))
+        rd = self.readers.get(iid)
+        if rd is not None and rd[2] == k and rd[3] is not None:
+            return rd[3]                            # mismo cuadro (congelado / pedido repetido)
+        if m.get("file"):
+            if rd is None or rd[0] is None or rd[1] != k:
+                if rd is not None and rd[0] is not None:
+                    rd[0].close()
+                rd = [V.FrameReader(m["file"], m["w"], m["h"], k, None, fps), k, None, None]
+                self.readers[iid] = rd
+            arr = rd[0].read()
+            if arr is None:
+                return rd[3]
+            rd[1], rd[2], rd[3] = k + 1, k, C.image_from_rgba(arr)
+            return rd[3]
+        # sin clip en cache (cuadro suelto de /frame): un cuadro directo de la fuente
+        try:
+            info = V.probe(m["src"])
+            w, h = int(m["w"]), int(m["h"])
+            r = subprocess.run(_media_video_cmd(m, info, w, h, fps, 1, m.get("t0", 0.0) + k / fps,
+                                                None, single=True), capture_output=True)
+            if len(r.stdout) < w * h * 4:
+                return None
+            img = C.image_from_rgba(np.frombuffer(r.stdout[:w * h * 4], np.uint8).reshape(h, w, 4).copy())
+            self.readers[iid] = [None, -1, k, img]
+            return img
+        except Exception:  # noqa
+            return None
+
+    def fitted_image(self, it: dict, img: skia.Image, dw: int, dh: int, fit: str) -> skia.Image:
+        """fit_media con cache para imagenes (los clips cambian por cuadro)."""
+        m = it.get("_media") or {}
+        key = (m.get("file"), dw, dh, fit, json.dumps(it.get("focus")), it.get("zoom")) \
+            if m.get("type") == "image" else None
+        if key is not None and key in self.fitted:
+            return self.fitted[key]
+        out = fit_media(img, dw, dh, fit, _focus(it), _num_or(it.get("zoom"), 1.0))
+        if key is not None:
+            if len(self.fitted) > 16:
+                self.fitted.pop(next(iter(self.fitted)))
+            self.fitted[key] = out
+        return out
+
+    def placeholder(self, w: int, h: int) -> skia.Image:
+        k = (int(w), int(h))
+        if k not in self.placeholders:
+            self.placeholders[k] = _placeholder_image(w, h)
+        return self.placeholders[k]
+
+    def release(self, active_ids: set) -> None:
+        for iid in [i for i in self.readers if i not in active_ids]:
+            rd = self.readers.pop(iid)
+            if rd[0] is not None:
+                rd[0].close()
+
+    def close(self) -> None:
+        self.release(set())
+
+
+# ---------------------------------------------------------------- colocacion automatica del PiP
+PIP_MARGIN = 0.015                  # separacion minima (fraccion de la caja)
+PIP_SCALES = (1.0, 0.85, 0.72, 0.6)  # si no cabe sin tapar la cara, la tarjeta se achica
+CAPTION_HALF = 0.05                 # media altura de la franja de subtitulos (fraccion de H)
+
+
+def _overlap(a, b) -> float:
+    return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
+def media_auto_place(face, w: float, h: float, cap_top: float | None = None,
+                     avoid=()) -> tuple[float, float, float]:
+    """Centro (x, y) y escala de un PiP SIN posicion (x/y null), en fracciones de la caja de
+    layout. Contrato compartido con la vista en vivo del Studio (doc 4.2b):
+
+    - `face` = [cx, cy, w, h] de la cara (mediana en el rango del item) o None; `w`, `h` = la
+      tarjeta; `cap_top` = borde superior de la franja de subtitulos (y - 0.06) o None;
+      `avoid` = rectangulos [x0, y0, x1, y1] de otros overlays activos (textos, graficos).
+    - Zona prohibida = la cara ampliada (0.03 a los lados, 0.05 arriba por el cabello, 0.03
+      abajo); zona util = SAFE (sin la columna de botones) y arriba de los subtitulos.
+    - Candidatos en orden, con escala 1, 0.85, 0.72 y 0.6: al lado contrario de la cara (la
+      cara a la derecha del centro de SAFE -> a la izquierda) alineado arriba con la cara; al
+      otro lado; en el pecho (entre la cara y los subtitulos); arriba de la cabeza. Cada uno se
+      acota a la zona util. Gana el primero que no toca ni la cara ni `avoid`; si no hay, el
+      primero que no toca la cara con el menor cruce con `avoid`; si ninguno libra la cara, el
+      de menor cruce con ella.
+    - Sin cara: arriba a la derecha dentro de SAFE (la persona suele ir al centro), con la
+      misma busqueda contra `avoid` (esquina derecha, izquierda, abajo)."""
+    S = C.SAFE
+    m = PIP_MARGIN
+    bottom = min(S["bottom"], cap_top) if cap_top else S["bottom"]
+    mid = (S["left"] + S["right"]) / 2
+    avoid = [tuple(float(v) for v in r[:4]) for r in avoid or ()]
+
+    def fit(cx, cy, ww, hh):
+        lo_x, hi_x = S["left"] + ww / 2 + m, S["right"] - ww / 2 - m
+        lo_y, hi_y = S["top"] + hh / 2 + m, bottom - hh / 2 - m
+        cx = mid if lo_x > hi_x else min(max(cx, lo_x), hi_x)
+        cy = (S["top"] + bottom) / 2 if lo_y > hi_y else min(max(cy, lo_y), hi_y)
+        return cx, cy
+
+    if face is None:
+        zone = None
+        order = lambda ww, hh: [(1.0, 0.0), (0.0, 0.0), (1.0, 1.0)]  # noqa: E731
+    else:
+        fx, fy, fw, fh = (float(v) for v in face[:4])
+        zone = (fx - fw / 2 - 0.03, fy - fh / 2 - 0.05, fx + fw / 2 + 0.03, fy + fh / 2 + 0.03)
+        first = -1 if fx >= mid else 1                  # -1 = a la izquierda de la cara
+
+        def order(ww, hh):
+            side = [zone[0] - m - ww / 2, zone[2] + m + ww / 2]
+            a, b = (side[0], side[1]) if first < 0 else (side[1], side[0])
+            return [(a, zone[1] + hh / 2), (b, zone[1] + hh / 2),
+                    (fx, zone[3] + m + hh / 2), (fx, zone[1] - m - hh / 2)]
+    free, best_face = None, None
+    for s in PIP_SCALES:
+        ww, hh = w * s, h * s
+        for cx, cy in order(ww, hh):
+            cx, cy = fit(cx, cy, ww, hh)
+            r = (cx - ww / 2, cy - hh / 2, cx + ww / 2, cy + hh / 2)
+            fo = _overlap(r, zone) if zone else 0.0
+            ao = sum(_overlap(r, a) for a in avoid)
+            if fo <= 1e-9 and ao <= 1e-9:
+                return round(cx, 4), round(cy, 4), s
+            if fo <= 1e-9 and (free is None or ao < free[0] - 1e-9):
+                free = (ao, cx, cy, s)
+            if best_face is None or fo < best_face[0] - 1e-9:
+                best_face = (fo, cx, cy, s)
+    pick = free or best_face
+    return round(pick[1], 4), round(pick[2], 4), pick[3]
+
+
+def _overlay_boxes(job: dict, fs: float, fe: float, mods: dict | None) -> list[tuple]:
+    """Rectangulos aproximados (fracciones de la caja) de los textos y graficos con posicion
+    activos en [fs, fe): el PiP automatico los evita. Texto = franja de 0.16 de alto en su `y`
+    (o la del preset) a lo ancho de SAFE; grafico = cuadrado de `size` en su x/y."""
+    S = C.SAFE
+    bw, bh = _media_box(job)
+    tx = (mods or {}).get("text")
+    presets = getattr(tx, "PRESETS", {}) if tx is not None else {}
+    out = []
+    for it in job.get("text") or []:
+        if it["_fe"] <= fs or it["_fs"] >= fe:
+            continue
+        y = it.get("y")
+        if y is None:
+            y = (presets.get(it.get("preset")) or {}).get("y")
+        y = _num_or(y, 0.3)
+        out.append((S["left"], y - 0.08, S["right"], y + 0.08))
+    for it in job.get("graphics") or []:
+        if it.get("kind") in ("media", "progress") or it["_fe"] <= fs or it["_fs"] >= fe:
+            continue
+        if it.get("x") is None or it.get("y") is None:
+            continue
+        half = _num_or(it.get("size"), 0.18) / 2
+        x, y = _num_or(it["x"], 0.5), _num_or(it["y"], 0.5)
+        out.append((x - half, y - half * bw / bh, x + half, y + half * bw / bh))
+    return out
+
+
+def _media_src_wh(it: dict) -> tuple[float, float] | None:
+    """Dims de display del medio (con su recorte) para la tarjeta: el plan (media.w/h de POST
+    /sources) o el archivo."""
+    m = it.get("_media") or {}
+    wh = None
+    try:
+        if m.get("type") == "image":
+            wh = image_size(m["src"])
+        else:
+            info = V.probe(m["src"])
+            wh = (int(info.get("w") or 0), int(info.get("h") or 0))
+    except Exception:  # noqa: el del plan como respaldo
+        wh = None
+    if not wh or not wh[0] or not wh[1]:
+        wh = m.get("hint_wh")
+    if not wh or not wh[0] or not wh[1]:
+        return None
+    x0, y0, x1, y1 = m.get("crop") or (0.0, 0.0, 1.0, 1.0)
+    return float(wh[0]) * (x1 - x0), float(wh[1]) * (y1 - y0)
+
+
+def set_media_auto(job: dict, rows: np.ndarray | None, mods: dict | None = None) -> None:
+    """graphics.media sin x/y: colocacion automatica lejos de la cara (media_auto_place) con la
+    mediana de la cara en el rango del item. Escribe x, y y `size` (si se achico) en el item del
+    job; `_size0` guarda el tamano pedido (la normalizacion del clip no depende de la cara)."""
+    items = [it for it in job.get("graphics") or []
+             if it.get("kind") == "media" and (it.get("x") is None or it.get("y") is None or it.get("_auto_xy"))]
+    if not items:
+        return
+    fps, N = job["fps"], job["n_frames"]
+    box = tuple(job.get("layout") or (0, 0, job["W"], job["H"]))
+    bw, bh = box[2], box[3]
+    cap = job.get("captions") or {}
+    cap_top = (_num_or(cap.get("y"), 0.72) - CAPTION_HALF - 0.01) if job.get("captions_on") else None
+    for it in items:
+        if it.get("_auto_xy"):                      # recalculo (otra pista de rostro)
+            it["x"], it["y"] = it["_xy0"]
+            it["size"] = it["_size0"]
+        size = _num_or(it.get("size"), schema.GRAPHIC_KIND_DEFAULTS["media"]["size"])
+        wh = _media_src_wh(it)
+        cw, ch = wh if wh else (4.0, 5.0)
+        asp = _num_or(it.get("aspect"), 0.0) if it.get("aspect") is not None else 0.0
+        pw_, ph_ = _pip_card(size, asp, cw, ch, bw)
+        # marco blanco y sombra: ~3 % mas por lado
+        w_n, h_n = pw_ * 1.06 / bw, ph_ * 1.06 / bh
+        face = None
+        if rows is not None:
+            f0 = int(math.floor(it["_fs"] * fps))
+            f1 = min(N, max(f0 + 1, int(math.ceil(it["_fe"] * fps))))
+            seg = rows[max(0, f0):f1]
+            ok = seg[~np.isnan(seg).any(axis=1)] if len(seg) else seg
+            if len(ok):
+                face = _box_face(np.median(ok, axis=0), job["W"], job["H"], box)
+        cx, cy, s = media_auto_place(face, w_n, h_n, cap_top,
+                                     _overlay_boxes(job, it["_fs"], it["_fe"], mods))
+        if it.get("x") is not None or it.get("y") is not None:
+            s = 1.0                                 # solo falta una coordenada: no se achica
+        it["_xy0"] = [it.get("x"), it.get("y")]
+        it["_size0"] = size
+        it["_auto_xy"] = True
+        it["x"] = cx if it.get("x") is None else it["x"]
+        it["y"] = cy if it.get("y") is None else it["y"]
+        it["size"] = round(size * s, 4)
+
+
+# ---------------------------------------------------------------- subtitulos y foto con pie
+def _photo_caption_text(it: dict) -> str:
+    cap = it.get("caption")
+    if cap is None and isinstance(it.get("text"), str):
+        cap = it["text"]
+    return str(cap or "").strip() if not isinstance(cap, (dict, list, bool)) else ""
+
+
+def photo_caption_y(it: dict, cap_y: float, box_aspect: float = 9 / 16) -> float | str | None:
+    """Donde van los subtitulos durante una escena photo con pie (misma geometria que
+    cutaways.draw_photo, fracciones de la caja): None = el pie no toca la franja de los
+    subtitulos (se quedan); un y = se mueven ahi; 'hide' = no hay lugar (se ocultan).
+
+    pw = size*ancho; marco de alto 1.349 pw centrado en `y` (0.46); el pie escrito a mano va a
+    0.559 pw bajo el centro con media altura ~0.075 pw (+0.015 por la inclinacion). Si choca,
+    los subtitulos van (en orden): debajo del marco, sobre la parte baja de la foto (arriba del
+    borde blanco del pie) o arriba del marco, siempre dentro de SAFE."""
+    S = C.SAFE
+    pw = min(0.8, max(0.3, _num_or(it.get("size"), PHOTO_SIZE))) * box_aspect
+    y = _num_or(it.get("y"), PHOTO_Y)
+    c_mid, c_half = y + 0.559 * pw, 0.075 * pw + 0.015
+    if abs(c_mid - cap_y) >= c_half + CAPTION_HALF:
+        return None
+    half, bottom = 0.6745 * pw, 0.2 * pw
+    lo, hi = S["top"] + CAPTION_HALF, S["bottom"] - CAPTION_HALF + 0.03
+    below = y + half + 0.02 + CAPTION_HALF + 0.01
+    over = y + half - bottom - 0.012 - CAPTION_HALF
+    above = y - half - 0.035 * pw - 0.02 - CAPTION_HALF - 0.01
+    if lo <= below <= hi:
+        return round(below, 4)
+    # sobre la foto: la franja completa dentro del hueco de la imagen (no sobre el pie)
+    if lo <= over <= hi and over - CAPTION_HALF >= y - half + 0.2 * pw:
+        return round(over, 4)
+    if lo <= above <= hi:
+        return round(above, 4)
+    return "hide"
+
+
+def caption_layout(job: dict) -> None:
+    """Rangos donde los subtitulos se ocultan (`_hide`: titulos y escenas con texto) o se
+    MUEVEN (`y_ranges` internos, `_auto`: escenas photo con pie que chocaria con ellos). Se
+    recalcula si el job cambia (p. ej. al omitir items con un medio ilegible)."""
+    cap = job["captions"]
+    hide = []
+    if cap.get("hide_during_titles", True):
+        hide += [(it["_fs"], it["_fe"]) for it in job["text"] if not it.get("keep_captions")]
+        hide += [(it["_fs"], it["_fe"]) for it in job["cutaways"]
+                 if isinstance(it.get("text"), dict) and str(it["text"].get("text") or "").strip()]
+    user = [r for r in (cap.get("y_ranges") or []) if isinstance(r, dict) and not r.get("_auto")]
+    auto = []
+    bw, bh = _media_box(job)
+    for it in job["cutaways"]:
+        if it.get("kind") != "photo" or it.get("keep_captions") or not _photo_caption_text(it):
+            continue
+        t0 = _num_or(it.get("start"), 0.0)
+        cy = _num_or(cap.get("y"), 0.72)
+        for r in user:                          # altura por tramo del usuario en ese momento
+            try:
+                if float(r["start"]) <= t0 < float(r["end"]):
+                    cy = float(r["y"])
+                    break
+            except (KeyError, TypeError, ValueError):
+                continue
+        v = photo_caption_y(it, cy, bw / bh)
+        if v == "hide":
+            hide.append((it["_fs"], it["_fe"]))
+        elif v is not None:
+            auto.append({"start": t0, "end": _num_or(it.get("end"), t0), "y": v, "_auto": True,
+                         "_id": it.get("id")})
+    cap["_hide"] = _merge_ranges(hide)
+    cap["y_ranges"] = auto + user
 
 
 # ================================================================ compositor por cuadro
@@ -696,6 +1824,42 @@ class Compositor:
         self.cutaways = sorted(job["cutaways"], key=z)
         self.effects = job["effects"]
         self.transitions = sorted(job["transitions"], key=lambda t: t["_F0"])
+        self.media = _MediaFrames()
+        self.media_items = _media_items(job)
+
+    def _inject_media(self, t: float) -> None:
+        """Medios propios activos en t: item['_media_image'] (el cuadro del medio en su tiempo
+        local, sin ajustar al hueco: los renderers lo ajustan) y, en self_broll, `_src_image` ya
+        ajustado a la caja (el clip cover viene horneado a la caja: sin ajuste por cuadro).
+        Medio ilegible con `_media_placeholder` (solo /frame): un marcador. Cierra los lectores
+        de clips que ya no estan activos."""
+        active = set()
+        bw, bh = self.box[2], self.box[3]
+        for it in self._active(self.media_items, t):
+            iid = str(it.get("id"))
+            active.add(iid)
+            kind = it.get("kind")
+            m = it["_media"]
+            ta = time.perf_counter()
+            try:
+                if m.get("failed"):
+                    it["_media_image"] = None
+                    if it.get("_media_placeholder") and kind == "photo":
+                        it["_media_image"] = self.media.placeholder(round(bw * 0.52), round(bw * 0.63))
+                    elif it.get("_media_placeholder") and kind == "self_broll":
+                        it["_src_image"] = self.media.placeholder(bw, bh)
+                    continue
+                img = self.media.image(it, t - it["_fs"], self.fps)
+                it["_media_image"] = img
+                if img is not None and kind == "self_broll":
+                    it["_src_image"] = img if m.get("baked") else self.media.fitted_image(
+                        it, img, bw, bh, m.get("fit", "cover"))
+            except Exception as e:  # noqa
+                self._err(f"media:{kind}", e)
+                it["_media_image"] = None
+            finally:
+                self._prof("media", ta)
+        self.media.release(active)
 
     # ------------------------------------------------------------ utilidades
     def _err(self, key: str, e: BaseException) -> None:
@@ -1129,6 +2293,8 @@ class Compositor:
         cv.clear(skia.ColorBLACK)
         cv.drawImage(img, 0, 0)
         lctx = self.box_ctx(ctx)
+        if self.media_items:
+            self._inject_media(t)
         # 3) capas detras + sujeto encima
         a_text = self._active(self.text, t)
         a_gfx = self._active(self.graphics, t)
@@ -1334,6 +2500,8 @@ def _render_range(comp: Compositor, base: str, f0: int, f1: int, out: str, kind:
         reader.close()
         writer.abort()
         raise
+    finally:
+        comp.media.close()                     # lectores de clips del usuario de este rango
     return {"f0": f0, "f1": f1, "frames": f1 - f0, "t": time.perf_counter() - t0,
             "t_io": t_io, "pid": os.getpid()}
 
@@ -1350,40 +2518,70 @@ def _worker_chunk(task: tuple) -> dict:
     return r
 
 
+_SAFE_LOCK = threading.RLock()
+_SAFE_STATE: dict[str, Any] = {"depth": 0, "mod": None, "saved": {}}
+
+
 class _SafeMain:
     """Mientras se crean los procesos spawn: los workers NO deben re-ejecutar el script
     principal. spawn reimporta __main__ (por __spec__.name o por __file__) como __mp_main__ en
     cada worker, y p. ej. app/server.py arranca a nivel de modulo ollama, la revalidacion de
     licencia y FastAPI. Se ocultan __file__ y __spec__ SIEMPRE (los workers solo necesitan
     motion.render: el initializer y la tarea se serializan por referencia) y se limita el
-    numero de hilos BLAS/OpenMP que heredan (evita sobresuscripcion con N procesos)."""
+    numero de hilos BLAS/OpenMP que heredan (evita sobresuscripcion con N procesos).
+
+    Concurrencia: CANDADO DE MODULO (RLock) + CONTADOR. Dos hilos que crean procesos a la vez
+    (un export y una vista previa en el servidor, o scripts con hilos) se serializan: el tramo
+    protegido solo crea el pool y lanza los procesos (~0.1-1 s), y mientras un hilo esta dentro
+    ningun otro puede restaurar __main__.__file__ ni pisar las variables OMP que heredan sus
+    hijos (antes el primero que salia restauraba __file__ mientras el otro lanzaba procesos y
+    el hijo reimportaba el script principal). El contador permite anidar en el mismo hilo:
+    solo la entrada mas externa oculta y solo la ultima salida restaura."""
 
     def __init__(self, env: dict | None = None):
         self.env = {k: str(v) for k, v in (env or {}).items()}
 
     def __enter__(self):
-        self.mod = sys.modules.get("__main__")
-        self.saved: dict[str, Any] = {}
-        if self.mod is not None:
-            if hasattr(self.mod, "__file__"):
-                self.saved["__file__"] = self.mod.__file__
-                del self.mod.__file__
-            self.saved["__spec__"] = getattr(self.mod, "__spec__", None)
-            self.mod.__spec__ = None
-        self.old_env = {k: os.environ.get(k) for k in self.env}
-        os.environ.update(self.env)
+        _SAFE_LOCK.acquire()
+        try:
+            st = _SAFE_STATE
+            if st["depth"] == 0:
+                mod = sys.modules.get("__main__")
+                saved: dict[str, Any] = {}
+                if mod is not None:
+                    if hasattr(mod, "__file__"):
+                        saved["__file__"] = mod.__file__
+                        del mod.__file__
+                    saved["__spec__"] = getattr(mod, "__spec__", None)
+                    mod.__spec__ = None
+                st["mod"], st["saved"] = mod, saved
+            st["depth"] += 1
+            self.mod = st["mod"]
+            self.old_env = {k: os.environ.get(k) for k in self.env}
+            os.environ.update(self.env)
+        except BaseException:
+            _SAFE_LOCK.release()
+            raise
         return self
 
     def __exit__(self, *a):
-        if self.mod is not None:
-            if "__file__" in self.saved:
-                self.mod.__file__ = self.saved["__file__"]
-            self.mod.__spec__ = self.saved.get("__spec__")
-        for k, v in self.old_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+        try:
+            for k, v in self.old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            st = _SAFE_STATE
+            st["depth"] = max(0, st["depth"] - 1)
+            if st["depth"] == 0:
+                mod, saved = st["mod"], st["saved"]
+                if mod is not None:
+                    if "__file__" in saved:
+                        mod.__file__ = saved["__file__"]
+                    mod.__spec__ = saved.get("__spec__")
+                st["mod"], st["saved"] = None, {}
+        finally:
+            _SAFE_LOCK.release()
 
 
 def worker_threads(nw: int, override: int | None = None) -> int:
@@ -1947,6 +3145,59 @@ def _base_files(pr: dict) -> tuple[Path, Path]:
                         pr["timeline"], o["enhance_audio"], o.get("air"))
 
 
+def analysis_key(plan: dict, opts: dict | None = None, prep: dict | None = None) -> dict:
+    """Claves del ANALISIS de fondo (lo que calculan ensure_base / ensure_analysis) ->
+    {"base": str, "full": str, "media": str | None} (sha1 de 16 hex).
+
+    base: video base + voz = fuente, cortes cuantizados, formato/reencuadre (`air`), fps,
+          camara del plan y cadena de audio (`enhance_audio`): los nombres de base_*.mp4 y
+          voice_*.wav de la cache ya codifican todo eso.
+    full: base + pista de rostro (version del modulo camera y uniones), rangos de matte (con el
+          inset de 16:9, la calidad y la version del algoritmo) y la medicion del grade (si esta
+          activo y las tomas en tiempo final).
+    media: firma de los medios propios (media_signature; None sin medios): archivo, recorte,
+          media_in/loop, ajuste y hueco. Cambia al agregar o cambiar un medio; el servidor
+          entonces llama ensure_media (no hace falta relanzar el analisis: base y full no
+          cambian).
+    Editar textos, graficos, escenas, SFX, musica o el look del grade NO cambia base ni full
+    (el Studio autoguarda sin relanzar el analisis). Barata: 3-5 ms en caliente, no toca video;
+    la PRIMERA llamada del proceso carga los modulos de efectos (segundos)."""
+    o = dict(opts or {})
+    o.setdefault("workers", 0)
+    pr = prep or prepare(plan, o)
+    o, job, mods = pr["opts"], pr["job"], pr["mods"]
+    bv, bw = _base_files(pr)
+    base = hashlib.sha1(f"{bv.name}|{bw.name}|{o['fmt']}|{o['base_W']}x{o['base_H']}".encode()) \
+        .hexdigest()[:16]
+    ff = _face_file(job, mods, Path(o["cache_dir"]), bv.stem.replace("base_", ""))
+    mt = mods.get("matte")
+    extra = json.dumps({
+        "face": ff.name if ff is not None else None,
+        "matte": [list(r) for r in job.get("matte_ranges") or []],
+        "matte_box": job.get("matte_box"), "quality": job.get("quality"),
+        "matte_algo": getattr(mt, "_ALGO", None) if mt is not None else None,
+        "grade": bool(job.get("grade_on")),
+        "shots": [[round(float(s.get("start", 0.0)), 4), round(float(s.get("end", 0.0)), 4)]
+                  for s in job.get("shots") or []] if job.get("grade_on") else None,
+    }, sort_keys=True, default=str)
+    full = hashlib.sha1((base + extra).encode()).hexdigest()[:16]
+    return {"base": base, "full": full, "media": media_signature(job)}
+
+
+def ensure_media(plan: dict, opts: dict | None = None, prep: dict | None = None) -> dict:
+    """Normaliza los medios propios del plan en la cache (lo mismo que hace ensure_analysis),
+    sin tocar el base ni el analisis. Para el servidor cuando cambia analysis_key()['media']
+    (el usuario agrego o cambio un medio): el primer /frame de ese clip ya no decodifica de la
+    fuente. Devuelve {items, skipped, t}."""
+    t0 = time.time()
+    pr = prep or prepare(plan, opts)
+    o, job = pr["opts"], pr["job"]
+    skipped = [s for s in pr["skipped"] if s.startswith("media:")]
+    if _media_items(job):
+        skipped += prepare_media(job, o, o.get("cancel"))
+    return {"items": len(_media_items(job)), "skipped": skipped, "t": round(time.time() - t0, 3)}
+
+
 def ensure_base(plan: dict, opts: dict | None = None, prep: dict | None = None,
                 prog: _Progress | None = None) -> dict:
     """Construye (o reutiliza de cache) el video base + voz. Seguro de llamar en segundo
@@ -1982,6 +3233,8 @@ def ensure_analysis(plan: dict, opts: dict | None = None, prep: dict | None = No
     stats: dict[str, Any] = {"skipped": []}
     bkey = Path(base["video"]).stem.replace("base_", "")
     an = _analysis(job, mods, base, Path(o["cache_dir"]), bkey, prog, stats)
+    if _media_items(job):                  # medios propios: listos para /frame, draft y export
+        stats["skipped"] += prepare_media(job, o, prog.cancel)
     return {"base": base["video"], "voice": base["voice"], "face_path": an.get("face_path"),
             "matte": bool(an.get("_matte_obj")), "grade": bool(an.get("_grader_obj")),
             "music_prefetch": mth is not None, "t_total": round(time.time() - t0, 3), **stats}
@@ -2054,6 +3307,17 @@ def render_pro(plan: dict, out_path, opts: dict | None = None) -> dict:
     analysis = _analysis(job, mods, base, cache, bkey, prog, stats)
     grader_obj = analysis.pop("_grader_obj", None)
     matte_obj = analysis.pop("_matte_obj", None)
+    # medios propios (imagenes y clips del usuario) normalizados en la cache
+    if _media_items(job):
+        prog.step("Preparando tus imágenes y clips…")
+        tm = time.time()
+        stats["skipped"] += prepare_media(job, o, prog.cancel)
+        # un medio ilegible no sale en el export (ni marcador ni la escena sin su foto)
+        dropped = drop_failed_media(job)
+        stats["media"] = {"items": len(_media_items(job)), "t": round(time.time() - tm, 3),
+                          "dropped": dropped}
+        stats["items"] = {k: len(job[k]) for k in ("text", "graphics", "cutaways", "effects",
+                                                  "transitions")}
 
     # 4) audio EN PARALELO con el compositor (solo el mux necesita los dos). Escribe en su
     # propia subcarpeta; si el render se cancela no se le espera (es daemon) y el hilo borra lo
@@ -2451,11 +3715,19 @@ def render_frame(plan: dict, t_final: float, opts: dict | None = None) -> np.nda
         prefetch(a, b)
     matte = _preview_matte(mods, job, need, base_at, cache, bkey,
                            str(bv) if have_base else None) if need else None
+    if _media_items(job):                  # imagenes normalizadas; clips: del cache o 1 cuadro
+        prepare_media(job, o, o.get("cancel"), only_images=True)
+        for it in _media_items(job):       # ilegible: marcador en la edicion (el export lo omite)
+            if it["_media"].get("failed"):
+                it["_media_placeholder"] = True
     comp = Compositor(job, mods, grader, matte, face,
                       base_video=str(bv) if have_base else None, frame_source=base_at)
-    for tr in active_tr:
-        comp.frame(tr["_P"], base_at(tr["_P"]), transitions=False)
-    return comp.frame(n, base_n).copy()
+    try:
+        for tr in active_tr:
+            comp.frame(tr["_P"], base_at(tr["_P"]), transitions=False)
+        return comp.frame(n, base_n).copy()
+    finally:
+        comp.media.close()
 
 
 def _single_face(mods: dict, rgba: np.ndarray, n: int, job: dict, cache: Path):

@@ -36,6 +36,10 @@ API:
   redirect(plan, style=None, intensity=None, seed=None, only_ids=None, use_llm=False,
            music_sync=None, music_timeout=12) -> plan v2 (reusa director.music_grid si la pista no
       cambia; conserva las notas del nombre y de la musica)
+  apply_profile(plan, profile) -> plan v2 : pone/quita el perfil de la persona (plan.profile, doc
+      3.2) y re-dirige al instante sin LLM (redirect keep_rev: el resto de la edicion igual; lo
+      bloqueado recibe los datos nuevos). apply_profile_entities(ent, anc, words, profile) fija
+      las entidades del perfil (name_src 'perfil') y ancla el momento en que dice su nombre.
   detect_shots(video, duration=None) -> list[dict]
   analyze_shots(plan, use_llm=True, on_step=None, scan=None, deadline=None, on_basic=None)
       -> list[dict] (+ face, motion, rows = perfil de color del fondo, speech)
@@ -76,8 +80,33 @@ nombre confirmado, rotulo y seguir solo con el rol; escenas relampago (~1 s) y j
 clausula en tomas largas; el precio aterriza en 0.45 s y queda quieto >= 0.8 s (transicion seca
 despues o cruza el corte); marcas (subrayado/circulo) en la linea de SU palabra; flechas tambien
 en tarjetas sobre b-roll.
+Ola 3 (frente director, calidad visual): 'Regenerar con IA' propone OTRA version real del mismo id
+(`_variants`: otro preset/kind/posicion/parametros por semilla, sin tocar nada mas); lo bloqueado
+ocupa su frase y su rango; ids estables por frase (s<N>) o union de tomas (j<K>); titulos con
+presencia (MIN_LINE 0.052 W, sin titulos de muletillas); hook cerrado y sobre el fondo del estilo;
+momento protagonista con palabra gigante + frase legible (_bg_hero); primeros planos extremos y
+fuentes horizontales (rostro al cuadro 9:16, franja 'under'); aire muerto inicial recortado;
+behind_giant siempre detras y en SAFE; boton Seguir legible; musica con intro_fade por estilo.
+Ola 3b (revision del critico): oraciones partidas por la mayuscula de Whisper (STARTERS) y nunca
+en palabra colgante (DANGLING); muletillas generales (FILLER) recortadas del borde y LIGHT sin
+contar como contenido; hook sin preambulo de relleno (y 'muletilla al inicio' recortada); piso de
+titulos 1.15x el subtitulo y kicker solo con etiqueta explicita; primer plano: titulos, rotulo y
+Seguir BAJO la barbilla (pista de rostro del rango) con subtitulos ocultos (y_ranges hide); piso
+de plano medio en tomas abiertas (zcap, _fit_zoom si camina; _cap_cam para composiciones
+arriba); variantes por geometria y contraste, acentos ligados que se mueven con su titulo,
+composiciones que se bloquean juntas; fondo local por celdas (shots[].cells) y contorno oscuro en
+trazos blancos; drama solo con senal lexica; VLM con tope y corte tras 2 fallos.
+Perfil de la persona (plan.profile): sus datos mandan (nunca el nombre de un letrero): rotulo
+nombre + profesion (+ negocio si cabe) temprano (o cuando dice su nombre: dos palabras o
+presentacion), Seguir con red principal + @usuario + foto o iniciales (el negocio si la red es de
+la marca), pastilla de reservas con enlace corto cuando la voz invita de verdad ('link aqui
+abajo', 'agenda', 'pide tu cita'; nunca 'los dientes de abajo') y >= 1.5 s, tarjeta final >= 2.2 s
+con pila alineada (ubicacion, Seguir, chips de las demas redes, reservas) o, si a camara no cabe,
+escena corta con el video desenfocado; notas de lo que no cupo; marca de agua opcional que se
+aparta de los titulos.
 Opcional (`trim=True`): el director propone recortes `cuts` con src "ai" (b-roll mudo largo,
-silencios > SILENCE_MAX, cola `tail`); el Studio puede desactivarlos con `enabled: false`.
+silencios > SILENCE_MAX, aire muerto inicial > LEAD_MAX, cola `tail`); el Studio puede
+desactivarlos con `enabled: false`.
 """
 from __future__ import annotations
 
@@ -102,6 +131,7 @@ from typing import Any, Callable
 import numpy as np
 
 from . import assets
+from . import profile as PR
 from .ctx import SAFE, FrameCtx
 
 try:  # dentro del motor (scripts/ en sys.path)
@@ -110,7 +140,7 @@ except Exception:  # pragma: no cover
     _paths = None
 
 PROMPT_VERSION = "d6"
-SHOTS_VERSION = "s7"          # analisis de tomas (rostro por tiempo, calidad del recorte)
+SHOTS_VERSION = "s9"          # analisis de tomas (rostro por tiempo, calidad del recorte, fondo por celdas)
 TRACKS = ("text", "graphics", "cutaways", "effects", "transitions", "sfx")
 ID_PREFIX = {"text": "tx", "graphics": "gr", "cutaways": "cw", "effects": "fx",
              "transitions": "tr", "sfx": "sf"}
@@ -123,12 +153,13 @@ TEXT_ANIM_IN = ("pop", "rise", "slide_left", "slide_right", "type", "mask", "fad
                 "word_stagger", "letter_stagger")
 ANIM_OUT = ("fade", "pop_out", "slide_up", "none")
 GRAPHIC_ANIM_IN = ("pop", "draw", "fade", "rise", "scale_down", "slide_left", "slide_right", "none")
-GRAPHIC_KINDS = ("doodle", "icon", "card", "lower_third", "cta", "progress", "sticker_text")
+GRAPHIC_KINDS = ("doodle", "icon", "card", "lower_third", "cta", "progress", "sticker_text", "media",
+                 "socials")
 DOODLES = ("sparkle", "star4", "star5", "burst", "rays", "arrow_curve", "arrow_straight",
            "arrow_down", "circle_scribble", "underline", "squiggle", "dotted_path", "heart",
            "check", "cross", "exclaim", "question", "swirl", "lightning", "loop")
 CARD_VARIANTS = ("price", "location", "schedule", "link", "phone", "rating", "checklist", "stat",
-                 "generic")
+                 "generic", "booking")
 CTA_VARIANTS = ("follow", "link_below", "comment", "save", "share")
 CUTAWAY_KINDS = ("title_card", "info_card", "photo", "self_broll")
 BACKGROUNDS = ("grid_warp", "gradient", "paper", "dark_stars", "rays", "blur_self", "color",
@@ -154,18 +185,23 @@ FIELDS = {
     "text": _COMMON | {"preset", "text", "lines", "x", "y", "size", "font", "color", "accent",
                        "accent_words", "align", "stroke", "shadow", "anim_in", "anim_out",
                        "behind", "box", "from", "to", "prefix", "suffix", "decimals", "kicker",
-                       "rotation", "case", "anchor", "count_dur"},
+                       "rotation", "case", "anchor", "count_dur", "kicker_scale", "word_sync"},
     "graphics": _COMMON | {"kind", "x", "y", "size", "color", "anim_in", "anim_out", "rotation",
                            "name", "stroke", "draw", "wiggle", "path_to", "variant", "badge",
                            "badge_color", "title", "subtitle", "value", "items", "icon", "theme",
                            "label", "handle", "thickness", "text", "bg", "fg", "map", "bend",
-                           "shadow", "button", "arrow_color", "aspect", "double", "arrow_scale"},
+                           "shadow", "button", "arrow_color", "aspect", "double", "arrow_scale",
+                           "button_color", "avatar", "style", "media", "radius", "border",
+                           "border_color", "fit", "caption", "platform", "display", "initials",
+                           "links", "layout", "icon_style", "stagger", "opacity", "width", "cols",
+                           "backdrop"},
     "cutaways": _COMMON | {"kind", "background", "bg_colors", "text", "graphics", "src_t",
-                           "zoom_from", "zoom_to", "card", "anim_in", "anim_out"},
+                           "zoom_from", "zoom_to", "card", "anim_in", "anim_out", "media", "caption",
+                           "tilt", "size", "pan", "in_dur", "out_dur"},
     "effects": _COMMON | {"kind", "from", "to", "easing", "amount", "hold", "amp", "freq", "decay",
                           "pan", "contrast", "subject_color", "bg_desat", "bg_dark", "radius",
                           "background", "bg_colors", "color", "width", "glow", "mode", "release",
-                          "target", "fade_in", "fade_out", "grain", "vignette"},
+                          "target", "fade_in", "fade_out", "grain", "vignette", "tone", "lift"},
     "transitions": _EVENT | {"kind", "dur", "dir", "color", "align", "x", "y", "ring", "mode",
                              "peak", "gate"},
     "sfx": _EVENT | {"name", "gain_db", "pan", "dur", "variant", "pitch"},
@@ -211,6 +247,7 @@ STYLES: dict[str, dict] = {
         "backgrounds": ["rays", "grid_warp", "dark_stars"],
         "drama": {"effect": "bw", "contrast": 1.35, "giant": True, "shake": False,
                   "rgb": False, "flash": True, "sfx": "impact_boom"},
+        "hook_bg": "grid_warp",
         "scenes": {"budget": (0.12, 0.3), "bg_replace": ["paper", "grid_warp"], "bg_blur": True,
                    "outline": False},
         "gap": (4.0, 2.0), "coverage": (0.3, 0.85), "cutaways": 1.6, "punch": 1.0,
@@ -232,11 +269,12 @@ STYLES: dict[str, dict] = {
         "look": {"look": "cinematic", "vignette": 0.24, "grain": 0.03, "sharpen": 0.1},
         "music": {"prompt": "warm elegant instrumental, soft piano and strings, lo-fi texture, "
                             "calm premium mood",
-                  "bpm": 88, "gain_db": -17.0, "duck_db": -8.0, "mood": "inspiring"},
+                  "bpm": 88, "gain_db": -17.0, "duck_db": -8.0, "mood": "inspiring", "intro_fade": 0.6},
         "doodles": ["sparkle", "underline", "swirl", "star4", "loop"],
         "backgrounds": ["gradient", "paper"],
         "drama": {"effect": "bw", "contrast": 1.2, "giant": False, "shake": False,
                   "rgb": False, "flash": False, "sfx": "sub_drop"},
+        "hook_bg": None,
         "scenes": {"budget": (0.06, 0.18), "bg_replace": ["gradient"], "bg_blur": True,
                    "outline": False},
         "gap": (4.5, 2.6), "coverage": (0.25, 0.7), "cutaways": 0.7, "punch": 0.6,
@@ -256,11 +294,12 @@ STYLES: dict[str, dict] = {
         "trans_dur": 0.8,
         "look": {"look": "natural", "vignette": 0.08, "grain": 0.0, "sharpen": 0.1},
         "music": {"prompt": "minimal ambient electronic instrumental, soft pulses, clean and airy",
-                  "bpm": 100, "gain_db": -17.0, "duck_db": -8.0, "mood": "chill"},
+                  "bpm": 100, "gain_db": -17.0, "duck_db": -8.0, "mood": "chill", "intro_fade": 0.5},
         "doodles": ["underline", "sparkle"],
         "backgrounds": ["color"],
         "drama": {"effect": None, "contrast": 1.2, "giant": False, "shake": False,
                   "rgb": False, "flash": False, "sfx": "impact_soft"},
+        "hook_bg": None,
         "scenes": {"budget": (0.0, 0.06), "bg_replace": [], "bg_blur": True, "outline": False},
         "gap": (5.5, 3.2), "coverage": (0.12, 0.4), "cutaways": 0.0, "punch": 0.5,
         "accent_p": (0.15, 0.4), "zoom_face": 0.11, "jump_zoom": 0.08, "sfx_db": -4.0,
@@ -285,6 +324,7 @@ STYLES: dict[str, dict] = {
         "backgrounds": ["rays", "halftone", "grid_warp", "dark_stars"],
         "drama": {"effect": "bw", "contrast": 1.45, "giant": True, "shake": True,
                   "rgb": True, "flash": True, "sfx": "impact_boom"},
+        "hook_bg": "rays",
         "scenes": {"budget": (0.16, 0.34), "bg_replace": ["rays", "halftone"], "bg_blur": False,
                    "outline": True},
         "gap": (3.0, 1.4), "coverage": (0.45, 0.95), "cutaways": 1.4, "punch": 1.3,
@@ -403,13 +443,17 @@ _HUMOR_PH = ["no te preocupes", "jaja", "broma", "no vamos a hablar", "ni modo",
 _TOPIC_ROLES = [
     ({"dientes", "diente", "dental", "dentista", "muelas", "encias", "caries", "brackets",
       "ortodoncia", "limpieza dental", "sarro", "odontologia", "consultorio dental"}, "Dentista"),
-    ({"nutricion", "dieta", "nutriologa", "nutriologo", "calorias"}, "Nutricion"),
+    ({"nutricion", "dieta", "nutriologa", "nutriologo", "calorias"}, "Nutrición"),
     ({"abogado", "abogada", "demanda", "legal", "juicio"}, "Abogado"),
     ({"entrenamiento", "gym", "gimnasio", "rutina", "musculo"}, "Coach fitness"),
     ({"barberia", "barbero", "barba", "fade", "navaja", "degradado"}, "Barbero"),
     ({"cabello", "corte", "tinte", "salon", "unas", "manicure"}, "Estilista"),
-    ({"casa", "departamento", "inmueble", "renta", "credito", "hipoteca"}, "Bienes raices"),
-    ({"piel", "facial", "acne", "dermatologa", "dermatologo"}, "Dermatologia"),
+    ({"casa", "departamento", "inmueble", "renta", "credito", "hipoteca"}, "Bienes raíces"),
+    ({"piel", "facial", "acne", "dermatologa", "dermatologo"}, "Dermatología"),
+    ({"perfume", "perfumes", "fragancia", "fragancias", "colonia", "aroma", "notas", "perfumeria",
+      "decants", "decant"}, "Perfumería"),
+    ({"cafe", "restaurante", "platillo", "menu", "comida", "tacos", "postre"}, "Restaurante"),
+    ({"tienda", "envio", "envios", "pedido", "pedidos", "producto", "productos", "catalogo"}, "Tienda"),
 ]
 _NAME_TITLES = {"dra": "Dra.", "doctora": "Dra.", "dr": "Dr.", "doctor": "Dr.", "lic": "Lic.",
                 "licenciada": "Lic.", "licenciado": "Lic.", "chef": "Chef", "coach": "Coach",
@@ -485,12 +529,15 @@ ICON_BLOCK = {"mood-tongue", "mood-tongue-wink", "mood-tongue-wink-2", "trending
 TOPIC_ICONS = {
     "Dentista": ["dental", "sparkles", "shield-check", "mood-smile", "calendar-event", "map-pin",
                  "clock"],
-    "Nutricion": ["salad", "apple", "scale", "heartbeat", "leaf", "calendar-event", "map-pin"],
+    "Nutrición": ["salad", "apple", "scale", "heartbeat", "leaf", "calendar-event", "map-pin"],
     "Abogado": ["scale", "file-text", "shield-check", "briefcase", "calendar-event", "map-pin"],
     "Coach fitness": ["barbell", "flame", "heartbeat", "trophy", "calendar-event", "map-pin"],
     "Estilista": ["scissors", "sparkles", "brush", "heart", "calendar-event", "map-pin"],
-    "Bienes raices": ["home", "key", "building", "map-pin", "calendar-event", "cash"],
-    "Dermatologia": ["sparkles", "droplet", "sun", "shield-check", "calendar-event", "map-pin"],
+    "Bienes raíces": ["home", "key", "building", "map-pin", "calendar-event", "cash"],
+    "Dermatología": ["sparkles", "droplet", "sun", "shield-check", "calendar-event", "map-pin"],
+    "Perfumería": ["perfume", "sparkles", "flower", "droplet", "gift", "diamond", "shopping-bag"],
+    "Restaurante": ["tools-kitchen-2", "coffee", "flame", "star", "map-pin", "clock"],
+    "Tienda": ["building-store", "shopping-bag", "package", "truck-delivery", "tag", "gift"],
     "": ["sparkles", "star", "heart", "bulb", "circle-check", "calendar-event", "map-pin"],
 }
 
@@ -662,20 +709,24 @@ _AVAIL: dict[str, tuple[float, bool]] = {}
 
 
 def llm_available(model: str | None = None, timeout: float = 2.0) -> bool:
-    """True si ollama responde y tiene el modelo (cache de 30 s)."""
+    """True si ollama responde y tiene el modelo (cache de 30 s si responde; un fallo solo se
+    recuerda 6 s). Con la maquina cargada /api/tags puede tardar: se reintenta una vez con mas
+    tiempo antes de caer a heuristicas (un video entero sin LLM ni VLM por un timeout de 2 s)."""
     model = model or _llm_model()
     key = _ollama_url() + "|" + model
     hit = _AVAIL.get(key)
-    if hit and time.time() - hit[0] < 30:
+    if hit and time.time() - hit[0] < (30 if hit[1] else 6):
         return hit[1]
     ok = False
-    try:
-        with urllib.request.urlopen(_ollama_url() + "/api/tags", timeout=timeout) as r:
-            names = [m.get("name", "") for m in json.loads(r.read()).get("models", [])]
-        base = model.split(":")[0]
-        ok = model in names or any(n.split(":")[0] == base and model.endswith(":latest") for n in names)
-    except Exception:
-        ok = False
+    for k, to in enumerate((timeout, max(6.0, timeout * 3))):
+        try:
+            with urllib.request.urlopen(_ollama_url() + "/api/tags", timeout=to) as r:
+                names = [m.get("name", "") for m in json.loads(r.read()).get("models", [])]
+            base = model.split(":")[0]
+            ok = model in names or any(n.split(":")[0] == base and model.endswith(":latest") for n in names)
+            break
+        except Exception:
+            ok = False
     _AVAIL[key] = (time.time(), ok)
     return ok
 
@@ -1024,6 +1075,33 @@ def _shot_rows(sc: dict, s: dict) -> list[list[int]] | None:
     return [[int(round(c)) for c in r] for r in med]
 
 
+COLS = 4       # columnas del perfil de fondo por celdas (ROWS x COLS)
+
+
+def _shot_cells(sc: dict, s: dict) -> list[list[list[int]]] | None:
+    """Perfil de fondo por CELDAS (ROWS filas x COLS columnas, todo el ancho): el color medio
+    local bajo un garabato o una flecha (un gabinete blanco junto a una silla oscura no se
+    promedia con ella). [fila][columna] = [r, g, b] sRGB 0-255, mediana en el tiempo."""
+    idx = [j for j, t in enumerate(sc.get("med_t") or []) if s["start"] + 0.1 <= t <= s["end"] - 0.1]
+    if not idx and sc.get("med_t"):
+        mid = (s["start"] + s["end"]) / 2
+        idx = [min(range(len(sc["med_t"])), key=lambda j: abs(sc["med_t"][j] - mid))]
+    prof = []
+    for j in idx[:24]:
+        img = sc["med"][j].astype(np.float32)
+        h, w = img.shape[:2]
+        grid = []
+        for r in range(ROWS):
+            y0, y1 = int(h * r / ROWS), max(int(h * r / ROWS) + 1, int(h * (r + 1) / ROWS))
+            grid.append([img[y0:y1, int(w * c / COLS):max(int(w * c / COLS) + 1, int(w * (c + 1) / COLS))]
+                         .mean(axis=(0, 1)) for c in range(COLS)])
+        prof.append(grid)
+    if not prof:
+        return None
+    med = np.median(np.array(prof), axis=0)
+    return [[[int(round(v)) for v in cell] for cell in row] for row in med]
+
+
 def _speech_ratio(plan: dict, a: float, b: float) -> float:
     ws = [w for ph in plan.get("phrases") or [] for w in ph or []]
     tot = 0.0
@@ -1083,6 +1161,9 @@ def _matte_quality(video: str, s: dict) -> float | None:
         except Exception:
             continue
     return _r(float(np.mean(qs)), 3) if qs else None
+
+
+_VLM_STATUS: dict[str, str] = {}     # video -> causa por la que el VLM no describio todas las tomas
 
 
 def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | None = None,
@@ -1152,15 +1233,24 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
                     "motion": _r(float(np.median(seg)) if len(seg) else 0.0, 2),
                     # rostro a 2 fps (t, cx, cy, w, h): para no tapar la cara cuando la persona camina
                     "face_track": (fa.get("track") or []) if fa["face"] and fa["face_ratio"] >= 0.3 else [],
-                    "rows": _shot_rows(sc, s), "speech": _r(_speech_ratio(plan, s["start"], s["end"]), 2)})
+                    "rows": _shot_rows(sc, s), "cells": _shot_cells(sc, s),
+                    "speech": _r(_speech_ratio(plan, s["start"], s["end"]), 2)})
     basic([dict(o, framing=_framing_from_face(o["face"]), use="a_camara" if o["face"] else "broll",
                 place="", text_seen=[]) for o in out])
     use_vlm = use_llm and llm_available(_vlm_model())
     vlm: list[dict | None] = [None] * len(shots)
+    cause = ""
     if use_vlm and sc["med"]:
         _step(on_step, "tomas", 0.2, "describiendo tomas (VLM)")
+        # tope propio del VLM: 12 s por toma (maximo 45 s) y se corta tras 2 fallos seguidos (un
+        # servidor saturado no gasta 2 minutos para acabar en heuristicas igual)
+        vdead = _now() + min(45.0, 12.0 * max(1, len(shots)))
+        if deadline is not None:
+            vdead = min(vdead, deadline)
+        fails = 0
         for i, s in enumerate(shots):
-            if deadline is not None and _now() > deadline:
+            if _now() > vdead:
+                cause = f"tiempo agotado en la toma {i + 1}/{len(shots)}"
                 break
             mid = (s["start"] + s["end"]) / 2
             j = min(range(len(sc["med_t"])), key=lambda k: abs(sc["med_t"][k] - mid))
@@ -1168,8 +1258,20 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
             if faces[i]["face_ratio"] < 0.3:      # b-roll: letreros -> mas resolucion para leer
                 hi = _grab_frame(str(video), s["start"] + (s["end"] - s["start"]) * 0.35, 960)
                 img = hi if hi is not None else img
-            vlm[i] = _vlm_describe(img, timeout=max(5.0, min(30.0, (deadline - _now()) if deadline else 30.0)))
+            vlm[i] = _vlm_describe(img, timeout=max(5.0, min(30.0, vdead - _now())))
             _step(on_step, "tomas", 0.2 + 0.7 * (i + 1) / len(shots), f"toma {i + 1}/{len(shots)}")
+            fails = 0 if vlm[i] is not None else fails + 1
+            if fails >= 2 and i + 1 < len(shots):
+                cause = f"{fails} fallos seguidos (servidor ocupado) en la toma {i + 1}/{len(shots)}"
+                break
+        if not cause and any(v is None for v in vlm):
+            cause = f"sin respuesta en {sum(1 for v in vlm if v is None)}/{len(shots)} tomas"
+    elif use_llm and not use_vlm:
+        cause = "modelo no disponible"
+    if cause and video:
+        if len(_VLM_STATUS) > 64:
+            _VLM_STATUS.clear()
+        _VLM_STATUS[str(video)] = cause
     _step(on_step, "tomas", 0.93, "midiendo el recorte del sujeto")
     for o in out:
         o["matte_q"] = _matte_quality(str(video), o) if o["face"] else None
@@ -1192,9 +1294,11 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
                   "free_space": _free_space(face) if face else str(v.get("free_space") or "arriba"),
                   "vlm": bool(vlm[i])})
     keys = ("start", "end", "src", "person", "framing", "place", "text_seen", "use", "free_space",
-            "face", "motion", "rows", "speech", "vlm", "matte_q", "face_track")
+            "face", "motion", "rows", "cells", "speech", "vlm", "matte_q", "face_track")
     out = [{k: o[k] for k in keys} for o in out]
-    if vkey and (not use_vlm or all(v is not None for v in vlm)):
+    # la cache con clave de VLM solo guarda descripciones REALES: si el VLM no respondio (ollama
+    # ocupado) el resultado heuristico no se queda pegado para las siguientes direcciones
+    if vkey and ((use_vlm and all(v is not None for v in vlm)) or not use_llm):
         _cache_put("shots", vkey, out)
     return out
 
@@ -1223,18 +1327,68 @@ def _flatten_words(plan: dict) -> list[dict]:
     return ws
 
 
+# palabras que abren oracion: con mayuscula a media transcripcion (Whisper sin puntos) marcan
+# el inicio de una oracion nueva ('... nombres en ingles No puedo', '... de demo Yo estoy')
+STARTERS = set("""yo tu el ella ellos ellas nosotros nosotras ustedes usted no si claro asi bueno pues
+entonces ahora ok okay oye oigan mira miren bien ademas tambien luego despues primero finalmente
+igual osea basicamente obviamente literalmente digamos total vamos vale listo hoy aqui alli ahi ya
+pero porque para por que como cuando donde y o e u ni sin con en de a al del la las los lo un una
+unos unas este esta esto estos estas ese esa eso esos esas mi mis tus su sus nuestro nuestra me te
+se le les nos hay es son fue era tengo tiene tenemos quiero queremos puedo podemos voy vas va
+estoy estamos dejame dejenme permitanme imaginate imagina recuerda ojo hola gracias sigueme
+siguenos checa chequen visita ven vengan""".split())
+# palabras que no cierran una idea (determinantes, posesivos, cuantificadores, preposiciones):
+# una oracion o un bloque de titulo no termina en ellas ('que no tiene ningun', 'aqui en nuestra')
+DANGLING = STOP | set("""ningun ninguna ningunos ningunas nuestro nuestra nuestros nuestras algun
+alguna algunos algunas varios varias cierto cierta porque muy mas tan sin sobre hacia hasta segun
+cuyo cuya tus mis sus""".split())
+
+
+def _is_cap(w: dict) -> bool:
+    t = str(w.get("text", "")).lstrip("¿¡\"'(")
+    return bool(t[:1]) and t[:1].isupper()
+
+
+def _cap_start(words: list[dict], k: int) -> bool:
+    """La palabra k abre una oracion nueva por su mayuscula: es de las que abren oracion
+    (pronombre, negacion, muletilla, conector, adverbio en -mente, imperativo con enclitico) y
+    no es el inicio de un nombre de varias palabras ('de Al Jaramain', 'Glorieta Norte')."""
+    if k <= 0 or k >= len(words):
+        return False
+    w = words[k]
+    if not _is_cap(w) or str(w["text"]).isupper() and len(w["n"]) > 1:
+        return False                        # sigla ('UV', 'MXN')
+    n = w["n"]
+    if not (n in STARTERS or n.endswith("mente") or re.search(r"(anme|enme)$", n)):
+        return False
+    nx = words[k + 1] if k + 1 < len(words) else None
+    if nx is not None and _is_cap(nx) and nx["n"] not in STARTERS and nx["t0"] - w["t1"] < 0.35:
+        return False                        # 'Al Jaramain': nombre propio
+    return True
+
+
 def _sentences(words: list[dict]) -> list[dict]:
     sents, cur = [], []
+    # transcripcion sin puntos (una toma larga): la mayuscula de Whisper manda y una pausa corta
+    # sola no parte la oracion
+    punct = sum(1 for w in words if re.search(r"[.!?…]$", w["text"])) >= max(1, len(words) // 60)
+    pause = 0.42 if punct else 0.62
     for k, w in enumerate(words):
         if cur and (w["t0"] - cur[-1]["t1"] > 0.8) and not (
-                cur[-1]["text"].endswith(",") and w["t0"] - cur[-1]["t1"] < 2.5):
+                cur[-1]["text"].endswith(",") and w["t0"] - cur[-1]["t1"] < 2.5) and not (
+                cur[-1]["n"] in DANGLING and w["t0"] - cur[-1]["t1"] < 1.3 and not _cap_start(words, k)):
+            sents.append(cur)
+            cur = []
+        elif cur and _cap_start(words, k):
             sents.append(cur)
             cur = []
         cur.append(w)
         end_p = bool(re.search(r"[.!?…]$", w["text"]))
         nxt_gap = (words[k + 1]["t0"] - w["t1"]) if k + 1 < len(words) else 9
         comma = w["text"].endswith(",") and nxt_gap < 2.5
-        if end_p or (nxt_gap > 0.42 and len(cur) >= 5 and not comma):
+        dangling = w["n"] in DANGLING and not end_p and nxt_gap < 1.3
+        if end_p or (nxt_gap > pause and len(cur) >= 5 and not comma and not dangling
+                     and not (k + 1 < len(words) and _cap_start(words, k + 1))):
             sents.append(cur)
             cur = []
     if cur:
@@ -1419,7 +1573,10 @@ def extract_entities(words: list[dict], sents: list[dict], shots: list[dict] | N
     places = " ".join(norm(s.get("place", "")) + " " for s in shots or [])
     best, best_n = "", 0
     for keys, role in _TOPIC_ROLES:
-        c = sum(bag[k] for k in keys if " " not in k) + sum(2 for k in keys if k.replace(" ", "") in places.replace(" ", ""))
+        spoken = sum(bag[k] for k in keys if " " not in k)
+        # el lugar de la toma solo refuerza lo que se DICE ("interior de casa" no vuelve a nadie
+        # agente inmobiliario): sin ninguna palabra del tema en la voz no hay rol por tema
+        c = spoken + (sum(2 for k in keys if k.replace(" ", "") in places.replace(" ", "")) if spoken else 0)
         if c > best_n:
             best, best_n = role, c
     if best_n >= 2 and not ent["role"]:
@@ -1475,8 +1632,8 @@ def _ocr_confirm(ent: dict, shots: list[dict]) -> dict:
 
 
 # raices de la profesion que deben aparecer en la MISMA entrada del letrero que el nombre
-_ROLE_SIGN = {"Dentista": ("dentist", "odontolog", "dental"), "Nutricion": ("nutri",),
-              "Abogado": ("abogad", "legal", "juridic"), "Dermatologia": ("dermat",),
+_ROLE_SIGN = {"Dentista": ("dentist", "odontolog", "dental"), "Nutrición": ("nutri",),
+              "Abogado": ("abogad", "legal", "juridic"), "Dermatología": ("dermat",),
               "Barbero": ("barber",), "Estilista": ("estilist", "salon", "belleza"),
               "Coach fitness": ("entrenador", "coach", "fitness"), "Doctora": ("medic", "doctor"),
               "Doctor": ("medic", "doctor")}
@@ -1502,8 +1659,8 @@ def _pretty_name(raw: str) -> str | None:
 
 
 # como se escribe la profesion en un letrero (para la pregunta dirigida al VLM)
-_ROLE_ASK = {"Dentista": "DENTISTA (u odontologia/dental)", "Nutricion": "NUTRIOLOGA o NUTRICION",
-             "Abogado": "ABOGADO o ABOGADA", "Dermatologia": "DERMATOLOGIA", "Barbero": "BARBERIA o BARBERO",
+_ROLE_ASK = {"Dentista": "DENTISTA (u odontologia/dental)", "Nutrición": "NUTRIOLOGA o NUTRICION",
+             "Abogado": "ABOGADO o ABOGADA", "Dermatología": "DERMATOLOGIA", "Barbero": "BARBERIA o BARBERO",
              "Estilista": "ESTILISTA o SALON DE BELLEZA", "Coach fitness": "ENTRENADOR o COACH"}
 
 
@@ -1973,6 +2130,8 @@ def zone_of(track: str, item: dict) -> str | None:
             return "edge"
         if k in ("doodle", "icon"):
             return "accent"
+        if k == "socials" and item.get("variant") == "watermark":
+            return "edge"                    # marca de agua: no ocupa ninguna franja
         return _zone_y(float(item.get("y", 0.3)))
     return None
 
@@ -2031,7 +2190,7 @@ def measure_lines(item: dict, style: str = "dinamico", with_text: bool = False) 
 
 
 _CARD_H_EST = {"location": 0.43, "price": 0.27, "schedule": 0.17, "link": 0.2, "phone": 0.2,
-               "rating": 0.2, "checklist": 0.25, "stat": 0.22, "generic": 0.16}
+               "rating": 0.2, "checklist": 0.25, "stat": 0.22, "generic": 0.16, "booking": 0.3}
 
 
 def card_height(item: dict, style: str = "dinamico") -> float:
@@ -2042,6 +2201,41 @@ def card_height(item: dict, style: str = "dinamico") -> float:
         return float(r[8]) / 1920.0
     except Exception:
         return _CARD_H_EST.get(item.get("variant", "generic"), 0.18) * float(item.get("size", 0.74)) * 1080 / 1920
+
+
+def lt_sub_fits(sub: str, size: float, style: str = "dinamico", x: float = 0.07, min_k: float = 0.8) -> bool:
+    """El subtitulo del rotulo (versalitas con tracking, graphics.draw_lower_third) cabe a >=
+    `min_k` de su tamano nominal en el ancho hasta SAFE.right."""
+    try:
+        from . import graphics as G
+        c = _measure_ctx(style)
+        avail = (SAFE["right"] - x) * c.W - c.px(10) - 2 * c.px(28)
+        fs = G.font(G._fonts(c)["label"], size * c.W * 0.5 * min_k)
+        return G.text_w(fs, str(sub).upper(), fs.getSize() * 0.14) <= avail
+    except Exception:
+        return len(str(sub)) <= 30
+
+
+def cta_natural_width(item: dict, style: str = "dinamico") -> float:
+    """Ancho natural (fraccion de W) de un CTA segun graphics (sin `width`)."""
+    try:
+        from . import graphics as G
+        it = {k: v for k, v in item.items() if k != "width"}
+        return 2.0 * G.cta_extent(it, _measure_ctx(style)) / 1080.0
+    except Exception:
+        return float(item.get("size", 0.7))
+
+
+def socials_size(item: dict, style: str = "dinamico") -> tuple[float, float]:
+    """(ancho, alto) normalizados del grupo de chips de redes segun motion/graphics.py (o estimado)."""
+    try:
+        from . import graphics as G
+        w, h = G.socials_extent(dict(item), _measure_ctx(style))
+        return w / 1080.0, h / 1920.0
+    except Exception:
+        n = len(item.get("links") or []) or 1
+        ch = float(item.get("size", 0.074)) * 1080 / 1920
+        return 0.6, n * ch + (n - 1) * 0.22 * ch
 
 
 def _text_w(font: str, size: float, text: str) -> float:
@@ -2134,6 +2328,33 @@ def _luma(c) -> float:
     r, g, b = (v / 255 for v in _rgb(c))
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
+
+# muletillas y marcadores de discurso GENERALES del espanol hablado: nunca son el protagonista
+# de un titulo y se recortan del borde de un titulo ('Basicamente el perfume...' -> 'el perfume...')
+FILLER = {"pues", "nada", "basicamente", "bueno", "este", "eh", "ehh", "mmm", "ok", "okay", "entonces",
+          "obviamente", "literalmente", "tipo", "digamos", "osea", "asi", "igual", "verdad", "creo",
+          "permitanme", "permiteme", "dejame", "dejenme", "mira", "miren", "oye", "oigan", "sabes"}
+# palabras sin contenido propio (auxiliares y verbos ligeros, deicticos, cuantificadores, sustantivos
+# vagos): no se recortan de un titulo pero no cuentan como contenido. Categorias generales del
+# idioma, no vocabulario de un rubro: 'Tengo 20% de descuento' tiene contenido (numero + sustantivo)
+LIGHT = {"ser", "es", "son", "era", "fue", "soy", "somos", "estar", "estoy", "estas", "esta", "estamos",
+         "estan", "haber", "hay", "ha", "han", "he", "hemos", "tener", "tengo", "tiene", "tienes",
+         "tenemos", "tienen", "hacer", "hago", "hace", "hacemos", "hacen", "haciendo", "hecho", "ir",
+         "voy", "vas", "va", "vamos", "van", "poder", "puedo", "puede", "puedes", "podemos", "pueden",
+         "poderles", "querer", "quiero", "quieres", "quiere", "queremos", "quieren", "decir", "digo",
+         "dice", "dicho", "dije", "saber", "se", "sabe", "hablando", "hablar", "aqui", "ahi", "alla",
+         "alli", "ahora", "hoy", "mismo", "misma", "todo", "toda", "todos", "todas", "bien", "algo",
+         "cosa", "cosas", "caso", "manera", "forma", "estilo", "parte", "alguna", "alguno", "mencione",
+         "decirlo", "gente", "ningun", "ninguna", "tan", "tanto", "tanta", "muy", "mas", "menos"}
+# frases de relleno completas (se descuentan antes de medir el contenido de un bloque)
+FILLER_PH = ["o algo por el estilo", "por decirlo de alguna manera", "como ya mencione", "en ninguna parte",
+             "asi que nada", "de alguna manera", "o sea", "la verdad", "por asi decirlo", "que te digo",
+             "ok gente", "hola gente", "que onda gente", "asi que", "en este caso", "por decirlo asi",
+             "ya que"]
+# muletillas que se recortan del INICIO o del FINAL de un titulo (el subtitulo las conserva)
+EDGE_FILLER = FILLER | {"que", "y", "o", "pero"}
+# tamano efectivo minimo de una linea de titulo (fraccion de W; las etiquetas de tarjetas aparte)
+MIN_LINE = 0.052
 
 CLAUSE_W = {"y", "e", "o", "u", "pero", "que", "como", "cuando", "donde", "porque", "si", "para",
             "aunque", "pues", "entonces", "ni", "mientras", "sino"}
@@ -2240,6 +2461,7 @@ class _Choreo:
 
     MAXW = 0.76                     # ancho maximo de un bloque de texto (fraccion de W)
     XC = 0.5                        # centro horizontal de los bloques (0.12..0.88 con MAXW)
+    XS = (SAFE["left"] + SAFE["right"]) / 2     # centro de SAFE: pila alineada de la tarjeta final
 
     def __init__(self, plan: dict, shots: list[dict], script: dict, style: str, intensity: float,
                  seed: int, fixed: dict | None = None, windows: list | None = None, rev: int = 0):
@@ -2259,7 +2481,18 @@ class _Choreo:
             self.aspect = float(dims[1]) / float(dims[0]) if dims[0] else 16 / 9
         except Exception:
             pass
+        # fuente horizontal (o cuadrada): la salida 9:16 es un recorte que SIGUE la cara
+        # (reframe_track): ancho del recorte en fraccion del ancho de la fuente
+        self.crop_w = 1.0
+        # zoom maximo de encuadre: sin pasar de ~1.15x de ampliacion sobre la resolucion de la
+        # fuente (4K vertical 2880 px -> 1.72; 1080p -> 1.3)
+        try:
+            src_h = float(dims[1])
+        except Exception:
+            src_h = 1920.0
+        self.zcap = _clamp(src_h / 1920.0 * 1.15, 1.3, 1.8)
         if self.aspect < 1.2:           # salida 9:16 siempre (el base pass reencuadra)
+            self.crop_w = _clamp(self.aspect * 9.0 / 16.0, 0.05, 1.0)
             self.aspect = 16 / 9
         self.words = script["words"]
         self.sents = script["sents"]
@@ -2294,6 +2527,12 @@ class _Choreo:
         cap_sz = float(cap["size"]) * (1.28 if cap["preset"] == "bold_caps" else 1.0)
         # borde superior de la linea de subtitulos: nada con flecha/tarjeta debe bajar de aqui
         self.cap_top = float(cap["y"]) - cap_sz * (1080.0 / 1920.0) * 0.8
+        # jerarquia: un titulo nunca es mas chico que 1.15x el subtitulo que oculta (si no cabe
+        # con ese tamano, ese bloque se queda como subtitulo)
+        self.title_floor = float(cap["size"]) * (1.15 if cap["preset"] == "bold_caps" else 1.0) * 1.15
+        self.kicker_labels: Counter = Counter()      # etiquetas de kicker ya usadas
+        self.cap_hide: list[dict] = []               # captions.y_ranges con hide (CTA en primer plano)
+        self.prof_notes: list[str] = []              # notas del perfil (lo que no cupo en el cierre)
         self.grid = None                     # rejilla de la musica (beats en tiempo final)
         self.snapped: list[tuple[float, float]] = []
         self.ink: list[tuple] = []          # (fa, fb, x0, y0, x1, y1, id) tinta de textos
@@ -2305,12 +2544,23 @@ class _Choreo:
         self.sent_main = None
         # presupuesto de escenas a pantalla completa (listas, precio en escena, tarjetas grandes)
         self.n_cut_left = int(round(self.S["cutaways"] * self.I * max(1.0, self.D / 25.0)))
-        self.name = name_usable(self.ent)       # nombre publicable (voz o confirmado)
+        self.name = name_usable(self.ent)       # nombre publicable (voz, confirmado o perfil)
+        # perfil de la persona (3.2): rotulo, Seguir, reservas y cierre salen de SUS datos
+        self.prof = _plan_profile(plan)
+        self.psocial = PR.primary_social(self.prof)
+        self.book = PR.booking_link(self.prof)
+        # iconos del rubro y musica: el rubro de la voz (la profesion escrita no los cambia)
+        self.role = self.ent["topic_role"] if "topic_role" in self.ent else self.ent.get("role", "")
+        if self.book is not None and PR.uses(self.prof, "booking_cta") and self.anc.get("link") is None:
+            li = self._booking_anchor()
+            if li is not None:
+                self.anc["link"] = li
         self.link_item = None                   # CTA link_below de la frase del link
         self.link_ext = False                   # ese link se sostiene hasta el ultimo cuadro
         self.protect: list[tuple[float, float]] = []   # (desde, hasta) tiempo final: dato que se lee
         self.cap_ranges = None                  # captions.y_ranges (tomas de cuerpo completo)
         self.last_word = max(self.words, key=lambda w: w["f1"]) if self.words else None
+        self.fixed_titles: list[tuple[float, float]] = []      # (inicio, fin) originales
         for tr, items in self.fixed.items():
             for it in items:
                 self.ids.add(str(it.get("id")))
@@ -2329,6 +2579,9 @@ class _Choreo:
                                                "kind": it.get("kind")})
                     continue
                 a, b = self.f(float(it["start"])), self.f(float(it["end"]))
+                if tr == "effects" and it.get("kind") == "bg_replace" and it.get("enabled", True) is not False:
+                    # fondo reemplazado que se queda (bloqueado): la tinta de encima se mide contra el
+                    self.bg_fx.append((a, b, "light" if it.get("background") in LIGHT_BG else "dark"))
                 if z:
                     self.occ[z].append((a, b, str(it.get("id"))))
                     if z == "accent":
@@ -2337,7 +2590,29 @@ class _Choreo:
                     r = measure_text(it, self.style)
                     if r is not None:
                         self.ink.append((a, b, *self._pad_rect(it, r), str(it.get("id"))))
+                if tr in ("text", "cutaways") and it.get("enabled", True) is not False:
+                    # lo bloqueado ocupa SU frase y su rango: ningun otro titulo en ninguna franja
+                    # (no se regenera el mismo texto encima ni en otra zona)
+                    self.fixed_titles.append((float(it["start"]), float(it["end"])))
+                    # las OTRAS franjas van marcadas 'lockzone:': bloquean titulos, pero no la
+                    # pastilla del enlace ni los CTA (free(..., cta=True)). Sin la marca, bloquear un
+                    # titulo junto a 'link aqui abajo' borraba 'Agenda en PaseoClub' al re-dirigir
+                    for zz in ("top", "center", "low"):
+                        if zz != z:
+                            self.occ[zz].append((a, b, "lockzone:" + str(it.get("id"))))
+                if tr == "graphics" and it.get("kind") == "card":
+                    v = it.get("variant")
+                    self.shown |= {"price"} if v == "price" else {"address", "landmark"} if v == "location" else set()
                 self.events.append((a, str(it.get("id"))))
+        # palabras que ya cubre un titulo/escena bloqueado: su frase no se vuelve a titular
+        for a0, b0 in self.fixed_titles:
+            for w in self.words:
+                if a0 - 0.05 <= w["t0"] and w["t1"] <= b0 + 0.08:
+                    self.titled_words.add(w["i"])
+        for s_ in self.sents:
+            ws_ = self.words[s_["w0"]:s_["w1"] + 1]
+            if ws_ and sum(1 for w in ws_ if w["i"] in self.titled_words) >= 0.6 * len(ws_):
+                s_["info"]["_done"] = True
 
     # ---------------------------------------------------------- tiempo
     def f(self, t: float) -> float:
@@ -2409,6 +2684,17 @@ class _Choreo:
         return pal["dark"]
 
     # ---------------------------------------------------------- tomas y huecos de pantalla
+    def out_face(self, face: list | None) -> list | None:
+        """Rostro (cx, cy, w, h) de la FUENTE -> cuadro de salida 9:16. En una fuente vertical es
+        el mismo; en una horizontal el recorte sigue la cara (centrado en ella salvo en los
+        bordes del cuadro) y todo lo horizontal se escala por 1/ancho del recorte."""
+        if not face or self.crop_w >= 0.999:
+            return face
+        cw = self.crop_w
+        cx, cy, fw, fh = [float(v) for v in face[:4]]
+        c0 = _clamp(cx, cw / 2, 1 - cw / 2)
+        return [_r(_clamp(0.5 + (cx - c0) / cw, 0.0, 1.0), 4), cy, _r(min(1.0, fw / cw), 4), fh]
+
     def _prep_shots(self, shots: list[dict]) -> list[dict]:
         out = []
         for k, s in enumerate(shots):
@@ -2416,18 +2702,38 @@ class _Choreo:
             d["k"] = k
             d["f0"], d["f1"] = self.f(s["start"]), self.f(s["end"])
             talk = s.get("use", "a_camara") == "a_camara"
+            if self.crop_w < 0.999:
+                d["face"] = self.out_face(s.get("face"))
+                d["face_track"] = [[tr[0], *self.out_face(tr[1:5])] for tr in s.get("face_track") or []
+                                   if len(tr) >= 5]
+                s = d
             face = s.get("face") or (list(NOMINAL_FACE) if talk else None)
             d["face"] = face
             d["face_nominal"] = bool(talk and not s.get("face"))
             d["talk"] = talk
             z0 = 1.0
+            wide = bool(talk and not d["face_nominal"] and face[3] < 0.14)
             if talk and not d["face_nominal"]:
                 z0 = _clamp(self.S["zoom_face"] / max(0.03, face[3]), 1.0, 1.45)
+                if wide:
+                    # plano abierto a camara (cuerpo entero): piso de PLANO MEDIO (cara ~0.14-0.16
+                    # del alto, de la cintura arriba) como el editor de referencia; la camara
+                    # limita el zoom por toma si la persona camina (pista de rostro). Deja sitio
+                    # bajo el tope para el cerrado del jump-cut
+                    jn = 1.0 + self.S["jump_zoom"] * (0.6 + 0.4 * self.I)
+                    z0 = max(z0, min(self.zcap / jn, (self.S["zoom_face"] + 0.045) / max(0.03, face[3])))
             d["z0"] = z0
+            d["wide"] = wide
             mq = s.get("matte_q")
             # recorte del sujeto confiable (contorno / reemplazo de fondo); sin medicion = se permite
             d["matte_ok"] = bool(talk and not d["face_nominal"] and (mq is None or float(mq) >= MATTE_OK))
-            zmax = z0 * (1.0 + self.S["jump_zoom"] * (0.6 + 0.4 * self.I)) * 1.03
+            # en un primer plano (cara > ~1/5 del alto) el jump-zoom es corto: cerrar mas corta la
+            # frente y empuja la barbilla sobre los titulos; en primer plano extremo casi nada
+            close = _clamp((0.34 - face[3]) / 0.2, 0.25, 1.0) if face and talk else 1.0
+            if face and talk and face[3] >= 0.3:
+                close = 0.15
+            d["jz"] = 1.0 + self.S["jump_zoom"] * (0.6 + 0.4 * self.I) * close
+            zmax = z0 * d["jz"] * 1.03
             d["zmax"] = zmax
             d["face_x"] = face[0] if face else None
             d.update(self._geom(d, zmax))
@@ -2439,24 +2745,74 @@ class _Choreo:
         face = shot.get("face")
         if not face:
             return {"top": (SAFE["top"] + 0.02, 0.36), "center": (0.38, ZONE_Y["center"]),
-                    "low": (ZONE_Y["center"], ZONE_Y["low"]), "head_top": None, "chin": None}
-        cx, cy, fw, fh = face
+                    "low": (ZONE_Y["center"], ZONE_Y["low"]), "under": None, "head_top": None,
+                    "chin": None}
+        cx, cy, fw, fh = face[:4]
         z = z * 1.08                          # margen para los punch-in
         head_top = cy - fh * z * 0.98
-        chin = cy + fh * z * 0.62
+        # la caja del detector llega a la barbilla (h/2 bajo el centro): margen fijo para el
+        # cuello (un margen proporcional a h se come media pantalla en un primer plano)
+        chin = cy + fh * z * 0.52 + 0.012
+        # primer plano (la barbilla cae bajo el pecho: no hay franja de pecho ni arriba de la
+        # cabeza): el titulo va BAJO la barbilla y puede ocupar la franja de los subtitulos
+        # (se ocultan mientras hay titulo)
+        under = None
+        if fh >= 0.25:
+            # primer plano extremo: el titulo va bajo la BARBILLA (cuello / pecho y la franja de
+            # los subtitulos, que se ocultan) anclado al fondo; nunca sobre boca ni barbilla
+            if SAFE["bottom"] - 0.012 - (chin + 0.004) >= 0.035:
+                under = (chin + 0.004, SAFE["bottom"] - 0.012)
+        elif chin > ZONE_Y["center"] - 0.07:
+            under = (min(max(chin - 0.01, 0.5), SAFE["bottom"] - 0.08), SAFE["bottom"] - 0.012)
         return {"top": (SAFE["top"] + 0.012, head_top - 0.02),
                 "center": (chin + 0.03, ZONE_Y["center"]),
                 "low": (max(ZONE_Y["center"], chin + 0.03), ZONE_Y["low"]),
-                "head_top": head_top, "chin": chin}
+                "under": under, "head_top": head_top, "chin": chin}
 
     def zoom_level(self, shot: dict, t0: float, t1: float) -> float:
         lv = [z for a, b, z in self.cam if a < t1 and t0 < b]
         return max(lv) if lv else shot.get("z0", 1.0)
 
-    def geom(self, shot: dict, t0: float, t1: float) -> dict:
-        return self._geom(shot, self.zoom_level(shot, t0, t1))
+    def geom(self, shot: dict, t0: float, t1: float, z: float | None = None) -> dict:
+        """Huecos libres del rango [t0, t1]: con la pista de rostro la cabeza y la barbilla son
+        las de TODO el rango (quien se inclina hacia la camara no queda bajo un titulo).
+        `z` = zoom supuesto (por defecto el de la camara en ese rango)."""
+        z = self.zoom_level(shot, t0, t1) if z is None else z
+        g = self._geom(shot, z)
+        if not shot.get("talk") or not shot.get("face") or shot.get("face_nominal") or g.get("chin") is None:
+            return g
+        pts = self._track_out(shot, t0, t1, z)
+        if len(pts) <= 1:
+            return g
+        ht = min(oy - fh * 0.98 for _ox, oy, _fw, fh in pts)
+        chin = max(oy + fh * 0.52 + 0.012 for _ox, oy, _fw, fh in pts)
+        g = dict(g)
+        g["head_top"], g["chin"] = min(g["head_top"], ht), max(g["chin"], chin)
+        g["top"] = (g["top"][0], min(g["top"][1], g["head_top"] - 0.02))
+        g["center"] = (max(g["center"][0], g["chin"] + 0.03), g["center"][1])
+        g["low"] = (max(g["low"][0], g["chin"] + 0.03), g["low"][1])
+        if g.get("under"):
+            lo = max(g["under"][0], g["chin"] + 0.004)
+            g["under"] = (lo, g["under"][1]) if g["under"][1] - lo >= 0.035 else None
+        return g
 
-    def face_rect(self, shot: dict, t0: float, t1: float) -> tuple | None:
+    def _track_out(self, shot: dict, t0: float, t1: float, z: float | None = None) -> list[tuple]:
+        """Rostro de la pista (2 fps) en [t0, t1] en el cuadro de salida, con el zoom anclado en la
+        cara mediana: [(cx, cy, w, h)] con w/h ya escalados (zoom * 1.08 de margen para los
+        punch-in). Se descartan detecciones sueltas (otra cara, un reflejo)."""
+        face = shot.get("face")
+        if not face:
+            return []
+        ax, ay, fw0, fh0 = [float(v) for v in face[:4]]
+        z = self.zoom_level(shot, t0, t1) if z is None else z
+        zz = z * 1.08
+        pts = [tr for tr in shot.get("face_track") or [] if len(tr) >= 5 and t0 - 0.3 <= tr[0] <= t1 + 0.3]
+        pts = [tr for tr in pts if 0.6 * fh0 <= float(tr[4]) <= 1.6 * fh0 and abs(float(tr[1]) - ax) < 0.35] or \
+            [[0.0, ax, ay, fw0, fh0]]
+        return [(ax + (float(cx) - ax) * z, ay + (float(cy) - ay) * z, float(fw) * zz, float(fh) * zz)
+                for _t, cx, cy, fw, fh in pts]
+
+    def face_rect(self, shot: dict, t0: float, t1: float, zl: float | None = None) -> tuple | None:
         """Caja de la cabeza en el cuadro de salida (zoom anclado en la cara). Si la toma trae
         pista de rostro (2 fps), es la union de las posiciones en [t0, t1]: la persona que
         camina no queda debajo de un icono."""
@@ -2464,7 +2820,7 @@ class _Choreo:
         if not face or not shot.get("talk"):
             return None
         ax, ay, fw0, fh0 = face
-        z = self.zoom_level(shot, t0, t1) * 1.08
+        z = (self.zoom_level(shot, t0, t1) if zl is None else zl) * 1.08
         pts = [tr for tr in shot.get("face_track") or [] if t0 - 0.3 <= tr[0] <= t1 + 0.3]
         if not pts:
             pts = [[0.0, ax, ay, fw0, fh0]]
@@ -2473,8 +2829,29 @@ class _Choreo:
         for _t, cx, cy, fw, fh in pts:
             ox, oy = ax + (cx - ax) * z / 1.08, ay + (cy - ay) * z / 1.08     # zoom anclado en la mediana
             x0, x1 = min(x0, ox - fw * z * 0.7), max(x1, ox + fw * z * 0.7)
-            y0, y1 = min(y0, oy - fh * z * 1.05), max(y1, oy + fh * z * 0.8)
+            y0, y1 = min(y0, oy - fh * z * 1.05), max(y1, oy + fh * z * 0.55 + 0.03)
         return (x0, y0, x1, y1)
+
+    def face_core(self, shot: dict, t0: float, t1: float, zl: float | None = None) -> tuple | None:
+        """Zona intocable de la cara (de media frente a la barbilla; la caja del detector sube
+        hasta media frente): ningun texto delante la toca. El cabello y la coronilla si pueden
+        quedar bajo un titulo (como en las ediciones de referencia)."""
+        fr = self.face_rect(shot, t0, t1, zl)
+        if fr is None:
+            return None
+        ax, ay, fw0, fh0 = shot["face"][:4]
+        z = (self.zoom_level(shot, t0, t1) if zl is None else zl) * 1.08
+        pts = [tr for tr in shot.get("face_track") or [] if t0 - 0.3 <= tr[0] <= t1 + 0.3] or \
+            [[0.0, ax, ay, fw0, fh0]]
+        top = min(ay + (cy - ay) * z / 1.08 - fh * z * 0.5 for _t, cx, cy, fw, fh in pts)
+        bottom = fr[3]
+        if fh0 >= 0.25:
+            # primer plano extremo: se protege hasta la BARBILLA (con la pista del rango); el
+            # cuello y el pecho si pueden quedar bajo el titulo
+            pts_o = self._track_out(shot, t0, t1, zl)
+            bottom = min(fr[3], max(oy + fh * 0.52 + 0.004 for _ox, oy, _fw, fh in pts_o))
+        w = fr[2] - fr[0]
+        return (fr[0] + 0.12 * w, max(fr[1], top), fr[2] - 0.12 * w, bottom)
 
     def shot_at(self, t: float) -> dict:
         for s in self.shots:
@@ -2488,15 +2865,26 @@ class _Choreo:
                                                    "head_top": None, "chin": None}
 
     # ---------------------------------------------------------- fondo bajo el texto
-    def _bg_at(self, shot: dict, y0: float, y1: float, t0: float, t1: float) -> dict | None:
+    def _bg_at(self, shot: dict, y0: float, y1: float, t0: float, t1: float,
+               x0: float | None = None, x1: float | None = None) -> dict | None:
         """Color medio del fondo en la franja [y0, y1] del cuadro de salida (None = desconocido).
-        Usa el perfil por toma (shots[].rows) y el zoom anclado en la cara; si hay un
-        reemplazo de fondo activo, manda el fondo sintetico."""
+        Usa el perfil por toma (shots[].rows; con [x0, x1] y shots[].cells, el de las celdas de
+        esa zona) y el zoom anclado en la cara; si hay un reemplazo de fondo activo, manda el
+        fondo sintetico."""
         fa, fb = self.f(t0), self.f(t1)
         for a, b, kind in self.bg_fx:
             if a < fb and fa < b and (min(b, fb) - max(a, fa)) >= 0.4 * max(1e-3, fb - fa):
                 ht = self.geom(shot, t0, t1)["head_top"] if shot.get("talk") else None
-                if ht is None or y1 <= ht + 0.01:
+                side = False
+                if x0 is not None and x1 is not None and ht is not None:
+                    # a un lado de la persona (fuera de su silueta: ~3 anchos de cara) tambien
+                    # manda el fondo sintetico
+                    pts_ = self._track_out(shot, t0, t1)
+                    if pts_:
+                        # el centro del objeto fuera del torso (~1 ancho de cara a cada lado)
+                        xm = (x0 + x1) / 2
+                        side = all(abs(xm - cx_) > 1.0 * w_ for cx_, _cy, w_, _h in pts_)
+                if ht is None or y1 <= ht + 0.01 or side:
                     rgb = (236, 231, 222) if kind == "light" else (16, 16, 20)
                     return {"rgb": rgb, "L": rel_lum(rgb), "sat": 0.05, "src": "fx"}
                 break       # el texto cae sobre la persona (centrada): manda su color real
@@ -2510,6 +2898,17 @@ class _Choreo:
         sy1 = _clamp(cy + (y1 - cy) / z, 0.0, 1.0)
         i0, i1 = int(sy0 * n), max(int(sy0 * n) + 1, int(math.ceil(sy1 * n)))
         sel = rows[max(0, i0):min(n, i1)] or rows[min(n - 1, max(0, i0)):min(n, i0 + 1)]
+        cells = shot.get("cells")
+        if x0 is not None and x1 is not None and cells and len(cells) == n and self.crop_w >= 0.999:
+            # color LOCAL: solo las columnas bajo [x0, x1] (zoom anclado en la cara)
+            m = len(cells[0])
+            cx = shot["face"][0] if shot.get("face") and shot.get("talk") else 0.5
+            sx0 = _clamp(cx + (x0 - cx) / z, 0.0, 1.0)
+            sx1 = _clamp(cx + (x1 - cx) / z, 0.0, 1.0)
+            j0, j1 = int(sx0 * m), max(int(sx0 * m) + 1, int(math.ceil(sx1 * m)))
+            j0, j1 = min(m - 1, max(0, j0)), min(m, max(1, j1))
+            ii0, ii1 = min(n - 1, max(0, i0)), min(n, max(i0 + 1, i1))
+            sel = [cells[r][c] for r in range(ii0, ii1) for c in range(j0, j1)] or sel
         rgb = tuple(float(np.mean([r[c] for r in sel])) for c in range(3))
         h, sat, v = _hsv(rgb)
         return {"rgb": rgb, "L": rel_lum(rgb), "sat": sat, "src": "rows"}
@@ -2562,7 +2961,7 @@ class _Choreo:
 
     def doodle_color(self, t0: float, t1: float, x: float, y: float) -> str:
         shot = self.shot_at(t0)
-        bg = self._bg_at(shot, y - 0.03, y + 0.03, t0, t1)
+        bg = self._bg_at(shot, y - 0.03, y + 0.03, t0, t1, x - 0.06, x + 0.06)
         if bg is not None and contrast("#FFFFFF", bg["rgb"]) < 2.4:
             return self.acc_light
         if bg is not None and contrast(self.pal["accent"], bg["rgb"]) < 2.2:
@@ -2570,16 +2969,20 @@ class _Choreo:
         return self.pal["accent"]
 
     # ---------------------------------------------------------- ocupacion
-    def free(self, zone: str, fa: float, fb: float, pad: float = 0.0) -> bool:
-        if zone == "center_low":
-            return self.free("center", fa, fb, pad) and self.free("low", fa, fb, pad)
+    def free(self, zone: str, fa: float, fb: float, pad: float = 0.0, cta: bool = False) -> bool:
+        """`cta`: para un CTA (Seguir, enlace) las franjas que un titulo bloqueado reserva de mas
+        ('lockzone:') no cuentan; su propia franja si."""
+        if zone in ("center_low", "under"):
+            return self.free("center", fa, fb, pad, cta) and self.free("low", fa, fb, pad, cta)
         zs = [zone] if zone != "accent" else []
         if zone in ("top", "center", "low", "accent"):
             zs.append("full")
         if zone == "full":
             zs = ["full", "top", "center", "low", "accent"]
         for z in zs:
-            for a, b, _ in self.occ[z]:
+            for a, b, iid in self.occ[z]:
+                if cta and str(iid).startswith("lockzone:"):
+                    continue
                 if fa < b + pad - 1e-6 and a < fb + pad - 1e-6:
                     return False
         if self.windows is not None:
@@ -2666,18 +3069,44 @@ class _Choreo:
         return o
 
     # ---------------------------------------------------------- emision
-    def _id(self, track: str, role: str) -> str:
-        base = f"{ID_PREFIX[track]}_{role}"
-        n = 1
-        while f"{base}_{n}" in self.ids:
-            n += 1
-        iid = f"{base}_{n}"
+    def _sid_at(self, t: float) -> int | None:
+        """Frase (id) que contiene t (tiempo original, +-0.35 s) o la siguiente."""
+        nxt = None
+        for s_ in self.sents:
+            if s_["t0"] - 0.35 <= t <= s_["t1"] + 0.35:
+                return s_["id"]
+            if nxt is None and s_["t0"] > t:
+                nxt = s_["id"]
+        if nxt is not None:
+            return nxt
+        return self.sents[-1]["id"] if self.sents else None
+
+    def _anchor(self, track: str, fields: dict) -> str:
+        """Ancla ESTABLE del id: la frase del guion (s3) o, en transiciones de corte, la toma que
+        empieza ahi (j2). Asi un re-dirigir o un cambio de estilo conserva el id del elemento de
+        esa frase (la seleccion y el bloqueo del Studio lo siguen)."""
+        if track == "transitions":
+            at = float(fields.get("at", 0.0))
+            for sh in self.shots[1:]:
+                if abs(float(sh["start"]) - at) < 0.35:
+                    return f"j{sh['k']}"
+        t = float(fields.get("at", fields.get("start", 0.0)) or 0.0)
+        sid = self._sid_at(t)
+        return f"s{sid}" if sid is not None else f"t{int(round(t * 10))}"
+
+    def _id(self, track: str, role: str, anchor: str | None = None) -> str:
+        base = f"{ID_PREFIX[track]}_{role}_{anchor or 'x'}"
+        iid = base
+        k = 0
+        while iid in self.ids:
+            k += 1
+            iid = base + (chr(ord("a") + k) if k < 26 else str(k))
         self.ids.add(iid)
         return iid
 
     def add(self, track: str, role: str, fields: dict, zone: str | None = None,
             event: bool = True) -> dict | None:
-        it = {"id": self._id(track, role)}
+        it = {"id": self._id(track, role, self._anchor(track, fields))}
         if track in ("transitions", "sfx"):
             it.update({"enabled": True, "src": "ai", "locked": False})
             it.update(fields)
@@ -2697,19 +3126,40 @@ class _Choreo:
                 if not any(wa - 0.3 <= fa and fb <= wb + 0.6 for wa, wb in self.windows):
                     self.ids.discard(it["id"])
                     return None
+            # un item que arranca justo en una union (inicio de un tramo tras un corte) arranca un
+            # poco DENTRO del corte: el render cuantiza los tramos a su reticula de cuadros (el
+            # inicio del tramo baja hasta 1 cuadro) y sin esto el primer cuadro tras la union
+            # queda sin su zoom/titulo (un cuadro abierto que parpadea en cada jump-cut)
+            for ka, (kpa, kpb) in enumerate(self.tl.keeps):
+                if abs(s - kpa) < 1e-4 and kpa > 1e-4:
+                    prev_end = self.tl.keeps[ka - 1][1] if ka > 0 else 0.0
+                    s = max(prev_end + 1e-3, s - min(0.045, (kpa - prev_end) / 2))
+                    break
             it.update({"start": _r(s), "end": _r(e), "enabled": True, "src": "ai", "locked": False,
                        "intensity": 1.0})
             it.update({k: v for k, v in fields.items() if k not in ("start", "end")})
+            if track == "text" and it.get("lines") and it.get("preset") != "counter":
+                self._line_floor(it)
+            if track == "text" and it.get("preset") == "behind_giant":
+                self._sane_behind(it)
+            if track == "graphics" and it.get("kind") == "doodle" and it.get("color") and \
+                    _luma(it["color"]) > 0.85 and not it.get("border_color"):
+                # trazo blanco: contorno oscuro si el fondo local no le da contraste de sobra
+                x_, y_ = float(it.get("x", 0.5)), float(it.get("y", 0.5))
+                bg_ = self._bg_at(self.shot_at(s + 0.02), y_ - 0.03, y_ + 0.03, s, e, x_ - 0.06, x_ + 0.06)
+                if bg_ is None or contrast("#FFFFFF", bg_["rgb"]) < 4.5:
+                    it["border_color"] = "#161616"
             if zone is None:
                 zone = zone_of(track, it)
             if zone == "accent":
                 ok = self.free_accent(float(it.get("x", 0.5)), float(it.get("y", 0.5)), fa, fb)
             else:
-                ok = not zone or zone in ("bottom", "edge") or self.free(zone, fa, fb)
+                ok = not zone or zone in ("bottom", "edge") or self.free(
+                    zone, fa, fb, cta=track == "graphics" and it.get("kind") == "cta")
             if not ok:
                 self.ids.discard(it["id"])
                 return None
-            for zz in (["center", "low"] if zone == "center_low" else [zone] if zone else []):
+            for zz in (["center", "low"] if zone in ("center_low", "under") else [zone] if zone else []):
                 self.occ[zz].append((fa, fb, it["id"]))
             if zone == "accent":
                 self.acc_pos[it["id"]] = (float(it.get("x", 0.5)), float(it.get("y", 0.5)))
@@ -2717,6 +3167,53 @@ class _Choreo:
                 self.events.append((fa, it["id"]))
         self.fx[track].append(it)
         return it
+
+    def _unplace(self, it: dict) -> None:
+        """Quita un item recien colocado (pista, franjas, tinta, eventos y sus SFX pedidos)."""
+        iid = it.get("id")
+        for tr in TRACKS:
+            if it in self.fx[tr]:
+                self.fx[tr].remove(it)
+        for z in list(self.occ):
+            self.occ[z] = [e for e in self.occ[z] if e[2] != iid]
+        self.ink = [r for r in self.ink if r[6] != iid]
+        self.events = [e for e in self.events if e[1] != iid]
+        self.sfx_req = [r for r in self.sfx_req if not str(r.get("src", "")).startswith(str(iid))]
+        self.ids.discard(iid)
+
+    def _line_floor(self, it: dict) -> None:
+        """Ninguna linea de un titulo por debajo de MIN_LINE (fraccion de W): sube la escala de
+        las lineas chicas y, si alguna ya no cabe en MAXW, achica el bloque y repite."""
+        for _ in range(4):
+            size = float(it.get("size", 0.08))
+            lines = it["lines"]
+            low = [ln for ln in lines if size * float(ln.get("scale", 1.0)) < MIN_LINE - 1e-4]
+            if not low:
+                return
+            for ln in low:
+                ln["scale"] = _r(min(1.0, MIN_LINE / max(1e-3, size) + 0.002), 3)
+            widest = max(_text_w(ln.get("font") or it.get("font"), size * float(ln.get("scale", 1.0)),
+                                 str(ln.get("text", ""))) for ln in lines)
+            if widest > self.MAXW + 0.04:
+                it["size"] = _r(size * (self.MAXW + 0.04) / widest, 4)
+
+    BEHIND_SIZE = (0.12, 0.46)        # rango de tamano del preset behind_giant (text.PRESETS)
+
+    def _sane_behind(self, it: dict) -> None:
+        """behind_giant siempre detras, con el tamano del preset y la tinta dentro de SAFE."""
+        it["behind"] = True
+        lo, hi = self.BEHIND_SIZE
+        it["size"] = _r(_clamp(float(it.get("size", 0.3)), lo, hi), 4)
+        for _ in range(4):
+            r = measure_text(it, self.style)
+            if r is None:
+                break
+            if r[1] < SAFE["top"] - 0.004:
+                it["y"] = _r(float(it["y"]) + (SAFE["top"] - r[1]), 4)
+            elif r[3] > SAFE["bottom"]:
+                it["y"] = _r(float(it["y"]) - (r[3] - SAFE["bottom"]), 4)
+            else:
+                break
 
     def sfx(self, at: float, name: str, prio: int = 5, gain: float | None = None, pan: float = 0.0,
             src_id: str = "", vary: bool = False, dur: float | None = None) -> None:
@@ -2729,7 +3226,10 @@ class _Choreo:
             key = f"sfxv:{src_id}:{name}"
             g += (self.rc.rand(key + "g") - 0.5) * 4.0
             pan = pan + (self.rc.rand(key + "p") - 0.5) * 0.5
-        req = {"at": float(at), "name": name, "prio": prio, "gain": g + self.S["sfx_db"],
+        g += self.S["sfx_db"]
+        if name == "pen_scribble":
+            g = min(g, -2.0)            # el lapiz acompana, nunca tapa la voz
+        req = {"at": float(at), "name": name, "prio": prio, "gain": g,
                "pan": _clamp(pan, -0.6, 0.6), "src": src_id}
         if dur is not None and name in ("typing", "pen_scribble", "riser_short", "riser_long"):
             req["dur"] = _r(_clamp(float(dur), 0.15, 4.0), 2)
@@ -2773,15 +3273,32 @@ class _Choreo:
                 if not merged:
                     continue
             if s["talk"]:
-                jz = 1.0 + self.S["jump_zoom"] * (0.6 + 0.4 * self.I)
+                jz = s.get("jz") or (1.0 + self.S["jump_zoom"] * (0.6 + 0.4 * self.I))
                 push = 0.025 + 0.035 * self.I
+                if s.get("face") and float(s["face"][3]) >= 0.3:
+                    push = 0.012          # primer plano extremo: casi quieto (la barbilla no baja)
                 # tomas largas a camara: reencuadre tipo jump-cut (cerrado/abierto) por clausula
                 merged = [pc for sg in merged for pc in self._jump_pieces(sg[0], sg[1])]
                 start_tight = self.rand(f"cam{s['k']}") < 0.35 and len(merged) > 1
+                if self.words and s["start"] - 1e-6 <= self.words[0]["t0"] < s["end"] and \
+                        s.get("face") and float(s["face"][3]) < 0.14:
+                    # hook en plano abierto: arranca CERRADO (la cara llena el cuadro) y abre en
+                    # la siguiente clausula, como el punch-in de un editor en el primer segundo
+                    start_tight = True
+                hook_shot = bool(self.words) and s["start"] - 1e-6 <= self.words[0]["t0"] < s["end"]
                 for k, (a, b) in enumerate(merged):
                     tight = (k % 2 == 1) != start_tight
                     lv = s["z0"] * (jz if tight else 1.0)
+                    if k == 0 and tight and hook_shot and s.get("face") and float(s["face"][3]) < 0.14:
+                        # primer cuadro del video en plano abierto: plano medio corto (cara ~18% del
+                        # alto) para que el gancho se sienta cerca
+                        lv = max(lv, min(self.zcap, 0.18 / max(0.04, float(s["face"][3]))))
                     dur = self.f(b) - self.f(a)
+                    # quien camina no se sale del cuadro: el zoom se limita a lo que deja ver
+                    # todas sus posiciones del tramo
+                    zfit = self._fit_zoom(s, a, b)
+                    if zfit < self.zcap - 1e-6:
+                        lv = max(1.0, min(lv, zfit / (1.0 + push * min(1.0, dur / 3.0))))
                     to = lv * (1.0 + push * min(1.0, dur / 3.0))
                     self.add("effects", "cam", {"start": a, "end": b, "kind": "zoom",
                                                 "from": _r(lv, 3), "to": _r(to, 3),
@@ -2792,6 +3309,26 @@ class _Choreo:
                 self.add("effects", "kb", {"start": s["start"], "end": s["end"], "kind": "kenburns",
                                            "from": 1.04, "to": _r(1.1 + 0.08 * self.I, 3),
                                            "pan": [_r(0.03 * d, 3), -0.015]}, event=False)
+
+    def _fit_zoom(self, s: dict, a: float, b: float) -> float:
+        """Zoom maximo (anclado en la cara mediana del tramo) que deja ver TODAS las posiciones
+        del rostro en [a, b] (pista a 2 fps) con margen: la persona que camina no se sale."""
+        face = s.get("face")
+        pts = [tr for tr in s.get("face_track") or [] if len(tr) >= 5 and a - 0.25 <= tr[0] <= b + 0.25]
+        if not face or len(pts) < 2:
+            return self.zcap
+        fh0 = float(face[3])
+        pts = [tr for tr in pts if 0.6 * fh0 <= float(tr[4]) <= 1.6 * fh0] or pts
+        x0 = min(float(tr[1]) - 0.8 * float(tr[3]) for tr in pts)
+        x1 = max(float(tr[1]) + 0.8 * float(tr[3]) for tr in pts)
+        ay = float(np.median([float(tr[2]) for tr in pts]))
+        top = min(float(tr[2]) - 1.1 * float(tr[4]) for tr in pts)
+        z = self.zcap
+        if x1 - x0 > 1e-3:
+            z = min(z, 0.86 / (x1 - x0))
+        if ay - top > 1e-3:
+            z = min(z, (ay - 0.02) / (ay - top))
+        return max(1.0, z)
 
     JUMP_MAX = 4.2          # s (tiempo final): un encuadre fijo mas largo se parte en jump-cuts
     JUMP_MIN = 1.8
@@ -2899,6 +3436,8 @@ class _Choreo:
             dur = base_dur * self.S["trans_dur"] * (0.85 if r["ctx"] == "scene" else 1.0)
             if guard:
                 dur = min(dur, 0.34)
+            if dur < 0.06 and kind != "cut":
+                kind, dur = "cut", TRANS_DUR["cut"]      # el corte seco es el kind 'cut', nunca dur 0
             dirn = r.get("dir") or ("left" if i % 2 == 0 else "right")
             fields = {"at": r["at"], "kind": kind, "dur": _r(dur, 3)}
             if kind in ("whip", "slide", "torn_paper"):
@@ -3031,7 +3570,7 @@ class _Choreo:
                 nw = sum(len(c) for c in cur)
                 hard = (self.shot_at(first["t0"])["k"] != self.shot_at(cur[0][0]["t0"])["k"]
                         or re.search(r"[.?!…]$", last["text"]) or gap > 0.6
-                        or re.match(r"^[¿¡]", first["text"]))
+                        or re.match(r"^[¿¡]", first["text"]) or _cap_start(self.words, first["i"]))
                 full = len(cur) >= 3 or nw + len(ch) > 9 or (ch[-1]["f1"] - cur[0][0]["f0"]) > 3.4
                 soft = (len(cur) >= 2 or dur_cur >= 1.2) and dur_cur >= 0.9 and (
                     first["n"] in CLAUSE_W or bool(re.search(r"[,;:]$", last["text"])))
@@ -3056,7 +3595,17 @@ class _Choreo:
                 continue
             out.append(b)
             i += 1
-        return out
+        # un bloque no termina en determinante, posesivo, cuantificador o preposicion ('aqui en
+        # nuestra', 'que no tiene ningun'): esas palabras pasan al bloque siguiente (con su sustantivo)
+        for k in range(len(out) - 1):
+            b, nb = out[k], out[k + 1]
+            while b and b[-1] and b[-1][-1]["n"] in DANGLING and not re.search(r"[,.;:?!]$", b[-1][-1]["text"]) \
+                    and sum(map(len, b)) > 1 and nb[0][0]["f0"] - b[-1][-1]["f1"] < 0.7 and \
+                    self.shot_at(nb[0][0]["t0"])["k"] == self.shot_at(b[-1][-1]["t0"])["k"]:
+                nb[0].insert(0, b[-1].pop())
+                if not b[-1]:
+                    b.pop()
+        return [b for b in out if b and any(b)]
 
     def _fit_lines(self, lines: list[dict], size: float, max_w: float) -> float:
         """Reduce `size` hasta que la linea mas ancha quepa en max_w."""
@@ -3081,12 +3630,17 @@ class _Choreo:
             return [" ".join(words)]
         import itertools
         best, cost_b = [" ".join(words)], 9e9
+        w1 = _text_w(font, size, " ".join(words))
+        if w1 <= self.MAXW and n <= 5:
+            best, cost_b = [" ".join(words)], w1 + 0.08
         for k in range(2, min(max_lines, n) + 1):
             for cuts in itertools.combinations(range(1, n), k - 1):
                 parts = [words[a:b] for a, b in zip((0,) + cuts, cuts + (n,))]
                 ws_ = [_text_w(font, size, " ".join(p)) for p in parts]
                 cost = max(ws_) + (max(ws_) - min(ws_)) * 0.3 + 0.08 * k
                 cost += sum(0.3 for p in parts[:-1] if norm(p[-1]) in STOP)
+                # una linea de una sola palabra corta ('tus') queda huerfana
+                cost += sum(0.35 for p in parts if len(p) == 1 and len(norm(p[0])) <= 4)
                 if max(ws_) > self.MAXW:
                     cost += 5
                 if cost < cost_b:
@@ -3094,13 +3648,21 @@ class _Choreo:
         return best
 
     def _hero_of(self, words: list[dict], emph: set) -> dict | None:
-        em = [w for w in words if w["i"] in emph and w["n"] not in STOP]
+        """Palabra protagonista: de enfasis y con contenido (nunca 'BASICAMENTE', 'PERMITANME'
+        ni un verbo ligero como 'HACIENDO')."""
+        em = [w for w in words if w["i"] in emph and self.content_word(w)] or \
+            [w for w in words if w["i"] in emph and (self._entity_word(w) or re.search(r"\d", w["text"]))]
         if not em:
             return None
         return max(em, key=lambda w: (len(w["n"]) <= 12, len(w["n"]), -w["i"]))
 
+    def _hero_fallback(self, words: list[dict]) -> dict:
+        cont = [w for w in words if self.content_word(w)] or \
+            [w for w in words if w["n"] not in STOP and w["n"] not in FILLER] or words
+        return max(cont, key=lambda w: (len(w["n"]) <= 12, len(w["n"])))
+
     def _text_spec(self, preset: str, blk: list[list[dict]], emph: set, humor: bool = False,
-                   acc_words: set | None = None, compact: bool = False) -> dict:
+                   acc_words: set | None = None, compact: bool = False, label: str | None = None) -> dict:
         """Campos del item de texto (sin posicion) + lineas medidas para colocar. `emph` = palabra
         protagonista (stack); `acc_words` = palabras que ademas van en color de acento."""
         pal = self.pal
@@ -3114,7 +3676,7 @@ class _Choreo:
                                 "accent": acc, "shadow": 0.5, "anim_out": "fade", "font": font}
         lines: list[dict]
         if preset == "stack":
-            hero = self._hero_of(words, emph) or max(words, key=lambda w: len(w["n"]))
+            hero = self._hero_of(words, emph) or self._hero_fallback(words)
             lines = []
             for ln in blk:
                 if hero in ln:
@@ -3130,6 +3692,18 @@ class _Choreo:
                 else:
                     lines.append({"text": " ".join(_display(w["text"]) for w in ln), "scale": 0.5,
                                   "font": small, "_small": True})
+            j = 0
+            while j < len(lines):
+                # una palabra funcional sola en su linea ('que') se une a la linea chica vecina
+                if lines[j].get("_small") and len(lines[j]["text"].split()) == 1 and norm(lines[j]["text"]) in STOP:
+                    nb = j + 1 if j + 1 < len(lines) and lines[j + 1].get("_small") else \
+                        (j - 1 if j > 0 and lines[j - 1].get("_small") else None)
+                    if nb is not None:
+                        a_, b_ = min(j, nb), max(j, nb)
+                        lines[a_] = dict(lines[a_], text=lines[a_]["text"] + " " + lines[b_]["text"])
+                        del lines[b_]
+                        continue
+                j += 1
             while len(lines) > 3:
                 pairs = [(len(lines[j]["text"]) + len(lines[j + 1]["text"]), j) for j in range(len(lines) - 1)
                          if lines[j].get("_small") and lines[j + 1].get("_small")]
@@ -3139,6 +3713,15 @@ class _Choreo:
                 lines[j] = dict(lines[j], text=lines[j]["text"] + " " + lines[j + 1]["text"])
                 del lines[j + 1]
             size = self._fit_lines(lines, 0.19, self.MAXW)
+            for _ in range(3):
+                # las lineas chicas nunca bajan de MIN_LINE (0.5 de un bloque achicado = ilegible)
+                k_min = MIN_LINE / max(1e-3, size)
+                if all(ln.get("scale", 1.0) >= k_min - 1e-4 for ln in lines):
+                    break
+                for ln in lines:
+                    if ln.get("_small"):
+                        ln["scale"] = _r(max(ln["scale"], min(0.8, k_min)), 3)
+                size = self._fit_lines(lines, size, self.MAXW)
             for ln in lines:
                 ln.pop("_small", None)
             spec.update({"lines": lines, "size": size, "anim_in": "word_stagger",
@@ -3152,12 +3735,13 @@ class _Choreo:
                 del lines[j + 1]
             if len(lines) > 1:
                 lines[-1]["scale"] = 1.15
-            size = self._fit_lines(lines, 0.082, 0.62)
+            size = self._fit_lines(lines, max(0.082, self.title_floor * 1.04), 0.62)
             spec.update({"lines": lines, "size": size, "anim_in": "word_stagger", "align": "left",
                          "accent_words": emw})
         else:
             base = {"title_pop": 0.085, "serif_elegant": 0.1, "script_accent": 0.11,
                     "highlight_marker": 0.07, "kicker": 0.062, "typewriter": 0.058}.get(preset, 0.08)
+            base = max(base, self.title_floor * 1.04)
             max_lines = 2 if preset == "script_accent" else 3
             # se respetan los cortes de la voz: una linea demasiado ancha se parte en dos
             # (balanceada) y solo si sobran lineas se reenvuelve todo el bloque
@@ -3189,7 +3773,10 @@ class _Choreo:
             if preset == "highlight_marker":
                 spec.update({"accent_words": emw or [_display(words[-1]["text"])], "shadow": 0.3})
             elif preset == "kicker":
-                spec.update({"shadow": 0.3})
+                # etiqueta EXPLICITA (rol / seccion / dato) y el bloque completo como cuerpo; la
+                # etiqueta no baja de MIN_LINE (el cuerpo nunca baja del piso de titulos)
+                spec.update({"shadow": 0.3, "kicker": (label or self.ent.get("role") or "Tip").upper(),
+                             "kicker_scale": _r(min(0.8, MIN_LINE / max(1e-3, self.title_floor) + 0.006), 3)})
             elif preset == "script_accent":
                 spec["color"] = acc if humor else "#FFFFFF"
         spec["_lines"] = lines
@@ -3213,10 +3800,19 @@ class _Choreo:
     def _place_in(self, spec: dict, g: dict, z: str, fa: float, fb: float,
                   min_size: float) -> tuple[str, float, float] | None:
         lines = spec["_lines"]
+        # la linea mas chica del bloque tambien respeta el piso de lectura (MIN_LINE)
+        k_min = min([float(ln.get("scale", 1.0)) for ln in lines] or [1.0])
+        min_size = max(min_size, MIN_LINE / max(0.05, k_min))
         for z in (z,):
-            if not self.free(z, fa, fb):
+            if not self.free(z, fa, fb) or (z == "under" and not g.get("under")):
                 continue
             lo, hi = (g["center"][0], g["low"][1]) if z == "center_low" else g[z]
+            if z in ("center", "center_low", "low", "under"):
+                # una pastilla o tarjeta que asoma desde abajo en la franja (p. ej. la pastilla de
+                # reservas de dos lineas sostenida hasta el final): el titulo termina arriba de ella
+                for a_, b_, _x0, y0_, _x1, _y1, iid_ in self.ink:
+                    if str(iid_).startswith("gr_") and a_ < fb - 1e-6 and fa < b_ - 1e-6 and lo < y0_ < hi:
+                        hi = y0_ - 0.012
             room = hi - lo
             if room < 0.035:
                 continue
@@ -3229,6 +3825,8 @@ class _Choreo:
                 continue
             if z == "top":
                 y = (lo + hi) / 2 if room < 0.2 else hi - h / 2 - 0.01
+            elif z == "under":
+                y = hi - h / 2 - 0.01          # primer plano: al fondo de la franja, lejos de la barbilla
             else:
                 y = lo + h / 2 + 0.005
             ok = True
@@ -3262,9 +3860,39 @@ class _Choreo:
 
     COUNT_DUR = 0.45                 # s de conteo del precio (text.counter count_dur)
 
-    MIN_SIZE = {"kicker": 0.036, "stack": 0.07, "title_pop": 0.05, "serif_elegant": 0.055,
-                "script_accent": 0.06, "highlight_marker": 0.045, "cascade": 0.045,
-                "typewriter": 0.04}
+    # presencia: ningun titulo por debajo de ~0.05 W (antes kicker 0.036 / cascada 0.045)
+    MIN_SIZE = {"kicker": 0.052, "stack": 0.09, "title_pop": 0.058, "serif_elegant": 0.066,
+                "script_accent": 0.075, "highlight_marker": 0.054, "cascade": 0.056,
+                "typewriter": 0.052}
+
+    def min_size(self, preset: str) -> float:
+        """Tamano minimo de un titulo: el del preset y nunca menos que 1.15x el subtitulo."""
+        return max(self.MIN_SIZE.get(preset, 0.05), self.title_floor)
+
+    # etiqueta del kicker por seccion del guion (nunca una linea de la voz hecha pastilla)
+    KICKER_SECTION = {"problema": "Ojo", "beneficio": "Beneficio", "oferta": "Promo", "cierre": "Recuerda"}
+
+    def kicker_label(self, ws: list[dict], use: bool = True) -> str | None:
+        """Etiqueta natural para un kicker: el rol del video (una vez, 'PERFUMERIA'), la seccion
+        del guion ('OJO', 'PROMO') o 'DATO' si el bloque trae un numero. None = este bloque no
+        lleva kicker (se usa otro preset)."""
+        cands = []
+        role = str(self.ent.get("role") or "").strip()
+        if role and len(role) <= 16:
+            cands.append((role, 1))
+        s = ws[0].get("s", -1) if ws else -1
+        sec = (self.sents[s]["info"].get("section") if isinstance(s, int) and 0 <= s < len(self.sents) else None)
+        if sec in self.KICKER_SECTION:
+            cands.append((self.KICKER_SECTION[sec], 2))
+        if any(re.search(r"\d", w["text"]) for w in ws):
+            cands.append(("Dato", 2))
+        for lab, cap in cands:
+            if self.kicker_labels[lab] < cap and self.last.get("kicker_label") != lab:
+                if use:
+                    self.kicker_labels[lab] += 1
+                    self.last["kicker_label"] = lab
+                return lab
+        return None
 
     def title_block(self, blk: list[list[dict]], preset: str, emph: set, zones: list[str], t0: float,
                     t1: float, role: str, humor: bool = False, fallback: bool = True,
@@ -3273,22 +3901,29 @@ class _Choreo:
         shot = self.shot_at(ws[0]["t0"])
         g = self.geom(shot, t0, t1)
         preset = self.sub_preset(preset)
+        label = None
+        if preset == "kicker":
+            label = self.kicker_label(ws, use=False)
+            if label is None:
+                preset = "title_pop"          # sin etiqueta natural no hay kicker
         compact = first_bonus > 1.0
         if compact and g.get("head_top"):
             # sobre el fondo reemplazado el hueco llega casi a la cabeza (no hay nada detras)
             g = dict(g, top=(g["top"][0], g["top"][1] + 0.014))
-        spec0 = self._text_spec(preset, blk, emph, humor, acc_words, compact)
+        spec0 = self._text_spec(preset, blk, emph, humor, acc_words, compact, label=label)
         fa, fb = self.f(t0), self.f(t1)
         fr = self.face_rect(shot, t0, t1)
         zones_try = list(zones)
+        if g.get("under") and "under" not in zones_try:
+            zones_try.append("under")          # primer plano: bajo la barbilla
         r = None
         spec = None
         while zones_try:
             spec = copy.deepcopy(spec0)
-            pl = self._place(spec, g, zones_try, fa, fb, self.MIN_SIZE.get(preset, 0.05), first_bonus)
+            pl = self._place(spec, g, zones_try, fa, fb, self.min_size(preset), first_bonus)
             if pl is None and fallback and preset not in ("title_pop", "kicker"):
                 spec = self._text_spec("title_pop", blk, emph, humor, acc_words)
-                pl = self._place(spec, g, zones_try, fa, fb, 0.05, first_bonus)
+                pl = self._place(spec, g, zones_try, fa, fb, self.min_size("title_pop"), first_bonus)
             if pl is None:
                 return None
             zone, y, size = pl
@@ -3299,22 +3934,24 @@ class _Choreo:
             r = measure_text(probe, self.style)
             # nunca texto sobre la cara (ojos, nariz, boca): si la tinta real la toca, se prueba
             # otra zona. El cabello de la coronilla si puede rozarse (descendentes de la ultima linea)
-            core = None if fr is None else (fr[0] + 0.12 * (fr[2] - fr[0]), fr[1] + 0.2 * (fr[3] - fr[1]),
-                                            fr[2] - 0.12 * (fr[2] - fr[0]), fr[3])
+            core = None if fr is None else self.face_core(shot, t0, t1)
 
             def hits(rr):
                 return rr is not None and core is not None and rr[0] < core[2] and core[0] < rr[2] \
                     and rr[1] < core[3] and core[1] < rr[3]
-            if hits(r) and zone in ("center", "center_low", "low"):
+            if hits(r) and zone in ("center", "center_low", "low", "under"):
                 # bajo la cara: se baja o se achica dentro de su franja antes de descartarla
                 hi_z = g["low"][1] if zone == "center_low" else g[zone][1]
+                k_min = min([float(ln.get("scale", 1.0)) for ln in spec.get("_lines") or []] or [1.0])
                 for _ in range(6):
                     dy = core[3] + 0.006 - r[1]
                     if r[3] + dy <= hi_z + 1e-4:
                         spec["y"] = _r(float(spec["y"]) + dy, 4)
                     else:
                         spec["size"] = _r(float(spec["size"]) * 0.9, 4)
-                        if spec["size"] < self.MIN_SIZE.get(spec["preset"], 0.05) * 0.95:
+                        if spec["size"] < self.min_size(spec["preset"]) * 0.97 or \
+                                spec["size"] * k_min < MIN_LINE * 0.97:
+                            r = (0.0, 0.0, 1.0, 1.0)      # no cabe con presencia: otra zona
                             break
                     probe = {k: v for k, v in spec.items() if not k.startswith("_")}
                     r = measure_text(probe, self.style)
@@ -3339,6 +3976,9 @@ class _Choreo:
         it = self.add("text", role, spec, zone=zone)
         if not it:
             return None
+        if it.get("preset") == "kicker" and label:
+            self.kicker_labels[label] += 1
+            self.last["kicker_label"] = label
         for w in ws:
             self.titled_words.add(w["i"])
         pr = self._pad_rect(it, r)
@@ -3435,7 +4075,9 @@ class _Choreo:
         if name == "underline":
             last = lines[-1]
             lw = min(x1 - x0, _text_w(last["font"], float(it["size"]) * last.get("scale", 1.0), last["text"]) * 1.05)
-            uy = min(y1 + 0.01, SAFE["bottom"] - 0.02)
+            uy = min(y1 + 0.01, SAFE["bottom"] - 0.012)
+            if uy < y1 - 0.004:
+                return None               # no cabe bajo el texto: nunca un subrayado que lo tacha
             ux = (x0 + x1) / 2 if it.get("align") != "left" else x0 + lw / 2
             rect = (ux - lw / 2, uy - 0.012, ux + lw / 2, uy + 0.012)
             if not (self.clear_of_ink(rect, fa, fb, skip=own) and self.free_accent(ux, uy, fa, fb)):
@@ -3540,30 +4182,45 @@ class _Choreo:
 
     BEHIND_MAX = 0.3           # oclusion (ponderada) maxima para que un texto detras se lea
 
-    def legible_behind(self, item: dict, shot: dict, t0: float, t1: float) -> dict:
-        """Texto detras del sujeto SOLO si se lee (oclusion <= BEHIND_MAX). Si no, sube hasta que
-        solo lo roce la coronilla; si aun asi no se lee, va delante, arriba de la cabeza."""
+    def legible_behind(self, item: dict, shot: dict, t0: float, t1: float,
+                       max_occ: float | None = None, top_min: float | None = None) -> dict:
+        """Texto detras del sujeto SOLO si se lee (oclusion <= BEHIND_MAX; una palabra gigante
+        aguanta un poco mas, `max_occ`). Si no, sube hasta que solo lo roce la coronilla; si aun
+        asi no se lee, va delante (pila) sobre el cabello, nunca de las cejas para abajo."""
         if not item.get("behind"):
             return item
-        if self.occlusion(item, shot, t0, t1) <= self.BEHIND_MAX:
+        lim = self.BEHIND_MAX if max_occ is None else max_occ
+        if self.occlusion(item, shot, t0, t1) <= lim:
             return item
         g = self.geom(shot, t0, t1)
         ht = g.get("head_top")
         r = measure_text(item, self.style)
         if ht is None or r is None:
-            return dict(item, behind=False)
+            out = dict(item, behind=False)
+            if out.get("preset") == "behind_giant":
+                out["preset"] = "stack"
+            return out
+        top_min = SAFE["top"] if top_min is None else max(SAFE["top"], top_min)
         for _ in range(10):
             dy = min(0.02, max(0.0, r[3] - (ht + 0.02)))
-            if dy <= 0 or r[1] - dy < SAFE["top"]:
+            if dy <= 0 or r[1] - dy < top_min:
                 break
             item = dict(item, y=_r(float(item["y"]) - dy, 4))
             r = measure_text(item, self.style) or r
-            if self.occlusion(item, shot, t0, t1) <= self.BEHIND_MAX:
+            if self.occlusion(item, shot, t0, t1) <= lim:
                 return item
         # delante y por encima de la cabeza, dentro de SAFE (achica hasta caber en la franja
-        # [SAFE.top, cabeza]); nunca sobre la cara
+        # [SAFE.top, cabeza]); nunca sobre la cara. Delante ya no es 'gigante detras': pasa a
+        # pila (behind_giant siempre va con behind:true)
         item = dict(item, behind=False)
-        lo_, hi_ = SAFE["top"] + 0.005, ht - 0.012
+        if item.get("preset") == "behind_giant":
+            item["preset"] = "stack"
+        # delante puede cubrir el cabello (como un editor) pero no la cara (face_core)
+        brow = ht - 0.012
+        core = self.face_core(shot, t0, t1) if shot.get("talk") else None
+        if core is not None:
+            brow = max(brow, core[1] - 0.006)
+        lo_, hi_ = top_min + 0.005, brow
         for _ in range(16):
             r = measure_text(item, self.style)
             if r is None:
@@ -3640,8 +4297,11 @@ class _Choreo:
                           "aspect": _r(_clamp(h_ * self.aspect / w_, 0.3, 1.0), 3)}
         if name == "underline":
             w_ = min(self.MAXW, (x1 - x0) * 1.06)
-            cx, cy = (x0 + x1) / 2, min(y1 + 0.012, self.cap_top - 0.02)
-            if cy + 0.014 > below - 0.004:
+            # sobre los subtitulos no baja; un titulo que YA ocupa su franja (primer plano, los
+            # subtitulos se ocultan) solo respeta SAFE. Nunca tacha la linea
+            lim = self.cap_top - 0.02 if y1 < self.cap_top - 0.01 else SAFE["bottom"] - 0.012
+            cx, cy = (x0 + x1) / 2, min(y1 + 0.012, lim)
+            if cy + 0.014 > below - 0.004 or cy < y1 - 0.004:
                 return None
             rect = (cx - w_ / 2, cy - 0.012, cx + w_ / 2, cy + 0.014)
             fields = {"x": _r(cx, 3), "y": _r(cy, 4), "size": _r(w_, 3)}
@@ -3713,7 +4373,7 @@ class _Choreo:
             s_ = sz * k
             hw, hh = s_ / 2, s_ / 2 / self.aspect
             c = [(x1 - hw * 0.4, y0 - hh * 0.9), (x0 + hw * 0.4, y0 - hh * 0.9),     # esquinas de arriba
-                 (x1 + hw + 0.015, cy), (x0 - hw - 0.015, cy),                         # lados
+                 (x1 + hw + 0.03, cy), (x0 - hw - 0.03, cy),                           # lados
                  (x1 - hw * 0.4, y1 + hh * 0.9), (x0 + hw * 0.4, y1 + hh * 0.9)]      # esquinas de abajo
             if away < 0:
                 c = [c[1], c[0], c[3], c[2], c[5], c[4]]
@@ -3776,6 +4436,87 @@ class _Choreo:
         self.used["comp"] += 1
         return c
 
+    @staticmethod
+    def _filler_ids(ws: list[dict]) -> set:
+        """Indices de las palabras que forman una frase de relleno completa (FILLER_PH)."""
+        ns = [w["n"] for w in ws]
+        drop: set = set()
+        for ph in FILLER_PH:
+            p_ = ph.split()
+            for k in range(len(ns) - len(p_) + 1):
+                if ns[k:k + len(p_)] == p_:
+                    drop |= {ws[j]["i"] for j in range(k, k + len(p_))}
+        return drop
+
+    def _entity_word(self, w: dict) -> bool:
+        """Nombre propio / marca: mayuscula que no abre oracion ('Aurelia', 'Norte')."""
+        if not _is_cap(w) or w["n"] in STARTERS or w["n"] in FILLER or len(w["n"]) < 2:
+            return False
+        s = w.get("s", -1)
+        if isinstance(s, int) and 0 <= s < len(self.sents) and self.sents[s]["w0"] == w["i"]:
+            return False                      # primera palabra de la oracion
+        return True
+
+    @staticmethod
+    def content_word(w: dict) -> bool:
+        """Palabra con contenido propio (sustantivo, adjetivo, verbo pleno): ni funcional, ni
+        muletilla, ni verbo ligero/deictico, ni adverbio en -mente."""
+        n = w["n"]
+        return n not in STOP and n not in FILLER and n not in LIGHT and len(n) >= 3 \
+            and not n.endswith("mente") and not re.fullmatch(r"\d+", n)
+
+    def weak_block(self, ws: list[dict], emph: set | None = None) -> bool:
+        """Bloque sin contenido que mostrar (muletillas: 'asi que nada, este video basicamente
+        pues'; 'creo que no tiene ningun'): el subtitulo basta; un titulo ahi es ruido.
+        Titulable = un numero o un nombre propio, o >= 2 palabras de contenido, o 1 si el bloque
+        no es mayormente muletilla ('Hay promocion', 'como se sienten'). Una palabra clave del
+        LLM ya no basta por si sola."""
+        drop = self._filler_ids(ws)
+        kept = [w for w in ws if w["i"] not in drop]
+        if not kept:
+            return True
+        if any(re.search(r"\d", w["text"]) or self._entity_word(w) for w in kept):
+            return False
+        content = [w for w in kept if self.content_word(w)]
+        if len(content) >= 2:
+            return False
+        if not content:
+            return True
+        filler = len(drop) + sum(1 for w in kept if w["n"] in FILLER)
+        return filler / len(ws) >= 0.34
+
+    def trim_edges(self, blk: list[list[dict]]) -> list[list[dict]]:
+        """Quita del borde de un titulo las muletillas ('Basicamente el perfume' -> 'el perfume',
+        'con ruido de fondo creo' -> 'con ruido de fondo') y lo que queda colgando al final
+        ('que no tiene ningun'). El subtitulo conserva todo lo dicho."""
+        ws = [w for ln in blk for w in ln]
+        if not ws:
+            return []
+        drop = self._filler_ids(ws)
+
+        def filler(k: int) -> bool:
+            w = ws[k]
+            if w["i"] in drop:
+                return True
+            if w["n"] == "este":
+                # demostrativo ('este video') salvo que lo siga otra muletilla o una pausa
+                nx = ws[k + 1] if k + 1 < len(ws) else None
+                return nx is None or nx["n"] in FILLER or nx["i"] in drop or nx["t0"] - w["t1"] > 0.3
+            return w["n"] in EDGE_FILLER
+
+        lead = 0
+        while lead < len(ws) - 1 and filler(lead):
+            lead += 1
+        tail = len(ws)
+        while tail - 1 > lead and (filler(tail - 1) or (ws[tail - 1]["n"] in DANGLING
+                                                        and not re.search(r"[?!]$", ws[tail - 1]["text"]))):
+            tail -= 1
+        if filler(lead) and tail - lead <= 1:
+            return []
+        keep = {w["i"] for w in ws[lead:tail]}
+        out = [[w for w in ln if w["i"] in keep] for ln in blk]
+        return [ln for ln in out if ln]
+
     def title_sequence(self, s: dict, w0: int, w1: int, role: str, zones_lead: list[str],
                        zones_hero: list[str], humor: bool = False, max_blocks: int = 99,
                        accents: bool = True, punches: bool = True, end_limit: float | None = None,
@@ -3788,28 +4529,90 @@ class _Choreo:
         if info.get("title"):
             a, b = info["title"]
             emph |= {a, b} if b - a <= 1 else {b}
-        emph = {i for i in emph if w0 <= i <= w1}
-        kw = {w["i"] for w in self.words[w0:w1 + 1] if w["kw"] and w["n"] not in STOP and len(w["n"]) >= 5}
+        # el enfasis nunca cae en una muletilla ni en un verbo ligero ('BASICAMENTE', 'HACIENDO')
+        emph = {i for i in emph if w0 <= i <= w1 and (self.content_word(self.words[i])
+                                                       or self._entity_word(self.words[i])
+                                                       or re.search(r"\d", self.words[i]["text"]))}
+        kw = {w["i"] for w in self.words[w0:w1 + 1] if w["kw"] and self.content_word(w) and len(w["n"]) >= 5}
         blocks = self._blocks(w0, w1, emph, kw)[:max_blocks]
         if not blocks:
             return 0
         flat = [w for b in blocks for ln in b for w in ln]
         if not any(w["i"] in emph for w in flat):
-            cand = [w for w in flat if w["n"] not in STOP] or flat
-            emph = emph | {max(cand, key=lambda w: len(w["n"]))["i"]}
+            emph = emph | {self._hero_fallback(flat)["i"]}
         primary = set(emph)
-        accent_set = emph | {w["i"] for w in flat if w["kw"] and w["n"] not in STOP and len(w["n"]) >= 5}
+        accent_set = emph | {w["i"] for w in flat if w["kw"] and self.content_word(w) and len(w["n"]) >= 5}
         main = self.sub_preset(main or self._sentence_preset(humor))
         comp = self.sub_preset(companion or self._companion(main))
+        if role != "hook" and any(
+                any(min(b, ln[-1]["f1"]) - max(a, ln[0]["f0"]) > 0.3 for a, b, _k in self.bg_fx)
+                for blk in blocks for ln in blk):
+            comp = main       # la composicion del fondo nuevo ya es la segunda pieza de la frase
         self.sent_main = main
         placed = 0
         home = None
+        tried: set = set()             # bloques ya partidos (no se vuelven a unir ni a partir)
         for bi, blk in enumerate(blocks):
+            raw = [w for ln in blk for w in ln]
+            blk = self.trim_edges(blk)       # sin muletillas en el borde ni palabra colgando
+            if not blk:
+                continue
             ws = [w for ln in blk for w in ln]
             hero = any(w["i"] in primary for w in ws)
+            if all(w["i"] in self.titled_words for w in ws):
+                continue                     # ya lo muestra otro titulo/escena (o uno bloqueado)
+            # el contenido se mide en la clausula HABLADA completa ('asi que nada, este video
+            # basicamente pues' es relleno aunque recortado quede 'este video')
+            if self.weak_block(raw, primary) or self.weak_block(ws, primary):
+                nb = blocks[bi + 1] if bi + 1 < len(blocks) else None
+                if role == "hook" and nb and self.shot_at(nb[0][0]["t0"])["k"] == self.shot_at(ws[0]["t0"])["k"] \
+                        and nb[0][0]["f0"] - ws[-1]["f1"] < 0.6 and \
+                        tuple(w["i"] for ln in blk + nb for w in ln) not in tried:
+                    # hook: la clausula sin contenido ('aqui estamos haciendo') se suma a la
+                    # siguiente (el texto esta desde el primer cuadro y remata en la idea)
+                    blocks[bi + 1] = blk + nb
+                continue                     # muletillas: basta el subtitulo
             preset = main if (hero or len(blocks) == 1) else comp
             fa_, fb_ = ws[0]["f0"], ws[-1]["f1"]
-            if any(min(b, fb_) - max(a, fa_) >= 0.5 * max(0.1, fb_ - fa_) for a, b, _ in self.bg_fx):
+            on_bg = any(min(b, fb_) - max(a, fa_) >= 0.5 * max(0.1, fb_ - fa_) for a, b, _ in self.bg_fx)
+            if on_bg and role != "hook":
+                # momento protagonista sobre el fondo nuevo: palabra GIGANTE detras de la persona
+                # con la frase encima (presencia; no una linea chica apretada sobre la cabeza).
+                # Las clausulas siguientes sobre el mismo fondo son la misma composicion
+                merged = list(blk)
+                j = bi + 1
+                while j < len(blocks) and sum(map(len, merged)) + sum(map(len, blocks[j])) <= 12:
+                    nws = [w for ln in blocks[j] for w in ln]
+                    n0, n1 = nws[0]["f0"], nws[-1]["f1"]
+                    if not any(min(b, n1) - max(a, n0) >= 0.5 * max(0.1, n1 - n0) for a, b, _ in self.bg_fx):
+                        break
+                    merged = merged + [list(ln) for ln in blocks[j]]
+                    j += 1
+                self._bghero_left = None
+                it = self._bg_hero(s, merged, emph | accent_set, role, end_limit)
+                left = getattr(self, "_bghero_left", None)
+                if it is not None and left:
+                    # la clausula que no entro en la composicion: su propio titulo, antes
+                    lw, tc = left
+                    lw = [w for ln in self.trim_edges([lw]) for w in ln]
+                    if lw:
+                        lt0 = max(lw[0]["t0"] - 0.08, self.shot_at(lw[0]["t0"])["start"] + 0.02)
+                        lt1 = tc - 0.04
+                        if self.f(lt1) - self.f(lt0) >= 0.8 and not self.weak_block(lw):
+                            # arriba, donde sigue la composicion (el fondo nuevo luce)
+                            li_ = self.title_block([lw], main, {w["i"] for w in lw if w["i"] in primary},
+                                                   ["top"] + [z_ for z_ in zones_hero if z_ != "top"], lt0, lt1,
+                                                   role, humor=humor,
+                                                   acc_words={w["i"] for w in lw if w["i"] in accent_set},
+                                                   first_bonus=1.9)
+                            if li_ is not None:
+                                li_["anim_out"] = "none"      # le pasa la franja a la composicion
+                if it is not None:
+                    placed += 1
+                    home = "top"
+                    self.last["tp_recent"] = (self.last.get("tp_recent", []) + ["behind_giant"])[-2:]
+                    continue
+            if on_bg:
                 # bloque sobre fondo reemplazado: es el momento protagonista (pila grande)
                 preset = "stack" if main != "script_accent" else main
                 if not hero:
@@ -3841,7 +4644,7 @@ class _Choreo:
                 zones.remove(home)
                 zones.insert(0, home)
             top_bonus = 1.0
-            if any(min(b, fb_) - max(a, fa_) >= 0.5 * max(0.1, fb_ - fa_) for a, b, _ in self.bg_fx):
+            if on_bg and role != "hook":
                 # sobre el fondo nuevo (arriba de la cabeza) el titulo luce el reemplazo
                 zones = ["top"] + [z_ for z_ in zones if z_ != "top"]
                 top_bonus = 1.9
@@ -3850,6 +4653,13 @@ class _Choreo:
                                   acc_words={w["i"] for w in ws if w["i"] in accent_set},
                                   first_bonus=top_bonus)
             if not it:
+                key_ = tuple(w["i"] for w in ws)
+                if len(blk) >= 2 and key_ not in tried:
+                    # no cabe con presencia (primer plano, franja corta): se reorganiza en dos
+                    # bloques mas cortos que entran uno tras otro con la voz
+                    tried.add(key_)
+                    h_ = (len(blk) + 1) // 2
+                    blocks[bi + 1:bi + 1] = [blk[:h_], blk[h_:]]
                 continue
             self.last["tp_recent"] = (recent + [it["preset"]])[-2:]
             home = it["_geom"][1]
@@ -3873,6 +4683,208 @@ class _Choreo:
                     self.punch_at(hw["t0"], 0.07 + 0.07 * self.I, 0.35)
         return placed
 
+    def _bg_hero(self, s: dict, blk: list[list[dict]], emph: set, role: str,
+                 end_limit: float | None) -> dict | None:
+        """Composicion del momento protagonista sobre el fondo reemplazado (dos piezas de la
+        misma composicion, editables por separado; ids tx_bghero_s<N> y tx_bghero_s<N>b, que se
+        bloquean juntas con su fx_bgswap_s<N>):
+          - la frase ARRIBA en 1-2 lineas con presencia (0.075-0.09 W) que se escribe al ritmo de
+            la voz desde el inicio del bloque (si no cabe, solo su ultima clausula);
+          - la palabra protagonista GIGANTE (>= 0.13 W) debajo, detras de la cabeza o delante sobre
+            el cabello (nunca de las cejas para abajo), que ATERRIZA cuando se dice (golpe suave);
+            su hueco queda reservado desde el inicio.
+        Si el encuadre no deja sitio, la camara de ese tramo abre un poco (el fondo nuevo luce)."""
+        ws = [w for ln in blk for w in ln]
+        shot = self.shot_at(ws[0]["t0"])
+        if not shot["talk"] or shot.get("face_nominal") or not shot.get("face_x") or \
+                not (0.3 <= shot["face_x"] <= 0.7):
+            return None
+        cand = [w for w in ws if self.content_word(w) and len(w["n"]) >= 4]
+        if not cand:
+            return None
+        pref = [w for w in cand if w["i"] in emph or w["kw"]] or cand
+        hero = pref[-1]                       # el remate de la clausula ('... tus DIENTES')
+        if len(hero["n"]) > 10:
+            return None
+        before = [w for w in ws if w["i"] < hero["i"]]
+        after = [w for w in ws if w["i"] > hero["i"]]
+        if len(after) > 2 or sum(len(w["n"]) for w in after) > 8:
+            return None
+        t0 = max(ws[0]["t0"] - 0.08, shot["start"] + 0.02)
+        lim = shot["end"] - 0.04
+        if s["id"] + 1 < len(self.sents) and self.sents[s["id"] + 1]["t0"] > ws[-1]["t1"]:
+            lim = min(lim, self.sents[s["id"] + 1]["t0"] - 0.04)
+        if end_limit is not None:
+            lim = min(lim, end_limit)
+        t1 = min(max(ws[-1]["t1"] + 0.55, self.o(self.f(hero["t0"]) + 1.1)), lim)
+        fa, fb = self.f(t0), self.f(t1)
+        if fb - fa < 1.0 or not self.free("top", fa, fb):
+            return None
+        # la gigante aterriza con la voz (entera, con golpe: word_sync false), pero se ve >= 1.1 s
+        # aunque la palabra se diga al final de la toma
+        tg = max(t0, min(hero["t0"] - 0.05, self.o(fb - 1.1)))
+        light = any(k == "light" and a < fb and fa < b for a, b, k in self.bg_fx)
+        lead_font = self.K["serif"] if self.preset_ok("serif_elegant") else self.K["text"]
+        lead_preset = "serif_elegant" if self.preset_ok("serif_elegant") else "title_pop"
+        disp = self.K["display"]
+        giant = " ".join([_display(hero["text"]).strip("¿?¡!.,").upper()] +
+                         [_display(w["text"]).strip("¿?¡!.,").upper() for w in after])
+        ink = self.pal["dark"] if light else "#FFFFFF"
+        acc = self.acc_light if light else self.pal["accent"]
+        # frase: completa o solo su ultima clausula ('y como se ven tus' -> 'como se ven tus')
+        leads = [before] if before else [[]]
+        cut = max((k for k, w in enumerate(before) if k > 0 and w["n"] in CLAUSE_W), default=None)
+        if cut is not None:
+            tail_ = before[cut:]
+            if tail_ and tail_[0]["n"] in ("y", "e", "o", "u", "pero"):
+                tail_ = tail_[1:]
+            if tail_:
+                leads.append(tail_)
+        opts = []                 # (lineas, tamano, palabras) de la mas grande/completa a la menor
+        for li_, lw in enumerate(leads):
+            words_ = [_display(w["text"]) for w in lw]
+            if not words_:
+                opts.append(([], 0.0, lw))
+                continue
+            for fs in (0.09, 0.085, 0.08, 0.075):
+                lines = self._rewrap(words_, lead_font, fs, 2)
+                if len(lines) <= 2 and max(_text_w(lead_font, fs, ln) for ln in lines) <= self.MAXW:
+                    opts.append((lines, fs, lw))
+        if not opts:
+            return None
+        gsize = self._fit_lines([{"text": giant, "scale": 1.0, "font": disp}], 0.3, self.MAXW)
+        GMIN = 0.13
+
+        def layout(z=None, only=None):
+            g_ = self.geom(shot, t0, t1, z)
+            ht_ = g_.get("head_top")
+            if ht_ is None:
+                return None
+            core_ = self.face_core(shot, t0, t1, z)
+            brow_ = (core_[1] - 0.006) if core_ is not None else ht_
+            for lines_, fs_, lw_ in (only or opts):
+                lh_ = sum(fs_ * 1.12 for _ in lines_) / self.aspect
+                top_ = SAFE["top"] + (lh_ + 0.012 if lines_ else 0.0)
+                sz_ = min(gsize, (brow_ - top_) * self.aspect / 1.12)
+                if sz_ >= GMIN:
+                    return ht_, brow_, lines_, fs_, lw_, top_, sz_
+            return None
+
+        lay = layout()
+        full = [o for o in opts if o[2] is leads[0]]
+        if full and (lay is None or lay[4] is not leads[0]):
+            # no cabe la frase COMPLETA: la camara de este tramo abre lo justo (sin bajar de
+            # ~0.85 del plano medio de la toma), primero con letra >= 0.08 W y si no con 0.075
+            zc = self.zoom_level(shot, t0, t1)
+            zfloor = max(1.0, 0.85 * float(shot.get("z0", 1.0)))
+            best = None
+            for fsmin in (0.08, 0.075):
+                cand_ = [o for o in full if o[1] >= fsmin - 1e-6]
+                z_ = zc
+                while z_ >= zfloor - 1e-6 and cand_:
+                    if layout(z_, cand_) is not None:
+                        best = z_
+                        break
+                    z_ -= 0.02
+                if best is not None:
+                    break
+            if best is not None:
+                if best < zc - 1e-3:
+                    self._cap_cam(t0, t1, best)
+                lay = layout() or lay
+        if lay is None:
+            return None
+        ht, brow, lead_txt, lead_fs, lead_ws, top_lim, size = lay
+        if ht < 0.12:
+            return None
+        # frase recortada a su ultima clausula: la composicion empieza con ESA clausula y lo
+        # anterior ('como se sienten') se titula aparte antes (title_sequence), no se pierde
+        first_i = (lead_ws[0]["i"] if lead_ws else hero["i"])
+        left = [w for w in ws if w["i"] < first_i]
+        if left:
+            t0 = max(t0, self.words[first_i]["t0"] - 0.08)
+            fa = self.f(t0)
+            if fb - fa < 1.0:
+                return None
+            tg = max(t0, tg)
+            ws = [w for w in ws if w["i"] >= first_i]
+        gh = size * 1.12 / self.aspect
+        gy = top_lim + gh / 2
+        gfields = {"start": tg, "end": t1, "preset": "behind_giant",
+                   "lines": [{"text": giant, "scale": 1.0, "font": disp, "color": acc}],
+                   "x": 0.5, "y": _r(gy, 4), "size": _r(size, 4), "font": disp, "color": acc,
+                   "accent": acc, "align": "center", "behind": True, "case": "none",
+                   "anim_in": "scale_down", "anim_out": "fade", "shadow": 0.12 if light else 0.35,
+                   "accent_words": [], "word_sync": False}
+        gfields = self.legible_behind(gfields, shot, tg, t1, max_occ=0.4, top_min=top_lim - 0.004)
+        if not gfields.get("behind"):
+            gfields["shadow"] = 0.2 if light else 0.6
+        gi = self.add("text", "bghero", gfields, zone="top")
+        if not gi:
+            return None
+        # el hueco de la gigante queda reservado desde el inicio del bloque (la frase ya esta)
+        self.occ["top"].append((fa, fb, gi["id"]))
+        rg = measure_text(gi, self.style)
+        if rg is not None:
+            self.ink.append((fa, fb, *rg, gi["id"]))
+        # la frase encima (se escribe con la voz); si no cabe con presencia, solo la gigante
+        if lead_txt and rg is not None:
+            fs = lead_fs
+            for _ in range(6):
+                lh = sum(fs * 1.12 for _ in lead_txt) / self.aspect
+                if rg[1] - 0.008 - lh >= SAFE["top"] or fs <= 0.075:
+                    break
+                fs *= 0.96
+            ly = rg[1] - 0.008 - lh / 2
+            if ly - lh / 2 >= SAFE["top"] - 0.004:
+                lt0 = max(t0, lead_ws[0]["t0"] - 0.08) if lead_ws else t0
+                lf = {"start": lt0, "end": t1, "preset": lead_preset, "text": "\n".join(lead_txt),
+                      "x": 0.5, "y": _r(ly, 4), "size": _r(fs, 4), "font": lead_font, "color": ink,
+                      "accent": acc, "align": "center", "anim_in": "word_stagger", "anim_out": "fade",
+                      "shadow": 0.12 if light else 0.5, "accent_words": []}
+                li = self.add("text", "bghero", lf, zone="edge")
+                if li:
+                    self.occ["top"].append((fa, fb, li["id"]))
+                    r = measure_text(li, self.style)
+                    if r is not None:
+                        self.ink.append((fa, fb, *r, li["id"]))
+        for w in ws:
+            self.titled_words.add(w["i"])
+        self.sfx(tg + 0.04, "impact_soft", prio=6, src_id=gi["id"])
+        self.protect.append((self.f(tg) + 0.25, self.f(tg) + 0.9))
+        self._bghero_left = (left, t0) if left else None
+        # destello junto a la palabra gigante (lado contrario a la cara)
+        if rg is not None:
+            gi["_geom"] = ((rg[0], rg[1], rg[2], rg[3]), "top", gfields["lines"], "light" if light else "dark")
+            self.accent_for(gi, ws, emph, f"bh{hero['i']}", max(tg, hero["t0"] - 0.05), t1, force="sparkle")
+        return gi
+
+    def _cap_cam(self, t0: float, t1: float, zmax: float) -> bool:
+        """Baja el zoom de camara de los tramos que tocan [t0, t1] a <= zmax (abre el encuadre
+        para una composicion de texto arriba). Todos los tramos tocados se escalan con el MISMO
+        factor: el jump-cut sigue alternando cerrado / abierto. True si cambio algo."""
+        zmax = max(1.0, float(zmax))
+        hit = []
+        for it in self.fx["effects"]:
+            if it.get("kind") != "zoom" or not str(it.get("id", "")).startswith("fx_cam"):
+                continue
+            a, b = float(it["start"]), float(it["end"])
+            if min(b, t1) - max(a, t0) < min(0.3, 0.5 * (t1 - t0)):
+                continue                  # un roce en el borde no abre el tramo vecino
+            hit.append(it)
+        tops = [max(float(it["from"]), float(it["to"])) for it in hit]
+        if not hit or max(tops) <= zmax + 1e-3:
+            return False
+        k = zmax / max(tops)
+        for it in hit:
+            a, b = float(it["start"]), float(it["end"])
+            it["from"] = _r(max(1.0, float(it["from"]) * k), 3)
+            it["to"] = _r(max(1.0, float(it["to"]) * k), 3)
+            # el tramo de camara se reconoce por su FIN (el inicio pudo entrar un poco en el corte)
+            self.cam = [(ca, cb, (max(float(it["from"]), float(it["to"])) if abs(cb - b) < 0.003 and ca < b
+                                  and a - 0.05 <= ca else cz)) for ca, cb, cz in self.cam]
+        return True
+
     def riser(self) -> None:
         """Riser que culmina en el cambio mas grande: la entrada a un b-roll mudo (revelacion) o,
         si no hay, la primera escena a pantalla completa."""
@@ -3894,19 +4906,28 @@ class _Choreo:
         if not self.sents:
             return
         s = self.sents[0]
+        # el preambulo de relleno ('Ok gente,') o ya recortado no se titula: el hook arranca en
+        # la primera palabra que queda en el video y no es muletilla
+        w0 = s["w0"]
+        drop = self._filler_ids(self.words[s["w0"]:s["w1"] + 1])
+        while w0 < s["w1"] and (not self.kept(self.words[w0]["t0"] + 0.01) or self.words[w0]["i"] in drop
+                                or self.words[w0]["n"] in FILLER):
+            w0 += 1
         w1 = s["w1"]
         # hook visual en los primeros segundos: como mucho ~4.5 s de titulos
-        while w1 > s["w0"] and self.words[w1]["f1"] - self.words[s["w0"]]["f0"] > 4.5:
+        while w1 > w0 and self.words[w1]["f1"] - self.words[w0]["f0"] > 4.5:
             w1 -= 1
-        first = self.words[s["w0"]]
+        first = self.words[w0]
+        self._hook_bg(s, w1, w0)
         self.punch_at(first["t0"] + 0.02, 0.09 + 0.05 * self.I, 0.45, role="hook_punch", min_gap=0.8)
         main = self.sub_preset(self.pick("hook", self.S["hook_presets"]))
-        n = self.title_sequence(s, s["w0"], w1, "hook", ["top", "center"], ["center", "center_low", "top"],
+        n = self.title_sequence(s, w0, w1, "hook", ["top", "center"], ["center", "center_low", "top"],
                                 main=main)
         if n == 0:
-            ws = self.words[s["w0"]:min(w1, s["w0"] + 3) + 1]
-            self.title_block([ws], "title_pop", set(s["info"]["emph"]), ["center", "top"],
-                             first["t0"] - 0.05, ws[-1]["t1"] + 0.5, "hook")
+            ws = self.words[w0:min(w1, w0 + 3) + 1]
+            if not self.weak_block(ws):
+                self.title_block([ws], "title_pop", set(s["info"]["emph"]), ["center", "top"],
+                                 first["t0"] - 0.05, ws[-1]["t1"] + 0.5, "hook")
         # whoosh de entrada
         self.sfx(max(0.0, first["t0"] - 0.05), "whoosh_fast", prio=9)
         if self.S["scenes"]["outline"]:
@@ -3919,9 +4940,76 @@ class _Choreo:
                     self.sfx(first["t0"] + 0.05, "shutter", prio=4, src_id=it["id"])
         s["info"]["_done"] = True
 
+    def _hook_bg(self, s: dict, w1: int, w0: int | None = None) -> dict | None:
+        """Impacto del hook (como el editor de referencia): el sujeto recortado sobre un fondo
+        del estilo desde el primer cuadro hasta el final del primer bloque (~1.4-2.6 s). Solo
+        con recorte limpio, persona centrada y plano medio/abierto (en un primer plano casi no
+        hay fondo que cambiar)."""
+        kind = self.S.get("hook_bg")
+        if not kind or self.I < 0.5 or self.windows is not None:
+            return None
+        w0 = s["w0"] if w0 is None else w0
+        first = self.words[w0]
+        shot = self.shot_at(first["t0"])
+        face = shot.get("face")
+        if not (shot["talk"] and not shot.get("face_nominal") and face and shot.get("matte_ok")
+                and 0.28 <= face[0] <= 0.72 and 0.06 <= face[3] <= 0.2):
+            return None
+        blocks = self._blocks(w0, w1, set(s["info"]["emph"]))
+        if not blocks:
+            return None
+        fb = blocks[0][-1][-1]["f1"] + 0.25
+        if len(blocks) > 1 and fb - self.f(first["t0"]) < 1.4:
+            fb = blocks[1][-1][-1]["f1"] + 0.25
+        fa = max(0.0, self.f(first["t0"]) - 0.06)
+        fb = min(fb, fa + 2.8, shot["f1"] - 0.04)
+        # termina con el encuadre cerrado del hook: abierto, la persona queda diminuta sobre el
+        # fondo sintetico
+        for a_, b_, _z in self.cam:
+            if a_ - 1e-6 <= first["t0"] < b_:
+                fb = min(fb, self.f(b_) - 0.02)
+                break
+        if fb - fa < 1.2:
+            return None
+        a, b = self.o(fa) if fa > 0 else max(0.0, shot["start"]), self.o(fb)
+        # un fondo que ya se queda (bloqueado junto con el titulo del hook por _lock_groups) ES el
+        # fondo del hook: no se emite una copia identica (duplicaba recorte y compositor en el export)
+        for fx0 in self.fixed.get("effects") or []:
+            if fx0.get("kind") == "bg_replace" and fx0.get("enabled", True) is not False:
+                oa, ob = self.f(float(fx0["start"])), self.f(float(fx0["end"]))
+                if min(fb, ob) - max(fa, oa) >= 0.5 * (fb - fa):
+                    self.sfx(max(0.0, a) + 0.02, "swoosh_up", prio=6, src_id=str(fx0.get("id", "")))
+                    self.music_swells.append({"start": _r(a), "end": _r(b), "db": 1.5})
+                    return None
+        cols = [self.pal["dark"], self.pal["accent2"]]
+        it = self.add("effects", "hookbg", {"start": a, "end": b, "kind": "bg_replace", "background": kind,
+                                            "bg_colors": cols, "fade_in": 0.0, "fade_out": 0.12},
+                      event=True)
+        if it:
+            self.bg_fx.append((fa, fb, "dark"))
+            self.sfx(max(0.0, a) + 0.02, "swoosh_up", prio=6, src_id=it["id"])
+            self.music_swells.append({"start": _r(a), "end": _r(b), "db": 1.5})
+        return it
+
     # ---------------------------------------------------------- 4. momento dramatico
+    # negaciones y avisos fuertes: una frase 'dramatica' necesita alguna senal en lo que se dice
+    _DRAMA_W = {"nunca", "jamas", "nadie", "prohibido", "error", "errores", "peligro", "peligroso", "grave",
+                "cuidado", "ojo", "urgente", "atencion", "importante", "alerta", "necesitamos", "tenemos",
+                "escucha", "escuchame", "alto", "secreto", "increible"}
+
+    def drama_signal(self, s: dict) -> bool:
+        """El tratamiento dramatico (B/N, destello, golpe grave) solo con una senal lexica: una
+        frase hecha ('necesitamos hablar'), una pregunta o una palabra de aviso/negacion fuerte.
+        Una frase neutra ('nombres en ingles, no puedo') no se vuelve drama porque el LLM lo diga."""
+        ws = self.words[s["w0"]:s["w1"] + 1]
+        txt = " ".join(w["n"] for w in ws)
+        if any(p in txt for p in _DRAMA_PH) or "?" in s.get("text", ""):
+            return True
+        return any(w["n"] in self._DRAMA_W for w in ws)
+
     def drama(self) -> None:
-        cand = [s for s in self.sents if s["info"]["fx"] == "dramatico" and not s["info"].get("_done")]
+        cand = [s for s in self.sents if s["info"]["fx"] == "dramatico" and not s["info"].get("_done")
+                and self.drama_signal(s)]
         if not cand:
             return
         s = cand[0]
@@ -3955,6 +5043,12 @@ class _Choreo:
         # texto: gigante detras del sujeto si la toma lo permite; si no, serif centrado
         emph = set(s["info"]["emph"]) or {max(ws, key=lambda w: len(w["n"]))["i"]}
         g = self._geom(shot, self.zoom_level(shot, t0, end))
+        if D["giant"] and shot["talk"] and not shot.get("face_nominal") and shot.get("face_x") is not None \
+                and 0.25 <= shot["face_x"] <= 0.75 and g.get("head_top") is not None and g["head_top"] < 0.17:
+            # plano medio cerrado: para la palabra gigante sobre la cabeza la camara abre lo justo
+            ax, ay, _fw, fh = shot["face"][:4]
+            if self._cap_cam(t0, end, (ay - 0.175) / max(1e-3, fh * 1.08 * 0.98)):
+                g = self._geom(shot, self.zoom_level(shot, t0, end))
         giant_ok = (D["giant"] and shot["talk"] and not shot.get("face_nominal")
                     and shot["face_x"] is not None
                     and 0.25 <= shot["face_x"] <= 0.75 and (g["head_top"] or 0) >= 0.17)
@@ -4006,9 +5100,14 @@ class _Choreo:
                 "color": "#FFFFFF", "accent": self.pal["accent"], "align": "center",
                 "behind": True,
                 "anim_in": self.pick("drama_anim", ["scale_down", "letter_stagger"]) if static >= 0.8 else "pop",
-                "anim_out": "fade", "shadow": 0.2, "accent_words": []}, shot, t0, end)
+                "anim_out": "fade", "shadow": 0.2, "accent_words": []}, shot, t0, end, max_occ=0.42)
             if not fields.get("behind"):
+                # delante (pila sobre el cabello): tinta contra el fondo real de su franja
                 fields["shadow"] = 0.6
+                r0 = measure_text(fields, self.style)
+                if r0 is not None:
+                    self._apply_ink(fields, self._bg_at(shot, r0[1], r0[3], t0, end))
+                    fields.pop("_mode", None)
             placed = self.add("text", "drama", fields, zone="top")
             if placed:
                 r = measure_text(placed, self.style)
@@ -4216,8 +5315,13 @@ class _Choreo:
             hw = [w for w in self.words[sched_i:min(s["w1"], sched_i + 1) + 1]]
             title = _cap_first(" ".join(_display(w["text"]) for w in hw))
             # sin repetir "Agenda": el link (con su etiqueta) llega enseguida
+            bf = self._book_fields()
+            via = ""
+            if bf:
+                via = "En mi página" if self.book["kind"] == "web" else \
+                    "En " + PR.PLATFORMS.get(bf["platform"], {}).get("label", "el link")
             self.card("schedule", sched_i, t0, end, title=title,
-                      subtitle=self.ent.get("schedule") or ("En el link de abajo" if link_i is not None else ""),
+                      subtitle=self.ent.get("schedule") or via or ("En el link de abajo" if link_i is not None else ""),
                       icon="calendar-event", theme="light", sfx_name="ding")
             s["info"]["_done"] = True
         if link_i is not None:
@@ -4231,10 +5335,30 @@ class _Choreo:
             if s["id"] + 1 < len(self.sents):
                 # la siguiente frase manda (su titulo entra en su primera palabra)
                 end = min(end, max(t0 + 1.0, self.sents[s["id"] + 1]["t0"] - 0.12))
-            it = self.cta("link_below", t0, end, label=self.ent.get("link_label") or "Link abajo")
+            bf = self._book_fields()
+            end0 = end
+            # la pastilla se lee >= 1.5 s en tiempo FINAL (un recorte puede comerse el tramo): si no
+            # alcanza se alarga dentro de la toma; si aun asi no, no se pone (la tarjeta final la
+            # lleva) en vez de un parpadeo que parece falla
+            if self.f(end) - self.f(t0) < self.LINK_MIN:
+                lim = self.f(shot["end"] - 0.03)
+                if self.reserved:
+                    lim = min(lim, self.reserved[0][0] - 0.3)
+                end = max(end, self.o(min(lim, self.f(t0) + self.LINK_MIN + 0.1)))
+            lk = dict(label=bf.get("label") or self.ent.get("link_label") or "Link abajo",
+                      extra={k: v for k, v in bf.items() if k != "label"})
+            it = self.cta("link_below", t0, end, **lk)
+            if it is None and end > end0 + 1e-6:
+                # algo fijo empieza justo despues (un titulo que el usuario bloqueo): la pastilla
+                # corta entra igual y extend_link la sostiene hasta el final en la franja baja; si no
+                # se puede sostener se quita abajo (< LINK_MIN)
+                it = self.cta("link_below", t0, end0, **lk)
             if it is not None:
                 self.link_item = it
-                self.extend_link(it)
+                if not self.extend_link(it) and \
+                        self.f(float(it["end"])) - self.f(float(it["start"])) < self.LINK_MIN - 1e-3:
+                    self._unplace(it)
+                    self.link_item = None
             s["info"]["_done"] = True
 
     def _price_overlay(self, i0: int, i1: int, s: dict, shot: dict, end: float, val: float, cur: str,
@@ -4277,7 +5401,7 @@ class _Choreo:
         sticker_h = 0.05 if service else 0.0
         best = None
         for z in ("top", "center_low"):
-            if not self.free(z, fa, fb):
+            if not self.free(z, fa, fb) or (z == "under" and not g.get("under")):
                 continue
             lo, hi = (g["center"][0], g["low"][1]) if z == "center_low" else g[z]
             lo += sticker_h
@@ -4330,6 +5454,7 @@ class _Choreo:
             self.add("effects", "price_blur", {"start": t0, "end": end, "kind": "bg_blur", "radius": 20.0},
                      event=False)
         # etiqueta del servicio encima del numero + destellos a los lados
+        tag_top = None
         if service:
             sy = max(SAFE["top"] + 0.03, r[1] - 0.035)
             bgc = self.pal["accent"] if _luma(self.pal["accent"]) < 0.9 else "#FFFFFF"
@@ -4341,12 +5466,19 @@ class _Choreo:
             if st:
                 self.acc_pos[st["id"]] = (0.5, sy)
                 self.sfx(t0 + 0.14, "pop", prio=5, src_id=st["id"], vary=True)
+                # borde superior de la pastilla (alto 1.45x la fuente + borde, inclinada ~4 grados)
+                tag_top = sy - PRICE_TAG_HALF
         self.protect.append((self.f(land), self.f(land) + 0.8))
         # circulo a mano alrededor del precio cuando aterriza (como un editor que lo remarca)
         t_c = self.o(self.f(land) + 0.05)
         if self.f(end) - self.f(t_c) >= 0.8 and self.S.get("marks", 0) > 0:
             cw_, ch_ = (r[2] - r[0]) * 1.16 + 0.04, (r[3] - r[1]) * 1.55 + 0.02
             cx_, cy_ = (r[0] + r[2]) / 2, (r[1] + r[3]) / 2
+            if tag_top is not None and cy_ - ch_ / 2 > tag_top - 0.012:
+                # el circulo abraza TAMBIEN la etiqueta: al alto del numero su trazo cruzaba la
+                # pastilla del servicio y parecia tacharla ('LIMPIEZA' tachada)
+                top_, bot_ = tag_top - 0.012, cy_ + ch_ / 2
+                cy_, ch_ = (top_ + bot_) / 2, bot_ - top_
             rect = (cx_ - cw_ / 2, cy_ - ch_ / 2, cx_ + cw_ / 2, cy_ + ch_ / 2)
             fr = self.face_rect(shot, t_c, end)
             # nunca sobre ojos/nariz/boca (puede rozar barbilla o cabello, como los titulos)
@@ -4453,7 +5585,7 @@ class _Choreo:
             end = self.o(min(fb, fa + 2.6))
             if cut_end is not None and self.f(cut_end) - fa >= 1.3:
                 end = min(end, cut_end)
-            label = {"location": "Ubicacion", "schedule": "Horarios", "price": "Precio",
+            label = {"location": "Ubicación", "schedule": "Horarios", "price": "Precio",
                      "link": "Agenda"}.get(variant, "")
             fields = {"start": t0, "end": end, "kind": "info_card", "background": "blur_self",
                       "bg_colors": [self.pal["dark"], self.pal["accent2"]],
@@ -4508,32 +5640,48 @@ class _Choreo:
         return None
 
     def cta(self, variant: str, t0: float, t1: float, label: str = "", handle: str = "",
-            zones: tuple = ("low", "center", "top")) -> dict | None:
+            zones: tuple = ("low", "center", "top"), extra: dict | None = None) -> dict | None:
+        """CTA sobre la toma en la primera franja libre. `extra`: campos del perfil (link_below
+        con `display` = pastilla de dos lineas; follow con title/platform/avatar)."""
         shot = self.shot_at(t0)
         g = self.geom(shot, t0, t1)
         fa, fb = self.f(t0), self.f(t1)
+        extra = dict(extra or {})
+        two = bool(extra.get("display")) and variant == "link_below"
         size = 0.66 if variant == "link_below" else 0.68
         for z in zones:
-            if not self.free(z, fa, fb):
+            if not self.free(z, fa, fb, cta=True):
                 continue
             lo, hi = g[z]
             if hi - lo < 0.06:
                 continue
-            yy = 0.6 if z == "low" else ((lo + hi) / 2 if z == "top" else hi - 0.04)
+            yy0 = 0.6 if z == "low" else ((lo + hi) / 2 if z == "top" else hi - 0.04)
+            yy, arrow = yy0, 1.0
             if variant == "link_below":
                 # la flecha rebota hacia abajo: el centro de la pastilla queda arriba de subtitulos
-                yy = min(yy, self._link_y_max(size))
-                if yy - self._link_h(size) / 2 < max(lo, SAFE["top"]) - 0.01:
+                # (la pastilla de dos lineas prueba una flecha mas corta o ninguna)
+                fit = None
+                for ar in ((1.0, 0.6, 0.0) if two else (1.0,)):
+                    y_ = min(yy0, self._link_y_max(size, ar, two))
+                    if y_ - self._link_h(size, two) / 2 >= max(lo, SAFE["top"]) - 0.01:
+                        fit = (y_, ar)
+                        break
+                if fit is None:
                     continue
-            it = self.add("graphics", "cta", {
-                "start": t0, "end": t1, "kind": "cta", "variant": variant, "label": label,
-                "handle": handle, "x": _r(self.XC, 3), "y": _r(yy, 4), "size": size,
-                "color": self.pal["accent"], "anim_in": "pop", "anim_out": "fade", "rotation": 0.0},
-                zone=z)
+                yy, arrow = fit
+            fields = {"start": t0, "end": t1, "kind": "cta", "variant": variant, "label": label,
+                      "handle": handle, "x": _r(self.XC, 3), "y": _r(yy, 4), "size": size,
+                      "color": self.pal["accent"], "anim_in": "pop", "anim_out": "fade", "rotation": 0.0}
+            if arrow < 1.0:
+                fields["arrow_scale"] = arrow
+            fields.update(extra)
+            if variant == "follow":
+                fields["button_color"] = self.button_color()
+            it = self.add("graphics", "cta", fields, zone=z)
             if it:
-                hh = self._link_h(size) if variant == "link_below" else size * 0.17 * 1080 / 1920
+                hh = self._link_h(size, two) if variant == "link_below" else size * 0.17 * 1080 / 1920
                 self.ink.append((fa, fb, self.XC - size / 2, yy - hh / 2, self.XC + size / 2,
-                                 yy + (2.45 * hh if variant == "link_below" else hh / 2), it["id"]))
+                                 yy + ((0.8 + 1.66 * arrow) * hh if variant == "link_below" else hh / 2), it["id"]))
                 self.sfx(t0 + 0.04, "click", prio=8, src_id=it["id"])
                 if variant == "link_below":
                     self.sfx(t0 + 0.3, "swoosh_down", prio=3, src_id=it["id"])
@@ -4548,7 +5696,8 @@ class _Choreo:
         for c in self.fx["cutaways"]:
             t += self.f(c["end"]) - self.f(c["start"])
         for e in self.fx["effects"]:
-            if e["kind"] in ("bw", "bg_replace", "color_pop"):
+            # el fondo del hook no gasta el presupuesto de escenas (es el gancho, no una escena)
+            if e["kind"] in ("bw", "bg_replace", "color_pop") and not str(e["id"]).startswith("fx_hookbg"):
                 t += self.f(e["end"]) - self.f(e["start"])
         return t
 
@@ -4578,27 +5727,59 @@ class _Choreo:
             face = shot.get("face")
             if not shot["talk"] or shot.get("face_nominal") or not face or not shot.get("matte_ok", True):
                 continue                         # sin recorte limpio no hay fondo reemplazado
-            if not (0.3 <= face[0] <= 0.7 and face[3] >= 0.095):
-                continue
+            if not (0.3 <= face[0] <= 0.7 and 0.095 <= face[3] <= 0.3):
+                continue                         # en un primer plano extremo casi no hay fondo que cambiar
             a = max(ws[0]["t0"] - 0.12, shot["start"] + 0.05)
             b = min(ws[-1]["t1"] + 0.45, shot["end"] - 0.05)
             dur = self.f(b) - self.f(a)
             if dur < 1.3 or dur > max(3.2, room + 0.5):
                 continue
-            if self.drama_range and a < self.drama_range[1] and self.drama_range[0] < b:
+            # el rotulo nunca queda a medias entre el fondo nuevo y el real: el fondo lo cubre
+            # completo (hasta 1.6 s mas, dentro de la toma) o el rotulo termina con el fondo (o
+            # antes de que entre) si asi se lee >= 2 s; si nada de eso cabe, no se usa este bloque
+            lts = [lt for lt in self.fx["graphics"] if lt.get("kind") == "lower_third"
+                   and float(lt["start"]) < b and a < float(lt["end"])
+                   and not (a <= float(lt["start"]) and float(lt["end"]) <= b)]
+            opts = []
+            if lts:
+                a2 = min([a] + [float(lt["start"]) - 0.1 for lt in lts])
+                b2 = max([b] + [float(lt["end"]) + 0.1 for lt in lts])
+                if a2 >= shot["start"] + 0.05 and b2 <= shot["end"] - 0.05 and (a - a2) + (b2 - b) <= 1.6:
+                    opts.append((a2, b2, []))
+                fix = []
+                for lt in lts:
+                    la = float(lt["start"])
+                    cut = b - 0.1 if la >= a - 0.05 else a - 0.1
+                    if self.f(cut) - self.f(la) < 2.0:
+                        fix = None
+                        break
+                    fix.append((lt, cut))
+                if fix is not None:
+                    opts.append((a, b, fix))
+            else:
+                opts.append((a, b, []))
+            ok_opt = None
+            for a_, b_, fix_ in opts:
+                if self.drama_range and a_ < self.drama_range[1] and self.drama_range[0] < b_:
+                    continue
+                # la escena cambia el fondo detras de la persona: basta con que no haya otra escena
+                # ni titulos (un rotulo en la franja baja puede convivir)
+                if not (self.free("top", self.f(a_), self.f(b_))
+                        and self._zone_free_but("center", self.f(a_), self.f(b_),
+                                                {e[2] for e in self.occ["center"] if str(e[2]).startswith("gr_name")})):
+                    continue
+                ok_opt = (a_, b_, fix_)
+                break
+            if ok_opt is None:
                 continue
-            # la escena cambia el fondo detras de la persona: basta con que no haya otra escena ni
-            # titulos (un rotulo en la franja baja puede convivir)
-            if not (self.free("top", self.f(a), self.f(b))
-                    and self._zone_free_but("center", self.f(a), self.f(b),
-                                            {e[2] for e in self.occ["center"] if str(e[2]).startswith("gr_name")})):
-                continue
+            a, b, lt_fix = ok_opt
+            dur = self.f(b) - self.f(a)
             score = len(blk) + (1 if any(w["n"] in CLAUSE_W for w in ws[1:]) else 0) + dur * 0.3
             if best is None or score > best[0]:
-                best = (score, bi, a, b, shot)
+                best = (score, bi, a, b, shot, lt_fix)
         if best is None:
             return False
-        _, bi, a, b, shot = best
+        _, bi, a, b, shot, lt_fix = best
         bgk = self.pick("bgr", self.S["scenes"]["bg_replace"])
         light = bgk in LIGHT_BG
         cols = ["#F3EFE6", "#E4DDCF"] if bgk == "paper" else [self.pal["dark"], self.pal["accent2"]]
@@ -4606,6 +5787,13 @@ class _Choreo:
                                             "bg_colors": cols})
         if not it:
             return False
+        for lt, cut in lt_fix:
+            # el rotulo termina junto con el fondo (sin resto sobre el fondo real)
+            lt["end"] = _r(cut)
+            nf = self.f(cut)
+            for z in self.occ:
+                self.occ[z] = [(x, nf, iid) if iid == lt["id"] else (x, y, iid) for x, y, iid in self.occ[z]]
+            self.ink = [tuple([r[0], min(r[1], nf)] + list(r[2:])) if r[6] == lt["id"] else r for r in self.ink]
         self.bg_fx.append((self.f(a), self.f(b), "light" if light else "dark"))
         self.sfx(a + 0.02, "swoosh_up", prio=6, src_id=it["id"])
         self.sfx(b - 0.05, "whoosh_soft", prio=3, src_id=it["id"])
@@ -4638,7 +5826,9 @@ class _Choreo:
             if s["info"].get("title"):
                 emph |= set(range(s["info"]["title"][0], s["info"]["title"][1] + 1))
             # palabra del inserto: un sustantivo con icono ('LIMPIEZA'), no un intensificador
-            pool_w = [w for w in ws if w["i"] in emph and w["n"] not in STOP and len(w["n"]) >= 4
+            # (>= 5 letras: 'auto' de 'auto captions' no es un coche)
+            pool_w = [w for w in ws if w["i"] in emph and w["n"] not in STOP and len(w["n"]) >= 5
+                      and w["n"] not in FILLER and w["n"] not in LIGHT
                       and not w["n"].endswith(("isimo", "isima", "mente"))]
             if not pool_w or s["info"].get("_done"):
                 continue
@@ -4651,7 +5841,10 @@ class _Choreo:
                     continue
                 icon = tone_icon(hero["n"], self.role, self.used["topic_icon"])
                 if not icon:
-                    pool = topic_icons(self.role)
+                    # los iconos que el LLM propuso para ESTA frase antes que los del rubro
+                    own = [ic for ic in s["info"].get("icons") or [] if ic not in ICON_BLOCK
+                           and assets.icon_exists(str(ic))]
+                    pool = own or topic_icons(self.role)
                     icon = pool[0] if pool else None
                 if icon:
                     cands.append((order[sec], rank, s["id"], s, hero, icon))
@@ -4807,8 +6000,21 @@ class _Choreo:
 
     # ---------------------------------------------------------- 8. rotulo de nombre
     def _lt_texts(self) -> tuple[str, str] | None:
-        """(titulo, subtitulo) del rotulo: nombre publicable + rol; sin nombre confirmado, el
-        rol + el tema (nunca un nombre leido en un letrero sin confirmar)."""
+        """(titulo, subtitulo) del rotulo. Con perfil: su nombre + profesion ('Dra. Ana Ruiz' /
+        'Odontóloga'; sin nombre, el negocio). Sin perfil: nombre publicable + rol; sin nombre
+        confirmado, el rol + el tema (nunca un nombre leido en un letrero sin confirmar)."""
+        if self.prof is not None:
+            nm, ttl = self.prof.get("name") or "", self.prof.get("title") or ""
+            biz = self.prof.get("business") or ""
+            if nm:
+                # la marca se ve: 'PERFUMISTA · OLFATO' si cabe sin achicar de mas el rol
+                if ttl and biz and norm(biz) not in norm(ttl) and norm(biz) not in norm(nm):
+                    both = f"{ttl} · {biz}"
+                    if lt_sub_fits(both, 0.064, self.style):
+                        return nm, both
+                return nm, ttl or biz
+            if biz:
+                return biz, ttl or self.prof.get("tagline") or ""
         role = str(self.ent.get("role") or "").strip()
         if self.name:
             return self.name, role
@@ -4824,50 +6030,95 @@ class _Choreo:
             return None
         return role, _cap_first(sub.lower())
 
+    def _try_lower_third(self, sh: dict, fa: float, L: float, title: str, sub: str,
+                         end_lim: float) -> bool:
+        """Coloca el rotulo en [fa, fa+L] (tiempo final) de la toma `sh` si ahi no hay titulos
+        (franjas baja y centro libres), ni escena, ni fondo reemplazado, ni el cierre, y no toca
+        la cara (en primer plano va en la franja de los subtitulos, que se ocultan)."""
+        fb = fa + L
+        if fa < sh["f0"] + 0.02 or fb > min(sh["f1"] - 0.1, end_lim) + 1e-6:
+            return False
+        if sh["k"] != self.shot_at(self.o(fb - 0.05))["k"] or not self.kept(self.o(fa + 0.05)) \
+                or not (self.free("low", fa, fb) and self.free("center", fa, fb)) \
+                or any(a < fb and fa < b for a, b in self.reserved) \
+                or any(a < fb and fa < b for a, b, _ in self.bg_fx):
+            return False
+        t0, t1 = self.o(fa), self.o(fb)
+        g = self.geom(sh, t0, t1)
+        # el panel (~0.085 H) deja >= 0.04 H de aire sobre los subtitulos: no se leen
+        # como un solo bloque
+        y = _clamp(max(g["low"][0] + 0.02, 0.6), 0.5, self.cap_top - 0.07)
+        rect = (0.07, y - 0.045, 0.8, y + 0.045)
+        fr = self.face_rect(sh, t0, t1)
+        hide = False
+        if fr is not None and rect[1] < fr[3] and g.get("under") and g.get("chin") is not None:
+            # primer plano: el rotulo va en la franja de los subtitulos (se ocultan)
+            y = SAFE["bottom"] - 0.012 - 0.045
+            rect = (0.07, y - 0.045, 0.8, y + 0.045)
+            hide = rect[1] >= g["chin"] + 0.004
+        if (fr is not None and rect[1] < fr[3] and not hide) or not self.clear_of_ink(rect, fa, fb):
+            return False
+        size = 0.064                 # un nombre largo lo ajusta el renderer (fit_font) a SAFE
+        it = self.add("graphics", "name", {
+            "start": t0, "end": t1, "kind": "lower_third", "title": title, "subtitle": sub,
+            "x": 0.07, "y": _r(y, 4), "size": size, "color": self.pal["accent"], "theme": "dark",
+            "anim_in": "draw", "anim_out": "undraw", "rotation": 0.0}, zone="low")
+        if not it:
+            return False
+        self.occ["center"].append((fa, fb, it["id"]))
+        self.ink.append((fa, fb, *rect, it["id"]))
+        if hide:
+            self.cap_hide.append({"start": _r(t0), "end": _r(t1),
+                                  "y": float(self.S["captions"]["y"]), "hide": True})
+        self.sfx(t0 + 0.02, "swipe", prio=7, src_id=it["id"])
+        self.sfx(t0 + 0.3, "pop_soft", prio=3, src_id=it["id"] + "b", vary=True)
+        return True
+
     def lower_third(self) -> None:
         """Rotulo nombre + rol que PRESENTA a quien habla: en la primera toma a camara despues
         del hook (como un editor), donde no haya ningun titulo encima (franja baja Y centro
-        libres). El remate final queda solo para seguir + link."""
+        libres). El remate final queda solo para seguir + link. Con perfil corre ANTES que los
+        titulos (temprano, 2.8 s para leer nombre y profesion) y, si la persona dice su nombre,
+        entra cuando lo dice."""
+        if self.prof is not None and not PR.uses(self.prof, "lower_third"):
+            return
         txt = self._lt_texts()
         if txt is None:
             return
         title, sub = txt
+        profiled = self.prof is not None
+        Ls = (2.8, 2.4, 2.0) if profiled else (2.4, 2.0)
+        end_lim = (self.reserved[0][0] - 2.0) if self.reserved else self.D - 2.5
+        na = self.anc.get("name") if profiled else None
+        if na is not None and 0 <= na[0] < len(self.words):
+            w = self.words[na[0]]
+            sh = self.shot_at(w["t0"])
+            cands = [(sh, w["f0"] + d) for d in (-0.12, 0.12, 0.36, 0.6, 0.84)]
+            nxt = next((x for x in self.shots if x["k"] == sh["k"] + 1), None)
+            if nxt is not None and nxt["f0"] - w["f0"] < 1.2:
+                # lo dice justo antes de un corte: entra con la toma siguiente
+                cands += [(nxt, nxt["f0"] + 0.05 + d) for d in (0.0, 0.25)]
+            for L in Ls:
+                for sh_, fa in cands:
+                    if not sh_["talk"] or sh_.get("face_nominal"):
+                        continue
+                    if self._try_lower_third(sh_, max(sh_["f0"] + 0.05, fa), L, title, sub, end_lim):
+                        # el rotulo ya presenta el nombre dicho: esas palabras no se titulan
+                        for i in range(na[0], min(na[1], len(self.words) - 1) + 1):
+                            self.titled_words.add(self.words[i]["i"])
+                        return
         start_f = 2.0
         if self.sents:
             start_f = max(start_f, self.f(self.sents[0]["t1"]) + 0.3)
         if self.drama_range and self.f(self.drama_range[0]) < start_f + 3:
             start_f = max(start_f, self.f(self.drama_range[1]) + 0.2)
-        end_lim = (self.reserved[0][0] - 2.0) if self.reserved else self.D - 2.5
-        for sh, L in [(sh, L) for L in (2.4, 2.0) for sh in self.shots]:
+        for sh, L in [(sh, L) for L in Ls for sh in self.shots]:
             if not sh["talk"] or sh.get("face_nominal"):
                 continue
             lo, hi = max(sh["f0"] + 0.3, start_f), min(sh["f1"] - 0.2, end_lim)
             fa = lo
             while fa + L <= hi + 1e-6:
-                fb = fa + L
-                if sh["k"] != self.shot_at(self.o(fb - 0.05))["k"] or not self.kept(self.o(fa + 0.05)) \
-                        or not (self.free("low", fa, fb) and self.free("center", fa, fb)) \
-                        or any(a < fb and fa < b for a, b in self.reserved) \
-                        or any(a < fb and fa < b for a, b, _ in self.bg_fx):
-                    fa += 0.25
-                    continue
-                t0, t1 = self.o(fa), self.o(fb)
-                g = self.geom(sh, t0, t1)
-                y = _clamp(max(g["low"][0] + 0.02, 0.615), 0.5, self.cap_top - 0.04)
-                rect = (0.07, y - 0.04, 0.8, y + 0.04)
-                fr = self.face_rect(sh, t0, t1)
-                if (fr is not None and rect[1] < fr[3]) or not self.clear_of_ink(rect, fa, fb):
-                    fa += 0.25
-                    continue
-                it = self.add("graphics", "name", {
-                    "start": t0, "end": t1, "kind": "lower_third", "title": title, "subtitle": sub,
-                    "x": 0.07, "y": _r(y, 4), "size": 0.064, "color": self.pal["accent"], "theme": "dark",
-                    "anim_in": "draw", "anim_out": "undraw", "rotation": 0.0}, zone="low")
-                if it:
-                    self.occ["center"].append((fa, fb, it["id"]))
-                    self.ink.append((fa, fb, *rect, it["id"]))
-                    self.sfx(t0 + 0.02, "swipe", prio=7, src_id=it["id"])
-                    self.sfx(t0 + 0.3, "pop_soft", prio=3, src_id=it["id"] + "b", vary=True)
+                if self._try_lower_third(sh, fa, L, title, sub, end_lim):
                     return
                 fa += 0.25
 
@@ -4908,6 +6159,10 @@ class _Choreo:
         if fa is None:
             fa = max(self.D - 2.6, self.D * 0.8, min(self.D - 1.8, last_f - 1.6))
         fa = min(fa, self.D - 1.2)
+        if getattr(self, "prof", None) is not None and self.D >= 10:
+            # con perfil la tarjeta final se lee y se alcanza a tocar: >= END_MIN s (entra sobre las
+            # ultimas palabras si hace falta; sus subtitulos se ocultan o quedan debajo)
+            fa = min(fa, self.D - self.END_MIN)
         fb = self.D
         return (fa, fb) if fb - fa >= 1.2 - 1e-6 else None
 
@@ -4925,20 +6180,21 @@ class _Choreo:
         return self.o(self.reserved[0][0]) - 0.02 if self.reserved else None
 
     @staticmethod
-    def _link_h(size: float) -> float:
-        """Alto (fraccion de H) de la pastilla link_below de ancho `size` (graphics: h = 0.2 W')."""
-        return size * 0.2 * 1080.0 / 1920.0
+    def _link_h(size: float, two: bool = False) -> float:
+        """Alto (fraccion de H) de la pastilla link_below de ancho `size` (graphics: h = 0.2 W';
+        con `display`, dos lineas: 0.25 W')."""
+        return size * (0.25 if two else 0.2) * 1080.0 / 1920.0
 
-    def _link_y_max(self, size: float, arrow: float = 1.0) -> float:
+    def _link_y_max(self, size: float, arrow: float = 1.0, two: bool = False) -> float:
         """y maxima del centro de link_below para que su flecha (escala `arrow`) no pise los
         subtitulos (graphics: la flecha llega a h/2 + 0.3h + 1.66h*escala bajo el centro)."""
-        h = self._link_h(size)
+        h = self._link_h(size, two)
         return self.cap_top - 0.012 - (0.8 + 1.66 * arrow) * h
 
-    def _zone_free_but(self, zone: str, fa: float, fb: float, skip: set) -> bool:
+    def _zone_free_but(self, zone: str, fa: float, fb: float, skip: set, cta: bool = False) -> bool:
         for z in ([zone, "full"] if zone != "full" else ["full"]):
             for a, b, iid in self.occ[z]:
-                if iid in skip or str(iid).startswith("reserve:"):
+                if iid in skip or str(iid).startswith("reserve:") or (cta and str(iid).startswith("lockzone:")):
                     continue
                 if fa < b - 1e-6 and a < fb - 1e-6:
                     return False
@@ -4959,17 +6215,18 @@ class _Choreo:
             # en la franja del pecho bloquearia los titulos del remate: se baja a la franja baja,
             # mas grande y sin flecha (un pase largo en pantalla; la voz ya dijo 'aqui abajo')
             size = 0.7
-            y = min(0.625, self._link_y_max(size, 0.0))
-            if _zone_y(y) != "low" or not self._zone_free_but("low", fs_, self.D, {it["id"]}):
+            two = bool(it.get("display"))
+            y = min(0.625, self._link_y_max(size, 0.0, two))
+            if _zone_y(y) != "low" or not self._zone_free_but("low", fs_, self.D, {it["id"]}, cta=True):
                 return False
             for z in ("top", "center", "low"):
                 self.occ[z] = [e for e in self.occ[z] if e[2] != it["id"]]
             self.ink = [r for r in self.ink if r[6] != it["id"]]
-            hh = self._link_h(size)
+            hh = self._link_h(size, two)
             self.ink.append((fs_, fe, self.XC - size / 2, y - hh / 2, self.XC + size / 2, y + hh / 2, it["id"]))
             it.update({"y": _r(y, 4), "size": size, "arrow_scale": 0.0})
             self.occ["low"].append((fs_, fe, it["id"]))
-        elif not self._zone_free_but("low", fe, self.D, {it["id"]}):
+        elif not self._zone_free_but("low", fe, self.D, {it["id"]}, cta=True):
             return False
         it["end"] = _r(float(self.tl.duration))
         it["anim_out"] = "none"
@@ -4980,9 +6237,112 @@ class _Choreo:
         self.link_ext = True
         return True
 
-    def _follow_fields(self) -> dict:
+    LINK_MIN = 1.5            # s (tiempo final) minimos de la pastilla del enlace en pantalla
+    # senales de que la voz manda al enlace (con perfil): 'link', 'enlace', 'bio', 'descripcion'
+    _BOOK_LINK = {"link", "links", "enlace", "enlaces", "bio", "descripcion"}
+    # verbos de reservar (imperativo / infinitivo): bastan solos
+    _BOOK_VERB = {"agenda", "agendar", "agendes", "agendame", "agendalo", "agendala", "agendate", "reserva",
+                  "reservar", "reserves", "reservame", "aparta", "apartar", "apartes"}
+    # sustantivos: solo en la frase del CTA o junto a un verbo de accion ('pide tu cita')
+    _BOOK_NOUN = {"cita", "citas", "horario", "horarios", "reservacion", "reservaciones", "agendas"}
+    _BOOK_ACT = {"pide", "pidas", "saca", "haz", "hagas", "escribeme", "escribenos", "mandame", "llamame",
+                 "visita", "visitame", "entra", "checa", "revisa", "consulta", "busca", "dale", "click", "clic",
+                 "toca", "picale", "encuentra", "encuentras"}
+    _OWN = {"mi", "mis", "nuestra", "nuestro", "nuestras", "nuestros", "su"}
+    _BODY = {"dientes", "diente", "muelas", "muela", "encias", "encia", "boca", "labio", "labios", "mandibula",
+             "parpado", "parpados", "ojos", "cabello", "pelo", "espalda", "pierna", "piernas", "brazo", "brazos"}
+
+    def _book_signals(self, s_: dict) -> tuple[int, int | None]:
+        """(puntaje, palabra ancla) de una frase como invitacion a reservar / ir al enlace. 'abajo'
+        solo cuenta en una frase de enlace ('el link de abajo', 'aqui abajo', 'abajo en la
+        descripcion'), nunca 'los dientes de abajo' ni 'de arriba hacia abajo'; 'pagina', 'web' o
+        'sitio' solo con 'mi/nuestra' o junto a otra senal; 'cita' u 'horarios' solo en la frase
+        del CTA o con un verbo de accion ('pide tu cita')."""
+        ws = self.words[s_["w0"]:s_["w1"] + 1]
+        ns = [w["n"] for w in ws]
+        cta = s_["info"].get("section") == "cta"
+        score, anchor = 0, None
+        link = [k for k, n in enumerate(ns) if n in self._BOOK_LINK]
+        verb = [k for k, n in enumerate(ns) if n in self._BOOK_VERB]
+        act = any(n in self._BOOK_ACT for n in ns)
+        abajo = []
+        for k, n in enumerate(ns):
+            if n != "abajo":
+                continue
+            prev = ns[max(0, k - 4):k]
+            nxt = ns[k + 1:k + 5]
+            if "arriba" in prev or "arriba" in nxt or any(p in self._BODY for p in prev):
+                continue
+            if (k > 0 and ns[k - 1] in ("aqui", "ahi", "aca", "alla")) or any(p in self._BOOK_LINK for p in prev) \
+                    or any(p in ("descripcion", "comentarios", "link", "enlace", "bio") for p in nxt):
+                abajo.append(k)
+        noun = [k for k, n in enumerate(ns) if n in self._BOOK_NOUN]
+        if noun and not (cta or act or verb or link or abajo):
+            noun = []
+        page = []
+        for k, n in enumerate(ns):
+            if n in ("pagina", "web", "sitio", "perfil") and (
+                    (k > 0 and ns[k - 1] in self._OWN) or (k > 1 and ns[k - 2] in self._OWN) or link or verb or noun):
+                page.append(k)
+        strong = sorted(set(link) | set(abajo))
+        score = 2 * len(strong) + len(verb) + len(noun) + len(page) + (1 if cta and (strong or verb or noun or page)
+                                                                        else 0)
+        first = sorted(strong or verb or noun or page)
+        if first:
+            anchor = ws[first[0]]["i"]
+        return score, anchor
+
+    def _booking_anchor(self) -> int | None:
+        """Palabra donde la voz manda a reservar o al enlace (ver _book_signals): la frase con mas
+        senales (a igualdad, la ultima). Solo con perfil que tiene pagina de reservas o web."""
+        best = None
+        for s_ in self.sents:
+            sc, anchor = self._book_signals(s_)
+            if sc <= 0 or anchor is None:
+                continue
+            key = (sc, s_["id"])
+            if best is None or key >= best[0]:
+                best = (key, anchor)
+        return best[1] if best else None
+
+    def _book_fields(self, force: bool = False) -> dict:
+        """Campos de la CTA/tarjeta de reservas del perfil: etiqueta ('Agenda en PaseoClub'),
+        enlace corto (`display`), plataforma e icono. {} sin perfil o con la CTA apagada."""
+        b = self.book
+        if b is None or not (force or PR.uses(self.prof, "booking_cta")):
+            return {}
+        # una web con la etiqueta automatica ('Sitio web') lleva una accion segun el rubro
+        ctx = " ".join(str(x or "") for x in (self.role, self.prof.get("business"), self.prof.get("title"),
+                                                self.script.get("topic")))
+        return {"label": PR.link_cta(b, ctx), "display": b["display"], "platform": b["platform"], "icon": b["icon"]}
+
+    def button_color(self) -> str:
+        """Color del boton Seguir: el acento del estilo si se lee como boton; si el acento es
+        blanco (minimal) el oscuro de la paleta (nunca el rojo generico del renderer)."""
+        acc = self.pal["accent"]
+        return acc if _luma(acc) <= 0.85 else self.pal["dark"]
+
+    def _follow_fields(self) -> dict | None:
         """Textos del CTA seguir: @usuario, o el nombre publicable (+ rol), o SOLO el rol si el
-        nombre no esta confirmado (nunca el nombre de un letrero sin confirmar)."""
+        nombre no esta confirmado (nunca el nombre de un letrero sin confirmar). Con perfil:
+        nombre + icono de la red principal + @usuario, avatar con su foto (o iniciales); None si
+        el perfil apago el Seguir o no tiene ni nombre ni red."""
+        if self.prof is not None:
+            if not PR.uses(self.prof, "follow_cta"):
+                return None
+            nm = _follow_title(self.prof)
+            ps = self.psocial
+            if not nm and ps is None:
+                return None
+            f = {"label": "Sígueme", "title": nm, "handle": ps["handle"] if ps else "",
+                 "initials": PR.initials(nm or (ps or {}).get("handle", ""))}
+            if ps is not None:
+                f["platform"] = ps["platform"]
+            else:
+                f["subtitle"] = self.prof.get("title") or "Sígueme para más"
+            if self.prof.get("avatar"):
+                f.update(avatar="image", media=copy.deepcopy(self.prof["avatar"]))
+            return f
         handle = str(self.ent.get("handle") or "").strip()
         if handle:
             return {"label": "Sígueme", "handle": handle}
@@ -4993,16 +6353,141 @@ class _Choreo:
             return {"label": role, "handle": role, "subtitle": "Sígueme para más"}
         return {"label": "Sígueme", "handle": ""}
 
+    END_MIN = 2.2            # s minimos de tarjeta final con perfil (se alcanza a leer y a tocar)
+    STACK_GAP = 0.02         # separacion vertical de la pila del cierre (fraccion de H)
+    SOC_MAX = 4              # chips de redes en la tarjeta final
+
+    def _end_socials(self, follow: dict | None, link: bool, place: bool = False) -> tuple[list[dict], list[str]]:
+        """(chips, no mostrados) de redes del cierre (perfil): las redes y enlaces que NO se ven ya
+        en el cierre (la red del Seguir y la pagina de la pastilla de reservas no se repiten). La
+        ubicacion va en su tarjeta; con `place` (cierre sin tarjeta de ubicacion) va como chip."""
+        if self.prof is None or not PR.uses(self.prof, "end_card"):
+            return [], []
+        shown = set()
+        if follow and follow.get("platform") and follow.get("handle"):
+            shown.add((follow["platform"], str(follow["handle"]).lower()))
+        out = []
+        for l in PR.all_links(self.prof):
+            if l["kind"] == "maps" or (l["platform"], str(l.get("handle") or "").lower()) in shown:
+                continue
+            if link and self.book is not None and l.get("url") == self.book.get("url"):
+                continue
+            out.append({"platform": l["platform"], "text": l["display"]})
+        if place:
+            addr = str(self.prof.get("address") or "")
+            mp = next((l for l in PR.all_links(self.prof) if l["kind"] == "maps"), None)
+            if addr or mp:
+                txt = addr.split(",")[0].strip()[:30] if addr else mp["display"]
+                out.append({"platform": "maps", "text": txt})
+        extra = [f"{PR.PLATFORMS.get(c['platform'], {}).get('label', c['platform'])} {c['text']}"
+                 for c in out[self.SOC_MAX:]]
+        return out[:self.SOC_MAX], extra
+
+    def _stack_width(self, ff: dict | None, bf: dict, fs: float = 0.78, ls: float = 0.66) -> float:
+        """Ancho COMUN (fraccion de W) de la pila del cierre: el mayor ancho natural del Seguir y
+        de la pastilla de reservas (>= 0.72), acotado a SAFE. Todo se centra en XC con ese ancho:
+        los bordes quedan alineados (tarjeta de ubicacion, Seguir, chips y reservas)."""
+        ws = [0.72]
+        if ff is not None:
+            ws.append(cta_natural_width(dict(ff, kind="cta", variant="follow", size=fs), self.style))
+        if bf:
+            ws.append(cta_natural_width(dict(bf, kind="cta", variant="link_below", size=ls), self.style))
+        return _r(min(SAFE["right"] - SAFE["left"] - 0.02, max(ws)), 3)
+
+    def _soc_opts(self, socials: list[dict], width: float) -> list[tuple[str, float, float]]:
+        """Opciones de maquetacion de los chips con el ancho comun -> [(layout, size, alto)], de
+        mayor a menor: una fila si caben en una linea, si no una rejilla de 2 columnas, si no
+        una columna."""
+        if not socials:
+            return []
+        out = []
+        n = len(socials)
+        for ss in (0.066, 0.058, 0.05):
+            row = {"kind": "socials", "links": socials, "layout": "row", "size": ss, "width": width}
+            rw, rh = socials_size(row, self.style)
+            opts = []
+            if rh <= ss * 1080 / 1920 * 1.05 and rw <= width + 1e-3:
+                opts.append(("row", ss, rh))
+            if n >= 2:
+                # rejilla justificada al ancho comun (2 o 4 chips: filas parejas, alineadas con la pila)
+                g = ("grid", ss, socials_size(dict(row, layout="grid", cols=2), self.style)[1])
+                opts = [g] + opts if n % 2 == 0 else opts + [g]
+            opts.append(("column", ss, socials_size(dict(row, layout="column"), self.style)[1]))
+            out += opts
+        return out
+
+    def _loc_card(self, width: float) -> dict | None:
+        """Tarjeta de ubicacion del cierre (direccion / referencia) con el ancho comun, o None."""
+        title = self.ent.get("address") or self.ent.get("landmark")
+        if not title:
+            return None
+        sub = self.ent.get("landmark") if self.ent.get("address") and self.ent.get("landmark") != title else ""
+        return {"kind": "card", "variant": "location", "title": title, "subtitle": sub or "", "value": "",
+                "icon": "map-pin", "theme": "light", "color": "#FFFFFF", "anim_in": "rise", "anim_out": "none",
+                "rotation": 0.0, "items": [], "map": False, "size": width}
+
+    def _layout_stack(self, elems: list[str], lo: float, hi: float, width: float, socials: list[dict],
+                      two: bool, loc: dict | None, anchor: str = "center", arrow_ok: bool = True
+                      ) -> list[tuple] | None:
+        """Pila vertical del cierre en [lo, hi] (fraccion de H) con el ancho comun: prueba tamanos
+        de mayor a menor y devuelve [(variante, centro y, size, alto, extra)] o None si no cabe.
+        `anchor`: 'center' (centrada en el hueco), 'top' o 'bottom' (pegada a ese borde)."""
+        gap = self.STACK_GAP
+        soc = self._soc_opts(socials, width) if "socials" in elems else [("column", 0.0, 0.0)]
+        loc_sizes = (1.0, 0.9) if loc is not None and "location" in elems else (1.0,)
+        for fs, ls, ar in ((0.78, 0.66, 1.0), (0.74, 0.64, 0.6), (0.78, 0.66, 0.0), (0.72, 0.6, 0.0),
+                           (0.68, 0.56, 0.0)):
+            if not arrow_ok and ar > 0:
+                continue
+            for lay, ss, sh_ in soc:
+                for lk in loc_sizes:
+                    parts = []
+                    for v in elems:
+                        if v == "follow":
+                            parts.append((v, fs * 0.17 * 1080 / 1920, fs, None))
+                        elif v == "socials":
+                            parts.append((v, sh_, ss, lay))
+                        elif v == "link_below":
+                            hl = self._link_h(ls, two)
+                            # la flecha cuelga bajo la pastilla: cuenta en el alto de la pila
+                            parts.append((v, hl / 2 + (0.8 + 1.66 * ar) * hl if ar > 0 else hl, ls, ar))
+                        elif v == "location" and loc is not None:
+                            ch = card_height(dict(loc, size=_r(width * lk, 3)), self.style)
+                            parts.append((v, ch, _r(width * lk, 3), None))
+                    tot = sum(p[1] for p in parts) + gap * (len(parts) - 1)
+                    if tot > hi - lo + 1e-6:
+                        continue
+                    y = lo if anchor == "top" else hi - tot if anchor == "bottom" else lo + (hi - lo - tot) / 2
+                    out = []
+                    for v, hh, sz, ex in parts:
+                        if v == "link_below" and ex:
+                            hl = self._link_h(sz, two)
+                            out.append((v, y + hl / 2, sz, hl, ex))
+                        else:
+                            out.append((v, y + hh / 2, sz, hh, ex))
+                        y += hh + gap
+                    return out
+        return None
+
     def final_cta(self) -> None:
         """Remate hasta el ultimo cuadro: seguir (nombre/rol) + link grande con flecha (o el link
         de la frase del CTA sostenido); sobre el b-roll de cierre suma la ubicacion. Fondo
-        desenfocado detras de la persona solo DESPUES de la ultima palabra (el gag se ve)."""
+        desenfocado detras de la persona solo DESPUES de la ultima palabra (el gag se ve).
+        Con perfil (tarjeta final): Seguir con su red y @usuario, chips con las demas redes (fila,
+        rejilla 2x2 o columna) y la pastilla de reservas con su enlace corto aunque la voz no la
+        mencione, todo con un ANCHO COMUN (bordes alineados). En un primer plano donde no cabe
+        bajo la barbilla, la tarjeta final es una escena corta (video desenfocado detras). Lo que
+        no cabe queda en una nota del director."""
+        ff = self._follow_fields()
         if not self.reserved:
-            if self.windows is None and self.D >= 6 and not any(
+            if self.windows is None and self.D >= 6 and ff is not None and not any(
                     it.get("kind") == "cta" for it in self.fixed["graphics"]):
                 win = self._final_window()
                 if win:
-                    self.cta("follow", self.o(win[0]), self.o(win[1]), label="Sígueme")
+                    extra = {k: v for k, v in ff.items() if k not in ("label", "handle")} if self.prof else None
+                    self.cta("follow", self.o(win[0]), self.o(win[1]),
+                             label=ff.get("label", "Sígueme") if self.prof else "Sígueme",
+                             handle=ff.get("handle", "") if self.prof else "", extra=extra)
             return
         fa, fb = self.reserved[0]
         for z in ("top", "center", "low"):
@@ -5013,82 +6498,132 @@ class _Choreo:
         shot = self.shot_at(t0 + 0.02)
         g = self.geom(shot, t0, t1)
         ext = self.link_item if getattr(self, "link_ext", False) else None
-        link = self.anc.get("link") is not None and ext is None
-        lo = max(g["center"][0], SAFE["top"] + 0.05) if shot["talk"] else 0.4
-        stack = ["follow"] + (["link_below"] if link else [])
-        placed = []
-        if ext is not None:
-            # seguir encima del link sostenido (si no cabe al pecho, arriba de la cabeza)
-            ly = float(ext["y"])
-            ltop = ly - self._link_h(float(ext["size"])) / 2
-            for fs in (0.78, 0.74, 0.7):
+        book_end = self.prof is not None and self.book is not None and PR.uses(self.prof, "end_card")
+        link = (self.anc.get("link") is not None or book_end) and ext is None
+        bf = self._book_fields(force=book_end)
+        two = bool(bf.get("display"))
+        talk = bool(shot["talk"])
+        loc = self._loc_card(0.78) if not talk else None
+        socials, extra_soc = self._end_socials(ff, link or ext is not None, place=talk)
+        lo = max(g["center"][0], SAFE["top"] + 0.05) if talk else SAFE["top"] + 0.012
+        # palabras dentro del cierre: los subtitulos siguen visibles y el CTA no los pisa
+        spoken = any(w["f1"] > fa + 0.05 for w in self.words)
+        cap_lim = self.cap_top - 0.014
+        closeup = bool(talk and shot.get("face") and not shot.get("face_nominal")
+                       and g["center"][0] > cap_lim - 0.1)
+        width = self._stack_width(ff, bf) if self.prof is not None else 0.0
+        placed: list[tuple] = []          # (variante, centro y, size, alto, extra)
+        missing: list[str] = []
+        hide_caps = False
+        if closeup and ext is None and ff is not None:
+            # primer plano: la barbilla cae sobre los subtitulos. Seguir va en la franja de los
+            # subtitulos (anclado al fondo de SAFE, nunca sobre la barbilla) y los subtitulos se
+            # ocultan desde que entra
+            chin = float(g.get("chin") or 0.0)
+            for fs in (0.78, 0.72, 0.66, 0.6):
                 hf = fs * 0.17 * 1080 / 1920
-                yy = ltop - 0.026 - hf / 2
-                if yy - hf / 2 >= lo:
-                    placed = [("follow", yy, fs)]
+                yy = SAFE["bottom"] - 0.012 - hf / 2
+                if yy - hf / 2 >= chin + 0.004:
                     break
-            if not placed and g.get("head_top"):
+            placed = [("follow", yy, fs, hf, None)]
+            hide_caps = True
+        elif ext is not None:
+            # Seguir (y chips, y la ubicacion sobre el b-roll) ENCIMA del link sostenido, pegados a
+            # el: una sola tarjeta final con el ancho comun
+            ly = float(ext["y"])
+            top_link = ly - self._link_h(float(ext["size"]), bool(ext.get("display"))) / 2
+            if self.prof is not None:
+                ext["width"] = width
+                ext["x"] = _r(self.XS, 3)
+            elems = (["location"] if loc is not None else []) + (["follow"] if ff is not None else []) + \
+                (["socials"] if socials else [])
+            hi = top_link - self.STACK_GAP
+            res = None
+            for el in (elems, [e for e in elems if e != "location"], [e for e in elems if e != "socials"],
+                       [e for e in elems if e == "follow"]):
+                if not el:
+                    continue
+                res = self._layout_stack(el, lo, hi, width or 0.78, socials, two, loc, anchor="bottom")
+                if res is not None:
+                    break
+            placed = res or []
+            if not any(v == "follow" for v, *_x in placed) and ff is not None and g.get("head_top"):
                 top0, top1 = g["top"]
                 hf = 0.76 * 0.17 * 1080 / 1920
                 if top1 - top0 >= hf + 0.02:
-                    placed = [("follow", (top0 + top1) / 2, 0.76)]
+                    placed.insert(0, ("follow", (top0 + top1) / 2, 0.76, hf, None))
         else:
-            opts = ((0.78, 0.66, 1.0), (0.74, 0.64, 1.0), (0.78, 0.68, 0.0), (0.74, 0.62, 0.0), (0.68, 0.56, 0.0))
-            for fs, ls, ar in opts:
-                hf = fs * 0.17 * 1080 / 1920
-                y = lo + 0.012
-                pos = {}
-                for v in stack:
-                    if v == "follow":
-                        pos[v] = (y + hf / 2, fs)
-                        y += hf + 0.024
-                    else:
-                        hl = self._link_h(ls)
-                        pos[v] = (y + hl / 2, ls)
-                        y += hl
-                if "link_below" in pos and pos["link_below"][0] > self._link_y_max(pos["link_below"][1], ar):
-                    continue
-                if "link_below" not in pos and pos["follow"][0] > self.cap_top - 0.05:
-                    continue
-                placed = [(v, *pos[v]) for v in stack]
-                self._final_arrow = ar
-                break
-            if not placed:
+            elems = (["location"] if loc is not None else []) + (["follow"] if ff is not None else []) + \
+                (["socials"] if socials else []) + (["link_below"] if link else [])
+            if talk:
+                hi = cap_lim if spoken else SAFE["bottom"] - 0.012
+                anchor = "top"
+            else:
+                hi = SAFE["bottom"] - 0.012
+                anchor = "center"
+            res = None
+            if elems:
+                cands = [elems, [e for e in elems if e != "location"], [e for e in elems if e != "socials"],
+                         [e for e in elems if e not in ("socials", "location")]]
+                for el in cands:
+                    if not el:
+                        continue
+                    res = self._layout_stack(el, lo, hi, width or 0.78, socials, two, loc, anchor=anchor,
+                                             arrow_ok=not (talk and spoken))
+                    if res is not None:
+                        break
+            if res is None and elems:
                 # no cabe la pila: solo el link (o solo seguir) en el hueco, sin flecha
+                stack = [e for e in elems if e in ("follow", "link_below")] or ["socials"]
                 v = stack[-1]
                 ls = 0.6
-                yy = min(self._link_y_max(ls, 0.0), max(lo + 0.05, 0.5)) if v == "link_below" else max(lo + 0.05, 0.52)
-                placed = [(v, yy, ls if v == "link_below" else 0.74)]
-                self._final_arrow = 0.0
-        first = None
-        ff = self._follow_fields()
-        for k, (v, yy, sz) in enumerate(placed):
-            st = t0 + 0.3 * k
-            fields = {"start": st, "end": t1, "kind": "cta", "variant": v,
-                      "label": (self.ent.get("link_label") or "Link abajo") if v == "link_below" else ff["label"],
-                      "handle": ff.get("handle", "") if v == "follow" else self.ent.get("handle", ""),
-                      "x": _r(self.XC, 3), "y": _r(yy, 4), "size": sz,
-                      "color": self.pal["accent"], "anim_in": "pop", "anim_out": "none", "rotation": 0.0}
-            if v == "follow" and ff.get("subtitle"):
-                fields["subtitle"] = ff["subtitle"]
-            if v == "link_below" and getattr(self, "_final_arrow", 1.0) < 1.0:
-                fields["arrow_scale"] = 0.0          # sin flecha diminuta: la pastilla sola
-            zn = ("center" if k == 0 else "low") if ext is None else _zone_y(yy)
-            it = self.add("graphics", "cta", fields, zone=zn, event=True)
-            if not it:
-                continue
-            first = first or it
-            h = sz * 0.17 * 1080 / 1920 if v == "follow" else self._link_h(sz) * 2.6
-            self.ink.append((fa, fb, self.XC - sz / 2, yy - h / 2, self.XC + sz / 2, yy + h / 2, it["id"]))
-            self.sfx(st + 0.04, "click", prio=8, src_id=it["id"])
-            if v == "follow":
-                self.sfx(st + 1.1, "success", prio=5, src_id=it["id"] + "ok")
-            else:
-                self.sfx(st + 0.3, "swoosh_down", prio=4, src_id=it["id"])
+                hf = 0.74 * 0.17 * 1080 / 1920
+                if v == "link_below":
+                    yy = min(self._link_y_max(ls, 0.0, two), max(lo + 0.05, 0.5))
+                    res = [(v, yy, ls, self._link_h(ls, two), 0.0)]
+                elif v == "follow":
+                    yy = max(lo + hf / 2 + 0.01, 0.52)
+                    if spoken:
+                        yy = min(yy, cap_lim - hf / 2)
+                    res = [(v, yy, 0.74, hf, None)]
+                else:
+                    sh_ = socials_size({"kind": "socials", "links": socials, "layout": "column", "size": 0.058},
+                                       self.style)[1]
+                    res = [(v, min(max(lo + sh_ / 2 + 0.01, 0.5), cap_lim - sh_ / 2), 0.058, sh_, "column")]
+            placed = res or []
+        if socials and not any(v == "socials" for v, *_x in placed) and talk and g.get("head_top"):
+            # no cupieron en la pila: arriba de la cabeza (fila, rejilla o columna)
+            top0, top1 = max(g["top"][0], SAFE["top"] + 0.01), g["top"][1] - 0.012
+            for lay, ss, sh_ in self._soc_opts(socials, width or 0.78):
+                if sh_ <= top1 - top0:
+                    placed.append(("socials", (top0 + top1) / 2, ss, sh_, lay))
+                    break
+        lost_soc = bool(socials) and not any(v == "socials" for v, *_x in placed)
+        lost_link = bool(link and bf) and not any(v == "link_below" for v, *_x in placed)
+        if self.prof is not None and ff is not None and talk and (lost_soc or lost_link):
+            # a camara no caben las redes o la pastilla de reservas (primer plano: bajo la barbilla
+            # solo cabe el Seguir): la tarjeta final es una escena corta con el video desenfocado
+            # detras y la pila completa alineada
+            if self._end_scene(t0, t1, ff, bf, two, socials, extra_soc, ext):
+                return
+        if lost_soc:
+            missing += [f"{PR.PLATFORMS.get(c['platform'], {}).get('label', '')} {c['text']}".strip()
+                        for c in socials]
+        if lost_link:
+            missing.append(bf.get("label") or "reservas")
+        if loc is not None and not any(v == "location" for v, *_x in placed):
+            missing.append("ubicación")
+        missing += extra_soc
+        if missing and self.prof is not None:
+            self.prof_notes.append("perfil: sin espacio para " + ", ".join(dict.fromkeys(missing))[:200]
+                                   + " en el cierre")
+        if hide_caps:
+            self.cap_hide.append({"start": _r(t0), "end": _r(t1), "y": float(self.S["captions"]["y"]),
+                                  "hide": True})
+        first = self._place_stack(placed, t0, t1, fa, fb, ff, bf, socials, width, ext)
         if first is None and ext is None:
             return
-        if not shot["talk"]:
-            self._closing_location(t0, t1, placed)
+        if not talk:
             return
         lw = self.last_word
         b0 = max(t0, (lw["t1"] + 0.12) if lw else t0)
@@ -5102,39 +6637,248 @@ class _Choreo:
                                                 "color": self.pal["accent"], "width": 6.0, "glow": 0.5},
                      event=False)
 
-    def _closing_location(self, t0: float, t1: float, placed: list) -> None:
-        """Cierre sobre la fachada (b-roll final): la ubicacion en tarjeta compacta arriba de los
-        CTA (donde encontrarte + seguir + agendar)."""
-        title = self.ent.get("address") or self.ent.get("landmark")
-        if not title:
-            return
-        sub = self.ent.get("landmark") if self.ent.get("address") else ""
-        top_cta = min([yy - (sz * 0.17 * 1080 / 1920) / 2 for _v, yy, sz in placed] + [0.62])
-        base = {"kind": "card", "variant": "location", "title": title, "subtitle": sub, "value": "",
-                "icon": "map-pin", "theme": "light", "color": "#FFFFFF", "anim_in": "rise", "anim_out": "none",
-                "rotation": 0.0, "items": [], "map": False}
-        for size in (0.74, 0.66, 0.58):
-            h = card_height(dict(base, size=size), self.style)
-            y = top_cta - 0.03 - h / 2
-            if y - h / 2 < SAFE["top"] + 0.02:
+    def _stack_fields(self, v: str, sz: float, ex, ff: dict | None, bf: dict, socials: list[dict],
+                      width: float) -> dict:
+        """Campos (sin tiempos ni posicion) de un elemento de la pila del cierre."""
+        if v == "socials":
+            f = {"kind": "socials", "links": socials, "layout": ex or "column", "variant": "chips",
+                 "theme": "light", "icon_style": "brand", "size": sz, "color": self.pal["accent"],
+                 "anim_in": "pop", "anim_out": "none", "stagger": 0.1, "rotation": 0.0}
+            if ex == "grid":
+                f["cols"] = 2
+            if width:
+                f["width"] = width
+            return f
+        if v == "location":
+            loc = self._loc_card(sz)
+            return dict(loc) if loc else {}
+        f = {"kind": "cta", "variant": v,
+             "label": (bf.get("label") or self.ent.get("link_label") or "Link abajo") if v == "link_below"
+             else (ff or {}).get("label", "Sígueme"),
+             "handle": (ff or {}).get("handle", "") if v == "follow" else self.ent.get("handle", ""),
+             "size": sz, "color": self.pal["accent"], "anim_in": "pop", "anim_out": "none", "rotation": 0.0}
+        if v == "follow":
+            f["button_color"] = self.button_color()
+            f.update({k_: v_ for k_, v_ in (ff or {}).items() if k_ not in ("label", "handle")})
+        else:
+            f.update({k_: v_ for k_, v_ in bf.items() if k_ != "label"})
+            f["arrow_scale"] = float(ex) if isinstance(ex, (int, float)) else 0.0
+            if f["arrow_scale"] >= 1.0:
+                f.pop("arrow_scale")
+        if width and self.prof is not None:
+            f["width"] = width
+        return f
+
+    def _place_stack(self, placed: list[tuple], t0: float, t1: float, fa: float, fb: float,
+                     ff: dict | None, bf: dict, socials: list[dict], width: float, ext) -> dict | None:
+        """Coloca la pila del cierre (entradas escalonadas 0.3 s de arriba hacia abajo)."""
+        first = None
+        order = sorted(placed, key=lambda p: p[1])
+        for k, (v, yy, sz, hh, ex) in enumerate(order):
+            st = t0 + (0.15 if v == "location" else 0.0) + 0.3 * k
+            fields = self._stack_fields(v, sz, ex, ff, bf, socials, width)
+            if not fields:
                 continue
-            st = self.o(self.f(t0) + 0.15)
-            it = self.add("graphics", "end_place", dict(base, start=st, end=t1, x=_r(self.XC, 3), y=_r(y, 4),
-                                                        size=size), zone="top")
-            if it:
+            fields.update({"start": st, "end": t1, "x": _r(self.XS if width else self.XC, 3), "y": _r(yy, 4)})
+            role = {"socials": "socials", "location": "end_place"}.get(v, "cta")
+            # la pila ya se midio contra si misma y contra el link sostenido: entra como 'edge' y
+            # ocupa su franja a mano (lo que se coloque despues la respeta)
+            it = self.add("graphics", role, fields, zone="edge", event=True)
+            if not it:
+                continue
+            zn = _zone_y(yy)
+            if zn in self.occ:
+                self.occ[zn].append((self.f(st), self.D, it["id"]))
+            first = first or it
+            h = hh * 2.6 if v == "link_below" and fields.get("arrow_scale", 1.0) > 0 else hh
+            ww = width or (sz if v not in ("socials", "location") else min(SAFE["right"] - SAFE["left"], 0.8))
+            xc = self.XS if width else self.XC
+            self.ink.append((fa, fb, xc - ww / 2, yy - h / 2, xc + ww / 2, yy + h / 2, it["id"]))
+            if v == "location":
                 self.occ["top"].append((self.f(st), self.D, it["id"]))
-                self.ink.append((self.f(st), self.D, self.XC - size / 2, y - h / 2, self.XC + size / 2, y + h / 2,
-                                 it["id"]))
                 self.sfx(st + 0.05, "notification", prio=6, src_id=it["id"])
+                continue
+            self.sfx(st + 0.04, "click" if v != "socials" else "pop", prio=8 if v != "socials" else 6,
+                     src_id=it["id"])
+            if v == "follow":
+                self.sfx(st + 1.1, "success", prio=5, src_id=it["id"] + "ok")
+            elif v == "link_below":
+                self.sfx(st + 0.3, "swoosh_down", prio=4, src_id=it["id"])
+        return first
+
+    def _end_scene(self, t0: float, t1: float, ff: dict, bf: dict, two: bool, socials: list[dict],
+                   extra_soc: list[str], ext) -> bool:
+        """Tarjeta final como escena corta (>= END_MIN s) cuando la persona esta en primer plano y
+        bajo la barbilla solo cabe el Seguir: el video sigue DESENFOCADO detras (fondo blur_self,
+        la voz continua) y encima la pila alineada: Seguir + 'Encuéntrame en' con los chips +
+        reservas. Los subtitulos se ocultan en ese tramo."""
+        fa, fb = self.f(t0), self.f(t1)
+        ext_id = ext.get("id") if ext is not None else None
+        # la escena tapa todo: nada mas en pantalla en ese tramo (el link sostenido pasa adentro)
+        for z in ("full", "top", "center", "low", "accent"):
+            for a, b, iid in self.occ[z]:
+                if iid != ext_id and not str(iid).startswith("reserve:") and fa < b - 1e-6 and a < fb - 1e-6:
+                    return False
+        if fb - fa < 1.5 or (self.windows is not None):
+            return False
+        link = bool(bf) and (ext is not None or self.book is not None)
+        if ext is not None:
+            socials2, extra2 = self._end_socials(ff, True, place=True)
+            socials, extra_soc = socials2, extra2
+        width = self._stack_width(ff, bf)
+        elems = ["follow"] + (["socials"] if socials else []) + (["link_below"] if link else [])
+        res = None
+        for el in (elems, [e for e in elems if e != "socials"]):
+            res = self._layout_stack(el, SAFE["top"] + 0.05, SAFE["bottom"] - 0.03, width, socials, two, None,
+                                     anchor="center", arrow_ok=False)
+            if res is not None:
+                break
+        if res is None:
+            return False
+        gr = []
+        missing = list(extra_soc)
+        for k, (v, yy, sz, _hh, ex) in enumerate(sorted(res, key=lambda p: p[1])):
+            f = self._stack_fields(v, sz, ex, ff, bf, socials, width)
+            if v == "socials":
+                f["title"] = "Encuéntrame en"
+                f["y"] = _r(yy + sz * 1080 / 1920 * 0.26, 4)     # la cabecera sube el grupo
+            else:
+                f["y"] = _r(yy, 4)
+            f.update({"x": _r(self.XS, 3), "offset": _r(0.2 + 0.28 * k, 2)})
+            gr.append(f)
+        if not any(v == "socials" for v, *_x in res) and socials:
+            missing += [f"{PR.PLATFORMS.get(c['platform'], {}).get('label', '')} {c['text']}".strip()
+                        for c in socials]
+        saved = ({z: list(v) for z, v in self.occ.items()}, list(self.ink))
+        if ext is not None:
+            # el link sostenido termina donde entra la tarjeta (va dentro de ella)
+            ef = self.f(max(float(ext["start"]) + 0.3, t0 + 0.2))
+            for z in self.occ:
+                self.occ[z] = [(a, min(b, fa), iid) if iid == ext_id else (a, b, iid) for a, b, iid in self.occ[z]]
+            self.ink = [tuple([r[0], min(r[1], ef)] + list(r[2:])) if r[6] == ext_id else r for r in self.ink]
+        cw = self.add("cutaways", "endcard", {
+            "start": t0, "end": t1, "kind": "title_card", "background": "blur_self",
+            "bg_colors": ["#0B0B12"], "anim_in": "fade", "in_dur": 0.35, "anim_out": "cut",
+            "graphics": gr}, zone="full")
+        if not cw:
+            self.occ, self.ink = saved
+            return False
+        if ext is not None:
+            ext["end"] = _r(max(float(ext["start"]) + 0.3, t0 + 0.2))
+            ext["anim_out"] = "fade"
+            self.link_ext = False
+        self.cap_hide.append({"start": _r(t0), "end": _r(t1), "y": float(self.S["captions"]["y"]), "hide": True})
+        self.sfx(t0 + 0.02, "whoosh_soft", prio=7, src_id=cw["id"])
+        self.sfx(t0 + 0.24, "click", prio=8, src_id=cw["id"] + "f")
+        self.sfx(t0 + 0.2 + 1.1, "success", prio=5, src_id=cw["id"] + "ok")
+        if socials:
+            self.sfx(t0 + 0.5, "pop", prio=6, src_id=cw["id"] + "s")
+        if missing:
+            self.prof_notes.append("perfil: sin espacio para " + ", ".join(dict.fromkeys(missing))[:200]
+                                   + " en el cierre")
+        self.prof_notes.append("perfil: tarjeta final como escena (a camara no cabian las redes o las reservas)")
+        return True
+
+    def _fix_lt_bg(self) -> None:
+        """El rotulo nunca queda a medias entre el fondo reemplazado y el real: si un fondo
+        (escena) empieza o termina mientras el rotulo esta en pantalla, el fondo se extiende hasta
+        cubrirlo (+0.1 s, dentro de su toma y <= 1 s mas) o, si no se puede, el rotulo se recorta
+        al fondo (-0.1 s) mientras siga >= 2 s en pantalla."""
+        lts = [it for it in self.fx["graphics"] if it.get("kind") == "lower_third"]
+        bgs = [e for e in self.fx["effects"] if e.get("kind") == "bg_replace"]
+        for lt in lts:
+            la, lb = float(lt["start"]), float(lt["end"])
+            for e in bgs:
+                ea, eb = float(e["start"]), float(e["end"])
+                if not (ea < lb and la < eb) or (ea <= la and lb <= eb):
+                    continue
+                sh = self.shot_at(ea + 0.02)
+                na, nb = min(ea, la - 0.1), max(eb, lb + 0.1)
+                fna, fnb = self.f(na), self.f(nb)
+                clash = any(iid != e["id"] and fna < b_ - 1e-6 and a_ < fnb - 1e-6 for a_, b_, iid in self.occ["full"]) \
+                    or any(c is not e and float(c["start"]) < nb and na < float(c["end"])
+                           for c in self.fx["cutaways"] + [x for x in bgs if x is not e]) \
+                    or any((float(t_["start"]) < ea and na < float(t_["end"])) or
+                           (float(t_["start"]) < nb and eb < float(t_["end"]))
+                           for t_ in self.fx["text"])     # su tinta se midio contra el fondo real
+                if na >= sh["start"] + 0.02 and nb <= sh["end"] - 0.03 and (ea - na) + (nb - eb) <= 1.6 \
+                        and not clash:
+                    old_f = (self.f(ea), self.f(eb))
+                    e["start"], e["end"] = _r(na), _r(nb)
+                    self.bg_fx = [(self.f(na), self.f(nb), k) if abs(a - old_f[0]) < 1e-3 and abs(b - old_f[1]) < 1e-3
+                                  else (a, b, k) for a, b, k in self.bg_fx]
+                    continue
+                # recorte del rotulo al tramo del fondo o al de fuera (>= 1.8 s en pantalla)
+                if la < ea < lb:
+                    cand = (la, ea - 0.1) if self.f(ea - 0.1) - self.f(la) >= 1.8 else None
+                else:
+                    cand = (la, eb - 0.1) if eb < lb and self.f(eb - 0.1) - self.f(la) >= 1.8 else None
+                if cand is not None:
+                    lt["end"] = _r(cand[1])
+                    lb = cand[1]
+                    continue
+                # ultimo recurso: el fondo termina antes de que entre el rotulo (si queda >= 1.2 s)
+                if ea < la < eb <= lb + 1e-6 and self.f(la - 0.1) - self.f(ea) >= 1.2:
+                    e["end"] = _r(la - 0.1)
+
+    def watermark(self) -> None:
+        """Marca de agua sutil con el @usuario de la red principal del perfil (apagada por
+        defecto: `profile.use.handle_watermark`), arriba a la izquierda de SAFE, hasta el cierre.
+        Con pastilla translucida (se lee sobre fondos claros) y SOLO en los tramos donde esa
+        esquina esta libre: se aparta cuando un titulo o una escena ocupan la esquina."""
+        if self.prof is None or not PR.uses(self.prof, "handle_watermark") or self.windows is not None:
             return
+        ps = self.psocial or PR.primary_social(self.prof)
+        if ps is None:
+            return
+        end_f = self.reserved[0][0] if self.reserved else self.D
+        item = {"kind": "socials", "variant": "watermark",
+                "links": [{"platform": ps["platform"], "text": ps["handle"]}], "size": 0.03,
+                "layout": "row", "anim_in": "fade", "anim_out": "fade", "opacity": 0.8, "backdrop": 0.34,
+                "rotation": 0.0, "color": "#FFFFFF"}
+        w, h = socials_size(item, self.style)
+        scenes = [(self.f(c["start"]), self.f(c["end"])) for c in self.fx["cutaways"]]
+
+        def free_of(x: float, y: float) -> tuple[float, list, tuple]:
+            box = (x - w / 2 - 0.02, y - h / 2 - 0.012, x + w / 2 + 0.02, y + h / 2 + 0.012)
+            busy = [(a, b) for a, b, x0, y0, x1, y1, _i in self.ink
+                    if x0 < box[2] and box[0] < x1 and y0 < box[3] and box[1] < y1] + scenes
+            busy.sort()
+            free, cur = [], 0.0
+            for a, b in busy:
+                if a - 0.3 > cur:
+                    free.append((cur, a - 0.3))
+                cur = max(cur, b + 0.3)
+            if cur < end_f:
+                free.append((cur, end_f))
+            free = [(max(0.0, a), min(end_f, b)) for a, b in free if min(end_f, b) - max(0.0, a) >= 2.0]
+            return sum(b - a for a, b in free) - 0.8 * len(free), free, box
+        # la esquina superior (izquierda o derecha de SAFE) que mas tiempo queda libre
+        opts = [free_of(SAFE["left"] + w / 2 + 0.012, SAFE["top"] + h / 2 + 0.008) + (SAFE["left"] + w / 2 + 0.012,),
+                free_of(SAFE["right"] - w / 2 - 0.012, SAFE["top"] + h / 2 + 0.008) + (SAFE["right"] - w / 2 - 0.012,)]
+        _score, free, box, x = max(opts, key=lambda o: o[0])
+        y = SAFE["top"] + h / 2 + 0.008
+        for a, b in free:
+            a, b = max(0.0, a), min(end_f, b)
+            if b - a < 2.0:
+                continue
+            it = self.add("graphics", "watermark", dict(item, start=self.o(a) if a > 0 else 0.0, end=self.o(b),
+                                                        x=_r(x, 4), y=_r(y, 4)), zone="edge", event=False)
+            if it:
+                self.ink.append((a, b, *box, it["id"]))
 
     # ---------------------------------------------------------- 10. resto del guion
     def sentences(self) -> None:
         total = sum(self.f(s["t1"]) - self.f(s["t0"]) for s in self.sents) or 1.0
-        target = _lerp(*self.S["coverage"], self.I)
-        order = sorted(self.sents, key=lambda s: ({"hook": 0, "problema": 1, "beneficio": 1,
-                                                    "oferta": 2, "cierre": 2, "otro": 3}.get(s["info"]["section"], 3),
-                                                   s["id"]))
+        # en un video largo y conversado un editor titula las ideas, no cada frase (el resto lo
+        # llevan los subtitulos): la cobertura objetivo baja con la duracion
+        target = _lerp(*self.S["coverage"], self.I) * _clamp(40.0 / max(1.0, self.D), 0.55, 1.0)
+        rank = {"hook": 0, "problema": 1, "beneficio": 1, "oferta": 2, "cierre": 2, "otro": 3}
+        long_ = self.D > 35.0
+        # en un video largo, dentro de cada seccion primero las frases con contenido (nombres
+        # propios, palabras clave, numeros) y no las de relleno
+        order = sorted(self.sents, key=lambda s: (rank.get(s["info"]["section"], 3),
+                                                  -self._sent_score(s) if long_ else 0.0, s["id"]))
         color_pop_used = any(e["kind"] == "color_pop" for e in self.fx["effects"])
         for s in order:
             if s["info"].get("_done"):
@@ -5168,6 +6912,57 @@ class _Choreo:
                 em = [self.words[i] for i in info["emph"]] or ws[-1:]
                 self.punch_at(em[0]["t0"], 0.1, 0.4)
             info["_done"] = n > 0
+        self._title_gaps()
+
+    def _sent_score(self, s: dict) -> float:
+        """Cuanto contenido 'titulable' trae una frase (por palabra, para no premiar lo largo)."""
+        ws = self.words[s["w0"]:s["w1"] + 1]
+        if not ws:
+            return 0.0
+        emph = set(s["info"].get("emph") or [])
+        sc = 0.0
+        for k, w in enumerate(ws):
+            if w["n"] in STOP or w["n"] in FILLER or w["n"] in LIGHT or len(w["n"]) < 3:
+                sc -= 0.15
+                continue
+            sc += 0.4
+            if w["i"] in emph or w["kw"]:
+                sc += 1.2
+            if k > 0 and _display(w["text"])[:1].isupper():
+                sc += 1.0                        # nombre propio / marca ('Casa Nube', la tienda)
+            if re.search(r"\d", w["text"]):
+                sc += 1.0
+        return sc / math.sqrt(len(ws))
+
+    def _title_gaps(self, gap: float = 7.0) -> None:
+        """Ningun tramo largo sin titulo en un video largo: si entre dos titulos pasan mas de
+        `gap` s, la mejor frase de ese hueco lleva su titulo aunque se haya alcanzado la
+        cobertura (la variedad visual no se acaba en la primera mitad)."""
+        if self.D < 20.0 or self.windows is not None:
+            return
+        for _ in range(8):
+            spans = sorted((self.f(float(t["start"])), self.f(float(t["end"]))) for t in self.fx["text"])
+            spans += [(a, b) for a, b in self.reserved]
+            pts = [(0.0, 0.0)] + spans + [(self.D, self.D)]
+            best = None
+            for (a0, b0), (a1, b1) in zip(pts[:-1], pts[1:]):
+                if a1 - b0 < gap:
+                    continue
+                cands = [s_ for s_ in self.sents if not s_["info"].get("_done")
+                         and b0 + 0.5 <= self.f(s_["t0"]) and self.f(s_["t1"]) <= a1 - 0.3]
+                for s_ in cands:
+                    sc = self._sent_score(s_)
+                    if best is None or sc > best[0]:
+                        best = (sc, s_)
+            if best is None:
+                return
+            s_ = best[1]
+            n = self.title_sequence(s_, s_["w0"], s_["w1"], "title", ["top", "center"],
+                                    ["center", "center_low", "top"], humor=s_["info"]["tone"] == "humor",
+                                    max_blocks=3, end_limit=self.title_limit())
+            s_["info"]["_done"] = True
+            if n == 0:
+                continue
 
     def _color_pop(self, s: dict) -> bool:
         """Sujeto a color y fondo gris en la palabra de enfasis (una vez por video)."""
@@ -5566,19 +7361,24 @@ class _Choreo:
         self.reserve_final_cta()
         self.hook()
         self.drama()
+        if self.prof is not None:
+            self.lower_third()           # con perfil: presenta a la persona temprano (antes que el resto)
         self.drop_hit()
         self.enumerations()
         self.data()
         self.flash_scenes()
-        self.lower_third()
+        if self.prof is None:
+            self.lower_third()
         self.scenes()
         self.broll()
         self.sentences()
         self.enum_icons()
         self.final_cta()
+        self._fix_lt_bg()
         self.riser()
         self.assign_transitions()
         self.rhythm()
+        self.watermark()
         if self.S["progress"] and self.windows is None:
             self.add("graphics", "progress", {"start": 0.0, "end": self.tl.duration, "kind": "progress",
                                               "x": 0.5, "y": 0.0, "size": 1.0, "color": self.pal["accent"],
@@ -5600,9 +7400,11 @@ def _captions_cfg(style: str, pal: dict, ch: "_Choreo | None" = None) -> dict:
     cfg = {"enabled": True, "preset": c["preset"], "y": c["y"], "size": c["size"], "font": c["font"],
            "color": "#FFFFFF", "accent": pal["accent"], "case": c["case"],
            "max_words": c["max_words"], "hide_during_titles": True}
-    yr = getattr(ch, "cap_ranges", None) if ch is not None else None
+    yr = list(getattr(ch, "cap_ranges", None) or []) if ch is not None else []
+    # tramos sin subtitulos (hide: el CTA final de un primer plano ocupa su franja)
+    yr += list(getattr(ch, "cap_hide", None) or []) if ch is not None else []
     if yr:
-        cfg["y_ranges"] = yr
+        cfg["y_ranges"] = sorted(yr, key=lambda r: r["start"])
     return cfg
 
 
@@ -5614,7 +7416,9 @@ def _grade_cfg(style: str) -> dict:
 
 def _music_cfg(style: str, script: dict, ch: _Choreo) -> dict:
     m = STYLES[style]["music"]
-    topic = script.get("topic") or script["entities"].get("role") or ""
+    # el rubro de la voz (la profesion escrita en el perfil no cambia la pista: misma musica)
+    ent_ = script["entities"]
+    topic = script.get("topic") or (ent_.get("topic_role") if "topic_role" in ent_ else ent_.get("role")) or ""
     prompt = m["prompt"] + (f", for a video about {strip_accents(topic).lower()}" if topic else "")
     stops = sorted(ch.music_stops, key=lambda s: s["at"])
     swells = []
@@ -5628,9 +7432,12 @@ def _music_cfg(style: str, script: dict, ch: _Choreo) -> dict:
     humor = sum(1 for s in script.get("sents") or [] if (s.get("info") or {}).get("tone") == "humor")
     if mood == "upbeat" and humor >= 2:
         mood = "playful"          # guion con varios chistes: cama juguetona
+    # entrada: 'intro_fade' (fade_in es legado y ya no suaviza nada con el arranque horneado);
+    # dinamico/energetico entran con el golpe, elegante/minimal con una entrada suave
     cfg = {"enabled": True, "source": "ai", "track": None, "file": None, "prompt": prompt,
            "mood": mood, "bpm": m["bpm"], "gain_db": m["gain_db"], "duck_db": m["duck_db"],
-           "fade_in": 0.2, "fade_out": 1.5, "stops": stops, "swells": swells, "ending": "hit"}
+           "intro_fade": float(m.get("intro_fade", 0.0)), "fade_out": 1.5, "stops": stops,
+           "swells": swells, "ending": "hit"}
     if ch.drop_at is not None:
         cfg["drop_at"] = ch.drop_at
     return cfg
@@ -5739,9 +7546,17 @@ def _script_from_public(plan: dict, pub: dict, shots: list[dict]) -> dict:
                 if key in src:
                     s["info"][key] = src[key]
     e2 = dict(plan.get("entities") or {})
+    # lo que fijo un perfil (anterior o vigente) no cuenta como dato del usuario: se recalcula
+    pk = set(e2.get("profile_keys") or []) if isinstance(e2.get("profile_keys"), list) else set()
+    from_profile = e2.get("name_src") == "perfil"
     for k, v in e2.items():
+        if k in pk or (from_profile and k in ("name", "name_src", "name_confirmed")):
+            continue
         if isinstance(v, (str, bool)):
             ent[k] = v
+    if "role" in pk and "topic_role" in e2:
+        ent["role"] = str(e2["topic_role"] or "")   # el rubro que venia de la voz
+    apply_profile_entities(ent, anc, words, _plan_profile(plan), pub.get("ocr"))
     return {"words": words, "sents": sents, "entities": ent, "anchors": anc,
             "topic": pub.get("topic", ""), "llm": pub.get("llm", False), "ocr": pub.get("ocr", {})}
 
@@ -5768,8 +7583,15 @@ def _music_ready() -> bool:
 
 
 CARD_KEEP = 2.0      # s de b-roll que se conservan cuando lleva la tarjeta de ubicacion
-END_KEEP = 2.2       # s del b-roll que queda al FINAL (tarjeta de cierre con el CTA)
+PRICE_TAG_HALF = 0.034   # medio alto (fraccion de H) de la etiqueta del servicio sobre el precio
+END_KEEP = 2.8       # s del b-roll que queda al FINAL (tarjeta de cierre con el CTA). Las tarjetas
+#                      entran tras la transicion de escena (~0.2-0.4 s): con 2.2 s el cierre del
+#                      dentista (ubicacion + Seguir + reservas) se veia solo 1.7 s (< END_MIN)
 SILENCE_MAX = 2.5    # s: un silencio mayor (tiempo final) se recorta aunque no sea b-roll
+LEAD_MAX = 0.4       # s: mas aire que esto antes de la primera palabra se recorta (el hook)
+LEAD_KEEP = 0.12     # s que se dejan antes de la primera palabra
+# interjecciones de arranque que se recortan al inicio del video (hasta 3 palabras seguidas)
+LEAD_INTERJ = {"ok", "okay", "bueno", "eh", "ehh", "mmm", "pues", "gente", "entonces", "listo"}
 
 
 def propose_trims(plan: dict, shots: list[dict], words: list[dict], keep: float = 1.6,
@@ -5800,6 +7622,25 @@ def propose_trims(plan: dict, shots: list[dict], words: list[dict], keep: float 
                     "id": f"cut_ai_{len(out) + 1}", "reason": reason})
 
     last = max((w["t1"] for w in words), default=None)
+    # inicio: el hook arranca con la voz (aire muerto al principio = el scroll se va). Solo si
+    # el video abre a camara (una toma de producto/fachada al inicio es intencional)
+    first = min(words, key=lambda w: w["t0"]) if words else None
+    if first is not None:
+        fk = tl.remap_clamped(first["t0"])
+        s0 = next((s for s in shots if float(s["start"]) - 1e-6 <= first["t0"] < float(s["end"])), None)
+        opens_talking = s0 is not None and s0.get("use", "a_camara") == "a_camara" and \
+            tl.remap_clamped(float(s0["start"])) <= 0.05
+        # muletilla de arranque ('Ok gente, aqui estamos...', 'Bueno, ...'): un editor la corta y
+        # el video abre con la primera idea (solo si hay un respiro limpio para cortar)
+        ws0 = sorted(words, key=lambda w: w["t0"])
+        j = 0
+        while j < min(3, len(ws0) - 1) and ws0[j]["n"] in LEAD_INTERJ:
+            j += 1
+        if opens_talking and 0 < j < len(ws0) and ws0[j]["t0"] - ws0[j - 1]["t1"] >= 0.15 and \
+                tl.remap_clamped(ws0[j]["t0"]) < 4.0:
+            add(tl.inverse(0.0), ws0[j]["t0"] - 0.1, "muletilla al inicio")
+        elif opens_talking and fk > LEAD_MAX:
+            add(tl.inverse(0.0), first["t0"] - LEAD_KEEP, "silencio al inicio")
     broll_keep: dict[int, float] = {}
     for k, s in enumerate(shots):
         if s.get("use", "a_camara") == "a_camara":
@@ -5850,7 +7691,10 @@ def _silence_notes(plan: dict, words: list[dict], limit: float = 2.5) -> list[st
     notes = []
     for k in range(0, len(pts) - 1, 2):
         a, b = pts[k], pts[k + 1]
-        if b - a > limit and a > 0.5:
+        # la cola tras la ultima palabra es la tarjeta de cierre (b-roll final de END_KEEP s con
+        # musica y CTA), no aire muerto
+        lim = max(limit, END_KEEP + 0.5) if k == len(pts) - 2 else limit
+        if b - a > lim and a > 0.5:
             notes.append(f"silencio de {b - a:.1f} s en {a:.1f} s (tiempo final)")
     return notes
 
@@ -5909,7 +7753,8 @@ def _music_key(plan: dict, mcfg: dict, style: str, seed: int) -> str:
     """Huella de la PISTA de musica que pedira el render (cfg en tiempo final sin las claves de
     mezcla): si no cambia, la rejilla de beats guardada sigue valiendo (redirect)."""
     c, dur = music_cfg_final(plan, mcfg)
-    c = {k: v for k, v in c.items() if k not in ("swells", "gain_db", "duck_db", "fade_in", "locked")}
+    c = {k: v for k, v in c.items() if k not in ("swells", "gain_db", "duck_db", "fade_in", "intro_fade",
+                                                  "locked")}
     return _hkey(c, round(dur, 3), style, int(seed))
 
 
@@ -5935,6 +7780,88 @@ def _grid_public(grid: dict, key: str) -> dict:
     return {"bpm": _r(grid.get("bpm") or 0.0, 2), "beats": [_r(b) for b in grid.get("beats") or []],
             "downbeats": [_r(b) for b in grid.get("downbeats") or []],
             "drop": (_r(grid["drop"]) if grid.get("drop") is not None else None), "key": key}
+
+
+# ---------------------------------------------------------------- perfil de la persona (3.2)
+def _plan_profile(plan: dict | None) -> dict | None:
+    """Perfil saneado del plan (motion/profile.py) o None."""
+    return PR.normalize_profile((plan or {}).get("profile")) if isinstance(plan, dict) else None
+
+
+def _brand_handle(business: str, handle: str) -> bool:
+    """El @usuario es de la marca ('Olfato' / '@olfato.demo', 'Sonrisa Plena' / '@sonrisaplena')."""
+    b = norm(business)
+    h = norm(handle)
+    if len(b) < 3 or not h:
+        return False
+    if b in h:
+        return True
+    ws = [norm(w) for w in str(business).split() if len(norm(w)) >= 4]
+    return bool(ws) and all(w in h for w in ws[:2])
+
+
+def _follow_title(prof: dict | None) -> str:
+    """Nombre del CTA Seguir con perfil: el de la persona; el del NEGOCIO si la red principal es
+    la de la marca (@olfato.demo -> 'Olfato'); sin nombre, el negocio."""
+    if not prof:
+        return ""
+    nm = prof.get("name") or prof.get("business") or ""
+    biz = prof.get("business") or ""
+    ps = PR.primary_social(prof)
+    if biz and ps is not None and _brand_handle(biz, ps.get("handle", "")):
+        return biz
+    return nm
+
+
+def _name_anchor(words: list[dict], name: str) -> list[int] | None:
+    """[i0, i1] (indices `i` de las palabras) donde la persona DICE el nombre del perfil:
+    profile.name_span (dos palabras del nombre seguidas, o una con presentacion antes: 'soy la
+    doctora Lucia'; tolera una letra de la transcripcion en palabras largas). i0 incluye el
+    honorifico dicho. None si no lo dice ('sonrisa blanca' no es la 'Dra. Blanca Flores')."""
+    sp = PR.name_span([str(w.get("text") or w.get("n") or "") for w in words], name)
+    if sp is None:
+        return None
+    return [int(words[sp[0]]["i"]), int(words[sp[1]]["i"])]
+
+
+def apply_profile_entities(ent: dict, anc: dict, words: list[dict], prof: dict | None,
+                           ocr: dict | None = None) -> list[str]:
+    """Fija en `ent` lo que dice el perfil (manda sobre lo que se infiere del audio o de un
+    letrero) y ancla `anc['name']` donde la persona dice su nombre. El nombre leido en un letrero
+    NUNCA se usa si hay perfil. El rubro que venia de la voz queda en `topic_role` (iconos y
+    musica no cambian por escribir la profesion). -> claves que fijo el perfil."""
+    if not prof:
+        return []
+    fixed, keys = PR.entities_from(prof)
+    if ent.get("name_src") == "letrero" or (ocr or {}).get("name_from_ocr"):
+        ent["name"] = ""                      # leido en un letrero: nunca con perfil
+        ent.pop("name_src", None)
+        ent.pop("name_confirmed", None)
+    ent.pop("name_candidate", None)
+    if "role" in fixed and "topic_role" not in ent:
+        ent["topic_role"] = str(ent.get("role") or "")
+    ent.update(fixed)
+    if prof.get("name"):
+        na = _name_anchor(words, prof["name"])
+        if na is not None:
+            anc["name"] = na
+    ent["profile_keys"] = keys
+    return keys
+
+
+def profile_note(prof: dict | None) -> str | None:
+    """Nota del director con lo que se integro del perfil."""
+    if not prof:
+        return None
+    bits = [b for b in (prof.get("name") or prof.get("business"), prof.get("title")) if b]
+    ps = PR.primary_social(prof)
+    if ps:
+        bits.append(f"{ps['label']} {ps['handle']}")
+    bk = PR.booking_link(prof)
+    if bk:
+        lab = PR.link_cta(bk, " ".join(str(prof.get(k) or "") for k in ("business", "title")))
+        bits.append(f"{lab} ({bk['display']})")
+    return "perfil: " + ", ".join(bits)[:220] if bits else None
 
 
 def name_usable(ent: dict) -> str:
@@ -6004,9 +7931,15 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
 
     _step(on_step, "tomas", 0.0, "detectando tomas")
     t = _now()
+    # tomas que ya describio el VLM en una direccion anterior (vienen completas en el plan): al
+    # re-dirigir se conserva la etiqueta del VLM (no se vuelve 'heuristico' por no repetirlo)
+    sh_in = [x for x in plan.get("shots") or [] if isinstance(x, dict)]
+    shots_known = bool(sh_in) and all(k in x for x in sh_in for k in ("person", "use", "framing", "face"))
     budget = float(os.environ.get("REELFY_DIRECTOR_BUDGET", "50"))
+    _VLM_STATUS.pop(str(p.get("video")), None)
     shots = analyze_shots(p, use_llm=use_llm, on_step=on_step, deadline=t_start + budget - 8.0,
                           on_basic=on_basic)
+    vlm_cause = _VLM_STATUS.pop(str(p.get("video")), "")
     on_basic(shots)
     timings["shots_ms"] = round((_now() - t) * 1000)
     _step(on_step, "guion", 0.0, "entendiendo el guion")
@@ -6020,11 +7953,16 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
     if ent0.get("name"):
         ent0["name_src"] = "voz"
     prev_ent = plan.get("entities") if isinstance(plan.get("entities"), dict) else {}
-    if prev_ent.get("name") and (prev_ent.get("name_confirmed") or prev_ent.get("name_src") == "usuario"):
+    if prev_ent.get("name") and prev_ent.get("name_src") != "perfil" and (
+            prev_ent.get("name_confirmed") or prev_ent.get("name_src") == "usuario"):
         # nombre que el usuario confirmo o escribio en el Studio: manda sobre el analisis
         ent0.update({k: prev_ent[k] for k in ("name", "name_src", "name_confirmed", "name_candidate")
                      if k in prev_ent})
-    if use_llm and not ent0.get("name") and ent0.get("role") and (script.get("ocr") or {}).get("name_candidates"):
+    # perfil de la persona (nombre, profesion, redes): manda sobre todo lo anterior
+    prof = _plan_profile(p)
+    apply_profile_entities(ent0, script["anchors"], script["words"], prof, script.get("ocr"))
+    if prof is None and use_llm and not ent0.get("name") and ent0.get("role") and \
+            (script.get("ocr") or {}).get("name_candidates"):
         # letrero-directorio: pregunta dirigida al VLM por LA persona de la misma profesion. Es un
         # candidato: no se publica (rotulo/CTA) hasta que el usuario lo confirme en el Studio
         t_s = _now()
@@ -6046,8 +7984,10 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
     _step(on_step, "coreografia", 0.0, "coreografiando la edicion")
     old = (plan.get("fx") or {}) if isinstance(plan.get("fx"), dict) else {}
     locked_ids = set((plan.get("director") or {}).get("locked") or [])
+    group_ids = _lock_groups(old, locked_ids)      # composiciones que se bloquean juntas
     fixed = {tr: [copy.deepcopy(it) for it in old.get(tr) or [] if isinstance(it, dict) and (
-        it.get("locked") or it.get("src") == "user" or it.get("id") in locked_ids)] for tr in TRACKS}
+        it.get("locked") or it.get("src") == "user" or it.get("id") in locked_ids or it.get("id") in group_ids)]
+        for tr in TRACKS}
     fx, ch = choreograph(p, shots, script, style, intensity, seed, fixed=copy.deepcopy(fixed))
     timings["choreo_ms"] = round((_now() - t) * 1000)
     mcfg = _merge_music(_music_cfg(style, script, ch), music)
@@ -6069,6 +8009,9 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
             grid_pub = _grid_public(grid, _music_key(p, mcfg, style, seed))
             notes.append(f"musica sincronizada: {grid['bpm']:.0f} BPM, drop en {grid['drop'] or 0:.2f} s "
                          f"(tiempo final), {len(ch.snapped)} eventos al beat")
+    reinked = _reink_orphans(ch, fixed)
+    if reinked:
+        notes.append(f"tinta ajustada al fondo real (su fondo ya no esta): {', '.join(reinked)[:200]}")
     for tr in TRACKS:
         if fixed[tr]:
             fx[tr] = sorted(fixed[tr] + fx[tr], key=lambda it: (float(it.get("at", it.get("start", 0))), str(it["id"])))
@@ -6081,19 +8024,26 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
     p["entities"] = _entities_public(script["entities"])
     prev = plan.get("director") or {}
     notes += _silence_notes(p, script["words"])
+    if profile_note(prof):
+        notes.append(profile_note(prof))
+    notes += [n for n in dict.fromkeys(ch.prof_notes)]
     if (script.get("ocr") or {}).get("name_candidates") and not p["entities"].get("name_candidate") \
-            and not p["entities"].get("name"):
+            and not p["entities"].get("name") and prof is None:
         notes.append("nombre leido en letreros (no usado; confirmar en el Studio): "
                      + ", ".join(script["ocr"]["name_candidates"][:3]))
     p["director"] = {"style": style, "intensity": float(intensity), "seed": int(seed),
                      "locked": list(prev.get("locked") or []),
                      "llm": _llm_model() if script.get("llm") else "heuristico",
-                     "vlm": _vlm_model() if any(s.get("vlm") for s in shots) else "heuristico",
+                     "vlm": _vlm_model() if any(s.get("vlm") for s in shots) else (
+                         prev.get("vlm") if shots_known and prev.get("vlm") else "heuristico"),
                      "rev": 0, "script": _script_public(script), "timings": timings,
                      "kit": {k: v for k, v in ch.K.items()}, "notes": notes}
     if grid_pub:
         p["director"]["music_grid"] = grid_pub
     p = _finalize(p)
+    if vlm_cause and not shots_known:
+        p["director"]["warnings"] = sorted(set(p["director"].get("warnings") or []) |
+                                           {f"VLM: {vlm_cause}; esas tomas van con heuristicas"})
     p["director"]["timings"]["total_ms"] = round((_now() - t_start) * 1000)
     _step(on_step, "listo", 1.0, "")
     return p
@@ -6102,27 +8052,642 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
 def _entities_public(e: dict) -> dict:
     ent = {k: e.get(k, "") for k in ("name", "role", "price", "address", "landmark", "cta", "link_label",
                                      "handle")}
-    for k in ("schedule", "phone", "name_candidate", "name_src"):
+    for k in ("schedule", "phone", "name_candidate", "name_src", "business", "handle_platform", "link_display"):
         if e.get(k):
             ent[k] = e[k]
+    if "topic_role" in e:
+        ent["topic_role"] = str(e["topic_role"] or "")        # rubro de la voz (puede ser vacio)
     if "name_confirmed" in e:
         ent["name_confirmed"] = bool(e["name_confirmed"])
+    if e.get("profile_keys"):
+        ent["profile_keys"] = [str(k) for k in e["profile_keys"]]
     return ent
+
+
+# ---------------------------------------------------------------- variantes (Regenerar con IA)
+# familias para proponer OTRA version de un item sin cambiar lo que dice ni cuando pasa
+# familias por GEOMETRIA: un circulo alrededor de un precio sigue rodeandolo (nunca un
+# subrayado que lo tacha); subrayado/ola solo donde ya habia algo bajo el texto
+_DOODLE_FAM = [("sparkle", "star4", "star5", "burst"), ("underline", "squiggle"), ("circle_scribble",),
+               ("arrow_curve", "arrow_straight"), ("question", "exclaim"), ("heart", "check"),
+               ("lightning", "rays", "burst"), ("swirl", "loop")]
+_TITLE_VARIANTS = ("stack", "title_pop", "cascade", "serif_elegant", "highlight_marker", "kicker",
+                   "script_accent")
+# SFX por USO (la variante de un SFX de trazo sigue siendo de trazo; la de un pop, de texto)
+SFX_USE = [("draw", ("pen_scribble", "scratch")), ("text", ("pop", "pop_soft", "bubble", "tick", "click")),
+           ("hit", ("impact_soft", "impact_boom", "sub_drop", "heartbeat")),
+           ("air", ("whoosh_soft", "whoosh_fast", "swoosh_up", "swoosh_down", "whip", "swipe")),
+           ("tonal", ("ding", "bell", "chime", "sparkle", "notification", "success")),
+           ("money", ("cash", "coin")), ("rise", ("riser_short", "riser_long")),
+           ("glitch", ("glitch", "record_stop")), ("paper", ("paper_rip", "scratch")),
+           ("camera", ("shutter", "click")), ("typing", ("typing",))]
+
+
+def _vr(seed: int, rev: int, iid: str, key: str) -> float:
+    """Azar de la variante: depende de (semilla del pedido, director.rev, id). rev sube en cada
+    re-direccion, asi que 'Regenerar' otra vez con la misma semilla da OTRA propuesta; la misma
+    (semilla, rev) repite la misma."""
+    return FrameCtx(seed=int(seed) * 1000 + int(rev), style="dinamico").rand(f"var:{iid}:{key}")
+
+
+def _pick_other(options: list, current, seed: int, rev: int, iid: str, key: str):
+    uniq: list = []
+    for o in options:
+        if o not in uniq:
+            uniq.append(o)
+    opts = [o for o in uniq if o != current]
+    if not opts:
+        return current
+    return opts[int(_vr(seed, rev, iid, key) * len(opts)) % len(opts)]
+
+
+def _item_words(it: dict) -> list[str]:
+    if it.get("lines"):
+        return [str(ln.get("text", "")) for ln in it["lines"] if str(ln.get("text", "")).strip()]
+    return [t_ for t_ in str(it.get("text", "")).split("\n") if t_.strip()]
+
+
+def _item_bg(ch: "_Choreo", it: dict, rect: tuple | None = None) -> dict | None:
+    """Fondo real (o sintetico) bajo un item: la franja de su tinta y, si se conoce, su x."""
+    t0, t1 = float(it.get("start", 0.0)), float(it.get("end", 0.0))
+    shot = ch.shot_at(t0 + 0.02)
+    if "_bghero_" in str(it.get("id", "")):
+        # pieza de la composicion: vive sobre el fondo sintetico (aunque roce el cabello)
+        fa, fb = ch.f(t0), ch.f(t1)
+        for a, b, kind in ch.bg_fx:
+            if a < fb and fa < b and (min(b, fb) - max(a, fa)) >= 0.4 * max(1e-3, fb - fa):
+                rgb = (236, 231, 222) if kind == "light" else (16, 16, 20)
+                return {"rgb": rgb, "L": rel_lum(rgb), "sat": 0.05, "src": "fx"}
+    if rect is None:
+        x, y = float(it.get("x", 0.5)), float(it.get("y", 0.5))
+        sz = float(it.get("size", 0.1))
+        rect = (x - sz / 2, y - sz / 2 / ch.aspect, x + sz / 2, y + sz / 2 / ch.aspect)
+    return ch._bg_at(shot, rect[1], rect[3], t0, t1, rect[0], rect[2])
+
+
+def _legible(colors: list[str], bg: dict | None, need: float = 3.0) -> list[str]:
+    """Colores con contraste >= need contra el fondo (sin fondo conocido: todos)."""
+    if bg is None:
+        return list(colors)
+    return [c for c in colors if contrast(c, bg["rgb"]) >= need]
+
+
+def _text_emph(fake_lines: list[list[dict]], it: dict) -> set:
+    """Palabra protagonista de un titulo existente: la de la linea de mayor escala o la que va
+    en mayusculas (no solo accent_words: un stack guarda su protagonista como linea grande)."""
+    lines = it.get("lines") or []
+    words = [w for row in fake_lines for w in row]
+    if lines and len(lines) == len(fake_lines):
+        k = max(range(len(lines)), key=lambda i: float(lines[i].get("scale", 1.0)))
+        if len(lines) > 1 and float(lines[k].get("scale", 1.0)) > min(float(ln.get("scale", 1.0)) for ln in lines):
+            big = [w for w in fake_lines[k] if w["n"] not in STOP]
+            if big:
+                return {max(big, key=lambda w: len(w["n"]))["i"]}
+    up = [w for w in words if len(w["text"]) > 2 and w["text"].isupper() and w["n"] not in STOP]
+    if up and len(up) < len(words):
+        return {w["i"] for w in up}
+    acc = {norm(x) for x in it.get("accent_words") or []}
+    em = {w["i"] for w in words if w["n"] in acc}
+    if em:
+        return em
+    cont = [w for w in words if w["n"] not in STOP] or words
+    return {max(cont, key=lambda w: len(w["n"]))["i"]}
+
+
+def _visual_fallback(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict | None:
+    """Mismo lugar y preset pero algo que SE VE distinto: color de la tinta (legible contra su
+    fondo), fuente del kit o detras/delante. Nunca solo la entrada (queda igual tras entrar)."""
+    iid = str(it["id"])
+    out = copy.deepcopy(it)
+    r = measure_text(it, ch.style)
+    bg = _item_bg(ch, it, r) if r is not None else None
+    cur = str(it.get("color") or "#FFFFFF").upper()
+    pal = ch.pal
+    light_bg = bg is not None and contrast("#FFFFFF", bg["rgb"]) < 2.4
+    pool = ([pal["dark"], ch.acc_light, mix_hex(pal["accent2"], pal["dark"], 0.35), mix_hex(pal["warm"], pal["dark"], 0.45)]
+            if light_bg else ["#FFFFFF", pal["accent"], pal["accent2"], pal["warm"]])
+    pool = _legible(pool, bg) or pool
+    col = _pick_other([c.upper() for c in pool], cur, seed, rev, iid, "fbcol")
+    changed = False
+    if col != cur:
+        out["color"] = col
+        for ln in out.get("lines") or []:
+            if ln.get("color"):
+                ln["color"] = col
+        changed = True
+    # fuente del kit (display <-> bold, serif <-> bold): otra voz tipografica, mismo texto
+    fonts = [ch.K["display"], ch.K["bold"]] if it.get("font") in (ch.K["display"], ch.K["bold"]) else \
+        [ch.K["serif"], ch.K["bold"]] if it.get("font") in (ch.K["serif"],) else []
+    if fonts and _vr(seed, rev, iid, "fbfont") < 0.5:
+        nf = _pick_other(fonts, it.get("font"), seed, rev, iid, "fbf")
+        if nf != it.get("font"):
+            out["font"] = nf
+            for ln in out.get("lines") or []:
+                if ln.get("font") == it.get("font"):
+                    ln["font"] = nf
+            # la otra fuente puede ser mas ancha: el bloque se ajusta a MAXW (sin bajar del piso)
+            size = float(out.get("size", 0.08))
+            lines = out.get("lines") or [{"text": t_, "scale": 1.0} for t_ in str(out.get("text", "")).split("\n")]
+            widest = max(_text_w(ln.get("font") or nf, size * float(ln.get("scale", 1.0)), str(ln.get("text", "")))
+                         for ln in lines)
+            if widest > ch.MAXW:
+                out["size"] = _r(size * ch.MAXW / widest, 4)
+            probe = {k: v for k, v in out.items() if not k.startswith("_")}
+            r2 = measure_text(probe, ch.style)
+            if float(out["size"]) < ch.min_size(str(out.get("preset"))) * 0.97 or (r2 is not None and (
+                    r2[0] < SAFE["left"] - 0.01 or r2[2] > SAFE["right"] + 0.01 or r2[3] > SAFE["bottom"] + 0.01)):
+                out["font"], out["size"] = it.get("font"), it.get("size")
+                for ln, ln0 in zip(out.get("lines") or [], it.get("lines") or []):
+                    ln["font"] = ln0.get("font")
+            else:
+                changed = True
+    out["anim_in"] = _pick_other(["pop", "rise", "word_stagger", "scale_down", "slide_left", "mask"],
+                                 it.get("anim_in"), seed, rev, iid, "anim")
+    return out if changed else None
+
+
+def _text_variant(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict | None:
+    """Mismo texto y mismo momento con OTRO preset (y zona si se puede): se re-mide y coloca con
+    las reglas del coreografo (sin tapar la cara, dentro de SAFE, sin encimar lo demas). La
+    palabra protagonista se conserva (la linea grande del stack / la que va en mayusculas)."""
+    iid = str(it["id"])
+    preset = it.get("preset")
+    if preset == "counter":
+        # el precio no cambia de lugar (esta compuesto con su etiqueta): otra entrada y otro color
+        out = dict(it)
+        out["anim_in"] = _pick_other(["pop", "scale_down", "rise"], it.get("anim_in", "pop"), seed, rev, iid, "anim")
+        r = measure_text(it, ch.style)
+        bg = _item_bg(ch, it, r) if r is not None else None
+        cols = _legible(["#FFFFFF", ch.pal["accent"], ch.pal["accent2"], ch.pal["dark"]], bg) or ["#FFFFFF"]
+        out["color"] = _pick_other(cols, it.get("color"), seed, rev, iid, "col")
+        return out
+    if "_bghero_" in iid:
+        # pieza de la composicion del fondo reemplazado: se queda en su sitio (la otra pieza se
+        # mide contra ella); cambia tinta / fuente
+        return _visual_fallback(ch, it, seed, rev)
+    lines_txt = _item_words(it)
+    if not lines_txt:
+        return None
+    t0, t1 = float(it["start"]), float(it["end"])
+    fa, fb = ch.f(t0), ch.f(t1)
+    shot = ch.shot_at(t0 + 0.02)
+    fake, blk, k = [], [], 0
+    sid = ch._sid_at(t0 + 0.05)
+    for ln in lines_txt:
+        row = []
+        for tok in ln.split():
+            w = {"text": tok, "i": -1000 - k, "n": norm(tok), "kw": False, "t0": t0, "t1": t1,
+                 "f0": fa, "f1": fb, "s": sid if sid is not None else -1}
+            row.append(w)
+            fake.append(w)
+            k += 1
+        if row:
+            blk.append(row)
+    emph = _text_emph(blk, it)
+    for w in fake:
+        w["kw"] = w["i"] in emph
+    label = ch.kicker_label(fake, use=False) if preset != "kicker" else None
+    cands = [p_ for p_ in _TITLE_VARIANTS if ch.preset_ok(p_) and p_ != preset
+             and not (p_ == "kicker" and label is None)]
+    order = sorted(cands, key=lambda p_: _vr(seed, rev, iid, "p:" + p_))
+    cur_zone = zone_of("text", it)
+    zones = ["top", "center", "center_low", "low", "under"]
+    zones = sorted(zones, key=lambda z_: (z_ == cur_zone, _vr(seed, rev, iid, "z:" + z_)))
+    g = ch.geom(shot, t0, t1)
+    for p_ in order:
+        spec = ch._text_spec(p_, blk, emph, False, emph, label=label if p_ == "kicker" else None)
+        pl = ch._place(spec, g, zones, fa, fb, ch.min_size(p_))
+        if pl is None:
+            continue
+        zone, y, size = pl
+        spec["size"] = _r(size, 4)
+        spec.update({"x": _r(ch._x_for(spec), 3), "y": _r(y, 4)})
+        probe = {kk: v for kk, v in spec.items() if not kk.startswith("_")}
+        r = measure_text(probe, ch.style)
+        core = ch.face_core(shot, t0, t1)
+        if r is not None and core is not None and r[0] < core[2] and core[0] < r[2] and r[1] < core[3] \
+                and core[1] < r[3]:
+            continue
+        if r is not None and (r[1] < SAFE["top"] - 0.01 or r[3] > SAFE["bottom"] + 0.01):
+            continue
+        spec.pop("_lines", None)
+        ch._apply_ink(spec, ch._bg_at(shot, r[1], r[3], t0, t1) if r is not None else None)
+        spec.pop("_mode", None)
+        out = {kk: v for kk, v in it.items() if kk not in ("text", "lines", "box", "stroke", "behind",
+                                                           "case", "kicker", "kicker_scale", "rotation",
+                                                           "align")}
+        out.update({kk: v for kk, v in spec.items() if not kk.startswith("_")})
+        if out.get("lines"):
+            ch._line_floor(out)
+        return out
+    # sin otra colocacion posible: mismo lugar con otra tinta / fuente (algo que se vea)
+    return _visual_fallback(ch, it, seed, rev)
+
+
+def _graphic_variant(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict:
+    iid = str(it["id"])
+    k = it.get("kind")
+    out = dict(it)
+    pal = ch.pal
+    bg = _item_bg(ch, it) if k in ("doodle", "icon", "sticker_text") else None
+    if k == "doodle":
+        fam = next((f for f in _DOODLE_FAM if it.get("name") in f), ("sparkle", "star4", "burst"))
+        out["name"] = _pick_other(list(fam), it.get("name"), seed, rev, iid, "name")
+        cols = _legible([pal["accent"], "#FFFFFF", pal["accent2"], ch.acc_light, pal["dark"]], bg) or \
+            [ch.doodle_color(float(it["start"]), float(it["end"]), float(it.get("x", 0.5)), float(it.get("y", 0.5)))]
+        out["color"] = _pick_other(cols, it.get("color"), seed, rev, iid, "col")
+        if out["name"] in ("circle_scribble", "underline", "squiggle"):
+            # el trazo sigue en su sitio: cambia su caracter (doble trazo / marcador hueco)
+            out["double"] = not bool(it.get("double"))
+            out["rotation"] = it.get("rotation", 0.0)
+        else:
+            out["rotation"] = _r((_vr(seed, rev, iid, "rot") - 0.5) * 30, 1)
+        if out["name"] not in ("underline", "arrow_curve", "arrow_straight"):
+            out.pop("path_to", None)
+        if _luma(out["color"]) > 0.85 and (bg is None or contrast("#FFFFFF", bg["rgb"]) < 4.5):
+            out["border_color"] = "#161616"
+        else:
+            out.pop("border_color", None)
+    elif k == "icon":
+        out["badge"] = _pick_other(["circle", "squircle", "none"], it.get("badge", "circle"), seed, rev, iid, "badge")
+        out["style"] = _pick_other(["clean", "sketch"], it.get("style", "clean"), seed, rev, iid, "style")
+        out["anim_in"] = _pick_other(["pop", "draw", "scale_down", "rise"], it.get("anim_in"), seed, rev, iid, "ain")
+        if out["badge"] != "none":
+            # el disco se ve contra su fondo; el icono, contra el disco
+            bcs = _legible([pal["accent"], pal["dark"], pal["accent2"], "#FFFFFF"], bg) or [pal["dark"], "#FFFFFF"]
+            bc = _pick_other(bcs, it.get("badge_color"), seed, rev, iid, "bc")
+            out["badge_color"] = bc
+            out["color"] = pal["dark"] if contrast(pal["dark"], bc) >= contrast("#FFFFFF", bc) else "#FFFFFF"
+        else:
+            # icono sin disco: su propio color debe leerse contra el fondo (>= 3:1)
+            cs = _legible([pal["accent"], "#FFFFFF", pal["dark"], ch.acc_light], bg)
+            if not cs:
+                out["badge"] = "circle"
+                out["badge_color"] = pal["dark"] if bg is None or _luma(_hexc(bg["rgb"])) > 0.5 else "#FFFFFF"
+                out["color"] = "#FFFFFF" if out["badge_color"] == pal["dark"] else pal["dark"]
+            else:
+                out["color"] = _pick_other(cs, it.get("color"), seed, rev, iid, "c") if len(cs) > 1 or \
+                    cs[0] != it.get("color") else cs[0]
+    elif k == "card":
+        out["theme"] = _pick_other(["light", "dark", "brand"], it.get("theme", "light"), seed, rev, iid, "theme")
+        out["anim_in"] = _pick_other(["rise", "pop", "slide_left", "scale_down"], it.get("anim_in"), seed, rev, iid, "ain")
+    elif k == "cta":
+        if it.get("variant") == "follow":
+            cur = it.get("button_color") or it.get("color")
+            out["button_color"] = _pick_other([ch.button_color(), pal["dark"], pal["accent2"]], cur, seed, rev, iid, "bc")
+            # con foto de perfil (medio propio) se alterna foto / iniciales; sin ella, iniciales / cara
+            avs = ["image", "initial"] if isinstance(it.get("media"), dict) else ["initial", "face"]
+            out["avatar"] = _pick_other(avs, it.get("avatar", avs[0]), seed, rev, iid, "av")
+        else:
+            out["color"] = _pick_other([pal["accent"], pal["accent2"], "#FFFFFF"], it.get("color"), seed, rev, iid, "c")
+            out["anim_in"] = _pick_other(["pop", "rise", "scale_down"], it.get("anim_in"), seed, rev, iid, "ain")
+    elif k == "socials":
+        out["theme"] = _pick_other(["light", "dark"], it.get("theme", "light"), seed, rev, iid, "theme")
+        out["icon_style"] = _pick_other(["brand", "mono"], it.get("icon_style", "brand"), seed, rev, iid, "ic")
+    elif k == "lower_third":
+        out["theme"] = _pick_other(["dark", "light"], it.get("theme", "dark"), seed, rev, iid, "theme")
+        out["color"] = _pick_other([pal["accent"], pal["accent2"], pal["warm"]], it.get("color"), seed, rev, iid, "c")
+    elif k == "sticker_text":
+        bgc = _pick_other(_legible([pal["accent"], pal["dark"], "#FFFFFF", pal["accent2"]], bg, 1.6)
+                          or [pal["accent"], pal["dark"]], it.get("bg"), seed, rev, iid, "bg")
+        out.update({"bg": bgc, "fg": pal["dark"] if _luma(bgc) > 0.55 else "#FFFFFF",
+                    "rotation": _r((_vr(seed, rev, iid, "rot") - 0.5) * 10, 1)})
+    else:
+        out["color"] = _pick_other([pal["accent"], pal["accent2"], "#FFFFFF"], it.get("color"), seed, rev, iid, "c")
+    return out
+
+
+def _cutaway_variant(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict:
+    iid = str(it["id"])
+    out = copy.deepcopy(it)
+    pool = [b for b in list(ch.S["backgrounds"]) + ["grid_warp", "dark_stars", "rays", "gradient", "halftone"]
+            if b in BACKGROUNDS and b not in ("blur_self",)]
+    out["background"] = _pick_other(pool, it.get("background"), seed, rev, iid, "bg")
+    out["anim_in"] = _pick_other(["cut", "zoom", "circle", "wipe", "fade"], it.get("anim_in", "cut"), seed, rev, iid, "ain")
+    t = out.get("text")
+    if isinstance(t, dict) and t.get("preset") in ("stack", "title_pop"):
+        t["anim_in"] = _pick_other(["pop", "word_stagger", "scale_down"], t.get("anim_in"), seed, rev, iid, "tain")
+    return out
+
+
+def _effect_variant(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict:
+    iid = str(it["id"])
+    k = it.get("kind")
+    out = dict(it)
+    r = _vr(seed, rev, iid, "amt")
+    if k == "zoom":
+        a, b = float(it.get("from", 1.0)), float(it.get("to", 1.05))
+        out.update({"from": _r(b, 3), "to": _r(a, 3)} if abs(a - b) > 0.01 else {"to": _r(a * 1.06, 3)})
+        out["easing"] = _pick_other(["in_out_quad", "out_cubic", "linear"], it.get("easing"), seed, rev, iid, "e")
+    elif k == "punch":
+        out["amount"] = _r(_clamp(float(it.get("amount", 0.12)) * (1.35 if r < 0.5 else 0.7), 0.04, 0.35), 3)
+        out["mode"] = _pick_other(["cut", "spring"], it.get("mode", "cut"), seed, rev, iid, "mode")
+        if out["mode"] == "spring":
+            out.pop("release", None)
+            out["hold"] = 0.35
+        else:
+            out.update({"release": "cut", "hold": None})
+    elif k == "kenburns":
+        pan = list(it.get("pan") or [0.03, -0.015])
+        out["pan"] = [_r(-float(pan[0]), 3), _r(-float(pan[1]), 3)]
+    elif k == "shake":
+        out["amp"] = _r(float(it.get("amp", 8.0)) * (1.4 if r < 0.5 else 0.7), 1)
+    elif k == "bw":
+        out["tone"] = _pick_other(["neutral", "warm", "cool", "sepia"], it.get("tone", "neutral"), seed, rev, iid, "tone")
+        out["contrast"] = _r(_clamp(float(it.get("contrast", 1.3)) + (0.15 if r < 0.5 else -0.15), 0.8, 1.8), 2)
+    elif k == "bg_replace":
+        # mismo tono (claro <-> claro, oscuro <-> oscuro): los titulos encima ya tienen su tinta
+        light = it.get("background") in LIGHT_BG
+        pool = [b for b in list(ch.S["scenes"].get("bg_replace") or []) + ["grid_warp", "gradient", "rays",
+                                                                              "halftone", "dark_stars"]
+                if b in BACKGROUNDS and (b in LIGHT_BG) == light]
+        out["background"] = _pick_other(pool, it.get("background"), seed, rev, iid, "bg")
+        if out["background"] == "paper":
+            papers = [["#F3EFE6", "#E4DDCF"], ["#EEF1F4", "#DCE2E9"], ["#F6EEE9", "#E8D9CF"]]
+            cur = it.get("bg_colors") if it.get("background") == "paper" else None
+            out["bg_colors"] = _pick_other(papers, cur, seed, rev, iid, "paper")
+        else:
+            out["bg_colors"] = _pick_other([[ch.pal["dark"], ch.pal["accent2"]], [ch.pal["dark"], ch.pal["accent"]],
+                                            [ch.pal["dark"], ch.pal["warm"]]], it.get("bg_colors"), seed, rev, iid, "cols")
+    elif k == "bg_blur":
+        out["radius"] = _r(float(it.get("radius", 16.0)) * (1.5 if r < 0.5 else 0.6), 1)
+    elif k == "color_pop":
+        out["bg_dark"] = _r(_clamp(float(it.get("bg_dark", 0.22)) + (0.15 if r < 0.5 else -0.15), 0.0, 0.6), 2)
+    elif k == "subject_outline":
+        out["color"] = _pick_other([ch.pal["accent"], "#FFFFFF", ch.pal["accent2"]], it.get("color"), seed, rev, iid, "c")
+    elif k == "rgb_split":
+        out["amount"] = _r(float(it.get("amount", 10.0)) * (1.5 if r < 0.5 else 0.6), 1)
+    elif k == "flash_frame":
+        out["color"] = _pick_other(["#FFFFFF", ch.pal["accent"], ch.pal["warm"]], it.get("color"), seed, rev, iid, "c")
+    return out
+
+
+def _transition_variant(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict:
+    """Otro kind de transicion con el MISMO sonido de aire (whip <-> whip, flash <-> light_leak
+    <-> film_burn...) para que el SFX emparejado siga siendo verdad; si no hay, otro kind y
+    _variants actualiza el SFX de ese golpe."""
+    iid = str(it["id"])
+    kinds = [k_ for k_, _w in ch.S["transitions"]] + [k_ for k_, _w in ch.S["scene_trans"]] + \
+        ["flash", "whip", "zoom_blur", "light_leak", "film_burn", "slide", "glitch"]
+    kinds = [k_ for k_ in dict.fromkeys(kinds) if k_ in TRANS_DUR and k_ != "cut"]
+    air = TRANS_SFX.get(it.get("kind"))
+    same = [k_ for k_ in kinds if TRANS_SFX.get(k_) == air and k_ != it.get("kind")]
+    kind = _pick_other(same or kinds, it.get("kind"), seed, rev, iid, "kind")
+    out = {kk: v for kk, v in it.items() if kk in ("id", "at", "enabled", "src", "locked", "intensity", "x", "y")}
+    TM = _transitions_mod()
+    base_dur = TRANS_DUR.get(kind, 0.35)
+    if TM is not None:
+        base_dur = float((getattr(TM, "DEFAULTS", {}).get(kind) or {}).get("dur") or base_dur)
+    out.update({"kind": kind, "dur": _r(max(0.12, base_dur * ch.S["trans_dur"]), 3)})
+    if kind in ("whip", "slide", "torn_paper"):
+        out["dir"] = _pick_other(["left", "right", "up"], it.get("dir"), seed, rev, iid, "dir")
+    if kind == "flash":
+        out["color"] = "white"
+    elif kind == "light_leak":
+        out["color"] = "warm"
+    elif kind == "glitch":
+        out["color"] = ch.pal["accent"]
+    if kind not in ("film_burn", "torn_paper", "circle", "zoom_blur"):
+        out.pop("x", None)
+        out.pop("y", None)
+    return out
+
+
+def _sfx_family(name: str) -> tuple:
+    for _use, names in SFX_USE:
+        if name in names:
+            return names
+    return (name,)
+
+
+def _sfx_variant(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict:
+    """Otro SFX del mismo USO (trazo -> trazo, pop -> texto, golpe -> golpe); si el uso solo tiene
+    uno (typing), otra ganancia y otro paneo."""
+    iid = str(it["id"])
+    fam = [n for n in _sfx_family(str(it.get("name"))) if n in SFX_NAMES]
+    out = dict(it)
+    out["name"] = _pick_other(fam, it.get("name"), seed, rev, iid, "name")
+    g0 = float(it.get("gain_db", SFX_GAIN.get(str(it.get("name")), -6)))
+    if out["name"] == it.get("name"):
+        out["gain_db"] = _r(_clamp(g0 + (3.0 if _vr(seed, rev, iid, "g") < 0.5 else -3.0), -30, 3), 1)
+        out["pan"] = _r(_clamp(-float(it.get("pan", 0.0) or 0.0) + (_vr(seed, rev, iid, "p") - 0.5) * 0.6, -0.6, 0.6), 2)
+    else:
+        out["gain_db"] = _r(_clamp(g0 - SFX_GAIN.get(str(it.get("name")), -6) + SFX_GAIN.get(out["name"], -6),
+                                   -30, 3), 1)
+    out.pop("variant", None)
+    return out
+
+
+_ANCHOR_RX = re.compile(r"_([sjt]\d+)[a-z]?\d*$")
+
+
+def _anchor_of(iid: str) -> str | None:
+    m = _ANCHOR_RX.search(str(iid))
+    return m.group(1) if m else None
+
+
+def _accent_rect(ch: "_Choreo", g: dict) -> tuple:
+    x, y = float(g.get("x", 0.5)), float(g.get("y", 0.5))
+    sz = float(g.get("size", 0.1))
+    asp = float(g.get("aspect", 1.0) or 1.0) if g.get("name") == "circle_scribble" else 1.0
+    hh = (0.014 if g.get("name") in ("underline", "squiggle") else sz * asp / 2 / ch.aspect)
+    return (x - sz / 2, y - hh, x + sz / 2, y + hh)
+
+
+def _reanchor_accents(ch: "_Choreo", fx: dict, old: dict, new: dict, only: set) -> list[str]:
+    """Acentos LIGADOS a un titulo que cambio de lugar (garabato / icono de la misma frase cuyo
+    rectangulo tocaba la tinta vieja): se mueven con el titulo (subrayado bajo la tinta nueva,
+    circulo alrededor, el resto con el mismo desplazamiento relativo). Si ya no caben (SAFE,
+    cara, otra tinta), se apagan. -> ids tocados."""
+    r0, r1 = measure_text(old, ch.style), measure_text(new, ch.style)
+    if r0 is None or r1 is None:
+        return []
+    anc = _anchor_of(old.get("id", ""))
+    a, b = float(old["start"]), float(old["end"])
+    touched = []
+    for g in fx.get("graphics") or []:
+        if g.get("id") in only or g.get("kind") not in ("doodle", "icon") or g.get("locked"):
+            continue
+        if _anchor_of(g.get("id", "")) != anc or not (float(g["start"]) < b and a < float(g["end"])):
+            continue
+        gr = _accent_rect(ch, g)
+        if not (gr[0] < r0[2] + 0.08 and r0[0] - 0.08 < gr[2] and gr[1] < r0[3] + 0.06 and r0[1] - 0.06 < gr[3]):
+            continue
+        name = g.get("name")
+        w1, h1 = r1[2] - r1[0], r1[3] - r1[1]
+        if name in ("underline", "squiggle"):
+            g.update({"x": _r((r1[0] + r1[2]) / 2, 3), "y": _r(min(r1[3] + 0.012, SAFE["bottom"] - 0.012), 4),
+                      "size": _r(min(ch.MAXW, w1 * 1.02), 3)})
+        elif name == "circle_scribble":
+            g.update({"x": _r((r1[0] + r1[2]) / 2, 3), "y": _r((r1[1] + r1[3]) / 2, 4),
+                      "size": _r(min(0.9, w1 * 1.2 + 0.03), 3),
+                      "aspect": _r(_clamp((h1 * 1.6 + 0.02) * ch.aspect / max(1e-3, w1 * 1.2 + 0.03), 0.3, 1.0), 3)})
+        else:
+            # mismo lugar relativo a la tinta (proporcional dentro, mismo margen fuera)
+            x, y = float(g.get("x", 0.5)), float(g.get("y", 0.5))
+
+            def rel(v, lo0, hi0, lo1, hi1):
+                if v < lo0:
+                    return lo1 - (lo0 - v)
+                if v > hi0:
+                    return hi1 + (v - hi0)
+                return lo1 + (v - lo0) / max(1e-3, hi0 - lo0) * (hi1 - lo1)
+            g.update({"x": _r(rel(x, r0[0], r0[2], r1[0], r1[2]), 3), "y": _r(rel(y, r0[1], r0[3], r1[1], r1[3]), 4)})
+        nr = _accent_rect(ch, g)
+        shot = ch.shot_at(float(g["start"]) + 0.02)
+        core = ch.face_core(shot, float(g["start"]), float(g["end"]))
+        bad = nr[0] < SAFE["left"] - 0.03 or nr[2] > SAFE["right"] + 0.05 or nr[1] < SAFE["top"] - 0.01 \
+            or nr[3] > SAFE["bottom"] + 0.005 or (core is not None and nr[0] < core[2] and core[0] < nr[2]
+                                                  and nr[1] < core[3] and core[1] < nr[3])
+        if name not in ("underline", "squiggle", "circle_scribble") and \
+                nr[0] < r1[2] and r1[0] < nr[2] and nr[1] < r1[3] and r1[1] < nr[3]:
+            bad = True                         # un icono / destello sobre la tinta nueva
+        if bad:
+            g["enabled"] = False
+        touched.append(str(g.get("id")))
+    return touched
+
+
+def _variants(plan: dict, shots: list[dict], script: dict, style: str, intensity: float, seed: int,
+              rev: int, only: set, locked_ids: set) -> tuple[dict, list[str], list[str]]:
+    """'Regenerar con IA' de verdad: por cada id pedido, OTRA version con el MISMO id, el mismo
+    momento y el mismo contenido (otro preset / kind / posicion / parametros), decidida por
+    (semilla, rev). No agrega items; solo mueve los acentos ligados al titulo que cambio de
+    lugar y el SFX emparejado de una transicion. Un item bloqueado (locked o director.locked)
+    NO se regenera aunque se pida. -> (fx, ids_sin_variante, ids_bloqueados)."""
+    old = plan.get("fx") or {}
+    fx = {tr: [copy.deepcopy(it) for it in old.get(tr) or [] if isinstance(it, dict)] for tr in TRACKS}
+    others = {tr: [it for it in fx[tr] if it.get("id") not in only] for tr in TRACKS}
+    sc = dict(script)
+    sc["sents"] = [dict(s_, info={k: v for k, v in s_["info"].items() if not k.startswith("_")})
+                   for s_ in script["sents"]]
+    ch = _Choreo(plan, shots, sc, style, intensity, seed, fixed=copy.deepcopy(others), rev=rev)
+    missing, locked = [], []
+    tm = _transitions_mod()
+    for tr in TRACKS:
+        for k, it in enumerate(fx[tr]):
+            iid = it.get("id")
+            if iid not in only:
+                continue
+            if it.get("locked") or iid in locked_ids:
+                locked.append(str(iid))
+                continue
+            fn = {"text": _text_variant, "graphics": _graphic_variant, "cutaways": _cutaway_variant,
+                  "effects": _effect_variant, "transitions": _transition_variant, "sfx": _sfx_variant}[tr]
+            try:
+                nv = fn(ch, it, seed, rev)
+            except Exception:           # pragma: no cover - una variante nunca tumba el plan
+                nv = None
+            if not nv or {kk: v for kk, v in nv.items()} == it:
+                missing.append(str(iid))
+                continue
+            for kk in ("id", "start", "end", "at", "enabled", "src", "intensity", "z"):
+                if kk in it:
+                    nv[kk] = it[kk]
+            nv["locked"] = False
+            fx[tr][k] = nv
+            if tr == "text":
+                _reanchor_accents(ch, fx, it, nv, only)
+            elif tr == "transitions" and TRANS_SFX.get(nv.get("kind")) != TRANS_SFX.get(it.get("kind")):
+                # el aire del golpe es parte del mismo evento: sigue al nuevo kind
+                hit = float(it.get("at", 0.0))
+                if tm is not None and hasattr(tm, "hit_time"):
+                    try:
+                        hit = float(tm.hit_time(dict(it)))
+                    except Exception:
+                        pass
+                a0, a1 = TRANS_SFX.get(it.get("kind")), TRANS_SFX.get(nv.get("kind"))
+                for sx in fx["sfx"]:
+                    if a0 and sx.get("name") == a0 and abs(float(sx.get("at", -9)) - hit) < 0.2 \
+                            and sx.get("id") not in only and not sx.get("locked"):
+                        if a1:
+                            sx["name"] = a1
+                            sx["gain_db"] = _r(float(SFX_GAIN.get(a1, -6)) + ch.S["sfx_db"], 1)
+                        else:
+                            sx["enabled"] = False
+    return fx, missing, locked
 
 
 _KEEP_NOTES = ("nombre leido", "musica", "recortes IA")
 
 
+def _lock_groups(old: dict, locked_ids: set) -> set:
+    """Ids que se bloquean JUNTOS con uno bloqueado: las piezas de una composicion (la frase y la
+    palabra gigante del fondo reemplazado, tx_bghero_s<N>*, con su fx_bgswap_s<N>) y el fondo
+    reemplazado que dio la tinta a un texto bloqueado (sin el, esa tinta oscura pensada para
+    papel quedaria sobre el consultorio real)."""
+    items = [(tr, it) for tr in TRACKS for it in old.get(tr) or [] if isinstance(it, dict)]
+    kept = {str(it.get("id")) for _tr, it in items
+            if it.get("locked") or it.get("src") == "user" or it.get("id") in locked_ids}
+    out: set = set()
+    for _ in range(3):
+        grow = set()
+        for tr, it in items:
+            iid = str(it.get("id"))
+            if iid not in kept | out:
+                continue
+            anc = _anchor_of(iid)
+            if iid.startswith(("tx_bghero_", "fx_bgswap_")) and anc:
+                grow |= {str(o.get("id")) for _t, o in items
+                         if str(o.get("id", "")).startswith(("tx_bghero_", "fx_bgswap_")) and _anchor_of(o.get("id", "")) == anc}
+            if tr == "text":
+                a, b = float(it.get("start", 0)), float(it.get("end", 0))
+                for t2, o in items:
+                    if t2 == "effects" and o.get("kind") == "bg_replace":
+                        oa, ob = float(o.get("start", 0)), float(o.get("end", 0))
+                        if min(b, ob) - max(a, oa) >= 0.5 * max(0.05, b - a):
+                            grow.add(str(o.get("id")))
+        grow -= kept | out
+        if not grow:
+            break
+        out |= grow
+    return out
+
+
+def _reink_orphans(ch: "_Choreo", fixed: dict) -> list[str]:
+    """Un texto que se queda (bloqueado) cuyo fondo sintetico ya no existe y cuya tinta no se lee
+    (< 3:1) contra el fondo real: se re-entinta contra el fondo real. -> ids ajustados."""
+    out = []
+    for it in fixed.get("text") or []:
+        if it.get("enabled", True) is False or it.get("src") == "user" or it.get("preset") == "counter":
+            continue
+        a, b = ch.f(float(it["start"])), ch.f(float(it["end"]))
+        if any(min(b, fb) - max(a, fa) >= 0.5 * max(0.05, b - a) for fa, fb, _k in ch.bg_fx):
+            continue
+        r = measure_text(it, ch.style)
+        if r is None:
+            continue
+        bg = ch._bg_at(ch.shot_at(float(it["start"]) + 0.02), r[1], r[3], float(it["start"]), float(it["end"]))
+        col = it.get("color") or "#FFFFFF"
+        if bg is None or contrast(col, bg["rgb"]) >= 3.0:
+            continue
+        spec = copy.deepcopy(it)
+        ch._apply_ink(spec, bg)
+        spec.pop("_mode", None)
+        for k in ("color", "accent", "shadow", "stroke", "box", "lines"):
+            if k in spec:
+                it[k] = spec[k]
+        for ln in it.get("lines") or []:
+            if ln.get("color") and contrast(ln["color"], bg["rgb"]) < 3.0:
+                ln["color"] = it.get("color")
+        out.append(str(it.get("id")))
+    return out
+
+
 def redirect(plan: dict, style: str | None = None, intensity: float | None = None,
              seed: int | None = None, only_ids: list[str] | None = None,
-             use_llm: bool = False, music_sync: bool | None = None, music_timeout: float = 12.0) -> dict:
+             use_llm: bool = False, music_sync: bool | None = None, music_timeout: float = 12.0,
+             keep_rev: bool = False) -> dict:
     """Re-dirige un plan v2 respetando items `locked` y `src:"user"` (y los ids en
     director.locked). Con `only_ids`, solo re-hace esos items (mismo momento, otra propuesta).
     Tambien acepta en only_ids/locked las claves "captions", "music" y "grade".
     Sincronia con la musica: si la pista no cambia (misma huella que la rejilla guardada en
     director.music_grid) se reusa la rejilla; si cambia y `music_sync` (default: re-direccion
     completa con musica IA lista) se pide la rejilla nueva con `music_timeout` (el render reusa
-    la pista). Las notas del nombre del letrero y de la musica se conservan."""
+    la pista). Las notas del nombre del letrero y de la musica se conservan.
+    El perfil del plan (`plan.profile`, 3.2) se re-aplica siempre (sin LLM): cambiarlo actualiza
+    rotulo, Seguir, reservas y cierre al instante. `keep_rev` (apply_profile): misma revision de
+    variantes, asi el resto de la edicion queda igual que la propuesta vigente."""
     p = _base_v2(plan)
     p["duration"] = _plan_duration(p)
     d = dict(p.get("director") or {})
@@ -6130,7 +8695,7 @@ def redirect(plan: dict, style: str | None = None, intensity: float | None = Non
     style = style if style in STYLES else "dinamico"
     intensity = float(d.get("intensity", 0.75) if intensity is None else intensity)
     seed = int(d.get("seed", 7) if seed is None else seed)
-    rev = int(d.get("rev", 0)) + 1
+    rev = int(d.get("rev", 0)) + (0 if keep_rev and not only_ids else 1)
     locked_ids = set(d.get("locked") or [])
     shots = p.get("shots") or []
     if not shots or not all("use" in s for s in shots):
@@ -6142,13 +8707,17 @@ def redirect(plan: dict, style: str | None = None, intensity: float | None = Non
         script = analyze_script(p, shots, use_llm=use_llm)
     old = p.get("fx") or {}
     only = set(only_ids or [])
+    if only:
+        return _redirect_only(p, d, shots, script, style, intensity, seed, rev, only, locked_ids)
     fixed = {k: [] for k in TRACKS}
     windows = None
     tl = _timeline(p)
     removed_windows = []
+    group_ids = _lock_groups(old, locked_ids)
     for tr in TRACKS:
         for it in old.get(tr) or []:
-            keep = bool(it.get("locked")) or it.get("src") == "user" or it.get("id") in locked_ids
+            keep = bool(it.get("locked")) or it.get("src") == "user" or it.get("id") in locked_ids \
+                or it.get("id") in group_ids
             if only:
                 keep = keep or it.get("id") not in only
             if keep:
@@ -6173,6 +8742,7 @@ def redirect(plan: dict, style: str | None = None, intensity: float | None = Non
             return copy.deepcopy(old["music"])
         m = _music_cfg(style, script, ch_)
         um = old.get("music") if isinstance(old.get("music"), dict) else {}
+        m.pop("fade_in", None)
         if um and (um.get("source", "ai") != "ai" or um.get("enabled") is False):
             m = _merge_music(m, {k: um[k] for k in ("source", "enabled", "track", "file", "gain_db") if k in um})
         return m
@@ -6213,6 +8783,7 @@ def redirect(plan: dict, style: str | None = None, intensity: float | None = Non
             m2 = music_for(ch)
             if _music_key(p, m2, style, seed) == grid.get("key"):
                 mcfg = m2
+    reinked = _reink_orphans(ch, fixed)
     for tr in TRACKS:
         fx[tr] = sorted(fixed[tr] + fx[tr], key=lambda it: (float(it.get("at", it.get("start", 0))), str(it["id"])))
     for key_, fn in (("captions", lambda: _captions_cfg(style, pal, ch)),
@@ -6225,6 +8796,12 @@ def redirect(plan: dict, style: str | None = None, intensity: float | None = Non
     prev_notes = [n for n in d.get("notes") or [] if isinstance(n, str) and n.startswith(_KEEP_NOTES)
                   and not n.startswith("musica")]
     notes = prev_notes + _silence_notes(p, script["words"])
+    pn = profile_note(_plan_profile(p))
+    if pn:
+        notes.append(pn)
+    notes += [n for n in dict.fromkeys(getattr(ch, "prof_notes", []))]
+    if reinked:
+        notes.append(f"tinta ajustada al fondo real (su fondo ya no esta): {', '.join(reinked)[:200]}")
     if grid:
         notes.append(f"musica sincronizada: {float(grid.get('bpm') or 0):.0f} BPM, drop en "
                      f"{float(grid.get('drop') or 0):.2f} s (tiempo final), {len(ch.snapped)} eventos al beat")
@@ -6236,8 +8813,131 @@ def redirect(plan: dict, style: str | None = None, intensity: float | None = Non
         d["music_grid"] = grid
     else:
         d.pop("music_grid", None)
-    p["entities"] = _entities_public(dict(p.get("entities") or {}, **{
-        k: v for k, v in script["entities"].items() if k not in (p.get("entities") or {})}))
+    # entidades: las del plan ya estan en el guion (_script_from_public), salvo lo que fijo un
+    # perfil anterior, que se recalcula con el perfil vigente
+    p["entities"] = _entities_public(script["entities"])
+    p["director"] = d
+    return _finalize(p)
+
+
+def _retext_locked(plan: dict, old: dict | None, new: dict | None) -> list[str]:
+    """Items BLOQUEADOS (o del usuario) que muestran datos del perfil anterior: se quedan donde
+    estan pero con los datos nuevos (nombre, profesion, red y @usuario, reservas). -> ids."""
+    fx = plan.get("fx") or {}
+    locked_ids = set((plan.get("director") or {}).get("locked") or [])
+    o_name = (old or {}).get("name") or (old or {}).get("business") or ""
+    n_name = (new or {}).get("name") or (new or {}).get("business") or ""
+    o_fol, n_fol = _follow_title(old), _follow_title(new)
+    o_ps, n_ps = PR.primary_social(old), PR.primary_social(new)
+    o_bk, n_bk = PR.booking_link(old), PR.booking_link(new)
+    o_cta = PR.link_cta(o_bk, " ".join(str((old or {}).get(k) or "") for k in ("business", "title")))
+    n_ctx = " ".join(str((new or {}).get(k) or "") for k in ("business", "title"))
+    out = []
+    for it in fx.get("graphics") or []:
+        if not isinstance(it, dict) or not (it.get("locked") or it.get("src") == "user" or it.get("id") in locked_ids):
+            continue
+        k, v = it.get("kind"), it.get("variant")
+        before = json.dumps(it, sort_keys=True, ensure_ascii=False)
+        if k == "lower_third" and o_name and it.get("title") == o_name and n_name:
+            it["title"] = n_name
+            o_t, o_b = (old or {}).get("title") or "", (old or {}).get("business") or ""
+            n_t, n_b = (new or {}).get("title") or "", (new or {}).get("business") or ""
+            if o_t and it.get("subtitle") == f"{o_t} · {o_b}" and n_t and n_b:
+                it["subtitle"] = f"{n_t} · {n_b}"
+            elif it.get("subtitle") in (o_t, f"{o_t} · {o_b}"):
+                it["subtitle"] = n_t or it.get("subtitle")
+        elif k == "cta" and v == "follow" and ((o_fol and it.get("title") in (o_fol, o_name)) or
+                                              (o_ps and it.get("handle") == o_ps["handle"])):
+            if n_fol:
+                it["title"] = n_fol
+                it["initials"] = PR.initials(n_fol)
+            if n_ps:
+                it.update(handle=n_ps["handle"], platform=n_ps["platform"])
+            if (new or {}).get("avatar"):
+                it.update(media=copy.deepcopy(new["avatar"]), avatar="image")
+            elif it.get("avatar") == "image":
+                it.pop("media", None)
+                it["avatar"] = "initial"
+        elif (k == "cta" and v == "link_below" or k == "card" and v in ("booking", "link")) and o_bk and n_bk \
+                and (it.get("label") in (o_bk["label"], o_cta) or it.get("display") == o_bk["display"]):
+            lab = n_bk["label"] if k == "card" else PR.link_cta(n_bk, n_ctx)
+            it.update(label=lab, display=n_bk["display"], platform=n_bk["platform"])
+            if k == "cta":
+                it["icon"] = n_bk["icon"]
+        if json.dumps(it, sort_keys=True, ensure_ascii=False) != before:
+            out.append(str(it.get("id")))
+    return out
+
+
+retext_locked = _retext_locked          # API publica (el servidor la usa en /direct con `profile`)
+
+
+def apply_profile(plan: dict, profile: dict | None) -> dict:
+    """Pone (o quita, con None) el perfil de la persona en el plan y re-dirige al instante SIN
+    LLM ni re-analisis (misma revision: el resto de la edicion queda igual) -> plan v2 nuevo.
+    Lo usa PUT /profile del servidor cuando el Studio edita el perfil."""
+    p = copy.deepcopy(plan)
+    old = _plan_profile(p)
+    prof = PR.normalize_profile(profile)
+    if prof:
+        p["profile"] = prof
+    else:
+        p.pop("profile", None)
+    if p.get("version") != 2 or not isinstance(p.get("fx"), dict):
+        return direct(p, use_llm=False)
+    fixed = _retext_locked(p, old, prof)
+    out = redirect(p, music_sync=False, keep_rev=True)
+    if fixed:
+        out["director"]["notes"] = list(out["director"].get("notes") or []) + [
+            f"perfil aplicado tambien a lo bloqueado: {', '.join(fixed)[:200]}"]
+    return out
+
+
+def _redirect_only(p: dict, d: dict, shots: list[dict], script: dict, style: str, intensity: float,
+                   seed: int, rev: int, only: set, locked_ids: set) -> dict:
+    """redirect(only_ids): otra version REAL de cada item pedido (mismo id y momento) sin tocar
+    nada mas. La semilla (la manda el Studio en cada 'Regenerar') decide la variante; la semilla
+    del plan (director.seed, la del render) no cambia. captions / music / grade: otro preset de
+    subtitulos, otra variacion de la musica (seed) u otro look."""
+    old = p.get("fx") or {}
+    plan_seed = int(d.get("seed", 7))
+    fx, missing, locked = _variants(p, shots, script, style, intensity, seed, rev, only, locked_ids)
+    music_new = False
+    for key_ in ("captions", "music", "grade"):
+        cur = copy.deepcopy(old.get(key_)) if isinstance(old.get(key_), dict) else None
+        if cur is None:
+            continue
+        if key_ in only and key_ in locked_ids:
+            locked.append(key_)
+        elif key_ in only:
+            music_new = music_new or key_ == "music"
+            if key_ == "captions":
+                cur["preset"] = _pick_other(["clean_bold", "karaoke", "boxed", "bold_caps"], cur.get("preset"),
+                                            seed, rev, "captions", "preset")
+                cur["case"] = "upper" if cur["preset"] == "bold_caps" else "none"
+            elif key_ == "music":
+                cur["seed"] = int(_vr(seed, rev, "music", "seed") * 100000)
+                cur.pop("fade_in", None)
+            else:
+                cur["look"] = _pick_other(list(LOOKS[:-1]), cur.get("look"), seed, rev, "grade", "look")
+        fx[key_] = cur
+    for k_, v_ in old.items():
+        if k_ not in fx:
+            fx[k_] = copy.deepcopy(v_)
+    p["fx"] = fx
+    p["shots"] = shots
+    notes = [n for n in d.get("notes") or [] if isinstance(n, str)
+             and not n.startswith(("sin variante", "bloqueado"))]
+    if missing:
+        notes.append(f"sin variante para: {', '.join(sorted(missing))[:200]}")
+    if locked:
+        notes.append(f"bloqueado (no se regenera): {', '.join(sorted(locked))[:200]}")
+    if music_new:
+        # otra pista: la rejilla de beats guardada ya no es la suya (cortes y SFX al beat viejo)
+        d.pop("music_grid", None)
+        notes = [n for n in notes if not n.startswith(("musica sincronizada", "musica nueva"))] + \
+            ["musica nueva: sin sincronia de beats hasta re-dirigir"]
+    d.update({"style": style, "intensity": intensity, "seed": plan_seed, "rev": rev, "notes": notes})
     p["director"] = d
     return _finalize(p)
 
@@ -6269,7 +8969,15 @@ def edit_table(plan: dict) -> str:
                 elif k == "card":
                     extra = f"{it.get('variant')}: {it.get('title')} | {it.get('subtitle')} {it.get('value')}"
                 elif k == "cta":
-                    extra = f"{it.get('variant')}: {it.get('label')}"
+                    extra = f"{it.get('variant')}: {it.get('title') or it.get('label')}"
+                    shown = it.get("display") if it.get("variant") == "link_below" else it.get("handle")
+                    if shown:
+                        extra += f" | {it.get('platform') or ''} {shown}"
+                elif k == "socials":
+                    extra = f"{it.get('variant') or 'chips'} {it.get('layout') or ''}: " + ", ".join(
+                        f"{l.get('platform')} {l.get('text')}" for l in it.get("links") or [])
+                elif k == "lower_third":
+                    extra = f"{it.get('title')} | {it.get('subtitle')}"
                 else:
                     extra = str(it.get("title") or it.get("text") or "")
             elif tr == "cutaways":

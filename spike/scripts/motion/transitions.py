@@ -106,15 +106,15 @@ def _p(k: str, type_: str, label: str, default=None, **kw) -> dict:
 
 
 def _s_dur(d, lo, hi):
-    return _p("dur", "num", "Duracion", d, min=lo, max=hi, step=0.01, unit="s", req=True)
+    return _p("dur", "num", "Duración", d, min=lo, max=hi, step=0.01, unit="s", req=True)
 
 
 _S_INT = _p("intensity", "num", "Intensidad", 1.0, min=0.0, max=1.0, step=0.05)
-_S_ALIGN = _p("align", "seg", "Alineacion con la union", "auto", opts=list(ALIGNS))
+_S_ALIGN = _p("align", "seg", "Alineación con la unión", "auto", opts=list(ALIGNS))
 
 
 def _s_dir(d="left"):
-    return _p("dir", "seg", "Direccion", d, opts=list(DIRS))
+    return _p("dir", "seg", "Dirección", d, opts=list(DIRS))
 
 
 def _s_xy(what: str):
@@ -131,7 +131,7 @@ PARAMS: dict[str, list[dict]] = {
     "light_leak": [_s_dur(0.70, 0.3, 1.6), _S_INT, _S_ALIGN,
                    _p("color", "color", "Tono", "warm", presets=list(LEAK_COLORS)),
                    _p("peak", "seg", "Pico", "whiteout", opts=["whiteout", "partial"]),
-                   _p("gate", "bool", "Barra del marco de pelicula", False)],
+                   _p("gate", "bool", "Barra del marco de película", False)],
     "whip": [_s_dur(0.36, 0.2, 0.8), _S_INT, _S_ALIGN, _s_dir("left")],
     "zoom_blur": [_s_dur(0.40, 0.2, 0.9), _S_INT, _S_ALIGN, *_s_xy("Centro")],
     "glitch": [_s_dur(0.36, 0.15, 1.0), _S_INT, _S_ALIGN,

@@ -224,6 +224,15 @@ _POOL_LOCK = threading.Lock()
 _META_LOCK = threading.Lock()    # meta.json / faces.json: leer-mezclar-escribir sin carreras
 
 
+def _json_default(o):
+    """json.dumps(default=...): numpy -> Python (np.float32(0.5) -> 0.5, arreglos -> listas)."""
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
 def session_threads() -> int:
     """Hilos intra-op de la sesion compartida (REELFY_MATTE_THREADS para forzar)."""
     try:
@@ -813,7 +822,9 @@ class MatteProvider:
     def _atomic_json(path: Path, obj: dict) -> None:
         tmp = path.with_name(f"{path.name}.tmp{os.getpid()}_{threading.get_ident() % 100000}")
         try:
-            tmp.write_text(json.dumps(obj))
+            # escalares/arreglos de numpy (YuNet devuelve float32) -> tipos de Python: antes un
+            # float32 que se colaba tumbaba la escritura de faces.json/meta.json
+            tmp.write_text(json.dumps(obj, default=_json_default))
             os.replace(tmp, path)
         except (OSError, TypeError, ValueError) as e:
             _log(f"no se pudo escribir {path.name}: {e}")
@@ -1235,7 +1246,12 @@ def _color(c, default="#FFFFFF"):
 
 def _env(item: dict, lt: float, dur: float, tin: float = 0.25, tout: float = 0.2) -> float:
     k = _num(item, "intensity", 1.0, 0.0, 1.0)
-    pin, pout = ease.envelope(lt, dur, _num(item, "fade_in", tin, 0.0, 5.0), _num(item, "fade_out", tout, 0.0, 5.0))
+    fin = _num(item, "fade_in", tin, 0.0, 5.0)
+    pin, pout = ease.envelope(lt, dur, fin, _num(item, "fade_out", tout, 0.0, 5.0))
+    if fin <= 0.0:
+        # sin fundido de entrada: completo desde su PRIMER cuadro (ease.envelope acota tin a 1 ms y
+        # en lt=0 daba 0: el cuadro 0 del video salia sin el fondo del hook, y es la portada)
+        pin = 1.0
     return k * ease.out_cubic(pin) * (1.0 - ease.in_out_quad(pout))
 
 
@@ -1536,8 +1552,10 @@ def bg_replace(img, item: dict, lt: float, dur: float, ctx) -> skia.Image:
     if m is None:
         return img
     k = _num(item, "intensity", 1.0, 0.0, 1.0)
-    pin, pout = ease.envelope(lt, dur, _num(item, "fade_in", 0.45, 0.0, 5.0),
-                              _num(item, "fade_out", 0.3, 0.0, 5.0))
+    fin = _num(item, "fade_in", 0.45, 0.0, 5.0)
+    pin, pout = ease.envelope(lt, dur, fin, _num(item, "fade_out", 0.3, 0.0, 5.0))
+    if fin <= 0.0:
+        pin = 1.0       # sin revelado: el fondo esta desde el primer cuadro (el hook en el cuadro 0)
     q = ease.out_cubic(pin) * (1.0 - ease.in_out_cubic(pout))
     if q <= 0.002 or k <= 0.002:
         return img

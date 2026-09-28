@@ -290,9 +290,12 @@ test("dedupeFx: quita la copia de la IA de un titulo bloqueado y duplicados exac
     { id: "fx_punch_5", kind: "punch", start: 23.5, end: 24.5, src: "ai" },
   ], sfx: [{ id: "a", name: "pop", at: 1 }, { id: "b", name: "pop", at: 1.05 }, { id: "c", name: "pop", at: 2 }] };
   const rm = C.dedupeFx(fx);
-  assert.deepEqual(rm.map(r => r.id).sort(), ["b", "fx_punch_4", "tx_title_2"]);
+  // solo la copia de lo bloqueado: lo que la IA propone entre si no se toca (su plan queda igual al
+  // del servidor y la sincronizacion con la musica IA sigue funcionando)
+  assert.deepEqual(rm.map(r => r.id).sort(), ["tx_title_2"]);
   assert.deepEqual(fx.text.map(x => x.id), ["tx_title_1", "tx_otro"]);
-  assert.equal(fx.effects.length, 2);
+  assert.equal(fx.effects.length, 3);
+  assert.equal(fx.sfx.length, 3);
   // dos destellos iguales en lugares distintos son decoracion: se quedan
   const fx3 = { graphics: [{ id: "s1", kind: "doodle", name: "sparkle", start: 15.5, end: 16.3, x: 0.3, y: 0.4, src: "ai" },
     { id: "s2", kind: "doodle", name: "sparkle", start: 15.6, end: 16.3, x: 0.7, y: 0.45, src: "ai" }] };
@@ -331,7 +334,18 @@ test("planForLang: el plan que viaja lleva el idioma elegido", () => {
   assert.equal(C.planForLang(plan, "en").phrases[0][0].text, "hello");
   assert.equal(C.planForLang(plan, "es").phrases[0][0].text, "hola");
   assert.equal(C.planForLang({ phrases: [[{ text: "hola" }]] }, "en").phrases[0][0].text, "hola");
-  assert.deepEqual(C.PRO_LANGS, ["es", "en"]);
+  // v2 traduce a pt/fr/de/it: phrases_<lang>
+  const p2 = Object.assign({}, plan, { phrases_pt: [[{ text: "ola" }]] });
+  assert.equal(C.planForLang(p2, "pt").phrases[0][0].text, "ola");
+  assert.equal(C.planForLang(p2, "de").phrases[0][0].text, "hola");     // sin traducir aun: el original
+  assert.deepEqual(C.PRO_LANGS, ["es", "en", "pt", "fr", "de", "it"]);
+  // /settings.pro_langs manda (en sitio: quien guardo la referencia la ve cambiar)
+  const ref = C.PRO_LANGS;
+  C.setProLangs(["en", "pt"]);
+  assert.deepEqual(ref, ["es", "en", "pt"]);
+  C.setProLangs([]);                                                    // vacio no borra
+  assert.deepEqual(ref, ["es", "en", "pt"]);
+  C.setProLangs(["es", "en", "pt", "fr", "de", "it"]);
 });
 
 test("fxTexts / applyFxTexts: traducir titulos, graficos y escenas en sitio", () => {
@@ -370,4 +384,275 @@ test("subtitulos: un grupo tapado al empezar no reaparece; y_ranges mueve la alt
   assert.equal(C.captionY({ y: 0.7, y_ranges: [{ start: 5, end: 8, y: 0.6 }] }, 6), 0.6);
   assert.equal(C.captionY({ y: 0.7, y_ranges: [{ start: 5, end: 8, y: 0.6 }] }, 9), 0.7);
   assert.equal(C.captionY({}, 1), 0.72);
+});
+
+test("subtitulos del render (/captions): grupo activo como text.draw_captions", () => {
+  const gs = [{ start: 1, end: 2.2, words: [] }, { start: 2.2, end: 3.0, words: [] }, { start: 5, end: 6, words: [] }];
+  assert.equal(C.capGroupAt(gs, 0.5), null);
+  assert.equal(C.capGroupAt(gs, 1.0), gs[0]);
+  assert.equal(C.capGroupAt(gs, 2.2), gs[1]);           // relevo exacto: el siguiente
+  assert.equal(C.capGroupAt(gs, 3.5), null);            // hueco: nada (el anterior ya termino)
+  assert.equal(C.capGroupAt(gs, 5.5), gs[2]);
+  assert.equal(C.capGroupAt([], 1), null);
+});
+
+test("y_ranges con hide: sin subtitulos en el tramo (fundido 0.12 s) y sin mover la altura", () => {
+  const cfg = { y: 0.72, y_ranges: [{ start: 10, end: 12, hide: true }, { start: 20, end: 22, y: 0.5 }] };
+  assert.equal(C.captionRangeAlpha(cfg, 11), 0);
+  assert.equal(C.captionRangeAlpha(cfg, 5), 1);
+  assert.ok(Math.abs(C.captionRangeAlpha(cfg, 12.06) - 0.5) < 1e-9);
+  assert.equal(C.captionY(cfg, 11), 0.72);              // la fila hide no cambia la altura
+  assert.equal(C.captionY(cfg, 21), 0.5);
+});
+
+test("foto con pie: los subtitulos se MUEVEN (render.photo_caption_y) y respetan keep_captions", () => {
+  const photo = { id: "c1", kind: "photo", start: 4, end: 7, caption: "Mi primera consulta", size: 0.72 };
+  const fx = { captions: { y: 0.72 }, cutaways: [photo], text: [] };
+  const y = C.photoCaptionY(photo, 0.72);
+  assert.equal(typeof y, "number");
+  assert.equal(C.captionYAt(fx, 5), y);                 // durante la foto
+  assert.equal(C.captionYAt(fx, 8), 0.72);              // despues vuelve
+  assert.equal(C.captionsHiddenAt(fx, 5), false);       // se mueven, no se ocultan
+  // sin pie o con keep_captions: no se mueven
+  assert.equal(C.captionYAt({ captions: { y: 0.72 }, cutaways: [Object.assign({}, photo, { caption: "" })] }, 5), 0.72);
+  assert.equal(C.captionYAt({ captions: { y: 0.72 }, cutaways: [Object.assign({}, photo, { keep_captions: true })] }, 5), 0.72);
+  // subtitulos lejos del pie (arriba): no se mueven
+  assert.equal(C.photoCaptionY(photo, 0.2), null);
+});
+
+test("PiP automatico (render.media_auto_place): lejos de la cara, dentro de SAFE y sobre los subtitulos", () => {
+  const S = C.SAFE;
+  const face = [0.62, 0.3, 0.2, 0.12];
+  const [x, y, s] = C.mediaAutoPlace(face, 0.3, 0.3, 0.66, []);
+  const r = [x - 0.15 * s, y - 0.15 * s, x + 0.15 * s, y + 0.15 * s];
+  const zone = [face[0] - face[2] / 2 - 0.03, face[1] - face[3] / 2 - 0.05, face[0] + face[2] / 2 + 0.03, face[1] + face[3] / 2 + 0.03];
+  const inter = Math.max(0, Math.min(r[2], zone[2]) - Math.max(r[0], zone[0])) * Math.max(0, Math.min(r[3], zone[3]) - Math.max(r[1], zone[1]));
+  assert.equal(inter, 0);
+  assert.ok(x < face[0]);                               // cara a la derecha -> PiP a la izquierda
+  assert.ok(r[0] >= S.left - 1e-9 && r[2] <= S.right + 1e-9 && r[1] >= S.top - 1e-9 && r[3] <= 0.66 + 1e-9);
+  // sin cara: arriba a la derecha
+  const [x2, y2] = C.mediaAutoPlace(null, 0.3, 0.3, 0.66, []);
+  assert.ok(x2 > 0.5 && y2 < 0.4);
+  // pipPlace: x/y fijos se respetan; vacios -> automatico con la tarjeta de pipCard
+  const fx = { captions: { y: 0.72 }, text: [], graphics: [] };
+  assert.deepEqual(C.pipPlace(fx, { x: 0.3, y: 0.4, size: 0.36, start: 0, end: 2 }, face, 1080, 1920, 1080, 1920), { x: 0.3, y: 0.4, size: 0.36, auto: false });
+  const a = C.pipPlace(fx, { x: null, y: null, size: 0.36, start: 0, end: 2 }, face, 1080, 1920, 1080, 1920);
+  assert.equal(a.auto, true);
+  assert.ok(a.x < face[0]);
+  const [pw, ph] = C.pipCard(0.36, null, 1080, 1920, 1080);
+  assert.ok(Math.abs(pw - 0.36 * 1080) < 1e-6 && Math.abs(ph - pw * 1920 / 1080) < 1e-6);
+  assert.deepEqual(C.pipCard(0.4, 1, 10, 20, 1000).map(Math.round), [400, 400]);
+});
+
+test("Regenerar: se adoptan las piezas LIGADAS (SFX de la transicion, acentos del titulo, composicion)", () => {
+  const local = {
+    transitions: [{ id: "tr_1", kind: "whip", at: 5 }],
+    sfx: [{ id: "sf_1", name: "whoosh_fast", at: 5.05 }, { id: "sf_2", name: "pop", at: 9 }, { id: "sf_3", name: "ding", at: 5.1, locked: true }],
+    text: [{ id: "tx_1", preset: "title_pop", text: "Hola", start: 1, end: 3 }, { id: "tx_bghero_s2", preset: "behind_giant", text: "DIENTES", start: 10, end: 12 }, { id: "tx_bghero_s2b", preset: "stack", text: "sanos", start: 10, end: 12 }],
+    graphics: [{ id: "gr_1", kind: "doodle", name: "underline", start: 1.2, end: 2.8 }, { id: "gr_2", kind: "doodle", name: "sparkle", start: 6, end: 7 }],
+    effects: [{ id: "fx_bgswap_s2", kind: "bg_replace", start: 10, end: 12, background: "paper" }],
+  };
+  const server = C.clone(local);
+  server.transitions[0].kind = "zoom_blur";
+  server.sfx[0].name = "swoosh_up";
+  server.sfx[1].name = "bubble";                                        // ajeno: NO se adopta
+  server.sfx[2].name = "bell";                                          // bloqueado: NO
+  server.graphics = server.graphics.filter(g => g.id !== "gr_1");        // el acento se apago
+  server.graphics[0].name = "star4";                                     // ajeno: NO
+  let r = C.mergeRegenerate(local, server, ["tr_1"]);
+  assert.equal(r.fx.transitions[0].kind, "zoom_blur");
+  assert.equal(r.fx.sfx[0].name, "swoosh_up");
+  assert.equal(r.fx.sfx[1].name, "pop");
+  assert.equal(r.fx.sfx[2].name, "ding");
+  assert.deepEqual(r.linked, [{ id: "sf_1", track: "sfx", status: "changed" }]);
+  r = C.mergeRegenerate(local, server, ["tx_1"]);
+  assert.ok(!r.fx.graphics.some(g => g.id === "gr_1"));                  // acento ligado quitado
+  assert.equal(r.fx.graphics.find(g => g.id === "gr_2").name, "sparkle");
+  // composicion: regenerar la frase trae el fondo y la palabra gigante
+  const s2 = C.clone(local);
+  s2.text[2].text = "fuertes"; s2.text[1].y = 0.4; s2.effects[0].background = "grid_warp";
+  r = C.mergeRegenerate(local, s2, ["tx_bghero_s2b"]);
+  assert.equal(r.fx.text[2].text, "fuertes");
+  assert.equal(r.fx.text[1].y, 0.4);
+  assert.equal(r.fx.effects[0].background, "grid_warp");
+  assert.equal(r.results[0].status, "changed");
+  assert.deepEqual([...C.regenCompanions(local, ["tx_bghero_s2b"]).keys()].sort(), ["fx_bgswap_s2", "tx_bghero_s2"]);
+});
+
+test("avisos del render en lenguaje humano (skipped / warnings)", () => {
+  const plan = { fx: { sfx: [{ id: "sf_9", name: "boom" }], graphics: [{ id: "gr_m", kind: "media" }], transitions: [{ id: "tr_4", kind: "slide", at: 3 }] } };
+  let h = C.humanSkip("omitido: sfx:sf_9:nombre_desconocido", plan);
+  assert.equal(h.id, "sf_9"); assert.equal(h.level, "skip"); assert.match(h.msg, /no existe en el catálogo/);
+  h = C.humanSkip("media:gr_m:ilegible", plan);
+  assert.equal(h.track, "graphics"); assert.match(h.msg, /no se pudo leer/);
+  h = C.humanSkip("transitions:tr_4:sin_union", plan);
+  assert.equal(h.id, "tr_4"); assert.match(h.msg, /lejos de un corte/);
+  h = C.humanSkip("matte:12.1-14.5:calidad_baja", plan);
+  assert.equal(h.id, null); assert.match(h.msg, /12.1 a 14.5/);
+  assert.match(C.humanSkip("music:error", plan).msg, /Música/);
+  assert.match(C.humanSkip("effects:rgb_split", plan).msg, /no disponible/);
+});
+
+test("medios propios: graphics -> PiP, escenas -> foto (nunca la foto de perfil del CTA)", () => {
+  const s = C.clone(SCHEMA);
+  s.tracks.graphics.items.cta.params.push({ k: "media", type: "media", accept: ["image"] });
+  s.tracks.graphics.items.media = { label: "PiP", params: [{ k: "media", type: "media", accept: ["image", "video"] }] };
+  s.tracks.cutaways.items.photo = { label: "Foto", params: [{ k: "media", type: "media", accept: ["image", "video"] }] };
+  assert.equal(C.mediaKindFor(s, "graphics", "video"), "media");
+  assert.equal(C.mediaKindFor(s, "graphics"), "media");
+  assert.equal(C.mediaKindFor(s, "cutaways", "image"), "photo");
+  delete s.tracks.graphics.items.media;
+  assert.equal(C.mediaKindFor(s, "graphics", "image"), null);
+});
+
+test("dedupeFx: un efecto de la IA solo se quita si copia uno BLOQUEADO (mismo tipo y parametros)", () => {
+  const fx = { effects: [
+    { id: "fx_a", kind: "zoom", start: 1, end: 3, from: 1.0, to: 1.2, src: "ai", locked: true },
+    { id: "fx_b", kind: "zoom", start: 1.02, end: 3, from: 1.7, to: 1.8, src: "ai" },      // otra decision: se queda
+    { id: "fx_c", kind: "zoom", start: 1.01, end: 3, from: 1.0, to: 1.2, src: "ai" },      // copia de lo bloqueado: se quita
+  ], sfx: [{ id: "s1", name: "pop", at: 2, gain_db: -6, src: "user" }, { id: "s2", name: "pop", at: 2.05, gain_db: -12, src: "ai" }] };
+  const rm = C.dedupeFx(fx);
+  assert.deepEqual(fx.effects.map(e => e.id), ["fx_a", "fx_b"]);
+  assert.deepEqual(rm.map(r => r.id), ["fx_c"]);
+  assert.equal(fx.sfx.length, 2);                        // mismo sonido con otro volumen: no es copia
+});
+
+test("dedupeFx: la propuesta de la IA no se toca (re-emisiones con sufijo incluidas): solo copias de lo bloqueado", () => {
+  // quitar algo de la propuesta haria que el plan local difiera del guardado y rompe la sincronia
+  // automatica con la musica IA; esas copias son un defecto del director (se reporta alla)
+  const bg = (id, b) => ({ id, kind: "bg_replace", start: 1.025, end: 3.28, background: b, src: "ai" });
+  const fx = { effects: [bg("fx_hookbg_s0", "grid_warp"), bg("fx_hookbg_s0b", "grid_warp"),
+    { id: "fx_cam_s0", kind: "zoom", start: 1, end: 3, src: "ai" }],
+    text: [{ id: "tx_h", preset: "title_pop", text: "Tus dientes", start: 1, end: 3, locked: true, src: "ai" }] };
+  assert.deepEqual(C.dedupeFx(fx), []);
+  assert.deepEqual(fx.effects.map(e => e.id), ["fx_hookbg_s0", "fx_hookbg_s0b", "fx_cam_s0"]);
+});
+
+test("subtitulos: balancedSplit = text._balanced_split (min del maximo, sin cerrar linea en palabra funcional)", () => {
+  assert.deepEqual(C.balancedSplit([100, 100, 100, 100], 10, 2, ["uno", "dos", "tres", "cuatro"]), [0, 2]);
+  // 'de' al final de la primera linea penaliza: se prefiere otro corte
+  assert.deepEqual(C.balancedSplit([120, 40, 120, 60], 10, 2, ["precio", "de", "lista", "hoy"]), [0, 1]);
+  assert.deepEqual(C.balancedSplit([50, 50, 50], 10, 1, null), [0]);
+  assert.deepEqual(C.balancedSplit([80, 80, 80, 80, 80, 80], 10, 3, null), [0, 2, 4]);
+});
+
+// medida de prueba: monoespaciada (0.6 em por letra), tinta 0.02 em adentro de cada lado
+const mono = (txt, px) => { const adv = 0.6 * px * [...txt].length; return { adv, l: txt === " " ? 0 : 0.02 * px, r: txt === " " ? 0 : adv - 0.02 * px, asc: 0.72 * px, desc: 0.2 * px }; };
+
+test("subtitulos en vivo con la geometria del render: escala y espacio del preset, ancho util y envoltura", () => {
+  const W = 1080, H = 1920;
+  // bold_caps: tamano 0.052 * 1.28, espacio x1.3, contorno y mayusculas del preset
+  const D = C.captionCfg({ preset: "bold_caps" });
+  assert.equal(D.case, "upper"); assert.equal(D.stroke, 5); assert.equal(D.font, "Poppins-Black");
+  const L1 = C.captionLayout(["TUS", "DIENTES."], { preset: "bold_caps" }, W, H, mono);
+  const fs = 0.052 * 1.28 * W;
+  assert.ok(Math.abs(L1.fs - fs) < 1e-9);
+  const sp = 0.6 * fs * 1.3;
+  const want = 0.6 * fs * 3 + sp + 0.6 * fs * 8 - 0.04 * fs;       // tinta de TUS..DIENTES.
+  assert.equal(L1.rows.length, 1);
+  assert.ok(Math.abs(L1.rows[0].w - want) < 1e-6, `${L1.rows[0].w} vs ${want}`);
+  // la palabra de la derecha empieza tras el espacio del preset (no pegada: 'TUSDIENTES')
+  assert.ok(Math.abs(L1.xs[1] - (0.6 * fs * 3 + sp)) < 1e-6);
+  // minimal_small: escala 0.74 (no 0.82)
+  assert.ok(Math.abs(C.captionLayout(["hola"], { preset: "minimal_small" }, W, H, mono).fs - 0.052 * 0.74 * W) < 1e-9);
+  // grupo que no cabe en el ancho util (0.7296 W): bold_caps lo parte en 2 lineas; clean_bold (1 linea) lo reduce
+  const long = ["CONSULTORIO", "ESPECIALIZADO", "HOY"];
+  const L2 = C.captionLayout(long, { preset: "bold_caps" }, W, H, mono);
+  assert.equal(L2.rows.length, 2);
+  const maxw = C.captionUsable(0.5) * W;
+  assert.ok(Math.abs(maxw - 0.7296 * W) < 1e-6);
+  const L3 = C.captionLayout(long.map(x => x.toLowerCase()), { preset: "clean_bold" }, W, H, mono);
+  assert.equal(L3.rows.length, 1);
+  assert.ok(L3.rows[0].w <= maxw + 1e-6 && L3.rows[0].sc < 1);
+  // las lineas que dio /captions mandan
+  assert.equal(C.captionLayout(long, { preset: "bold_caps" }, W, H, mono, { lines: 1 }).rows.length, 1);
+});
+
+test("subtitulos en vivo: con el rect del export, mismo ancho, centro y alto que el render", () => {
+  const W = 540, H = 960, rect = [0.3, 0.68, 0.78, 0.76];
+  const L = C.captionLayout(["TUS", "DIENTES."], { preset: "bold_caps" }, W, H, mono, { rect, lines: 1 });
+  assert.ok(Math.abs(L.rows[0].w - (rect[2] - rect[0]) * W) < 1e-6);
+  const c0 = L.rows[0].x0 + L.M[0].l * L.rows[0].sc, c1 = L.rows[0].x0 + L.xs[1] + L.M[1].r * L.rows[0].sc;
+  assert.ok(Math.abs((c0 + c1) / 2 - (rect[0] + rect[2]) / 2 * W) < 1e-6);
+  assert.ok(Math.abs(L.top - rect[1] * H) < 1e-9 && Math.abs(L.height - (rect[3] - rect[1]) * H) < 1e-9);
+  // dos lineas: las dos quedan dentro del rect y la de abajo empieza donde termina la de arriba + gap
+  const L2 = C.captionLayout(["CONSULTORIO", "ESPECIALIZADO", "HOY"], { preset: "bold_caps" }, W, H, mono, { rect: [0.12, 0.64, 0.86, 0.8], lines: 2 });
+  assert.equal(L2.rows.length, 2);
+  const r0 = L2.rows[0], r1 = L2.rows[1];
+  assert.ok(r1.base - r1.asc >= r0.base + r0.desc - 1e-6);
+  assert.ok(Math.abs(r1.base + r1.desc - (0.8 - 0.64) * H) < 1e-6);
+  // palabra activa: text._active_bump
+  assert.equal(C.activeBump(0.5, { start: 1, end: 1.4 }), 0);
+  assert.ok(C.activeBump(1.1, { start: 1, end: 1.4 }) > 0.99);
+  assert.ok(C.activeBump(1.8, { start: 1, end: 1.4 }) < 1e-9);
+});
+
+test("titulos: presets y fuentes como el render (espacio, separacion, ancho util, italica real)", () => {
+  assert.equal(C.TEXT_PRESET_Y.serif_elegant, 0.15);
+  assert.equal(C.TEXT_PRESETS.title_pop.space, 1.12);
+  assert.deepEqual(C.italicOf("DMSerifDisplay"), { font: "DMSerifDisplay-Italic", synth: false });
+  assert.deepEqual(C.italicOf("Anton"), { font: "Anton", synth: true });
+  // ancho util: centrado en 0.5 -> 2 * min(0.44, 0.38); a la izquierda -> hasta SAFE.right; deriva
+  assert.ok(Math.abs(C.textUsable(0.5, "center") - 0.76) < 1e-9);
+  assert.ok(Math.abs(C.textUsable(0.1, "left") - 0.78) < 1e-9);
+  assert.ok(Math.abs(C.textUsable(0.5, "center", 0.5, 0.04) - 0.76 * 0.5 / 1.04) < 1e-9);
+});
+
+test("traducir titulos por item: editar a mano con menos lineas, re-traducir y volver al original conserva TODO", () => {
+  const mk = () => ({ text: [{ id: "t1", preset: "title_pop", start: 1, end: 3, text: "¿ya sientes\nSARRO?", lines: [{ text: "¿ya sientes", scale: 0.6 }, { text: "SARRO?", scale: 1 }] },
+    { id: "t2", preset: "title_pop", start: 4, end: 6, text: "Hola" }],
+    graphics: [{ id: "g1", kind: "cta", label: "Sigueme", start: 7, end: 9 }], cutaways: [{ id: "c1", kind: "title_card", text: { text: "Precio" }, start: 9, end: 10 }] });
+  const fx = mk(), orig = JSON.parse(JSON.stringify(fx));
+  const tr = (list, tag) => list.map(x => `${tag}:${x.text}`);
+  // 1) traducir a pt
+  let req = C.translationRequest(fx, null, "pt");
+  assert.deepEqual(req.list.map(x => x.text), ["¿ya sientes", "SARRO?", "Hola", "Sigueme", "Precio"]);
+  let st = C.applyTranslation(fx, null, req, tr(req.list, "pt"), "pt", []);
+  assert.deepEqual(fx.text[0].lines.map(l => l.text), ["pt:¿ya sientes", "pt:SARRO?"]);
+  assert.deepEqual(C.textStatus(fx, st), { translated: ["t1", "t2", "g1", "c1"], edited: [], fresh: [], total: 4 });
+  // 2) el usuario corrige a mano el titulo y lo deja en UNA linea
+  C.setTitleText(fx.text[0], "ja sente alívio?");
+  assert.equal(fx.text[0].lines.length, 1);
+  assert.deepEqual(C.textStatus(fx, st).edited, ["t1"]);
+  // 3) re-traducir (p. ej. a de): lo editado a mano se respeta
+  req = C.translationRequest(fx, st, "de");
+  assert.deepEqual(req.kept, ["t1"]);
+  assert.ok(!req.items.some(x => x.id === "t1"));
+  st = C.applyTranslation(fx, st, req, tr(req.list, "de"), "de", []);
+  assert.equal(C.titleText(fx.text[0]), "ja sente alívio?");
+  assert.equal(fx.text[1].text, "de:Hola");                                  // desde el ORIGINAL, no desde pt
+  // 4) pidiendo tambien los editados: sale del original COMPLETO (dos lineas)
+  req = C.translationRequest(fx, st, "de", { edited: true });
+  assert.deepEqual(req.items.map(x => x.id), ["t1"]);
+  st = C.applyTranslation(fx, st, req, tr(req.list, "de"), "de", []);
+  assert.deepEqual(fx.text[0].lines.map(l => l.text), ["de:¿ya sientes", "de:SARRO?"]);
+  // 5) editar otra vez a una linea y volver a los originales: todas las lineas vuelven
+  C.setTitleText(fx.text[0], "solo una");
+  assert.equal(C.restoreOriginalTexts(fx, st), 4);
+  assert.deepEqual(fx, orig);
+  // un titulo nuevo tras traducir queda como 'fresh' y se traduce solo el
+  const fx2 = mk(); let st2 = C.applyTranslation(fx2, null, C.translationRequest(fx2, null, "pt"), tr(C.translationRequest(fx2, null, "pt").list, "pt"), "pt", []);
+  fx2.text.push({ id: "t3", preset: "title_pop", text: "Nuevo", start: 11, end: 12 });
+  assert.deepEqual(C.textStatus(fx2, st2).fresh, ["t3"]);
+  assert.deepEqual(C.translationRequest(fx2, st2, "pt").items.map(x => x.id), ["t3"]);
+  // formato anterior (por ruta) sigue sirviendo para volver al original
+  const fx3 = mk(); fx3.text[0].lines[1].text = "ALIVIO?"; fx3.text[1].text = "Ola";
+  const legacy = { lang: "pt", src: [{ id: "t1", path: "lines.1.text", text: "SARRO?" }, { id: "t2", path: "text", text: "Hola" }], sig: "x" };
+  C.restoreOriginalTexts(fx3, legacy);
+  assert.equal(fx3.text[0].lines[1].text, "SARRO?"); assert.equal(fx3.text[1].text, "Hola");
+});
+
+test("dropReemitted: lo que el director re-emite con sufijo no viaja al re-dirigir (no se acumula); la propuesta no se toca", () => {
+  const bg = (id, b, extra) => Object.assign({ id, kind: "bg_replace", start: 1.025, end: 3.28, background: b, src: "ai" }, extra || {});
+  const fx = { effects: [bg("fx_hookbg_s0", "grid_warp"), bg("fx_hookbg_s0b", "rays"), bg("fx_hookbg_s0c", "grid_warp"),
+    { id: "fx_hookbg_s1", kind: "bg_replace", start: 8, end: 9, src: "ai" },                       // otra toma: viaja
+    { id: "fx_cam_s0", kind: "zoom", start: 1, end: 3, src: "ai" }, { id: "fx_cam_s0b", kind: "zoom", start: 5, end: 7, src: "ai" },   // otro tramo: viaja
+    bg("fx_hookbg_s0d", "rays", { locked: true })],                                                  // bloqueado: viaja
+    text: [{ id: "t1", text: "Hola" }] };
+  const before = JSON.stringify(fx);
+  const r = C.dropReemitted(fx);
+  assert.deepEqual(r.removed, ["fx_hookbg_s0b", "fx_hookbg_s0c"]);
+  assert.deepEqual(r.fx.effects.map(e => e.id), ["fx_hookbg_s0", "fx_hookbg_s1", "fx_cam_s0", "fx_cam_s0b", "fx_hookbg_s0d"]);
+  assert.equal(r.fx.text, fx.text);
+  assert.equal(JSON.stringify(fx), before);                      // el plan local (la propuesta) queda igual
 });

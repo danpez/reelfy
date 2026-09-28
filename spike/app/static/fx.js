@@ -82,6 +82,7 @@
 
   // ------------------------------------------------------------------ estado
   let SCHEMA = null, FONTS = [], SFXCAT = {}, CAT_TRIES = 0;
+  let PLATS = {};                         // catalogo de redes del perfil: id -> {label, icon, color, svg, kind}
   const FONT_STATE = {};                  // nombre -> "loading" | "ok" | "err"
   const ICON_CACHE = {};                  // nombre -> svg (string)
   const ICON_IMG = {};                    // nombre|color -> Image
@@ -129,12 +130,41 @@
     try {
       o.logo = LOGO_ON ? { pos: LOGO_POS, size: LOGO_SIZE, opacity: 0.9 } : null;
       o.air = AIR;
+      // aire OPT-IN en la edicion IA: solo cuenta si el usuario movio el control (air_user)
+      if (isPro() && FX.airUser) o.air_user = true;
       const en = document.getElementById("enhance"); o.enhance_audio = en ? en.checked : true;
       o.platform = PLATFORM; o.lang = LANG;
     } catch (e) { /* editor aun sin iniciar */ }
     return o;
   }
   FX.engineOpts = engineOpts;
+  /** El aire (margen desenfocado) se aplica en el export: en la edicion IA solo si el servidor lo
+      aplica siempre (pro_opts) o si es opt-in y el usuario lo pidio (air_user). */
+  FX.airUser = false;
+  FX.airActive = () => !isPro() || PRO_OPTS.has("air") || (PRO_OPTIN.has("air") && FX.airUser);
+  /** Opciones del proyecto guardadas por el servidor (/status.engine): el aire elegido y el audio
+      de estudio sobreviven a recargar la pagina. */
+  FX.restoreEngine = function (eng) {
+    if (!eng || typeof eng !== "object") return;
+    try {
+      if (eng.air_user && +eng.air > 0) {
+        FX.airUser = true; AIR = +eng.air;
+        const a = $("#air"), l = $("#airLbl"); if (a) a.value = Math.round(AIR * 100); if (l) l.textContent = Math.round(AIR * 100) + "%";
+      }
+      if (eng.enhance_audio === false) { const en = $("#enhance"); if (en) en.checked = false; }
+      // logo de la marca: el servidor guarda si iba (bool) o, en versiones nuevas, {pos, size}
+      if (Object.prototype.hasOwnProperty.call(eng, "logo")) {
+        LOGO_ON = !!eng.logo;
+        if (eng.logo && typeof eng.logo === "object") {
+          if (["tl", "tr", "bl", "br"].includes(eng.logo.pos)) LOGO_POS = eng.logo.pos;
+          if (+eng.logo.size > 0) LOGO_SIZE = +eng.logo.size;
+        }
+        const lo = $("#logoOn"); if (lo) lo.checked = LOGO_ON;
+        const ls = $("#logoSize"); if (ls) ls.value = Math.round(LOGO_SIZE * 100);
+        if (typeof segSet === "function" && $("#segLogo")) segSet("#segLogo", LOGO_POS);
+      }
+    } catch (e) { /* editor aun sin iniciar */ }
+  };
 
   /** Etiquetas, ayudas y descripciones del esquema con acentos (el motor las trae en ASCII). */
   function accentSchema(o) {
@@ -151,7 +181,8 @@
     if (!SCHEMA) tasks.push(jget("/fx/schema").then(s => { SCHEMA = accentSchema(s); }).catch(() => {}));
     if (!FONTS.length) tasks.push(jget("/fx/fonts").then(d => { FONTS = (d && d.fonts) || []; }).catch(() => {}));
     if (!Object.keys(SFXCAT).length) tasks.push(jget("/fx/sfx").then(d => { SFXCAT = d || {}; }).catch(() => {}));
-    if (!SETTINGS_OK) tasks.push(jget("/settings").then(d => { SETTINGS_OK = true; PRO_OPTS = new Set((d && d.pro_opts) || []); FX.syncProControls(); }).catch(() => {}));
+    if (!SETTINGS_OK) tasks.push(jget("/settings").then(d => { SETTINGS_OK = true; FX.applySettings(d); }).catch(() => {}));
+    if (!Object.keys(PLATS).length) tasks.push(jget("/profile/platforms").then(d => { FX.setPlatforms(d && d.platforms); }).catch(() => {}));
     await Promise.all(tasks);
     if (!FONTS.length && SCHEMA) {   // sin /fx/fonts: lista del esquema
       const p = (SCHEMA.captions && SCHEMA.captions.params || []).find(x => x.type === "font");
@@ -163,14 +194,25 @@
   /* Opciones del proyecto que el render pro ya aplica (el servidor las anuncia en /settings.pro_opts:
      "logo", "air", "enhance_audio"). Las demas se muestran deshabilitadas en la edicion IA: la UI no
      promete lo que el export no hace. */
-  let PRO_OPTS = new Set(), SETTINGS_OK = false;
+  let PRO_OPTS = new Set(), PRO_OPTIN = new Set(), FEATURES = new Set(), SETTINGS_OK = false;
   FX.proOpts = () => PRO_OPTS;
-  FX.setProOpts = list => { PRO_OPTS = new Set(list || []); FX.syncProControls(); };   // pruebas / servidor nuevo
+  FX.proOptin = () => PRO_OPTIN;
+  FX.features = () => FEATURES;
+  FX.setProOpts = (list, optin) => { PRO_OPTS = new Set(list || []); if (optin) PRO_OPTIN = new Set(optin); FX.syncProControls(); };   // pruebas / servidor nuevo
+  /** GET /settings: opciones que el render pro aplica (pro_opts), las opt-in (pro_opts_optin),
+      idiomas de la edicion IA (pro_langs) y capacidades de la API (features). */
+  FX.applySettings = function (d) {
+    d = d || {};
+    PRO_OPTS = new Set(d.pro_opts || []); PRO_OPTIN = new Set(d.pro_opts_optin || []);
+    FEATURES = new Set(d.features || []);
+    if (Array.isArray(d.pro_langs) && d.pro_langs.length) C.setProLangs(d.pro_langs);
+    FX.syncProControls();
+  };
   FX.syncProControls = function () {
     const pro = isPro();
     const gate = (sel, key) => {
       const el = $(sel); if (!el) return false;
-      const off = pro && !PRO_OPTS.has(key);
+      const off = pro && !PRO_OPTS.has(key) && !PRO_OPTIN.has(key);
       el.classList.toggle("proff", off);
       el.querySelectorAll("input,button,select").forEach(x => { x.disabled = off; });
       return off;
@@ -180,41 +222,122 @@
     const enhOff = gate("#enhanceRow", "enhance_audio");
     if (enhOff) { const en = $("#enhance"); if (en && !en.checked) { en.checked = true; if (window.applyEnhance) applyEnhance(); } }
     const n = $("#proNoteBrand"); if (n) n.classList.toggle("on", logoOff);
+    // aire opt-in: el control dice si se aplica (solo con una fuente mas ancha que la salida)
+    const an = $("#airNote");
+    if (an) {
+      const opt = pro && PRO_OPTIN.has("air") && !PRO_OPTS.has("air");
+      an.classList.toggle("on", opt);
+      if (opt) an.textContent = FX.airUser ? `Aire aplicado: ${Math.round((typeof AIR !== "undefined" ? AIR : 0) * 100)} % de margen desenfocado (solo cambia un video horizontal).`
+        : "Sin aire: el video va a sangre completa. Mueve el control para dejar margen (solo cambia un video horizontal).";
+    }
     $$("#segLang button").forEach(b => {
       const off = pro && !C.PRO_LANGS.includes(b.dataset.v);
       b.disabled = off; b.classList.toggle("dis", off);
-      b.title = off ? "En la edición IA por ahora: español e inglés. Los demás idiomas siguen en el modo clásico." : "";
+      b.title = off ? "Este idioma aún no está disponible en la edición IA." : "";
     });
     FX.syncLangNote();
   };
-  /** Aviso del idioma en la edicion IA: los subtitulos se traducen; titulos y graficos, a peticion. */
+  const LANG_ES = { es: "español", en: "inglés", pt: "portugués", fr: "francés", de: "alemán", it: "italiano" };
+  FX.langName = l => LANG_ES[l] || l;
+  /** Estado de la traduccion de titulos y graficos (vive en el plan: sobrevive a recargar). */
+  const trState = () => (PLAN && PLAN.studio && PLAN.studio.texts) || null;
+  /** Idioma de los titulos y graficos del plan (el de su ultima traduccion; "es" = originales). */
+  FX.textsLang = () => { const st = trState(); return st && st.lang ? st.lang : "es"; };
+  /** Aviso del idioma en la edicion IA: los subtitulos se traducen al elegir el idioma; titulos y
+      graficos, a peticion (y se pueden devolver a su texto original). Los editados a mano despues
+      de traducir se respetan (y se ofrece volver a traducirlos). */
   FX.syncLangNote = function () {
-    const n = $("#langNote"); if (!n) return;
-    if (!isPro() || typeof LANG === "undefined" || LANG !== "en") { n.style.display = "none"; return; }
-    const list = C.fxTexts(PLAN.fx), done = FX.fxEnSig && FX.fxEnSig === JSON.stringify(list.map(x => x.text));
+    const n = $("#langNote");
+    FX.syncLangWarn();
+    if (!n) return;
+    if (!isPro() || typeof LANG === "undefined") { n.style.display = "none"; return; }
+    const st = trState(), tl = FX.textsLang(), S = C.textStatus(PLAN.fx, st);
+    const plural = (k, a, b) => `${k} ${k === 1 ? a : b}`;
+    if (LANG === "es") {
+      if (tl === "es") { n.style.display = "none"; return; }
+      n.style.display = "";
+      n.innerHTML = `${ICO("alert")}<span>Los títulos y gráficos están en ${esc(FX.langName(tl))}.</span><button class="btn ghost mini" id="trBack">${ICO("undo")}Volver a los textos originales</button>`;
+      const b = $("#trBack"); if (b) b.onclick = () => FX.restoreFxTexts();
+      return;
+    }
     n.style.display = "";
-    n.innerHTML = `${ICO("alert")}<span>Subtítulos en inglés. ${!list.length ? "" : done ? "Títulos y gráficos traducidos." : `Los títulos y gráficos (${list.length}) siguen en el idioma original.`}</span>`
-      + (list.length && !done ? `<button class="btn ghost mini" id="trFx">${ICO("type")}Traducir títulos y gráficos</button>` : "");
+    const nm = FX.langName(LANG);
+    let msg = `Subtítulos en ${esc(nm)}. `, btns = "";
+    if (!S.total) msg += "";
+    else if (tl !== LANG) {
+      msg += `Los títulos y gráficos (${S.total}) siguen en ${esc(FX.langName(tl))}.`;
+      btns += `<button class="btn ghost mini" id="trFx">${ICO("type")}Traducir títulos y gráficos</button>`;
+    } else {
+      msg += "Títulos y gráficos traducidos.";
+      const miss = st && st.untranslated && st.untranslated.length ? st.untranslated.length : 0;
+      if (miss) msg += ` ${plural(miss, "quedó igual", "quedaron igual")} (nombres o cifras).`;
+      if (S.fresh.length) { msg += ` ${plural(S.fresh.length, "título nuevo sin traducir", "títulos nuevos sin traducir")}.`; btns += `<button class="btn ghost mini" id="trFx">${ICO("type")}Traducir ${S.fresh.length === 1 ? "el nuevo" : "los nuevos"}</button>`; }
+      if (S.edited.length) { msg += ` ${plural(S.edited.length, "editado a mano (se respeta)", "editados a mano (se respetan)")}.`; btns += `<button class="btn ghost mini" id="trEd">${ICO("type")}Traducir ${S.edited.length === 1 ? "el editado" : "los editados"} de nuevo</button>`; }
+    }
+    n.innerHTML = `${ICO("alert")}<span>${msg}</span>${btns}` + (tl !== "es" ? `<button class="btn ghost mini" id="trBack">${ICO("undo")}Volver a los textos originales</button>` : "");
     const b = $("#trFx"); if (b) b.onclick = () => FX.translateFx();
+    const e = $("#trEd"); if (e) e.onclick = () => FX.translateFx(null, { edited: true, only: "edited" });
+    const bk = $("#trBack"); if (bk) bk.onclick = () => FX.restoreFxTexts();
   };
-  /** Traduce EN SITIO los textos de titulos, graficos y escenas (un paso de deshacer). Usa
-      /translate con los textos como `highlights[].title` (translate_texts, 1:1) hasta que el
-      servidor acepte `texts`. */
-  FX.translateFx = async function () {
-    if (!isPro() || FX.busy()) return;
-    const list = C.fxTexts(PLAN.fx); if (!list.length) return;
-    if (window.chip) chip("Traduciendo títulos y gráficos…");
+  /** Aviso junto a Exportar si los titulos y los subtitulos van en idiomas distintos. */
+  FX.syncLangWarn = function () {
+    const w = $("#langWarn"); if (!w) return;
+    const tl = isPro() && typeof LANG !== "undefined" ? FX.textsLang() : "es";
+    const bad = isPro() && tl !== "es" && tl !== LANG;
+    w.classList.toggle("on", bad);
+    w.innerHTML = bad ? `${ICO("alert")}Títulos en ${esc(FX.langName(tl))}, subtítulos en ${esc(FX.langName(LANG))}` : "";
+    w.title = bad ? "El export saldría con dos idiomas. Clic para elegir el idioma o volver a los textos originales." : "";
+    w.onclick = bad ? () => { if (window.setPanelTab) setPanelTab("proj"); const n = $("#langNote"); if (n) n.scrollIntoView({ block: "center", behavior: "smooth" }); } : null;
+  };
+  /** Traduce EN SITIO los textos de titulos, graficos y escenas al idioma elegido (un paso de
+      deshacer): POST /translate {texts, spans, lang} -> texts_<lang> + untranslated. Cada item parte
+      de su texto ORIGINAL completo (plan.studio.texts.src); lo editado a mano tras traducir se
+      respeta salvo `o.edited`. 503 = la IA local no respondio: se avisa y NO se guarda nada. */
+  FX.translateFx = async function (lang, o) {
+    const opt = o || {};
+    const L = lang || (typeof LANG !== "undefined" ? LANG : "en");
+    if (!isPro() || FX.busy() || L === "es") return;
+    const st0 = trState();
+    const req = C.translationRequest(PLAN.fx, st0, L, { edited: !!opt.edited });
+    if (opt.only === "edited") {
+      const ed = new Set(C.textStatus(PLAN.fx, st0).edited);
+      req.items = req.items.filter(x => ed.has(x.id)); req.list = req.list.filter(x => ed.has(x.id));
+    }
+    if (!req.list.length) { FX.syncLangNote(); return; }
+    const span = x => { const f = C.findItem(PLAN.fx, x.id); const it = f && f.item; return it && it.start != null ? [+it.start, +it.end] : null; };
+    if (window.chip) chip(`Traduciendo títulos y gráficos al ${FX.langName(L)}…`);
     try {
-      const d = await jpost(`/translate/${JOB}`, { plan: { phrases: [], highlights: list.map(x => ({ title: x.text })) }, texts: list.map(x => x.text), lang: "en" });
-      const out = d.texts_en || d.titles_en || [];
-      if (out.length !== list.length) throw new Error("respuesta incompleta");
-      edit(() => { C.applyFxTexts(PLAN.fx, list.map((x, i) => Object.assign({}, x, { to: out[i] }))); }, { rebuild: true });
-      FX.fxEnSig = JSON.stringify(C.fxTexts(PLAN.fx).map(x => x.text));
-      toast("Títulos y gráficos traducidos. ⌘Z vuelve al español.", "type", true);
-    } catch (e) { toast(`No se pudo traducir: ${e.message || e}`, "alert"); }
-    finally { if (window.chip) chip(null); FX.syncLangNote(); }
+      const d = await jpost(`/translate/${JOB}`, { texts: req.list.map(x => x.text), spans: req.list.map(span), lang: L });
+      const out = d[`texts_${L}`] || [];
+      if (out.length !== req.list.length) throw new Error("respuesta incompleta");
+      edit(() => {
+        const nst = C.applyTranslation(PLAN.fx, st0, req, out, L, d.untranslated || []);
+        PLAN.studio = Object.assign({}, PLAN.studio, { texts: nst });
+      }, { rebuild: true });
+      const kept = req.kept.length && !opt.edited ? ` ${req.kept.length} editado${req.kept.length > 1 ? "s" : ""} a mano se respetó${req.kept.length > 1 ? "aron" : ""}.` : "";
+      toast(`Títulos y gráficos en ${FX.langName(L)}.${kept} ⌘Z o "Volver a los textos originales" los regresa.`, "type", true);
+    } catch (e) {
+      toast(e.status === 503 ? `La IA local no respondió: ${e.message}` : `No se pudo traducir: ${e.message || e}`, "alert");
+    } finally { if (window.chip) chip(null); FX.syncLangNote(); }
+  };
+  /** Devuelve titulos y graficos a su texto original COMPLETO (un paso de deshacer). */
+  FX.restoreFxTexts = function () {
+    const st = trState(); if (!st || !st.src) return;
+    let n = 0;
+    edit(() => {
+      n = C.restoreOriginalTexts(PLAN.fx, st);
+      PLAN.studio = Object.assign({}, PLAN.studio); delete PLAN.studio.texts;
+    }, { rebuild: true });
+    toast(`Títulos y gráficos de vuelta a su texto original${n ? ` (${n})` : ""}.`, "undo", true);
+    FX.syncLangNote();
   };
   FX.schema = () => SCHEMA;
+  /** Catalogo de redes del perfil (GET /profile/platforms): sus iconos SVG quedan en la cache de
+      iconos (insignias de chips, Seguir y el panel Perfil). */
+  FX.setPlatforms = function (list) {
+    (list || []).forEach(p => { if (!p || !p.id) return; PLATS[p.id] = p; if (p.icon && p.svg && !ICON_CACHE[p.icon]) ICON_CACHE[p.icon] = p.svg; });
+  };
+  FX.platforms = () => PLATS;
 
   // ------------------------------------------------------------------ fuentes reales (@font-face)
   const WEIGHT = n => { const f = FONTS.find(x => x.name === n); if (f && f.weight) return +f.weight;
@@ -292,6 +415,8 @@
     if (!opt.noLanes) FX.renderLanes();
     if (opt.inspector !== false) FX.refreshInspector(opt.rebuild);
     FX.renderDirectorStats();
+    // el aviso del idioma cuenta los titulos traducidos / editados a mano / nuevos
+    if (isPro() && ((typeof LANG !== "undefined" && LANG !== "es") || trState())) FX.syncLangNote();
     FX.planDirty();
   };
   /** Gestos de controles: mut() UNA vez al empezar (input) y cierre en change/blur. */
@@ -334,6 +459,7 @@
 
   // ------------------------------------------------------------------ timeline: pistas fx
   const ROWH = 22;          // alto de cada fila de una pista (bloque de 18 px + aire)
+  const ROWH_DENSE = 15;    // pista con mas de 3 filas: bloque de 13 px (solo icono y texto chico)
   const EROWH = 16;         // filas de eventos puntuales (SFX / transiciones): rombo de 11 px
   function trackRow(track, extraCls) {
     const m = TRACK_META[track];
@@ -383,13 +509,16 @@
     if (C.isEvent(track)) return renderEventLane(track, lane, arr);
     const iv = arr.map(it => [it.start * px, Math.max(it.start * px + 6, it.end * px)]);
     const { rows, n } = C.packRows(iv, 2);
-    lane.style.height = (arr.length ? n * ROWH + 2 : 16) + "px";
+    // pistas densas (mas de 3 filas encimadas): filas compactas para que quepan mas pistas sin scroll
+    const rh = n > 3 ? ROWH_DENSE : ROWH;
+    lane.classList.toggle("dense", n > 3);
+    lane.style.height = (arr.length ? n * rh + 2 : 16) + "px";
     arr.forEach((it, i) => {
       const el = document.createElement("div");
       const w = Math.max(6, (it.end - it.start) * px);
       el.className = "fxb" + (it.enabled === false ? " off" : "") + (it.src === "user" ? " user" : "") + (w < 16 ? " tiny" : w < 34 ? " narrow" : "");
       el.dataset.fx = `${track}:${it.id}`;
-      el.style.left = (it.start * px) + "px"; el.style.width = w + "px"; el.style.top = (2 + rows[i] * ROWH) + "px";
+      el.style.left = (it.start * px) + "px"; el.style.width = w + "px"; el.style.top = (2 + rows[i] * rh) + "px";
       const label = C.itemLabel(SCHEMA, track, it);
       el.title = `${label}\n${C.fmtClock(it.start, .1)} - ${C.fmtClock(it.end, .1)}${it.locked ? "\nBloqueado" : ""}${it.src === "user" ? "\nCreado por ti" : ""}`;
       el.innerHTML = `${ICO(kindIcon(track, it))}<span class="lb">${esc(label)}</span>`
@@ -426,11 +555,13 @@
           + (off ? "\nLejos de un corte o cambio de toma: se verá como una mezcla sobre el mismo plano. Arrástrala a una unión (marcas rojas de la regla)." : "");
       } else {
         const c = cat[it.name] || {}, hit = +c.hit || 0, sd = +c.dur || 0;
-        el.className = "fxe" + (it.enabled === false ? " off" : "");
+        // un nombre que no esta en el catalogo no suena (el export lo omite: sfx:<id>:nombre_desconocido)
+        const unknown = Object.keys(cat).length > 0 && !cat[it.name];
+        el.className = "fxe" + (it.enabled === false ? " off" : "") + (unknown ? " warn" : "");
         el.style.left = x + "px"; el.style.top = top + "px"; el.style.width = "1px";
         el.innerHTML = (sd ? `<div class="tail" style="left:${-hit * px}px;width:${Math.max(4, sd * px)}px"></div>` : "")
           + `<div class="dia"></div>` + (showLb ? `<span class="elb">${esc(lbl(it.name))}</span>` : "");
-        el.title = `SFX ${lbl(it.name)} en ${C.fmtClock(it.at, .1)} (${(+it.gain_db || 0).toFixed(1)} dB)`;
+        el.title = `SFX ${lbl(it.name)} en ${C.fmtClock(it.at, .1)} (${(+it.gain_db || 0).toFixed(1)} dB)` + (unknown ? "\nEste sonido no existe en el catálogo: no sonará en el export. Elige otro en el inspector." : "");
       }
       wireBlock(el, track, it);
       lane.appendChild(el);
@@ -525,10 +656,19 @@
     b.innerHTML = `${ICO("music")}<span>${esc(src)}${m.mood ? " · " + esc(lbl(m.mood)) : ""}${bpm ? " · " + bpm + " bpm" : ""}${FX.musicStale() && FX.music.file ? " · desactualizada" : ""}</span>`;
     b.onclick = e => { if (e.target !== b && !e.target.closest("span,svg")) return; if (FX.busy()) return; FX.selectMusic(); FX.focusElem(); };
     lane.appendChild(b);
-    // pulsos de la ultima musica generada (tiempo final -> original)
-    if (FX.music.beats && FX.music.beats.length && px > 12) {
-      const tl = tlObj();
-      FX.music.beats.forEach(bt => { const t = tl.inverse(bt); const d = document.createElement("div"); d.className = "mbeat"; d.style.left = (t * px) + "px"; b.appendChild(d); });
+    // pulsos de la musica (tiempo FINAL de la pista -> original del timeline): los de la ultima
+    // generada (/music) o, si aun no se genero, la rejilla con la que el director sincronizo
+    const grid = (PLAN.director && PLAN.director.music_grid) || null;
+    const beats = FX.music.beats && FX.music.beats.length ? FX.music.beats : (!FX.music.file && grid && grid.beats) || [];
+    const downs = new Set((FX.music.beats && FX.music.beats.length ? FX.music.downbeats : (grid && grid.downbeats)) || []);
+    if (beats.length && px > 6) {
+      const tl = tlObj(), every = px > 12 ? 1 : 2;
+      beats.forEach((bt, i) => {
+        const db = downs.has(bt);
+        if (!db && i % every) return;
+        const d = document.createElement("div"); d.className = "mbeat" + (db ? " down" : ""); d.style.left = (tl.inverse(+bt) * px) + "px"; b.appendChild(d);
+      });
+      b.title = `${beats.length} pulsos${downs.size ? `, ${downs.size} tiempos fuertes` : ""}${FX.music.file ? "" : " (rejilla del director)"}`;
     }
     (m.stops || []).forEach(s => {
       const d = document.createElement("div"); d.className = "mstop"; d.style.left = (s.at * px) + "px"; d.style.width = Math.max(3, (+s.dur || 0.5) * px) + "px";
@@ -592,9 +732,9 @@
       ks.forEach(k => { const c = (SFXCAT[k] && SFXCAT[k].category) || "otros"; (byCat[c] = byCat[c] || []).push(k); });
       Object.keys(byCat).sort().forEach(c => { html += `<div class="mh">${esc(c)}</div>` + byCat[c].map(k => `<button data-k="${esc(k)}" style="--c:${TRACK_META.sfx.rgb}">${ICO("speaker")}${esc(lbl(k))}</button>`).join(""); });
     } else {
-      // medios propios (imagen o clip): solo si el motor los declara en el esquema
-      const mk = C.mediaKinds(SCHEMA, track);
-      if (mk.length) html += `<button data-media="${esc(mk[0])}" style="--c:${TRACK_META[track].rgb}">${ICO("upload")}Imagen o video propio…</button>`;
+      // medios propios (imagen o clip): graphics -> PiP, escenas -> foto (si el motor los declara)
+      const mk = C.mediaKindFor(SCHEMA, track);
+      if (mk) html += `<button data-media="${esc(mk)}" style="--c:${TRACK_META[track].rgb}">${ICO("upload")}${track === "cutaways" ? "Foto o clip propio…" : "Imagen o video propio…"}</button>`;
       html += ks.map(k => `<button data-k="${esc(k)}" style="--c:${TRACK_META[track].rgb}">${ICO(kindIcon(track, { kind: k, preset: k }))}${esc(C.kindLabel(SCHEMA, track, k))}</button>`).join("");
     }
     openMenu(rect.left, rect.bottom + 4, html, m => {
@@ -634,8 +774,15 @@
     if (window.chip) chip("Subiendo el archivo…");
     try {
       const media = await uploadMedia(file);
-      // la escena con foto propia no lleva el titulo de ejemplo
-      return FX.addItem(track, kind, t, Object.assign({ [p.k]: media }, track === "cutaways" ? { "text.text": "" } : {}));
+      if (p.accept && media.type && !p.accept.includes(media.type)) throw new Error(media.type === "video" ? "aquí solo va una imagen" : "aquí solo va un clip");
+      // la escena con foto propia no lleva el titulo de ejemplo; un clip dura lo que dura (hasta 6 s)
+      const extra = Object.assign({ [p.k]: media }, track === "cutaways" ? { "text.text": "" } : {});
+      const t0 = t != null ? t : (V.currentTime || 0);
+      if (media.type === "video" && +media.dur > 0) extra.end = r3(Math.min(dur(), t0 + clamp(+media.dur, 1, 6)));
+      const it = FX.addItem(track, kind, t0, extra);
+      if (it && media.type === "image" && !media.thumb && /\.(heic|heif|avif)$/i.test(media.name || ""))
+        toast("Foto HEIC agregada: el navegador no la muestra en vivo; pausa para ver el cuadro exacto.", "image");
+      return it;
     } catch (e) { toast(`No se pudo agregar el archivo: ${e.message || e}`, "alert"); return null; }
     finally { if (window.chip) chip(null); }
   };
@@ -648,14 +795,15 @@
   function wireMediaDrop() {
     ["cutaways", "graphics"].forEach(track => {
       const lane = document.querySelector(`.lane[data-lane="${track}"]`); if (!lane || !SCHEMA) return;
-      const mk = C.mediaKinds(SCHEMA, track); if (!mk.length) return;
+      if (!C.mediaKindFor(SCHEMA, track)) return;
       lane.addEventListener("dragover", e => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) { e.preventDefault(); lane.classList.add("dropok"); } });
       lane.addEventListener("dragleave", () => lane.classList.remove("dropok"));
       lane.addEventListener("drop", e => {
         e.preventDefault(); lane.classList.remove("dropok");
         const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (!f) return;
         const t = clamp((e.clientX - lane.getBoundingClientRect().left) / TL.px, 0, dur());
-        FX.addMedia(track, mk[0], f, t);
+        const kind = C.mediaKindFor(SCHEMA, track, /^video\//.test(f.type) ? "video" : "image");
+        if (kind) FX.addMedia(track, kind, f, t);
       });
     });
   }
@@ -695,7 +843,10 @@
       SELX = news; FX.select(news[news.length - 1].track, news[news.length - 1].id); SELX = news; markSelection(); FX.focusElem();
     } else if (a === "lock") {
       const v = !sel.every(s => s.item.locked);
-      edit(() => sel.forEach(s => { s.item.locked = v; }));
+      // las piezas de una composicion (palabra gigante, frase y fondo) se bloquean juntas, como el director
+      const grp = FX.groupOf(sel.map(s => s.item.id));
+      edit(() => { sel.forEach(s => { s.item.locked = v; }); grp.forEach(g => { g.item.locked = v; }); });
+      if (grp.length) toast(`${v ? "Bloqueada" : "Desbloqueada"} la composición completa (${grp.length + sel.length} piezas).`, "lock");
     } else if (a === "en") {
       const v = sel.every(s => s.item.enabled === false);
       edit(() => sel.forEach(s => { s.item.enabled = v; }));
@@ -759,6 +910,12 @@
     const snap = JSON.stringify(PLAN);
     try {
       const req = Object.assign({ plan: PLAN, fmt: FMT || "9:16" }, body);   // el director trabaja con el idioma original
+      // lo que el director re-emite con sufijo (fx_hookbg_s0b...) no viaja: si no, se acumula una
+      // copia mas en cada re-direccion. La propuesta que vuelve se adopta intacta.
+      if (isPro() && req.plan && req.plan.fx) {
+        const dr = C.dropReemitted(req.plan.fx);
+        if (dr.removed.length) req.plan = Object.assign({}, req.plan, { fx: dr.fx });
+      }
       let d;
       if (bg) {
         const r0 = await jpost(`/direct/${JOB}`, Object.assign(req, { background: true }));
@@ -780,18 +937,29 @@
       return null;
     } finally { DIRECTING = null; busyHide(); FX.renderDirector(); }
   }
-  /** Adopta el plan del director: conserva las traducciones y quita duplicados de lo bloqueado. */
+  /** Plan que el servidor acaba de guardar (director, perfil, sincronia con la musica) listo para
+      el Studio: conserva las traducciones y el estado propio del Studio y quita las copias de la IA
+      de lo bloqueado ANTES de tomar nota de el (no cuenta como edicion: nada se reenvia y la
+      sincronizacion automatica con la musica IA sigue). -> quitados. */
+  function takeServerPlan(plan) {
+    const keep = {};
+    Object.keys(PLAN || {}).forEach(k => { if (/^(phrases|titles)_[a-z]{2}$/.test(k) || k === "studio") keep[k] = PLAN[k]; });
+    PLAN = plan;
+    Object.keys(keep).forEach(k => { if (PLAN[k] == null) PLAN[k] = keep[k]; });
+    const removed = isPro() ? C.dedupeFx(PLAN.fx) : [];
+    syncLocked();
+    FX.noteServerPlan(PLAN);
+    noteGrid();
+    return removed;
+  }
+  FX.takeServerPlan = takeServerPlan;
+  /** Adopta el plan del director (un paso de deshacer). */
   function adoptPlan(d) {
     mut();
-    const keepEn = PLAN.phrases_en, keepTitles = PLAN.titles_en;
-    PLAN = d.plan;
-    if (keepEn && !PLAN.phrases_en) PLAN.phrases_en = keepEn;
-    if (keepTitles && !PLAN.titles_en) PLAN.titles_en = keepTitles;
-    const removed = isPro() ? C.dedupeFx(PLAN.fx) : [];
+    const removed = takeServerPlan(d.plan);
     syncLocked();
     FX.afterPlanReplaced();
     FX.resetAnalysisSig();
-    if (removed.length) FX.markDirty();
     return removed;
   }
   FX.redirect = async function (full, seed) {
@@ -801,9 +969,18 @@
       first ? "Dirigiendo la edición con IA…" : full ? "Re-dirigiendo toda la edición…" : "Aplicando el estilo…");
     if (!r) return false;
     const removed = adoptPlan(r);
+    FX.proposal = JSON.stringify(PLAN);
     let msg = first ? "Edición dirigida por la IA: todo queda editable en el timeline." : full ? "Edición re-dirigida." : "Estilo aplicado.";
     if (nLocked) msg += nLocked === 1 ? " Se respetó el elemento bloqueado." : ` Se respetaron ${nLocked} elementos bloqueados.`;
     if (removed.length) msg += ` Se quitaron ${removed.length} repetido${removed.length > 1 ? "s" : ""}.`;
+    // musica IA nueva generandose: la edicion se sincroniza sola con sus beats al terminar
+    if (r.music && r.music.pending) {
+      msg += " La música IA nueva se está componiendo: la edición se sincroniza sola con sus beats.";
+      FX.musicSide = { state: "generating", pct: 0, message: "" }; FX.renderMusicSide();
+      FX.watchStatus(null, 4000);
+    } else if (FX.musicSide && (FX.musicSide.resync === "available" || FX.musicSide.state === "superseded")) {
+      FX.musicSide = {}; FX.renderMusicSide(); FX.watchStatus(null, 3000);
+    }
     toast(msg + (first ? "" : " ⌘Z para deshacer."), "spark", !first);
     return true;
   };
@@ -818,10 +995,10 @@
       ids.length > 1 ? `Regenerando ${ids.length} elementos con IA…` : "Regenerando con IA…");
     if (!r) return;
     // del plan del director solo se adopta la nueva version de lo pedido (fxcore.mergeRegenerate)
-    const { fx: merged, results } = C.mergeRegenerate(PLAN.fx, r.plan.fx || {}, ids);
+    const { fx: merged, results, linked } = C.mergeRegenerate(PLAN.fx, r.plan.fx || {}, ids);
     const changed = results.filter(x => x.status === "changed" || x.status === "replaced");
     FX.markDirty();                   // el servidor guardo SU plan: se vuelve a guardar el del Studio
-    if (!changed.length) {
+    if (!changed.length && !(linked || []).length) {
       toast(ids.length > 1 ? "La IA no propuso cambios para estos elementos; quedaron como estaban." : "La IA no propuso cambios para este elemento; quedó como estaba.", "alert");
       return;
     }
@@ -831,8 +1008,177 @@
     SELX = results.map(x => ({ track: x.track, id: x.newId })).filter(x => items(x.track).some(i => i.id === x.id));
     SEL = SELX.length ? { type: "fx", ...SELX[SELX.length - 1] } : null; markSelection(); FX.inspect(SEL, true);
     const same = results.length - changed.length;
-    toast(`Regenerado${changed.length > 1 ? ` (${changed.length})` : ""}.${same ? ` ${same} sin cambios.` : ""} ⌘Z vuelve a la versión anterior.`, "spark", true);
+    // piezas ligadas que cambiaron con el elemento (sonido de la transicion, acentos, composicion)
+    const lk = (linked || []).map(x => x.track === "sfx" ? "su sonido" : x.track === "graphics" ? (x.status === "removed" ? "un acento se quitó" : "sus acentos") : "la composición");
+    const lkTxt = lk.length ? ` También cambió ${[...new Set(lk)].join(", ")}.` : "";
+    toast(`Regenerado${changed.length > 1 ? ` (${changed.length})` : ""}.${same ? ` ${same} sin cambios.` : ""}${lkTxt} ⌘Z vuelve a la versión anterior.`, "spark", true);
   };
+  // ------------------------------------------------------------------ estado del trabajo en segundo plano
+  /* Sondeo liviano (/status?plan=0) mientras el editor espera algo del servidor:
+     - la musica IA de la propuesta (tarea `music`): al terminar, el servidor guarda la propuesta
+       sincronizada a sus beats; si el Studio no la edito desde entonces se adopta sola. Si ya la
+       edito, ofrece "Sincronizar con la musica" (re-dirigir con la pista en cache: < 1 s);
+     - el proxy 720p del video (seeks rapidos): al quedar listo se cambia la fuente del editor. */
+  let WATCH = { timer: null, until: 0, busy: false };
+  FX.musicSide = {};                 // {state, pct, message, resync, plan_rev}
+  FX.proposal = null;                // JSON del plan tal como lo devolvio el ultimo /direct
+  function needWatch() {
+    const m = FX.musicSide, ms = m.state;
+    // "ready" sin resync es un paso breve antes de sincronizar: se sigue como mucho 20 s
+    const ready = ms === "ready" && !m.resync && Date.now() - (m.since || 0) < 20000;
+    return Date.now() < WATCH.until || ["generating", "syncing"].includes(ms) || ready || SRC.state === "pending";
+  }
+  function scheduleWatch(ms) { clearTimeout(WATCH.timer); if (!JOB || JOB === "demo" || !needWatch()) return; WATCH.timer = setTimeout(tickWatch, ms || 1500); }
+  async function tickWatch() {
+    if (WATCH.busy) return scheduleWatch();
+    WATCH.busy = true;
+    try { handleStatus(await jget(`/status/${JOB}?plan=0`)); await checkProxy(); } catch (e) { /* se reintenta */ }
+    finally { WATCH.busy = false; scheduleWatch(); }
+  }
+  /** Arranca (o prolonga `forMs`) el sondeo con el /status que ya se tenga. */
+  FX.watchStatus = function (j, forMs) {
+    if (j) handleStatus(j);
+    if (forMs) WATCH.until = Math.max(WATCH.until, Date.now() + forMs);
+    scheduleWatch(j ? 1500 : 200);
+  };
+  function handleStatus(j) {
+    if (!j || typeof j !== "object") return;
+    // proxy del video: listo -> se cambia la fuente; cualquier otro estado final (error, cancelado)
+    // o sin tarea de proxy -> se deja el original y se deja de sondear por el
+    if (SRC.state === "pending") {
+      const ps = j.proxy_state || (j.proxy && j.proxy.state) || null;
+      if (ps === "done") checkProxy();
+      else if (ps !== "queued" && ps !== "running") SRC.state = "none";
+    }
+    // musica IA de la propuesta
+    const m = j.music || {};
+    const prev = FX.musicSide.state, since = FX.musicSide.since;
+    FX.musicSide = { state: j.music_state || m.state || null, pct: j.music_pct != null ? +j.music_pct : +(m.pct || 0),
+      message: j.music_message || m.message || "", resync: j.music_resync || m.resync || null, plan_rev: m.plan_rev != null ? +m.plan_rev : null };
+    const ms = FX.musicSide;
+    ms.since = prev === ms.state && since ? since : Date.now();
+    if (ms.state === "synced" && ms.plan_rev != null && FX.serverRev != null && ms.plan_rev > FX.serverRev) adoptSynced(ms.plan_rev);
+    if (prev !== ms.state || ["generating", "syncing"].includes(ms.state)) FX.renderMusicSide();
+  }
+  /** La propuesta que el servidor sincronizo con la musica IA reemplaza a la local SOLO si el
+      Studio no la edito (mismo contenido que devolvio /direct y nada pendiente de guardar). */
+  let SYNCING = false;
+  async function adoptSynced(rev) {
+    if (SYNCING || DIRECTING || !isPro()) return;
+    if (!FX.isClean()) {
+      // el plan local tiene cambios: el autoguardado los manda y el servidor marca la musica
+      // `superseded` (resync disponible): se sigue sondeando un rato para ofrecer "Sincronizar"
+      WATCH.until = Math.max(WATCH.until, Date.now() + 15000); scheduleWatch(1500);
+      FX.renderMusicSide(); return;
+    }
+    SYNCING = true;
+    try {
+      const p = await jget(`/plan/${JOB}`);
+      if (!p || !p.plan || !FX.isClean()) return;
+      FX.adoptServerPlan(p.plan, p.plan_rev);
+      FX.proposal = JSON.stringify(PLAN);
+      toast("Música IA lista: la edición quedó sincronizada con sus beats.", "music");
+    } catch (e) { /* el siguiente sondeo reintenta */ }
+    finally { SYNCING = false; FX.renderMusicSide(); }
+  }
+  /** Aviso de la musica IA de la propuesta en el panel Director (progreso o "Sincronizar"). */
+  /* Rejilla de beats del plan (director.music_grid): el director la deja solo si corresponde a la
+     pista vigente. Se anota la firma de la musica al recibir un plan con rejilla: mientras no cambie
+     lo que cambia el archivo de musica, la edicion sigue sincronizada aunque /status diga
+     `resync: available` (p. ej. tras "Sincronizar con la música", que sincroniza en la misma
+     respuesta sin tocar el estado de la tarea `music`). */
+  let GRID_SIG = null;
+  function noteGrid() {
+    try { GRID_SIG = isPro() && PLAN.director && PLAN.director.music_grid ? curMusicSig() : null; } catch (e) { GRID_SIG = null; }
+  }
+  FX.gridSynced = function () {
+    try { return !!(isPro() && PLAN.director && PLAN.director.music_grid && GRID_SIG != null && GRID_SIG === curMusicSig()); } catch (e) { return false; }
+  };
+  /** La edicion no sigue el ritmo de la musica IA lista: el servidor ofrece re-sincronizar y el plan
+      no trae la rejilla de la pista vigente. */
+  FX.needsResync = function () {
+    const ms = FX.musicSide || {};
+    return (ms.resync === "available" || ms.state === "superseded") && !FX.gridSynced();
+  };
+  FX.renderMusicSide = function () {
+    const el = $("#dirMusic"); if (!el) return;
+    const ms = FX.musicSide || {};
+    let h = "";
+    if (ms.state === "generating") h = `<div class="dmrow"><span class="spinner"></span><span>Componiendo la música IA… ${Math.round(ms.pct || 0)}%. La edición se sincroniza sola con sus beats al terminar.</span></div>`;
+    else if (ms.state === "syncing") h = `<div class="dmrow"><span class="spinner"></span><span>Sincronizando la edición con la música IA…</span></div>`;
+    else if (FX.needsResync()) {
+      // el motivo que da el servidor: la edicion cambio desde la propuesta, o la sincronia
+      // automatica no alcanzo a terminar (p. ej. la maquina estaba ocupada)
+      const why = /sin sincron/i.test(ms.message || "") && ms.state !== "superseded" ? "la sincronía automática no alcanzó a terminar" : "la edición cambió desde la propuesta";
+      h = `<div class="dmrow warn">${ICO("music")}<span>La música IA está lista, pero ${why}: sus cortes y golpes aún no siguen el ritmo.</span><button class="btn mini" id="dirResync" ${DIRECTING ? "disabled" : ""}>${ICO("music")}Sincronizar con la música</button></div>`;
+    }
+    else if (ms.state === "error") h = `<div class="dmrow warn">${ICO("alert")}<span>${esc(ms.message || "La música IA falló; suena la procedural.")}</span></div>`;
+    el.innerHTML = h;
+    const b = $("#dirResync"); if (b) b.onclick = () => FX.redirect(false).then(ok => { if (ok) toast("Edición sincronizada con la música IA.", "music", true); });
+  };
+  /* Video del editor: proxy H.264 720p del servidor (GET /source?proxy=1: mismo reloj que el
+     original, GOP corto = seeks rapidos). Cada URL que usa el <video> sirve SIEMPRE el mismo
+     archivo: mientras el proxy no esta se usa el original por su propia URL (/source sin proxy;
+     la misma URL con ?proxy=1 cambia de contenido al quedar listo y el navegador pediria rangos
+     del archivo anterior: 416 y video roto). Al quedar listo (cabecera X-Reelfy-Proxy o /status)
+     se cambia la fuente conservando el instante (y si estaba reproduciendo, sigue). */
+  const SRC = { state: null, job: null, since: 0, probing: false };
+  FX.srcState = () => SRC.state;
+  /** Cabecera del proxy con una peticion de 1 byte -> {state: ready|pending|none, tag}. */
+  async function probeProxy(job) {
+    // sin cache: la misma URL cambia de contenido al quedar listo el proxy (una respuesta vieja
+    // guardada por el navegador diria "pending" para siempre)
+    const r = await fetch(`/source/${job}?proxy=1`, { cache: "no-store", headers: { Range: "bytes=0-0" } });
+    const st = r.headers.get("X-Reelfy-Proxy") || "none";
+    const tag = String(r.headers.get("etag") || r.headers.get("last-modified") || Date.now()).replace(/[^\w]/g, "").slice(-12);
+    if (r.body && r.body.cancel) r.body.cancel().catch(() => {});
+    return { state: st, tag };
+  }
+  const proxyUrl = (job, tag) => `/source/${job}?proxy=1&v=${tag || Date.now()}`;
+  let VERR = false;
+  FX.openSource = function () {
+    const job = JOB;
+    SRC.job = job; SRC.state = null; SRC.since = Date.now();
+    if (!VERR && V) {
+      VERR = true;
+      // si el proxy no se puede reproducir, el original (mismo reloj) en el mismo instante
+      V.addEventListener("error", () => {
+        if (!SRC.job || !/proxy=1/.test(V.currentSrc || V.src || "")) return;
+        const t = V.currentTime || 0;
+        SRC.state = "none";
+        V.addEventListener("loadedmetadata", () => { try { V.currentTime = t; } catch (e) { /* nada */ } }, { once: true });
+        V.src = `/source/${SRC.job}`;
+      });
+    }
+    probeProxy(job).then(p => {
+      if (SRC.job !== job) return;
+      SRC.state = p.state;
+      V.src = p.state === "ready" ? proxyUrl(job, p.tag) : `/source/${job}`;
+      if (p.state === "pending") FX.watchStatus(null);
+    }).catch(() => { if (SRC.job !== job) return; SRC.state = "none"; V.src = `/source/${job}`; });
+  };
+  FX.useProxy = function (tag) {
+    if (SRC.job !== JOB || SRC.state === "ready") return;
+    SRC.state = "ready";
+    const t = V.currentTime || 0, playing = !V.paused;
+    const back = () => { try { V.currentTime = t; } catch (e) { /* nada */ } if (playing) V.play().catch(() => {}); };
+    V.addEventListener("loadedmetadata", back, { once: true });
+    V.src = proxyUrl(JOB, tag);
+  };
+  /** Mientras el proxy esta pendiente: la cabecera manda (el estado de /status puede quedarse
+      atras). Tope de 15 min: despues se sigue con el original. */
+  async function checkProxy() {
+    if (SRC.state !== "pending" || SRC.probing || SRC.job !== JOB) return;
+    if (Date.now() - SRC.since > 15 * 60000) { SRC.state = "none"; return; }
+    SRC.probing = true;
+    try {
+      const p = await probeProxy(SRC.job);
+      if (SRC.job !== JOB || SRC.state !== "pending") return;
+      if (p.state === "ready") FX.useProxy(p.tag);
+      else if (p.state !== "pending") SRC.state = "none";
+    } catch (e) { /* se reintenta */ } finally { SRC.probing = false; }
+  }
+
   /** Convierte el plan v1 en v2 con el director (primer "Dirigir con IA"). */
   FX.directFirst = async () => { if (await FX.redirect(true) && isPro()) FX.maybeAutoMusic(); };
 
@@ -843,6 +1189,7 @@
   FX.afterPlanReplaced = function () {
     TLCACHE.key = ""; CAPCACHE.key = ""; INSP_KEY = "";   // el inspector apunta a objetos del plan anterior
     DSTYLE = null; DINT = null;
+    noteGrid();
     SELX = SELX.filter(s => items(s.track).some(i => i.id === s.id));
     flatWords = P().flat(); liveWordEl = null;
     FX.syncMode();
@@ -858,6 +1205,7 @@
   FX.syncMode = function () { document.body.classList.toggle("pro", isPro()); FX.syncProControls(); };
   FX.renderAll = function () {
     FX.syncMode(); FX.renderDirector(); FX.renderProjectGroups(); FX.renderLanes();
+    if (window.PF && isPro()) PF.renderEditorGroup();
     FX.inspect(SEL);
   };
 
@@ -872,7 +1220,7 @@
       h += `<div class="btnrow" style="margin-bottom:10px">
         <button class="btn mini" id="dirFull" ${busy ? "disabled" : ""} title="Vuelve a dirigir toda la edición con la IA de lenguaje (~1 min). Lo bloqueado se respeta.">${busy ? '<span class="spinner"></span>' : ICO("spark")}Re-dirigir todo</button>
         <button class="btn ghost mini" id="dirVar" ${busy ? "disabled" : ""} title="Otra variación con el mismo estilo (rápido, sin IA de lenguaje)">${ICO("dice")}Otra variación</button></div>`;
-      h += `<div class="dirstats" id="dirStats"></div>`;
+      h += `<div id="dirMusic" class="dirmusic"></div><div class="dirstats" id="dirStats"></div>`;
       const d = PLAN.director || {}, all = (d.notes || []).concat(d.warnings || []).map(String);
       const notes = all.filter(n => !TECH.test(n)), tech = all.filter(n => TECH.test(n));
       const kit = d.kit ? Object.entries(d.kit).filter(([k, v]) => typeof v === "string" && k !== "accent").map(([, v]) => v) : [];
@@ -900,6 +1248,7 @@
     const v = $("#dirVar"); if (v) v.onclick = () => { const s0 = PLAN.director && PLAN.director.seed != null ? +PLAN.director.seed : 7; FX.redirect(false, s0 + 1 + Math.floor(Math.random() * 97)); };
     const ff = $("#dirFirst"); if (ff) ff.onclick = () => FX.directFirst();
     FX.renderDirectorStats();
+    FX.renderMusicSide();
     FX.renderMusicPanel();
   };
   FX.renderDirectorStats = function () {
@@ -913,7 +1262,7 @@
   /* Una sola semantica con el esquema: bpm 0 = automatico; los tiempos se muestran en tiempo
      ORIGINAL (el del timeline). La musica generada se marca desactualizada solo si cambia algo que
      cambia el ARCHIVO (fxcore.musicSig: animo, prompt, semilla, cortes...), no el volumen. */
-  FX.music = { file: null, bpm: 0, drop: null, beats: [], sig: null, busy: false, audio: null, node: null, gain: null, warnings: [], bySig: {} };
+  FX.music = { file: null, bpm: 0, drop: null, beats: [], downbeats: [], sig: null, busy: false, audio: null, node: null, gain: null, warnings: [], bySig: {} };
   const curMusicSig = () => C.musicSig((PLAN.fx && PLAN.fx.music) || {}, tlObj().keeps);
   FX.musicStale = () => !isPro() || !FX.music.file ? false : FX.music.sig !== curMusicSig();
   /** Tras deshacer/rehacer: si esa musica ya se genero, se vuelve a ella. */
@@ -938,6 +1287,9 @@
         + `<input type="number" class="fnum" id="musBpm" min="60" max="180" step="1" value="${bpmAuto ? (FX.music.bpm ? Math.round(FX.music.bpm) : 110) : m.bpm}" ${bpmAuto ? "disabled" : ""}></div></div></div>`;
       if (src === "ai") h += `<div class="optrow"><div style="flex:1;min-width:0"><label>Descripción para la IA <span class="info" data-tip="Describe el género y la energía. Siempre es instrumental (sin voces).">i</span></label><input type="text" class="ftext" id="musPrompt" value="${esc(m.prompt || "")}" placeholder="pop moderno, brillante, positivo"></div></div>`;
       if (src === "library") h += `<div id="musLib" class="mlist" style="max-height:160px;margin-bottom:8px"></div>`;
+      const inF = +(m.intro_fade || 0), outF = m.fade_out != null ? +m.fade_out : 1.5;
+      h += `<div class="optrow"><div style="flex:1;min-width:110px"><label>Entrada suave <span id="musInV">${inF > 0 ? inF.toFixed(2) + " s" : "con su golpe"}</span> <span class="info" data-tip="0 = la música entra con su arranque (golpe incluido). Más = sube en ese tiempo.">i</span></label><input type="range" class="rng w100" id="musIn" min="0" max="3" step="0.05" value="${inF}"></div>`
+        + `<div style="flex:1;min-width:110px"><label>Cola final <span id="musOutV">${outF.toFixed(2)} s</span> <span class="info" data-tip="Dónde cae el golpe o el desvanecido final antes del último cuadro.">i</span></label><input type="range" class="rng w100" id="musOut" min="0.6" max="3" step="0.05" value="${outF}"></div></div>`;
       h += `<div class="optrow"><div style="flex:1;min-width:0"><label>Volumen bajo la voz <span id="musGainV">${(+(m.gain_db != null ? m.gain_db : -17)).toFixed(1)} dB</span></label><input type="range" class="rng w100" id="musGain" min="-40" max="0" step="0.5" value="${m.gain_db != null ? m.gain_db : -17}"></div></div>`;
       const busy = FX.music.busy;
       h += `<div class="btnrow">`
@@ -960,6 +1312,8 @@
     if (bn) bn.onchange = () => { edit(() => { m.bpm = clamp(Math.round(+bn.value || 110), 60, 180); m.bpm_lock = true; }, { inspector: false }); FX.renderMusicPanel(); };
     const pr = $("#musPrompt"); if (pr) gesture(pr, () => { m.prompt = pr.value; }, d => d && FX.renderMusicPanelSoon());
     const g = $("#musGain"); if (g) gesture(g, () => { m.gain_db = +g.value; $("#musGainV").textContent = (+g.value).toFixed(1) + " dB"; FX.applyMusicGain(); });
+    const mi = $("#musIn"); if (mi) gesture(mi, () => { m.intro_fade = r3(+mi.value); $("#musInV").textContent = +mi.value > 0 ? (+mi.value).toFixed(2) + " s" : "con su golpe"; }, d => d && FX.renderMusicPanelSoon());
+    const mo = $("#musOut"); if (mo) gesture(mo, () => { m.fade_out = r3(+mo.value); $("#musOutV").textContent = (+mo.value).toFixed(2) + " s"; }, d => d && FX.renderMusicPanelSoon());
     const up = $("#musUpd"); if (up) up.onclick = () => FX.genMusic(false);
     const gen = $("#musGen"); if (gen) gen.onclick = () => FX.genMusic(!!FX.music.file);
     const pl = $("#musPlay"); if (pl) pl.onclick = () => FX.toggleMusicSolo();
@@ -993,7 +1347,7 @@
     try {
       const d = await jpost(`/music/${JOB}`, { plan: planForServer(), seed: m.seed != null ? m.seed : undefined, fmt: FMT || "9:16" });
       if (!d.file) throw new Error(d.detail || "sin archivo");
-      const res = { file: d.file, bpm: +d.bpm || 0, drop: d.drop != null ? +d.drop : null, beats: d.beats || [], sig };
+      const res = { file: d.file, bpm: +d.bpm || 0, drop: d.drop != null ? +d.drop : null, beats: d.beats || [], downbeats: d.downbeats || [], sig };
       Object.assign(FX.music, res, { warnings: d.warnings || [] });
       FX.music.bySig[sig] = res;
       FX.loadMusicAudio();
@@ -1098,6 +1452,11 @@
     const tags = document.createElement("div"); tags.className = "ins-tags"; tags.id = "insTags";
     tags.innerHTML = tagsHtml(it);
     b.appendChild(tags);
+    tags.addEventListener("click", e => {
+      if (!e.target.closest("[data-grp]")) return;
+      const all = [{ track, id: it.id }].concat(FX.groupOf([it.id]).map(g => ({ track: g.track, id: g.id })));
+      SELX = all; SEL = { type: "fx", track, id: it.id }; markSelection(); FX.inspect(SEL, true);
+    });
     const act = document.createElement("div"); act.className = "ins-actions";
     act.innerHTML = `<button class="btn ghost mini" data-a="en" title="Activar o desactivar (H)">${ICO(it.enabled === false ? "eyeoff" : "eye")}${it.enabled === false ? "Oculto" : "Visible"}</button>`
       + `<button class="btn ghost mini ${it.locked ? "on" : ""}" data-a="lock" title="La IA no lo cambia al re-dirigir (L)">${ICO("lock")}${it.locked ? "Bloqueado" : "Bloquear"}</button>`
@@ -1270,8 +1629,19 @@
     const tg = $("#insTags"); if (tg) tg.innerHTML = tagsHtml(it);
     const lk = $('#inspBody [data-a="lock"]'); if (lk) { lk.classList.toggle("on", !!it.locked); lk.innerHTML = `${ICO("lock")}${it.locked ? "Bloqueado" : "Bloquear"}`; }
   }
+  /** Piezas de la misma composicion (tx_bghero_s<N>, tx_bghero_s<N>b, fx_bgswap_s<N>) que no
+      estan en `ids`: el director las trata como una sola (se bloquean y regeneran juntas). */
+  const anchorOf = id => { const m = /^(?:tx_bghero|fx_bgswap)_s(\d+)/.exec(String(id || "")); return m ? m[1] : null; };
+  FX.groupOf = function (ids) {
+    const want = new Set(ids), ancs = new Set(ids.map(anchorOf).filter(a => a != null)), out = [];
+    if (!ancs.size) return out;
+    C.TRACKS.forEach(tk => items(tk).forEach(it => { if (!want.has(it.id) && ancs.has(anchorOf(it.id))) out.push({ track: tk, id: it.id, item: it }); }));
+    return out;
+  };
   function tagsHtml(it) {
-    return (it.src === "user" ? `<span class="tagp user">${ICO("user")}Creado por ti</span>` : `<span class="tagp ai">${ICO("spark")}IA</span>`)
+    const grp = anchorOf(it.id) != null ? FX.groupOf([it.id]) : [];
+    return (grp.length ? `<span class="tagp comp" title="Palabra gigante, frase y fondo se editan por separado pero se bloquean y regeneran juntos">${ICO("layers")}Composición (${grp.length + 1} piezas) <button class="linkbtn" type="button" data-grp="1">Seleccionar</button></span>` : "")
+      + (it.src === "user" ? `<span class="tagp user">${ICO("user")}Creado por ti</span>` : `<span class="tagp ai">${ICO("spark")}IA</span>`)
       + (it.locked ? `<span class="tagp lock">${ICO("lock")}Bloqueado</span>` : "") + (it.enabled === false ? `<span class="tagp off">${ICO("eyeoff")}Desactivado</span>` : "");
   }
   let laneTimer = null;
@@ -1604,12 +1974,15 @@
     const w = document.createElement("div");
     const names = SCHEMA ? C.kinds(SCHEMA, "sfx") : Object.keys(SFXCAT);
     const byCat = {}; names.forEach(k => { const c = (SFXCAT[k] && SFXCAT[k].category) || "otros"; (byCat[c] = byCat[c] || []).push(k); });
-    w.innerHTML = `<div class="sfxrow"><select class="fsel">${Object.keys(byCat).sort().map(c => `<optgroup label="${esc(c)}">${byCat[c].map(k => `<option value="${esc(k)}" ${k === it.name ? "selected" : ""}>${esc(lbl(k))}</option>`).join("")}</optgroup>`).join("")}</select>
-      <button class="btn ghost mini" title="Escuchar">${ICO("play")}Escuchar</button></div><div class="sfxdesc"></div>`;
+    // nombre fuera del catalogo (el export lo omite): se muestra tal cual y marcado, no el primero de la lista
+    const unknown = names.length > 0 && !names.includes(it.name);
+    w.innerHTML = `<div class="sfxrow"><select class="fsel${unknown ? " bad" : ""}">${unknown ? `<option value="${esc(it.name)}" selected>${esc(lbl(it.name || "sin nombre"))} (no existe)</option>` : ""}${Object.keys(byCat).sort().map(c => `<optgroup label="${esc(c)}">${byCat[c].map(k => `<option value="${esc(k)}" ${k === it.name ? "selected" : ""}>${esc(lbl(k))}</option>`).join("")}</optgroup>`).join("")}</select>
+      <button class="btn ghost mini" title="Escuchar">${ICO("play")}Escuchar</button></div><div class="sfxdesc"></div>`
+      + (unknown ? `<div class="insnote bad" id="sfxUnknown">${ICO("alert")}<span>Este sonido no existe en el catálogo: no sonará y el export lo omite. Elige otro.</span></div>` : "");
     const sel = w.querySelector("select"), desc = w.querySelector(".sfxdesc");
     const setDesc = () => { const c = SFXCAT[sel.value]; desc.textContent = c ? `${c.desc || ""}${c.dur ? ` · ${(+c.dur).toFixed(2)} s` : ""}` : ""; };
     setDesc();
-    sel.onchange = () => { edit(() => { it.name = sel.value; autoLock(it); }, { inspector: false }); setDesc(); FX.playSfx(sel.value, it.gain_db); };
+    sel.onchange = () => { const was = unknown; edit(() => { it.name = sel.value; autoLock(it); }, was ? { rebuild: true } : { inspector: false }); if (!was) setDesc(); FX.playSfx(sel.value, it.gain_db); };
     w.querySelector("button").onclick = () => FX.playSfx(sel.value, it.gain_db, it.pan);
     return w;
   }
@@ -1686,6 +2059,7 @@
     }
     (m.stops || []).forEach(st => { if (t >= st.at && t < st.at + (+st.dur || 0)) target = 0; });
     (m.swells || []).forEach(sw => { if (t >= sw.start && t < sw.end) target *= Math.pow(10, (+sw.db || 0) / 20); });
+    const inF = +(m.intro_fade || 0); if (inF > 0) target *= clamp(FX.finalTime(t) / inF, 0, 1);    // entrada suave
     M.gain.gain.value += (target - M.gain.gain.value) * 0.18;
   }
   FX.onCutsChanged = () => { if (isPro() && $("#musBody")) FX.renderMusicPanelSoon(); };
@@ -1764,13 +2138,26 @@
   function lum(hex) { const h = String(hex || "#fff").replace("#", ""); const v = h.length === 3 ? h.split("").map(x => x + x).join("") : h.slice(0, 6); const n = parseInt(v, 16) || 0; return (0.299 * (n >> 16 & 255) + 0.587 * (n >> 8 & 255) + 0.114 * (n & 255)) / 255; }
   function rrect(c, x, y, w, h, r) { r = Math.min(r, w / 2, h / 2); c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
 
-  /** Texto cinetico aproximado (misma geometria que el esquema: y = centro del bloque). */
+  /** Fuente de una palabra de titulo como el render: italica real si existe (text._italic) o
+      oblicua sintetica; en serif_elegant las palabras de acento van en la italica. */
+  const hasFont = n => FONTS.some(f => f.name === n);
+  function titleWordFont(font, italic) {
+    if (!italic) return { f: font, synth: false };
+    const io = C.italicOf(font);
+    return !io.synth && hasFont(io.font) ? { f: io.font, synth: false } : { f: font, synth: true };
+  }
+  /** Texto cinetico aproximado con la geometria del render donde importa (text._build_block): espacio
+      entre palabras y separacion entre lineas del preset, ancho util (x, alineacion, `width`,
+      deriva), envoltura balanceada de una linea que no cabe y reduccion de la que aun no cabe,
+      acentos de serif_elegant en italica. y = centro del bloque. */
   function drawTextItem(c, it, lt, L, box) {
     const B = box || LB, W = B.w, s = B.s;
     const st = animState(it, lt, L, "pop");
     if (st.a <= 0.01) return null;
+    const PR = C.TEXT_PRESETS[it.preset] || C.TEXT_PRESETS.title_pop;
+    const spK = +PR.space || 1, gapK = PR.gap != null ? +PR.gap : 0.12;
     const base = (+it.size || 0.08) * W;
-    let lines;
+    let lines, plain = false;
     if (it.preset === "counter") {
       const p = clamp(lt / Math.max(0.3, L * 0.7), 0, 1), e = C.ease("out_cubic", p);
       const v = (+it.from || 0) + ((+it.to || 0) - (+it.from || 0)) * e;
@@ -1778,8 +2165,8 @@
       const num = v.toLocaleString("es-MX", { minimumFractionDigits: dec, maximumFractionDigits: dec });
       lines = [{ text: `${it.prefix || ""}${num}${it.suffix || ""}`, scale: 1, font: it.font }];
       if (it.text) lines.push({ text: String(it.text), scale: 0.28, font: it.font });
-    } else if (Array.isArray(it.lines) && it.lines.length) lines = it.lines.map(l => ({ text: String((l && l.text) || ""), scale: +(l && l.scale) || 1, font: (l && l.font) || it.font, color: l && l.color, italic: l && l.italic }));
-    else lines = String(it.text || "").split("\n").map(x => ({ text: x, scale: 1, font: it.font }));
+    } else if (Array.isArray(it.lines) && it.lines.length) lines = it.lines.map(l => (typeof l === "string" ? { text: l, scale: 1, font: it.font } : { text: String((l && l.text) || ""), scale: +(l && l.scale) || 1, font: (l && l.font) || it.font, color: l && l.color, italic: l && l.italic }));
+    else { lines = String(it.text || "").split("\n").map(x => ({ text: x, scale: 1, font: it.font })); plain = true; }
     let kick = null;
     if (it.preset === "kicker") {
       const ks = C.kickerSplit(it, lines);
@@ -1789,25 +2176,54 @@
         lines = [kick].concat(ks.rest);
       }
     }
-    if (it.case === "upper") lines.forEach(l => { if (!l.pill) l.text = l.text.toUpperCase(); });
+    const cs = it.case || PR.case;
+    if (cs === "upper") lines.forEach(l => { if (!l.pill) l.text = l.text.toUpperCase(); });
+    lines = lines.filter(l => String(l.text || "").trim());
+    if (!lines.length) return null;
     const acc = new Set((it.accent_words || []).map(normW));
+    const serif = it.preset === "serif_elegant";
     const color = it.color || "#FFFFFF", accent = it.accent || "#FFD23F";
-    const align = it.preset === "cascade" ? "left" : (it.align || "center");
-    // medidas
+    const accCol = serif && !it.accent ? color : accent;       // serif_elegant: el acento es la italica
+    const align = it.preset === "cascade" ? "left" : (it.align || PR.align || "center");
     c.save();
     c.textBaseline = "alphabetic";
-    let totalH = 0, maxW = 0;
-    const meas = lines.map((l, i) => {
-      const px = base * l.scale; c.font = fontCss(l.font, px, l.italic);
-      const words = l.text.split(/\s+/).filter(Boolean);
-      const sp = c.measureText(" ").width;
-      const ws = words.map(w => c.measureText(w).width);
-      const w = ws.reduce((a, b) => a + b, 0) + sp * Math.max(0, words.length - 1);
-      const h = px * 1.05;
-      totalH += h + (i ? base * 0.12 : 0); maxW = Math.max(maxW, l.pill ? w + px * 1.6 : w);
-      return { l, px, words, ws, sp, w, h };
-    });
+    // medidas a 1 px (se escalan): avance y tinta de cada palabra con su fuente
+    const measureLine = (l, words) => {
+      const ms = words.map(w => {
+        const isAcc = !l.pill && acc.has(normW(w));
+        const wf = titleWordFont(l.font, !!l.italic || (serif && isAcc));
+        c.font = fontCss(wf.f, 100, wf.synth); const r = c.measureText(w);
+        return { f: wf.f, synth: wf.synth, isAcc, adv: r.width / 100, asc: (r.actualBoundingBoxAscent != null ? r.actualBoundingBoxAscent : 72) / 100, desc: (r.actualBoundingBoxDescent || 0) / 100 };
+      });
+      c.font = fontCss(l.font, 100); const sp = c.measureText(" ").width / 100 * (l.pill ? 1 : spK);
+      return { ms, sp };
+    };
     const [ix, iy] = itemXY(it);
+    const maxw = C.textUsable(it.x != null ? +it.x : align === "left" ? C.SAFE.left + 0.02 : align === "right" ? C.SAFE.right - 0.02 : ix, align, it.width, PR.drift) * W;
+    let meas = lines.map(l => { const words = l.text.split(/\s+/).filter(Boolean); return Object.assign({ l, words }, measureLine(l, words)); });
+    const widthAt = (m, px) => (m.ms.reduce((q, x) => q + x.adv, 0) + m.sp * Math.max(0, m.ms.length - 1)) * px;
+    // una sola linea logica que no cabe: se envuelve balanceada (text._fit con size explicito)
+    const autoWrap = !["stack", "cascade", "kicker", "counter"].includes(it.preset);
+    if (plain && !kick && (autoWrap || meas.length === 1) && meas.length === 1 && meas[0].words.length > 1 && widthAt(meas[0], base) > maxw) {
+      const m0 = meas[0];
+      for (let k = 2; k <= m0.words.length; k++) {
+        const stt = C.balancedSplit(m0.ms.map(x => x.adv), m0.sp, k, m0.words);
+        const parts = stt.map((a, i) => m0.words.slice(a, i + 1 < stt.length ? stt[i + 1] : m0.words.length));
+        if (parts.some(ws => ws.every(w => C.FUNC_END.has(normW(w))))) break;
+        meas = parts.map(ws => Object.assign({ l: Object.assign({}, m0.l, { text: ws.join(" ") }), words: ws }, measureLine(m0.l, ws)));
+        if (Math.max(...meas.map(m => widthAt(m, base))) <= maxw) break;
+      }
+    }
+    let totalH = 0, maxW = 0;
+    meas.forEach((m, i) => {
+      let px = base * m.l.scale;
+      const w0 = widthAt(m, px);
+      if (w0 > maxw && !m.l.pill) px *= maxw / w0 * 0.995;       // lo que aun no cabe se reduce
+      m.px = px; m.ws = m.ms.map(x => x.adv * px); m.spx = m.sp * px; m.w = widthAt(m, px);
+      m.asc = Math.max(...m.ms.map(x => x.asc)) * px; m.desc = Math.max(...m.ms.map(x => x.desc)) * px;
+      m.h = m.asc + m.desc;
+      totalH += m.h + (i ? base * gapK : 0); maxW = Math.max(maxW, m.l.pill ? m.w + px * 1.6 : m.w);
+    });
     const cx = B.x + (ix + st.dx) * W, cy = B.y + (iy + st.dy) * B.h;
     c.globalAlpha *= st.a;
     c.translate(cx, cy); c.scale(st.sc, st.sc); if (it.rotation) c.rotate(+it.rotation * Math.PI / 180);
@@ -1815,7 +2231,8 @@
     // aparicion por palabra como el render: alineada a la voz (`_words`) o escalonada
     const allW = []; meas.forEach((m, li) => m.words.forEach(w => allW.push({ w, li })));
     let wtimes = null;
-    if (it.preset !== "counter" && allW.length) {
+    if (it.word_sync === false && allW.length) wtimes = allW.map(() => 0);     // entra entero al inicio
+    else if (it.preset !== "counter" && allW.length) {
       let spoken = null;
       if (it.start != null && !box && typeof flatWords !== "undefined") {
         spoken = flatWords.filter(w => w.start >= +it.start - 0.05 && w.start < +it.end).map(w => ({ norm: C.normWord(w.text), start: w.start - it.start }));
@@ -1823,7 +2240,7 @@
       const step = ["pop", "scale_down", "fade", "mask"].includes(it.anim_in) && !(spoken && spoken.length) && ["title_pop", "behind_giant"].includes(it.preset) ? 0.08 : 0.12;
       wtimes = C.unitTimes(allW.map(x => C.normWord(x.w)), spoken, L, step, allW.map(x => x.li));
     }
-    const stroke = (+it.stroke || 0) * s, sh = it.shadow != null ? +it.shadow : 0.6;
+    const stroke = (+it.stroke || 0) * s * 2, sh = it.shadow != null ? +it.shadow : 0.6;
     const bb = { x: cx - maxW / 2, y: cy - totalH / 2, w: maxW, h: totalH };
     if (it.box && it.preset !== "highlight_marker" && it.preset !== "kicker") {
       const bl = align === "left" ? 0 : align === "right" ? -maxW : -maxW / 2;
@@ -1831,32 +2248,34 @@
     }
     if (align === "left") bb.x = cx; else if (align === "right") bb.x = cx - maxW;
     meas.forEach((m, li) => {
-      if (li) y += base * 0.12;
+      if (li) y += base * gapK;
       const lx0 = align === "left" ? (it.preset === "cascade" ? li * W * 0.05 : 0) : align === "right" ? -m.w : -m.w / 2;
-      const by = y + m.h * 0.82;
-      c.font = fontCss(m.l.font, m.px, m.l.italic);
+      const by = y + m.asc;
       if (m.l.pill) {
-        const pc = it.box || accent; c.fillStyle = pc; rrect(c, lx0 - m.px * 0.8, y - m.px * 0.12, m.w + m.px * 1.6, m.h + m.px * 0.24, (m.h + m.px * 0.24) / 2); c.fill();
+        c.font = fontCss(m.l.font, m.px);
+        const pc = it.box || accent; c.fillStyle = pc; rrect(c, lx0 - m.px * 0.8, y - m.px * 0.3, m.w + m.px * 1.6, m.h + m.px * 0.6, (m.h + m.px * 0.6) / 2); c.fill();
       }
       let x = lx0;
       m.words.forEach((w, wi) => {
         const wt = wtimes ? wtimes[widx++] : 0;
-        if (lt < wt) { x += m.ws[wi] + m.sp; return; }
+        if (lt < wt) { x += m.ws[wi] + m.spx; return; }
+        const mw = m.ms[wi];
+        c.font = fontCss(mw.f, m.px, mw.synth);
         let txt = w;
         if (["type", "letter_stagger"].includes(it.anim_in)) { const nch = Math.floor((lt - wt) / 0.035) + 1; if (nch < w.length) txt = w.slice(0, nch); }
         c.save(); c.globalAlpha *= clamp((lt - wt) / 0.12, 0, 1);
-        const isAcc = acc.has(normW(w));
-        let fill = m.l.color || (isAcc ? accent : color);
+        const isAcc = mw.isAcc;
+        let fill = m.l.color || (isAcc ? accCol : color);
         if (m.l.pill) fill = lum(it.box || accent) > 0.6 ? "#111111" : "#FFFFFF";
         if (it.preset === "highlight_marker" && (isAcc || !acc.size)) {
           c.fillStyle = hexA(it.box || accent, 0.92); c.fillRect(x - m.px * 0.08, y + m.h * 0.12, m.ws[wi] + m.px * 0.16, m.h * 0.8);
           fill = lum(it.box || accent) > 0.6 ? "#111111" : "#FFFFFF";
         }
         if (sh > 0) { c.shadowColor = `rgba(0,0,0,${0.55 * sh})`; c.shadowBlur = 14 * s * sh; c.shadowOffsetY = 3 * s * sh; }
-        if (stroke > 0) { c.lineJoin = "round"; c.lineWidth = stroke; c.strokeStyle = lum(fill) > 0.5 ? "rgba(0,0,0,.85)" : "rgba(255,255,255,.9)"; c.strokeText(txt, x, by); }
+        if (stroke > 0) { c.lineJoin = "round"; c.lineWidth = stroke; c.strokeStyle = it.stroke_color || (lum(fill) > 0.5 ? "rgba(0,0,0,.85)" : "rgba(255,255,255,.9)"); c.strokeText(txt, x, by); }
         c.fillStyle = fill; c.fillText(txt, x, by);
         c.restore();
-        x += m.ws[wi] + m.sp;
+        x += m.ws[wi] + m.spx;
       });
       y += m.h;
     });
@@ -1901,15 +2320,34 @@
     const bold = "Poppins-ExtraBold";
     c.shadowColor = "rgba(0,0,0,.35)"; c.shadowBlur = 14 * B.s; c.shadowOffsetY = 4 * B.s;
     c.textBaseline = "middle"; c.textAlign = "left";
+    const wfix = it.width ? clamp(+it.width, 0, SAFE_W) * W : 0;        // ancho comun de la pila del cierre
+    const fitTo = (fname, txt, px, room, minPx) => { let f = px; c.font = fontCss(fname, f); const w0 = c.measureText(txt).width; if (w0 > room) { f = Math.max(minPx || px * 0.4, px * room / w0); c.font = fontCss(fname, f); } return f; };
     if (v === "link_below") {
-      const h = S * 0.2, ib = h * 0.42, label = String(it.label || ent.link_label || "Agenda aquí");
-      let fs = h * 0.38; c.font = fontCss(bold, fs); let tw = c.measureText(label).width;
-      if (tw > S * 0.9) { fs *= S * 0.9 / tw; c.font = fontCss(bold, fs); tw = c.measureText(label).width; }
-      const bw = tw + ib + h * 0.2 + h;
-      c.fillStyle = acc; rrect(c, -bw / 2, -h / 2, bw, h, h / 2); c.fill(); c.shadowBlur = 0;
-      const on = lum(acc) > 0.55 ? "#141418" : "#FFFFFF", x1 = -(tw + ib + h * 0.2) / 2;
-      const im = iconImage(it.icon || "calendar-event", on); if (im) c.drawImage(im, x1, -ib / 2, ib, ib);
-      c.fillStyle = on; c.fillText(label, x1 + ib + h * 0.2, fs * 0.06);
+      // graphics._link_below_layout: con `display` (enlace corto) la pastilla lleva dos lineas
+      const label = String(it.label || ent.link_label || "Agenda aquí"), disp = String(it.display || "").trim();
+      const on = lum(acc) > 0.55 ? "#141418" : "#FFFFFF";
+      const icon = it.icon || (it.platform && PLATS[it.platform] && PLATS[it.platform].icon) || "calendar-event";
+      let h, ib, bw, fb, fd = 0, tw;
+      if (disp) {
+        h = S * 0.25; ib = h * 0.36;
+        const room = Math.max(S * 0.8, SAFE_W * W - (ib + h * 0.2 + h * 0.8));
+        fd = fitTo("Poppins-Medium", disp, h * 0.21, room, h * 0.13); const wd = c.measureText(disp).width;
+        fb = fitTo(bold, label, h * 0.3, room, h * 0.2); const wl = c.measureText(label).width;
+        tw = Math.max(wl, wd); bw = Math.min(SAFE_W * W, Math.max(tw + ib + h * 0.2 + h * 0.8, wfix));
+      } else {
+        h = S * 0.2; ib = h * 0.42;
+        fb = fitTo(bold, label, h * 0.38, S * 0.9, h * 0.26); tw = c.measureText(label).width;
+        bw = Math.min(SAFE_W * W, Math.max(tw + ib + h * 0.2 + h, wfix));
+      }
+      c.fillStyle = acc; rrect(c, -bw / 2, -h / 2, bw, h, h / 2); c.fill(); c.shadowBlur = 0; c.shadowOffsetY = 0;
+      const x1 = -(tw + ib + h * 0.2) / 2, tx = x1 + ib + h * 0.2;
+      const im = iconImage(icon, on); if (im) c.drawImage(im, x1, -ib / 2, ib, ib);
+      c.fillStyle = on; c.textBaseline = "alphabetic";
+      if (disp) {
+        c.font = fontCss(bold, fb); c.fillText(label, tx, -h * 0.03);
+        c.globalAlpha *= 0.78 * clamp((lt - 0.2) / 0.35, 0, 1); c.font = fontCss("Poppins-Medium", fd); c.fillText(disp, tx, h * 0.27);
+        c.globalAlpha /= Math.max(1e-3, 0.78 * clamp((lt - 0.2) / 0.35, 0, 1));
+      } else { c.font = fontCss(bold, fb); c.textBaseline = "middle"; c.fillText(label, tx, fb * 0.06); }
       const asc = clamp(it.arrow_scale != null ? +it.arrow_scale : 1, 0, 1);
       if (asc >= 0.35 && lt > 0.25) {
         c.save(); c.translate(0, h / 2 + h * 0.3 + h * 0.85 * asc); c.strokeStyle = it.arrow_color || "#FFFFFF";
@@ -1918,21 +2356,51 @@
       return { x: cx - bw / 2, y: cy - h / 2, w: bw, h: h * (asc >= 0.35 ? 2.9 : 1) };
     }
     if (v === "follow") {
+      // graphics._follow_layout: la pastilla crece para el nombre y el @usuario (hasta SAFE o
+      // `width`); el @usuario nunca se corta; avatar con iniciales o foto e insignia de la red
       const h = S * 0.17, d = h * 0.74;
-      const name = String(it.handle || ent.handle || ent.name || it.label || "Sígueme para más");
-      c.fillStyle = "#FFFFFF"; rrect(c, -S / 2, -h / 2, S, h, h / 2); c.fill(); c.shadowBlur = 0;
-      const ax = -S / 2 + h * 0.13 + d / 2;
-      c.fillStyle = acc; c.beginPath(); c.arc(ax, 0, d / 2, 0, Math.PI * 2); c.fill();
-      c.fillStyle = lum(acc) > 0.55 ? "#141418" : "#FFFFFF"; c.font = fontCss(bold, d * 0.46); c.textAlign = "center";
-      c.fillText(name.replace(/^@/, "").charAt(0).toUpperCase(), ax, d * 0.03); c.textAlign = "left";
-      const btn = String(it.button || "Seguir"); c.font = fontCss(bold, h * 0.24); const bw = c.measureText(btn).width + h * 0.6;
+      const title = String(it.title || "").trim(), handle = String(it.handle || "").trim();
+      const sub = title ? (handle || String(it.subtitle || "").trim()) : String(it.subtitle || "");
+      const name0 = title || String(it.handle || ent.handle || ent.name || it.label || "Sígueme para más");
+      const btn = String(it.button || "Seguir");
+      const [kb, pb] = title ? [0.24, 0.46] : [0.27, 0.7];
+      c.font = fontCss(bold, h * kb); const bwb = c.measureText(btn).width + h * pb;
+      const lead = h * 0.13 + d + h * 0.22, trail = h * 0.35;
+      c.font = fontCss(bold, h * 0.31); let need = c.measureText(name0).width;
+      if (sub) { c.font = fontCss("Poppins-SemiBold", h * 0.22); need = Math.max(need, c.measureText(sub).width); }
+      const Wd = Math.min(SAFE_W * W, title ? Math.max(S, wfix, lead + need + trail + bwb) : Math.max(S, wfix));
+      const maxw = Wd - lead - trail - bwb;
+      // nombre largo: variantes mas cortas (sin el segundo apellido) antes de achicar
+      const parts = name0.split(/\s+/);
+      const variants = [name0]; for (let k = parts.length - 1; k >= 2; k--) variants.push(parts.slice(0, k).join(" "));
+      let name = variants[variants.length - 1], fn = h * 0.19;
+      for (const nm of variants) { c.font = fontCss(bold, h * 0.31); const w0 = c.measureText(nm).width; const f = w0 > maxw ? h * 0.31 * maxw / w0 : h * 0.31; if (f >= h * 0.215) { name = nm; fn = f; break; } }
+      const fs = sub ? fitTo("Poppins-SemiBold", sub, h * 0.22, maxw, h * 0.104) : 0;
+      c.fillStyle = "#FFFFFF"; rrect(c, -Wd / 2, -h / 2, Wd, h, h / 2); c.fill(); c.shadowBlur = 0; c.shadowOffsetY = 0;
+      const ax = -Wd / 2 + h * 0.13 + d / 2;
+      const avIm = it.media && it.media.sid && (it.avatar === "image" || !it.avatar) ? mediaFrame(it, it.media, 0, false) : null;
+      c.save(); c.beginPath(); c.arc(ax, 0, d / 2, 0, Math.PI * 2); c.fillStyle = acc; c.fill();
+      if (avIm) { c.clip(); drawFit(c, avIm, ax - d / 2, -d / 2, d, d, "cover", null, 1); }
+      else {
+        const ini = String(it.initials || name0.replace(/^@/, "").charAt(0)).toUpperCase().slice(0, 2);
+        c.fillStyle = lum(acc) > 0.55 ? "#141418" : "#FFFFFF"; c.font = fontCss(bold, d * (ini.length > 1 ? 0.4 : 0.46)); c.textAlign = "center"; c.textBaseline = "middle";
+        c.fillText(ini, ax, d * 0.03); c.textAlign = "left";
+      }
+      c.restore();
+      const pl = title && it.platform && handle ? PLATS[it.platform] : null;
+      if (pl) {   // insignia de la red en la esquina del avatar (0.44 del diametro)
+        const bd = d * 0.44, bx = ax + d * 0.36, by = d * 0.36;
+        c.fillStyle = "#FFFFFF"; c.beginPath(); c.arc(bx, by, bd / 2 + 1.5 * B.s, 0, Math.PI * 2); c.fill();
+        c.fillStyle = pl.color || "#1E2330"; c.beginPath(); c.arc(bx, by, bd / 2, 0, Math.PI * 2); c.fill();
+        const im = iconImage(pl.icon, lum(pl.color || "#000") > 0.6 ? "#141418" : "#FFFFFF"); if (im) c.drawImage(im, bx - bd * 0.32, by - bd * 0.32, bd * 0.64, bd * 0.64);
+      }
       const bcol = it.button_color || (it.color && lum(it.color) <= 0.85 ? it.color : "#FF3B5C");
-      c.fillStyle = bcol; rrect(c, S / 2 - h * 0.13 - bw, -h * 0.3, bw, h * 0.6, h * 0.3); c.fill();
-      c.fillStyle = lum(bcol) > 0.6 ? "#141418" : "#FFFFFF"; c.fillText(btn, S / 2 - h * 0.13 - bw + h * 0.3, h * 0.01);
-      c.fillStyle = "#141418"; c.font = fontCss(bold, h * 0.27);
-      c.fillText(name.slice(0, 28), ax + d / 2 + h * 0.2, it.subtitle ? -h * 0.12 : 0);
-      if (it.subtitle) { c.fillStyle = "#6C6D7A"; c.font = fontCss("Poppins-Medium", h * 0.2); c.fillText(String(it.subtitle).slice(0, 36), ax + d / 2 + h * 0.2, h * 0.2); }
-      return { x: cx - S / 2, y: cy - h / 2, w: S, h };
+      c.fillStyle = bcol; rrect(c, Wd / 2 - h * 0.15 - bwb, -h * 0.3, bwb, h * 0.6, h * 0.3); c.fill();
+      c.fillStyle = lum(bcol) > 0.6 ? "#141418" : "#FFFFFF"; c.font = fontCss(bold, h * kb); c.textBaseline = "middle"; c.textAlign = "center";
+      c.fillText(btn, Wd / 2 - h * 0.15 - bwb / 2, h * 0.01); c.textAlign = "left";
+      c.fillStyle = "#141418"; c.font = fontCss(bold, fn); c.fillText(name, -Wd / 2 + lead, sub ? -h * 0.12 : 0);
+      if (sub) { c.fillStyle = "#6C6D7A"; c.font = fontCss("Poppins-SemiBold", fs); c.fillText(sub, -Wd / 2 + lead, h * 0.2); }
+      return { x: cx - Wd / 2, y: cy - h / 2, w: Wd, h };
     }
     const h = S * 0.17, ib = h * 0.72;
     const label = String(it.label || { comment: "Comenta abajo", save: "Guárdalo para después", share: "Compártelo con alguien" }[v] || "");
@@ -1970,6 +2438,9 @@
       c.lineWidth = (+it.stroke || 12) * s; c.lineCap = "round"; c.lineJoin = "round"; c.strokeStyle = col;
       const draw = it.draw !== false && (it.anim_in === "draw" || !it.anim_in);
       if (draw && lt < 0.45) { c.setLineDash([size * 4 * clamp(lt / 0.45, 0, 1), size * 4]); }
+      // contorno oscuro bajo un trazo claro (graphics.doodle border_color): se lee sobre fondos claros
+      const bc = it.border_color || (it.border ? "#141418" : null);
+      if (bc) { c.save(); c.strokeStyle = bc; c.lineWidth = (+it.stroke || 12) * s * 1.7; doodlePath(c, it.name, size / 2); c.stroke(); c.restore(); }
       doodlePath(c, it.name, size / 2); c.stroke();
       if (["sparkle", "star4", "star5", "heart"].includes(it.name) && !(draw && lt < 0.45)) { c.fillStyle = col; c.fill(); }
     } else if (k === "icon") {
@@ -2004,17 +2475,31 @@
       (it.items || []).slice(0, 4).forEach((x, i) => { c.font = fontCss("Poppins-Medium", w * 0.045); c.fillText("- " + x, -w / 2 + pad, ty + w * (0.18 + i * 0.065)); });
       bb = { x: cx - w / 2, y: cy - h / 2, w, h };
     } else if (k === "lower_third") {
-      const fs = (+it.size || 0.05) * W;
-      c.font = fontCss("Poppins-Bold", fs); const w1 = c.measureText(it.title || "").width;
-      c.font = fontCss("Poppins-Medium", fs * 0.62); const w2 = c.measureText(it.subtitle || "").width;
-      const w = Math.max(w1, w2) + fs * 1.2, h = fs * 2.2;
-      // x es el borde izquierdo del rotulo
-      c.fillStyle = "rgba(12,12,16,.82)"; rrect(c, 0, -h / 2, w, h, fs * 0.2); c.fill();
-      c.fillStyle = col === "#FFFFFF" ? "#FFD23F" : col; c.fillRect(0, -h / 2, fs * 0.18, h);
-      c.shadowBlur = 0; c.fillStyle = "#fff"; c.textBaseline = "alphabetic";
-      c.font = fontCss("Poppins-Bold", fs); c.fillText(it.title || "", fs * 0.5, -h / 2 + fs * 1.05);
-      c.globalAlpha *= 0.8; c.font = fontCss("Poppins-Medium", fs * 0.62); c.fillText(it.subtitle || "", fs * 0.5, -h / 2 + fs * 1.85);
-      bb = { x: cx, y: cy - h / 2, w, h };
+      // graphics.draw_lower_third: barra de acento + panel; nombre en negritas y el rol en
+      // VERSALITAS con tracking y color de acento (x = borde izquierdo, y = centro)
+      const fs = clamp(+it.size || 0.056, 0.02, 0.2) * W, light = it.theme === "light";
+      let acc2 = it.color || it.accent || "#FFD23F"; if (light && lum(acc2) > 0.8) acc2 = "#FF3B5C";
+      const padx = 28 * s, pady = 20 * s, barw = 10 * s;
+      const title = String(it.title || (PLAN.entities || {}).name || ""), sub = String(it.subtitle || (PLAN.entities || {}).role || "").toUpperCase();
+      c.font = fontCss("Poppins-Bold", fs); const wt = c.measureText(title).width;
+      const fsub = fs * 0.5, trk = fsub * 0.14;
+      c.font = fontCss("Poppins-SemiBold", fsub); const ws = sub ? c.measureText(sub).width + trk * Math.max(0, sub.length - 1) : 0;
+      const tht = fs * 1.05, ths = sub ? fsub * 1.25 : 0, gap = sub ? 8 * s : 0;
+      const ph = pady * 2 + tht + gap + ths, pw = Math.max(wt, ws) + padx * 2;
+      const pan = C.ease("out_cubic", clamp((lt - 0.12) / 0.5, 0, 1));
+      c.shadowBlur = 0; c.shadowOffsetY = 0;
+      c.fillStyle = light ? "rgba(255,255,255,.96)" : "rgba(15,15,20,.78)"; c.fillRect(barw, -ph / 2, pw * pan, ph);
+      c.fillStyle = acc2; c.fillRect(0, -ph / 2, barw, ph * C.ease("out_cubic", clamp(lt / 0.32, 0, 1)));
+      c.save(); c.beginPath(); c.rect(barw, -ph / 2, pw * pan, ph); c.clip();
+      c.textBaseline = "alphabetic"; c.fillStyle = light ? "#15151B" : "#FFFFFF";
+      c.font = fontCss("Poppins-Bold", fs); c.fillText(title, barw + padx, -ph / 2 + pady + fs * 0.9);
+      if (sub) {
+        c.fillStyle = acc2; c.font = fontCss("Poppins-SemiBold", fsub);
+        if ("letterSpacing" in c) { c.letterSpacing = `${trk.toFixed(1)}px`; c.fillText(sub, barw + padx, -ph / 2 + pady + tht + gap + fsub * 0.95); c.letterSpacing = "0px"; }
+        else c.fillText(sub, barw + padx, -ph / 2 + pady + tht + gap + fsub * 0.95);
+      }
+      c.restore();
+      bb = { x: cx, y: cy - ph / 2, w: barw + pw, h: ph };
     } else if (k === "cta") {
       bb = drawCta(c, it, cx, cy, B, lt);
     } else if (k === "sticker_text") {
@@ -2026,33 +2511,241 @@
       c.fillStyle = k === "cta" ? (lum(bg) > 0.6 ? "#111" : "#fff") : (it.fg || "#111111");
       c.textAlign = "center"; c.textBaseline = "middle"; c.fillText(txt, 0, fs * 0.06);
       bb = { x: cx - w / 2, y: cy - h / 2, w, h };
-    } else if (C.mediaParam(SCHEMA, "graphics", k) && C.getPath(it, C.mediaParam(SCHEMA, "graphics", k).k)) {
-      c.shadowBlur = 0; c.restore(); c.save(); c.globalAlpha *= st.a;       // imagen/clip propio (PiP)
-      const r = drawMediaCard(c, C.getPath(it, C.mediaParam(SCHEMA, "graphics", k).k), cx, cy, size, size * 1.78, it.rotation || 0, it.frame !== false);
+    } else if (k === "media") {
+      c.restore(); c.save(); c.globalAlpha *= st.a;       // imagen/clip propio (PiP): geometria del render
+      const r = drawPip(c, it, lt, L, B, t, st);
+      if (r) bb = r;
+    } else if (k === "socials") {
+      c.restore(); c.save(); c.globalAlpha *= st.a;       // posicion propia (centro del grupo)
+      const r = drawSocials(c, it, lt, L, B, st);
       if (r) bb = r;
     } else { c.strokeStyle = col; c.lineWidth = 3; c.strokeRect(-size / 2, -size / 2, size, size); }
     c.restore();
     return bb;
   }
 
-  /** Imagen de un medio propio para la vista en vivo (el clip se aproxima con su miniatura). */
-  const MEDIA_IMG = {};
-  function mediaImage(m) {
+  // ---- medios propios (imagen o clip de /sources) en la vista en vivo
+  /* Imagen: /tlsource/<sid> (formatos que el navegador decodifica; un HEIC no: se ve un marcador y
+     el cuadro exacto al pausar). Clip: un <video> silenciado por medio, sincronizado al tiempo local
+     del item (media_in + t, con repeticion o congelado del ultimo cuadro como el render). */
+  const MEDIA_EL = {};
+  function mediaEl(m) {
     if (!m || !m.sid) return null;
-    const url = m.type === "video" ? (m.thumb || `/tlsource/${encodeURIComponent(m.sid)}/thumb`) : `/tlsource/${encodeURIComponent(m.sid)}`;
-    let im = MEDIA_IMG[url];
-    if (!im) { im = MEDIA_IMG[url] = new Image(); im.src = url; }
-    return im.complete && im.naturalWidth ? im : null;
+    const key = `${m.type}|${m.sid}`;
+    let e = MEDIA_EL[key];
+    if (!e) {
+      e = MEDIA_EL[key] = { err: false, used: 0 };
+      const url = `/tlsource/${encodeURIComponent(m.sid)}`;
+      if (m.type === "video") {
+        const v = document.createElement("video"); v.muted = true; v.playsInline = true; v.preload = "auto"; v.src = url;
+        v.addEventListener("error", () => { e.err = true; });
+        e.vid = v;
+        const th = new Image(); th.src = m.thumb || `/tlsource/${encodeURIComponent(m.sid)}/thumb`; e.thumb = th;
+      } else {
+        const im = new Image(); im.onerror = () => { e.err = true; }; im.src = url; e.img = im;
+      }
+    }
+    return e;
   }
-  /** Foto/clip propio como tarjeta (borde blanco e inclinacion leve, como cutaways.photo). */
-  function drawMediaCard(c, m, cx, cy, maxW, maxH, tilt, frame) {
-    const im = mediaImage(m); if (!im) return null;
-    const k = Math.min(maxW / im.naturalWidth, maxH / im.naturalHeight), w = im.naturalWidth * k, h = im.naturalHeight * k;
-    c.save(); c.translate(cx, cy); if (tilt) c.rotate(tilt * Math.PI / 180);
-    c.shadowColor = "rgba(0,0,0,.45)"; c.shadowBlur = 24; c.shadowOffsetY = 8;
-    if (frame) { const pad = Math.max(6, w * 0.035); c.fillStyle = "#FFFFFF"; c.fillRect(-w / 2 - pad, -h / 2 - pad, w + 2 * pad, h + 2 * pad); }
-    c.shadowBlur = 0; c.drawImage(im, -w / 2, -h / 2, w, h); c.restore();
-    return { x: cx - w / 2, y: cy - h / 2, w, h };
+  /** Cuadro dibujable del medio en el tiempo local `lt` (y sincroniza el clip). -> {src, w, h} o null. */
+  function mediaFrame(it, m, lt, playing) {
+    const e = mediaEl(m); if (!e) return null;
+    e.used = performance.now();
+    if (e.img) return e.img.complete && e.img.naturalWidth ? { src: e.img, w: e.img.naturalWidth, h: e.img.naturalHeight } : null;
+    const v = e.vid, d = +(m.dur || v.duration || 0), m0 = Math.max(0, +(it.media_in || 0));
+    let tt = m0 + Math.max(0, lt);
+    if (d > m0 + 0.05) tt = it.loop === false ? Math.min(tt, d - 0.04) : m0 + ((tt - m0) % (d - m0));
+    if (playing && !(it.loop === false && tt >= d - 0.05)) {
+      if (v.paused) { try { v.currentTime = tt; } catch (x) { /* nada */ } v.play().catch(() => {}); }
+      else if (Math.abs(v.currentTime - tt) > 0.3) { try { v.currentTime = tt; } catch (x) { /* nada */ } }
+    } else {
+      if (!v.paused) v.pause();
+      if (Math.abs(v.currentTime - tt) > 0.04 && !v.seeking) { try { v.currentTime = tt; } catch (x) { /* nada */ } }
+    }
+    if (v.readyState >= 2 && v.videoWidth) return { src: v, w: v.videoWidth, h: v.videoHeight };
+    const th = e.thumb;
+    return th && th.complete && th.naturalWidth ? { src: th, w: th.naturalWidth, h: th.naturalHeight } : null;
+  }
+  /** Estado de los medios propios cargados (pruebas): [{key, type, t, paused, ready, err}]. */
+  FX.mediaState = () => Object.entries(MEDIA_EL).map(([k, e]) => ({ key: k, err: e.err, t: e.vid ? +e.vid.currentTime.toFixed(3) : null,
+    paused: e.vid ? e.vid.paused : null, ready: e.vid ? e.vid.readyState : (e.img && e.img.complete ? 4 : 0) }));
+  /** Los clips que no se dibujaron en este cuadro se pausan. */
+  function pauseIdleMedia(now) { Object.values(MEDIA_EL).forEach(e => { if (e.vid && !e.vid.paused && now - e.used > 150) e.vid.pause(); }); }
+  /** graphics.fit_src: dibuja `f` en la ventana (x, y, w, h) con cover/contain, focus y zoom. */
+  function drawFit(c, f, x, y, w, h, fit, focus, zoom) {
+    const iw = f.w, ih = f.h, z = clamp(+(zoom || 1), 1, 4);
+    const fx = Array.isArray(focus) ? clamp(+focus[0], 0, 1) : 0.5, fy = Array.isArray(focus) ? clamp(+focus[1], 0, 1) : 0.5;
+    if (fit === "contain" && z <= 1) {
+      const k = Math.min(w / iw, h / ih), dw = iw * k, dh = ih * k;
+      c.fillStyle = "#1A1A20"; c.fillRect(x, y, w, h);
+      c.drawImage(f.src, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh); return;
+    }
+    const ar = w / Math.max(1e-6, h);
+    let sw, sh; if (iw / ih > ar) { sw = ih * ar; sh = ih; } else { sw = iw; sh = iw / ar; }
+    sw /= z; sh /= z;
+    const sx = clamp(fx * iw - sw / 2, 0, iw - sw), sy = clamp(fy * ih - sh / 2, 0, ih - sh);
+    c.drawImage(f.src, sx, sy, sw, sh, x, y, w, h);
+  }
+  /** Marcador de un medio que el navegador no muestra (HEIC) o que no se pudo leer. */
+  function mediaPlaceholder(c, x, y, w, h, m, err) {
+    const bad = err && !/\.(heic|heif|avif)$/i.test((m && m.name) || "");
+    c.fillStyle = bad ? "#3A2226" : "#2A2D36"; c.fillRect(x, y, w, h);
+    const s = Math.min(w, h) * 0.28, im = iconImage("photo", "#9AA3B5");
+    if (im) c.drawImage(im, x + w / 2 - s / 2, y + h / 2 - s * 0.75, s, s);
+    c.fillStyle = "#C9D1E0"; c.textAlign = "center"; c.textBaseline = "middle";
+    c.font = `600 ${Math.max(9, Math.min(w, h) * 0.075)}px -apple-system, Helvetica, Arial`;
+    // HEIC/AVIF: el navegador no los decodifica pero el motor si (no es un error del archivo)
+    const noBrowser = /\.(heic|heif|avif)$/i.test((m && m.name) || "");
+    c.fillText(err && !noBrowser ? "No se pudo leer" : "Vista exacta al pausar", x + w / 2, y + h / 2 + s * 0.55, w * 0.9);
+    c.textAlign = "left";
+  }
+  /** graphics.socials (redes del perfil): chips con la insignia de la red en columna, fila o
+      rejilla (`layout`, `cols`, `width`), o marca de agua (`variant` watermark con `backdrop`). */
+  function drawSocials(c, it, lt, L, B, st) {
+    const wm = it.variant === "watermark", W = B.w;
+    const h = (it.size != null ? +it.size : (wm ? 0.034 : 0.074)) * W, maxw = SAFE_W * W;
+    const links = (it.links || []).slice(0, 8).map(l => {
+      const p = PLATS[l && l.platform] ? l.platform : "web";
+      return { p, t: String((l && l.text) || "").trim() || (PLATS[p] ? PLATS[p].label : "Web") };
+    });
+    if (!links.length) return null;
+    const fontN = wm ? "Poppins-SemiBold" : "Poppins-Bold";
+    const fitF = (txt, px, room) => { let f = px; c.font = fontCss(fontN, f); const w0 = c.measureText(txt).width; if (w0 > room) { f = Math.max(px * 0.6, f * room / w0); c.font = fontCss(fontN, f); } return f; };
+    let chips = links.map(l => {
+      const f = fitF(l.t, wm ? h * 0.62 : h * 0.36, maxw - h * 1.4);
+      const w = wm ? h * 1.05 + c.measureText(l.t).width : h * 0.14 + h * 0.72 + h * 0.2 + c.measureText(l.t).width + h * 0.42;
+      return { p: l.p, t: l.t, f, w };
+    });
+    const gap = h * (wm ? 0.3 : 0.22);
+    let rows = [];
+    if (it.layout === "grid" && !wm) {
+      const cols = Math.max(1, Math.min(4, +(it.cols || 2), chips.length));
+      const wfix = it.width ? clamp(+it.width, 0, SAFE_W) * W : 0;
+      const cw = Math.min(wfix ? (wfix - gap * (cols - 1)) / cols : Math.max(...chips.map(x => x.w)), (maxw - gap * (cols - 1)) / cols);
+      chips = chips.map(x => Object.assign(x, { f: fitF(x.t, h * 0.36, Math.max(h, cw - h * 1.48)), w: cw }));
+      for (let i = 0; i < chips.length; i += cols) rows.push(chips.slice(i, i + cols));
+    } else if (it.layout === "row" || wm) {
+      let cur = [], cw = 0;
+      chips.forEach(x => { if (cur.length && cw + gap + x.w > maxw) { rows.push(cur); cur = []; cw = 0; } cw += (cur.length ? gap : 0) + x.w; cur.push(x); });
+      if (cur.length) rows.push(cur);
+    } else rows = chips.map(x => [x]);
+    const totW = Math.max(...rows.map(r => r.reduce((q, x) => q + x.w, 0) + gap * (r.length - 1)));
+    const title = !wm && it.title ? String(it.title).toUpperCase() : "";
+    const totH = rows.length * h + (rows.length - 1) * gap + (title ? h * 0.52 : 0);
+    let cx = B.x + (it.x != null ? +it.x : 0.47) * W, cy = B.y + (it.y != null ? +it.y : 0.62) * B.h;
+    cx = clamp(cx, B.x + C.SAFE.left * W + totW / 2, B.x + C.SAFE.right * W - totW / 2);
+    if (totH < (C.SAFE.bottom - C.SAFE.top) * B.h) cy = clamp(cy, B.y + C.SAFE.top * B.h + totH / 2, B.y + C.SAFE.bottom * B.h - totH / 2);
+    const dark = it.theme === "dark", mono = it.icon_style === "mono";
+    const stagger = clamp(it.stagger != null ? +it.stagger : 0.09, 0, 0.5);
+    c.translate(cx, cy); if (it.rotation) c.rotate(+it.rotation * Math.PI / 180);
+    let y = -totH / 2;
+    if (title) { c.font = fontCss("Poppins-SemiBold", h * 0.3); c.fillStyle = "#FFFFFF"; c.textAlign = "center"; c.textBaseline = "middle"; c.shadowColor = "rgba(0,0,0,.45)"; c.shadowBlur = 6 * B.s; c.fillText(title, 0, y + h * 0.18); c.shadowBlur = 0; c.textAlign = "left"; y += h * 0.52; }
+    let k = 0;
+    rows.forEach(row => {
+      const rw = row.reduce((q, x) => q + x.w, 0) + gap * (row.length - 1);
+      let x = -rw / 2;
+      row.forEach(ch => {
+        const tl = lt - (k++) * stagger;
+        if (tl >= 0) {
+          const e = clamp(tl / 0.25, 0, 1), sc = 0.8 + 0.2 * C.ease("out_back", e);
+          c.save(); c.globalAlpha *= e; c.translate(x + ch.w / 2, y + h / 2); c.scale(sc, sc);
+          const pl = PLATS[ch.p] || {}, bcol = mono ? "#15151B" : (pl.color || "#1E2330");
+          c.textBaseline = "middle";
+          if (wm) {
+            const bk = clamp(it.backdrop != null ? +it.backdrop : 0.34, 0, 1), op = clamp(it.opacity != null ? +it.opacity : 0.72, 0.15, 1);
+            if (bk > 0.01) { c.fillStyle = `rgba(0,0,0,${bk})`; rrect(c, -ch.w / 2 - h * 0.28, -h * 0.62, ch.w + h * 0.56, h * 1.24, h * 0.62); c.fill(); }
+            const ib = h * 0.78, im = iconImage(pl.icon || "world", "#FFFFFF");
+            c.globalAlpha *= op;
+            if (im) c.drawImage(im, -ch.w / 2, -ib / 2, ib, ib);
+            c.font = fontCss(fontN, ch.f); c.fillStyle = "#FFFFFF"; c.fillText(ch.t, -ch.w / 2 + h * 1.05, 0);
+          } else {
+            c.shadowColor = "rgba(0,0,0,.3)"; c.shadowBlur = 12 * B.s; c.shadowOffsetY = 4 * B.s;
+            c.fillStyle = dark ? "rgba(17,17,22,.86)" : "#FFFFFF"; rrect(c, -ch.w / 2, -h / 2, ch.w, h, h / 2); c.fill();
+            c.shadowBlur = 0; c.shadowOffsetY = 0;
+            const d = h * 0.72, bx = -ch.w / 2 + h * 0.14 + d / 2;
+            c.fillStyle = bcol; c.beginPath(); c.arc(bx, 0, d / 2, 0, Math.PI * 2); c.fill();
+            const im = iconImage(pl.icon || "world", lum(bcol) > 0.6 ? "#15151B" : "#FFFFFF"); if (im) c.drawImage(im, bx - d * 0.3, -d * 0.3, d * 0.6, d * 0.6);
+            c.font = fontCss(fontN, ch.f); c.fillStyle = dark ? "#FFFFFF" : "#15151B"; c.fillText(ch.t, -ch.w / 2 + h * 0.14 + d + h * 0.2, 0);
+          }
+          c.restore();
+        }
+        x += ch.w + gap;
+      });
+      y += h + gap;
+    });
+    return { x: cx - totW / 2, y: cy - totH / 2, w: totW, h: totH };
+  }
+
+  /** Rostro de la toma en t ([cx, cy, w, h] en la caja) o null. */
+  FX.faceAt = t => faceAt(t);
+  /** Posicion efectiva del PiP (la misma colocacion automatica que el render: fxcore.pipPlace). */
+  FX.pipPlace = function (it) {
+    const m = it.media || {};
+    // cara mediana en el rango del item (pista de rostro de las tomas), como el render
+    return C.pipPlace(PLAN.fx, it, C.faceMedian(PLAN.shots, +it.start || 0, +it.end || 0), +m.w || 0, +m.h || 0, 1080, 1920);
+  };
+  /** graphics.media (PiP) con la geometria de graphics.draw_media. */
+  function drawPip(c, it, lt, L, B, t, st) {
+    const m = it.media && it.media.sid ? it.media : null;
+    const pl = FX.pipPlace(it);
+    const f = m ? mediaFrame(it, m, lt, V && !V.paused) : null;
+    const cw = f ? f.w : +((m && m.w) || 0), ch = f ? f.h : +((m && m.h) || 0);
+    const [w, h] = C.pipCard(pl.size, it.aspect, cw, ch, B.w);
+    const cx = B.x + (pl.x + st.dx) * B.w, cy = B.y + (pl.y + st.dy) * B.h;
+    const rad = clamp(it.radius != null ? +it.radius : 14, 0, 80) * B.s;
+    const bw = it.frame !== false ? Math.max(4 * B.s, Math.min(w, h) * 0.018) : 0;
+    c.translate(cx, cy); c.scale(st.sc, st.sc); if (it.rotation) c.rotate(+it.rotation * Math.PI / 180);
+    const sh = it.shadow != null ? +it.shadow : 0.55;
+    if (sh > 0) { c.shadowColor = `rgba(0,0,0,${0.5 * sh})`; c.shadowBlur = 26 * B.s; c.shadowOffsetY = 8 * B.s; }
+    if (bw) { c.fillStyle = "#FFFFFF"; rrect(c, -w / 2 - bw, -h / 2 - bw, w + 2 * bw, h + 2 * bw, rad + bw); c.fill(); }
+    else { c.fillStyle = "#000"; rrect(c, -w / 2, -h / 2, w, h, rad); c.fill(); }
+    c.shadowBlur = 0; c.shadowOffsetY = 0;
+    c.save(); rrect(c, -w / 2, -h / 2, w, h, rad); c.clip();
+    if (f) drawFit(c, f, -w / 2, -h / 2, w, h, it.fit || "cover", it.focus, it.zoom);
+    else mediaPlaceholder(c, -w / 2, -h / 2, w, h, m, m && MEDIA_EL[`${m.type}|${m.sid}`] && MEDIA_EL[`${m.type}|${m.sid}`].err);
+    c.restore();
+    return { x: cx - w / 2 - bw, y: cy - h / 2 - bw, w: w + 2 * bw, h: h + 2 * bw };
+  }
+  /** cutaways.photo: foto instantanea con borde, pie a mano y cinta (geometria de draw_photo). */
+  function drawPhoto(c, it, lt, L) {
+    const B = LB, W = B.w, H = B.h;
+    const pw = W * clamp(it.size != null ? +it.size : 0.72, 0.3, 0.8);
+    const phImg = pw * 0.92 * 1.2, border = pw * 0.045, bottom = pw * 0.2, fw = pw, fh = phImg + border + bottom;
+    const sp = 1 - Math.pow(1 - clamp(lt / 0.55, 0, 1), 3);
+    const tilt = it.tilt != null ? +it.tilt : -4;
+    const rot = tilt + (1 - sp) * 14, dy = (1 - sp) * H * 0.55, sc = 0.92 + 0.08 * sp;
+    const m = it.media && it.media.sid ? it.media : null;
+    const f = m ? mediaFrame(it, m, lt, V && !V.paused) : (V.videoWidth ? { src: V, w: V.videoWidth, h: V.videoHeight } : null);
+    c.save();
+    c.translate(B.x + W * 0.5, B.y + H * (it.y != null ? +it.y : 0.46) + dy); c.rotate(rot * Math.PI / 180); c.scale(sc, sc);
+    c.shadowColor = "rgba(0,0,0,.4)"; c.shadowBlur = 24 * B.s; c.shadowOffsetY = 10 * B.s;
+    c.fillStyle = "#FBFAF6"; rrect(c, -fw / 2, -fh / 2, fw, fh, 6 * B.s); c.fill(); c.shadowBlur = 0; c.shadowOffsetY = 0;
+    const ix = -fw / 2 + border, iy = -fh / 2 + border, iw = fw - 2 * border;
+    c.save(); c.beginPath(); c.rect(ix, iy, iw, phImg); c.clip();
+    if (f) drawFit(c, f, ix, iy, iw, phImg, m ? (it.fit || "cover") : "cover", m ? it.focus : null, m ? it.zoom : 1);
+    else mediaPlaceholder(c, ix, iy, iw, phImg, m, m && MEDIA_EL[`${m.type}|${m.sid}`] && MEDIA_EL[`${m.type}|${m.sid}`].err);
+    const dev = 1 - (1 - Math.pow(1 - clamp((lt - 0.1) / 0.9, 0, 1), 3));
+    if (dev > 0.01) { c.fillStyle = `rgba(244,241,234,${0.85 * dev})`; c.fillRect(ix, iy, iw, phImg); }
+    c.restore();
+    const cap = (it.caption != null ? it.caption : typeof it.text === "string" ? it.text : "") || "";
+    if (cap) {
+      const n = Math.ceil(String(cap).length * clamp((lt - 0.45) / 0.5, 0, 1));
+      const kitScript = (PLAN.director && PLAN.director.kit && PLAN.director.kit.script) || "Caveat-Bold";
+      let fs = bottom * 0.62; c.font = fontCss(kitScript, fs);
+      const tw = c.measureText(String(cap)).width; if (tw > fw - 2 * border) { fs *= (fw - 2 * border) / tw; c.font = fontCss(kitScript, fs); }
+      c.fillStyle = "#2A2A33"; c.textAlign = "center"; c.textBaseline = "middle";
+      c.fillText(String(cap).slice(0, n), 0, fh / 2 - bottom * 0.5); c.textAlign = "left";
+    }
+    c.save(); c.rotate((-tilt * 0.8 + 3) * Math.PI / 180); c.fillStyle = "rgba(242,230,200,.78)"; c.fillRect(-pw * 0.14, -fh / 2 - pw * 0.035, pw * 0.28, pw * 0.08); c.restore();
+    c.restore();
+  }
+  /** cutaways.self_broll con un medio propio: el archivo a pantalla completa (cover con focus). */
+  function drawSelfBroll(c, it, lt) {
+    const m = it.media && it.media.sid ? it.media : null; if (!m) return false;
+    const f = mediaFrame(it, m, lt, V && !V.paused);
+    if (f) drawFit(c, f, 0, 0, CW, CH, it.fit || "cover", it.focus, it.zoom);
+    else mediaPlaceholder(c, LB.x + LB.w * 0.2, LB.y + LB.h * 0.35, LB.w * 0.6, LB.h * 0.3, m, MEDIA_EL[`${m.type}|${m.sid}`] && MEDIA_EL[`${m.type}|${m.sid}`].err);
+    return true;
   }
 
   function drawSceneBg(c, bg, colors, lt) {
@@ -2075,6 +2768,7 @@
     if (!isPro()) return;
     const c = CTX; HITS = [];
     layoutBox();
+    ensureCaptions();
     // vinieta del look
     const g = PLAN.fx.grade || {};
     if (g.enabled !== false && +g.vignette > 0) {
@@ -2091,15 +2785,20 @@
     scenes.forEach(it => {
       const lt = t - it.start, L = it.end - it.start;
       const a = it.anim_in === "cut" ? 1 : clamp(lt / 0.2, 0, 1) * (it.anim_out === "cut" ? 1 : clamp((L - lt) / 0.2, 0, 1));
-      c.save(); c.globalAlpha = a; drawSceneBg(c, it.background, it.bg_colors, lt);
-      const mp = C.mediaParam(SCHEMA, "cutaways", it.kind);
-      if (mp && C.getPath(it, mp.k)) drawMediaCard(c, C.getPath(it, mp.k), LB.x + LB.w / 2, LB.y + LB.h * 0.45, LB.w * (+it.size || 0.8), LB.h * 0.6, it.tilt != null ? +it.tilt : -3, true);
+      c.save(); c.globalAlpha = a;
+      if (!(it.kind === "self_broll" && drawSelfBroll(c, it, lt))) drawSceneBg(c, it.background, it.bg_colors, lt);
+      if (it.kind === "photo") drawPhoto(c, it, lt, L);
       if (it.text && (it.text.text || it.text.preset === "counter")) {
         const tx = Object.assign({ x: 0.5, y: 0.45, size: 0.12, preset: "title_pop" }, it.text);
         drawTextItem(c, tx, lt, L);
       }
       if (it.card) drawGraphic(c, Object.assign({ kind: "card", x: 0.5, y: 0.5, size: 0.74 }, it.card), lt, L, null, t);
-      (it.graphics || []).forEach(gr => drawGraphic(c, gr, lt - ((gr.start || 0) - 0), L, null, t));
+      // graficos embebidos (cutaways._embedded): offset y length relativos a la escena
+      (it.graphics || []).forEach(gr => {
+        if (!gr || gr.enabled === false) return;
+        const off = +(gr.offset || 0), ln = gr.length != null ? +gr.length : Math.max(0.05, L - off), lg = lt - off;
+        if (lg >= 0 && lg < ln) drawGraphic(c, gr, lg, ln, null, t);
+      });
       c.restore();
       HITS.push({ track: "cutaways", id: it.id, bb: { x: 0, y: 0, w: CW, h: CH }, scene: true });
     });
@@ -2108,7 +2807,7 @@
     // texto normal
     texts.filter(x => !x.behind).sort((a, b) => (+a.z || 0) - (+b.z || 0)).forEach(it => { const bb = drawTextItem(c, it, t - it.start, it.end - it.start); if (bb) HITS.push({ track: "text", id: it.id, bb }); });
     // subtitulos: misma regla que el render (fxcore.captionsHiddenAt)
-    if (!C.captionsHiddenAt(PLAN.fx, t)) FX.drawCaptions(t);
+    if (!C.captionsHiddenAt(PLAN.fx, t, LB.w / LB.h)) FX.drawCaptions(t);
     // transiciones
     items("transitions").forEach(tr => {
       if (tr.enabled === false || tr.kind === "cut") return;
@@ -2121,71 +2820,195 @@
         rg.addColorStop(0, hexA(NAMED[tr.color] || tr.color || "#FF7A3D", peak * 0.95 * k)); rg.addColorStop(1, hexA("#FFB36B", 0)); c.fillStyle = rg; c.fillRect(0, 0, CW, CH);
       } else { c.fillStyle = `rgba(255,255,255,${peak * 0.35 * k})`; c.fillRect(0, 0, CW, CH); }
     });
+    pauseIdleMedia(performance.now());
   };
 
   /** Subtitulos con el preset del plan y las fuentes reales. */
-  FX.drawCaptions = function (t) {
+  /* Grupos de subtitulos: los REALES del export (POST /captions: text.caption_groups en tiempo
+     original, con sus lineas y palabras de acento). Mientras llegan (o sin servidor) se usa la
+     agrupacion aproximada. Se piden de nuevo solo si cambia algo que los cambia (frases del idioma,
+     estilo de subtitulos, cortes, tomas, formato, estilo del director). */
+  let CAPSRV = { key: "", groups: null, pending: "", timer: null, ctrl: null, fails: 0 };
+  function capServerKey() {
+    const cfg = PLAN.fx.captions || {};
+    return JSON.stringify([P(), cfg, PLAN.cuts, (PLAN.shots || []).map(s => [s.start, s.end]), FMT, (PLAN.director || {}).style, LANG]);
+  }
+  function requestCaptions(key) {
+    if (!JOB || JOB === "demo" || CAPSRV.pending === key || (FEATURES.size && !FEATURES.has("captions"))) return;
+    clearTimeout(CAPSRV.timer); CAPSRV.pending = key;
+    CAPSRV.timer = setTimeout(async () => {
+      if (CAPSRV.ctrl) CAPSRV.ctrl.abort();
+      const ctrl = CAPSRV.ctrl = new AbortController();
+      try {
+        const g = await jpost(`/captions/${JOB}`, { plan: planForServer(), fmt: FMT || "9:16" }, ctrl.signal);
+        if (ctrl !== CAPSRV.ctrl) return;
+        if (Array.isArray(g)) { CAPSRV.key = key; CAPSRV.groups = g; CAPSRV.fails = 0; CAPSRV.lang = LANG; }
+      } catch (e) { if (e.name !== "AbortError") CAPSRV.fails++; }
+      finally { if (ctrl === CAPSRV.ctrl) { CAPSRV.ctrl = null; if (CAPSRV.pending === key) CAPSRV.pending = ""; } }
+    }, CAPSRV.groups ? 350 : 0);
+  }
+  FX.captionSource = () => (CAPSRV.groups && CAPSRV.key === capServerKey() ? "render" : "aprox");
+  /** Pide los grupos del render cuando cambia lo que los cambia, aunque en este instante no se
+      dibujen subtitulos (la clave se revisa como mucho cada 300 ms). */
+  let capCheckAt = 0;
+  function ensureCaptions() {
+    const now = performance.now(); if (now - capCheckAt < 300) return;
+    capCheckAt = now;
     const cfg = PLAN.fx.captions || {};
     if (cfg.enabled === false || cfg.preset === "none") return;
+    const sk = capServerKey();
+    if (sk !== CAPSRV.key && CAPSRV.fails < 3) requestCaptions(sk);
+  }
+  FX.captionGroupsNow = () => CAPSRV.groups;
+  /* Geometria de los subtitulos en vivo = la del render (fxcore.captionLayout: tamano y espacio del
+     preset, envoltura balanceada, ancho util). Con los grupos de /captions se calibra con su `rect`
+     (la caja real del export): mismo ancho, mismo centro y mismo alto. Las medidas de cada palabra
+     salen del canvas con la fuente real (se cachean por fuente cargada). */
+  const CAPM = new Map();
+  function capMeasure(font) {
+    const fam = ensureFont(font), c = CTX;
+    return (txt, px) => {
+      const key = `${fam}|${font}|${txt}`;
+      let m = CAPM.get(key);
+      if (!m) {
+        if (CAPM.size > 3000) CAPM.clear();
+        c.save(); c.font = fontCss(font, 100); const r = c.measureText(txt); c.restore();
+        const adv = r.width;
+        m = { adv, l: r.actualBoundingBoxLeft != null ? -r.actualBoundingBoxLeft : 0, r: r.actualBoundingBoxRight != null ? r.actualBoundingBoxRight : adv,
+          asc: r.actualBoundingBoxAscent != null ? r.actualBoundingBoxAscent : 72, desc: r.actualBoundingBoxDescent != null ? r.actualBoundingBoxDescent : 0 };
+        CAPM.set(key, m);
+      }
+      const k = px / 100;
+      return { adv: m.adv * k, l: m.l * k, r: m.r * k, asc: m.asc * k, desc: m.desc * k };
+    };
+  }
+  const capTitleFont = () => (PLAN.director && PLAN.director.kit && typeof PLAN.director.kit.title === "string" ? PLAN.director.kit.title : null);
+  const capCase = (w, cs) => (cs === "upper" ? w.toUpperCase() : cs === "lower" ? w.toLowerCase() : cs === "title" ? w.charAt(0).toUpperCase() + w.slice(1) : w);
+  /** Layout (cacheado por grupo) del grupo `gr` en la caja B. srv = grupo del render (con rect/lines). */
+  function capLayoutOf(gr, cfg, B, srv, noRect) {
+    const D = C.captionCfg(cfg, capTitleFont());
+    const words = gr.words.map(w => ({ w, txt: capCase(String(w.text || "").trim(), D.case) })).filter(x => x.txt);
+    if (!words.length) return null;
+    const key = `${B.w.toFixed(1)}|${B.h.toFixed(1)}|${ensureFont(D.font)}|${JSON.stringify(cfg)}|${noRect ? 1 : 0}`;
+    const cache = noRect ? null : gr._lay;
+    if (cache && cache.key === key) return cache.L;
+    const L = C.captionLayout(words.map(x => x.txt), cfg, B.w, B.h, capMeasure(D.font),
+      { lines: srv ? gr.lines : null, rect: srv && !noRect ? gr.rect : null, titleFont: capTitleFont() });
+    if (!L) return null;
+    L.words = words; L.D = D;
+    if (!noRect) { try { Object.defineProperty(gr, "_lay", { value: { key, L }, writable: true, configurable: true, enumerable: false }); } catch (e) { /* grupo congelado */ } }
+    return L;
+  }
+  /** Grupo de subtitulos activo en t (del render o aproximado). -> {gr, srv} o null. */
+  function capGroupNow(t) {
+    const cfg = PLAN.fx.captions || {};
+    const sk = capServerKey();
+    if (CAPSRV.groups && (sk === CAPSRV.key || (CAPSRV.pending === sk && CAPSRV.lang === LANG))) {
+      const gr = C.capGroupAt(CAPSRV.groups, t); return gr ? { gr, srv: true } : null;
+    }
     const phs = P();
     const key = JSON.stringify([cfg.max_words, phs.length, phs.length ? phs[0].length : 0, LANG, (UNDO || []).length]);
     if (key !== CAPCACHE.key) CAPCACHE = { key, groups: C.captionGroups(phs, cfg.max_words || 4) };
     const gr = CAPCACHE.groups.find(g => t >= g.start - 0.02 && t < g.end + 0.12);
-    if (!gr) return;
+    return gr ? { gr, srv: false } : null;
+  }
+  /** Diagnostico de paridad (pruebas): ancho del grupo en vivo con y sin calibrar contra el rect del
+      export, en fraccion del ancho de la caja. */
+  FX.captionDebug = function (t) {
+    const cfg = PLAN.fx.captions || {}, g = capGroupNow(t);
+    if (!g) return null;
+    layoutBox();
+    const L = capLayoutOf(g.gr, cfg, LB, g.srv), U = capLayoutOf(g.gr, cfg, LB, g.srv, true);
+    const wOf = X => X ? Math.max(...X.rows.map(r => r.w)) / LB.w : null;
+    return { srv: g.srv, text: g.gr.text || g.gr.words.map(w => w.text).join(" "), lines: L ? L.rows.length : null,
+      rectW: g.srv && g.gr.rect ? +(g.gr.rect[2] - g.gr.rect[0]).toFixed(4) : null, liveW: wOf(L), portW: wOf(U), font: L && L.D.font,
+      fontReady: L ? FONT_STATE[L.D.font] === "ok" : false };
+  };
+  function mixHex(a, b, q) {
+    const p = h => { const s = String(h || "#fff").replace("#", ""); const v = s.length === 3 ? s.split("").map(x => x + x).join("") : s.slice(0, 6); const n = parseInt(v, 16) || 0; return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+    const x = p(a), y = p(b), k = clamp(q, 0, 1);
+    return `rgb(${x.map((v, i) => Math.round(v + (y[i] - v) * k)).join(",")})`;
+  }
+  FX.drawCaptions = function (t) {
+    const cfg = PLAN.fx.captions || {};
+    if (cfg.enabled === false || cfg.preset === "none") return;
+    const ra = C.captionRangeAlpha(cfg, t);          // filas y_ranges con hide (primer plano con CTA)
+    if (ra <= 0.003) return;
+    const sk = capServerKey();
+    if (sk !== CAPSRV.key && CAPSRV.fails < 3) requestCaptions(sk);
+    const g = capGroupNow(t);
+    if (!g || !g.gr.words || !g.gr.words.length) return;
+    const gr = g.gr;
     // como text.draw_captions: un grupo que empezo tapado por un titulo no reaparece al terminar
     // el titulo (repetiria lo que el titulo ya mostro)
-    if (C.captionGroupSuppressed(PLAN.fx, gr, t)) return;
-    const c = CTX, B = LB, W = B.w, s = B.s;
-    const preset = cfg.preset || "clean_bold";
-    let fsz = (+cfg.size || 0.052) * W * (preset === "minimal_small" ? 0.82 : 1);
-    const font = cfg.font || "Poppins-ExtraBold";
-    const color = cfg.color || "#FFFFFF", accent = cfg.accent || "#FFD23F";
-    const cs = cfg.case || (preset === "bold_caps" ? "upper" : "none");
-    const fmt = w => cs === "upper" ? w.toUpperCase() : cs === "lower" ? w.toLowerCase() : cs === "title" ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : w;
-    // como el render: las palabras entran al pronunciarse y la linea se recentra (karaoke muestra el grupo completo)
-    let words = gr.words.map(w => ({ w, txt: fmt(String(w.text || "").trim()) }));
-    if (preset !== "karaoke") { const vis = words.filter(x => +x.w.start <= t + 0.03); words = vis.length ? vis : words.slice(0, 1); }
+    if (C.captionGroupSuppressed(PLAN.fx, gr, t, LB.w / LB.h)) return;
+    const c = CTX, B = LB, s = B.s;
+    const L = capLayoutOf(gr, cfg, B, g.srv);
+    if (!L) return;
+    const D = L.D, fs = L.fs;
+    const color = cfg.color || "#FFFFFF", accent = cfg.accent || "#FFD23F", hi = cfg.highlight || accent;
+    const accentSet = g.srv && D.kw_accent !== false && cfg.kw_accent !== false ? new Set((gr.accent || []).map(C.normWord)) : null;
+    // altura: la del export (y_ranges, foto con pie) respecto a la base del preset
+    const dyY = (C.captionYAt(PLAN.fx, t, B.w / B.h) - D.y) * B.h;
+    const top = B.y + L.top + dyY;
+    // salida del grupo (la de los grupos del render ya viene en su permanencia)
+    const out = g.srv ? clamp((+gr.end - t) / 0.11, 0, 1) : clamp((gr.end + 0.12 - t) / 0.12, 0, 1);
+    let ga = out * ra, gdy = 0;
+    if (D.reveal === "group") { const u = t - gr.start; ga *= C.ease("out_cubic", u / 0.14); gdy = (1 - C.ease("out_cubic", u / 0.35)) * 0.22 * fs; }
+    if (ga <= 0.003) return;
     c.save(); c.textBaseline = "alphabetic"; c.lineJoin = "round";
-    const maxW = W * 0.84;
-    const setF = () => { c.font = fontCss(font, fsz); };
-    setF();
-    let sp = c.measureText(" ").width;
-    words.forEach(x => { x.wd = c.measureText(x.txt).width; });
-    let total = words.reduce((a, x) => a + x.wd, 0) + sp * (words.length - 1);
-    let rows = [words];
-    if (total > maxW && words.length > 1) {
-      let best = 1, diff = 1e9;
-      for (let k = 1; k < words.length; k++) { const a = words.slice(0, k).reduce((q, x) => q + x.wd, 0), b = words.slice(k).reduce((q, x) => q + x.wd, 0); if (Math.abs(a - b) < diff) { diff = Math.abs(a - b); best = k; } }
-      rows = [words.slice(0, best), words.slice(best)];
-      const mw = Math.max(...rows.map(r => r.reduce((q, x) => q + x.wd, 0) + sp * (r.length - 1)));
-      if (mw > maxW) { const k = maxW / mw; fsz *= k; setF(); sp = c.measureText(" ").width; words.forEach(x => { x.wd = c.measureText(x.txt).width; }); }
-    }
-    const age = t - gr.start;
-    const a = clamp(age / 0.08, 0, 1) * clamp((gr.end + 0.12 - t) / 0.12, 0, 1);
-    c.globalAlpha = a;
-    const lh = fsz * 1.18, cy = B.y + C.captionY(cfg, t) * B.h, y0 = cy - (rows.length - 1) * lh / 2 + fsz * 0.35;
-    rows.forEach((row, ri) => {
-      const rw = row.reduce((q, x) => q + x.wd, 0) + sp * (row.length - 1);
-      let x = B.x + (W - rw) / 2; const y = y0 + ri * lh;
-      if (preset === "boxed") { c.fillStyle = "rgba(0,0,0,.72)"; rrect(c, x - fsz * 0.3, y - fsz * 0.95, rw + fsz * 0.6, fsz * 1.3, fsz * 0.22); c.fill(); }
-      row.forEach(ww => {
-        const spoken = t >= ww.w.start, active = spoken && t < ww.w.end + 0.02;
-        let fill = color;
-        if (preset === "clean_bold" || preset === "bold_caps" || preset === "boxed") fill = active ? accent : color;
-        else if (preset === "karaoke") fill = spoken ? accent : color;
-        const sc = preset === "bold_caps" && active ? 1.08 : 1;
-        c.save();
-        if (sc !== 1) { c.translate(x + ww.wd / 2, y - fsz * 0.35); c.scale(sc, sc); c.translate(-(x + ww.wd / 2), -(y - fsz * 0.35)); }
-        if (preset !== "boxed") { c.shadowColor = "rgba(0,0,0,.6)"; c.shadowBlur = 10 * s; c.shadowOffsetY = 3 * s; }
-        const stroke = (cfg.stroke != null ? +cfg.stroke : preset === "bold_caps" ? 8 : preset === "minimal_small" ? 0 : 5) * s;
-        if (stroke > 0) { c.lineWidth = stroke; c.strokeStyle = "rgba(0,0,0,.9)"; c.strokeText(ww.txt, x, y); }
-        c.fillStyle = fill; c.fillText(ww.txt, x, y);
+    const stroke = 2 * D.stroke * s;
+    // palabra de la pastilla (boxed): la ultima que ya empezo
+    let pill = -1; if (D.active === "pill") L.words.forEach((x, i) => { if (t >= +x.w.start - 0.03) pill = i; });
+    L.rows.forEach(r => {
+      const vis = i => D.reveal !== "word" || t >= +L.words[i].w.start - 0.05;
+      let v1 = r.a; while (v1 < r.b && vis(v1)) v1++;
+      if (v1 === r.a) return;
+      const sc = r.sc, M = L.M;
+      // recentrado: la parte ya dicha queda centrada (text._recenter_dx; aqui sin resorte)
+      let dx = 0;
+      if (D.recenter && D.reveal === "word" && v1 < r.b) {
+        const l = r.x0 + L.xs[r.a] + M[r.a].l * sc, rr = r.x0 + L.xs[v1 - 1] + M[v1 - 1].r * sc;
+        dx = L.cx - (l + rr) / 2;
+      }
+      const base = top + r.base + gdy;
+      for (let i = r.a; i < v1; i++) {
+        const ww = L.words[i], w = ww.w, x = B.x + r.x0 + L.xs[i] + dx, wd = M[i].adv * sc;
+        const u = t - (+w.start - 0.05);
+        let a = 1, wsc = 1, wdy = 0;
+        if (D.reveal === "word") {
+          if (D.anim === "pop") { wsc = 0.8 + 0.2 * C.ease("out_back", u / 0.25); a = C.ease("out_cubic", u / 0.08); wdy = (1 - C.ease("out_cubic", u / 0.22)) * 0.1 * fs; }
+          else if (D.anim === "pop_strong") { wsc = 0.7 + 0.3 * C.ease("out_back", u / 0.3); a = C.ease("out_cubic", u / 0.07); }
+          else { a = C.ease("smoothstep", u / 0.2); wdy = (1 - C.ease("out_cubic", u / 0.3)) * 0.12 * fs; }
+        }
+        const kw = accentSet && accentSet.has(C.normWord(w.text));
+        let fill = kw ? accent : color;
+        const q = C.activeBump(t, w);
+        if (D.active === "color" && !kw && q > 0.002) fill = mixHex(color, accent, q);
+        if (D.active_scale > 0) { wsc *= 1 + D.active_scale * q; wdy -= 0.02 * fs * q; }
+        if (D.active === "wipe") fill = t >= +w.end ? accent : color;
+        c.save(); c.globalAlpha = ga * a;
+        c.font = fontCss(D.font, fs * sc);
+        const cy = base + wdy;
+        if (wsc !== 1) { const px = x + wd / 2, py = cy - M[i].asc * sc / 2; c.translate(px, py); c.scale(wsc, wsc); c.translate(-px, -py); }
+        if (i === pill) {
+          const h = (M[i].asc + M[i].desc) * sc + 0.28 * fs;
+          c.save(); c.shadowColor = "transparent"; c.fillStyle = hi; rrect(c, x + M[i].l * sc - 0.18 * fs, cy - M[i].asc * sc - 0.14 * fs, (M[i].r - M[i].l) * sc + 0.36 * fs, h, h * 0.3); c.fill(); c.restore();
+          fill = lum(hi) > 0.6 ? "#111111" : "#FFFFFF";
+        } else if (D.shadow > 0) { c.shadowColor = `rgba(0,0,0,${Math.min(0.85, 0.62 * D.shadow)})`; c.shadowBlur = 10 * s * D.shadow; c.shadowOffsetY = 3 * s; }
+        if (stroke > 0) { c.lineWidth = stroke; c.strokeStyle = cfg.stroke_color || "#000000"; c.strokeText(ww.txt, x, cy); }
+        c.fillStyle = fill; c.fillText(ww.txt, x, cy);
+        if (D.active === "wipe" && t >= +w.start && t < +w.end) {
+          // barrido del karaoke: la parte ya dicha de la palabra en acento
+          const p = clamp((t - +w.start) / Math.max(0.08, +w.end - +w.start), 0, 1);
+          c.save(); c.shadowColor = "transparent"; c.beginPath(); c.rect(x - fs, cy - fs * 1.5, (wd + fs) * p + fs * 0.05, fs * 2.2); c.clip(); c.fillStyle = accent; c.fillText(ww.txt, x, cy); c.restore();
+        }
         c.restore();
-        x += ww.wd + sp;
-      });
+      }
     });
     c.restore();
-    HITS.push({ track: "captions", id: "captions", bb: { x: B.x + W * 0.08, y: cy - lh * rows.length / 2 - fsz * 0.4, w: W * 0.84, h: lh * rows.length + fsz * 0.4 } });
+    const wmax = Math.max(...L.rows.map(r => r.w)), x0 = Math.min(...L.rows.map(r => r.x0));
+    HITS.push({ track: "captions", id: "captions", bb: { x: B.x + x0, y: top, w: wmax, h: L.height } });
   };
 
   // ------------------------------------------------------------------ capa superior: seleccion y marcadores
@@ -2313,8 +3136,15 @@
     if (SAVE.inflight) { await SAVE.inflight; if (!SAVE.dirty) return true; }
     if (SAVE.conflict && !force) return false;
     SAVE.dirty = false; saveHint();
-    const body = { plan: PLAN };
+    const body = { plan: planToSave() };
+    // el servidor ya tiene exactamente este plan (lo acaba de escribir el director o el perfil):
+    // no se reenvia (su huella distingue 1.0 de 1 y subiria la revision sin cambios reales, lo que
+    // rompe la sincronizacion automatica con la musica IA)
+    const js = JSON.stringify(body.plan);
+    if (!force && js === LAST_SAVED) { saveHint(); FX.kickAnalysis(); return true; }
     if (FX.serverRev != null && !force) body.base_rev = FX.serverRev;
+    const sent = JSON.stringify(PLAN);
+    let after = null;
     const run = (async () => {
       try {
         const r = await fetch(`/plan/${JOB}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -2323,14 +3153,40 @@
         if (r.status === 409) { SAVE.dirty = true; SAVE.conflict = true; if (d.plan_rev != null) SAVE.remoteRev = d.plan_rev; conflictToast(); return false; }
         if (!r.ok) { SAVE.dirty = true; return false; }
         if (d.plan_rev != null) FX.serverRev = d.plan_rev;
-        SAVE.conflict = false;
+        SAVE.conflict = false; SRV_PROF = !!(body.plan && body.plan.profile); LAST_SAVED = js;
+        // el servidor re-aplico el perfil (rotulo, Seguir, reservas y cierre con los datos nuevos):
+        // se adopta su plan si nada cambio mientras se guardaba
+        if (d.profile_applied && d.plan && JSON.stringify(PLAN) === sent) after = () => FX.adoptServerPlan(d.plan, d.plan_rev);
+        // la propuesta ya estaba sincronizada con la musica IA en el servidor: se adopta esa version
+        else if (d.music_synced && JSON.stringify(PLAN) === sent) after = () => adoptSynced(d.plan_rev);
+        // una edicion guardada sobre la propuesta sincronizada la deja `superseded`: se sondea un
+        // momento para ofrecer "Sincronizar con la música"
+        else if (["synced", "syncing", "ready"].includes(FX.musicSide.state) && !FX.gridSynced()) FX.watchStatus(null, 8000);
         FX.kickAnalysis();
         return true;
       } catch (e) { SAVE.dirty = true; return false; }   // sin red: se reintenta en el siguiente cambio
-      finally { SAVE.inflight = null; saveHint(); }
+      finally { SAVE.inflight = null; saveHint(); if (after) setTimeout(after, 0); }
     })();
     SAVE.inflight = run;
     return run;
+  };
+  /** El plan que se guarda lleva SIEMPRE la clave `profile` (null = sin perfil): sin ella el servidor
+      conserva el perfil guardado, y deshacer "aplicar perfil" dejaria el perfil viejo en el servidor. */
+  let SRV_PROF = false;               // el plan guardado en el servidor tiene perfil
+  let LAST_SAVED = null;              // JSON del plan tal como lo tiene el servidor (ultimo leido o escrito)
+  /** Toma nota del plan que el servidor tiene guardado (al abrir, tras /direct, perfil, sincronia). */
+  FX.noteServerPlan = p => { SRV_PROF = !!(p && p.profile); try { LAST_SAVED = p ? JSON.stringify(p) : null; } catch (e) { LAST_SAVED = null; } };
+  /** El plan local es exactamente el que el servidor tiene guardado (nada editado ni pendiente). */
+  FX.isClean = () => !SAVE.dirty && !SAVE.inflight && LAST_SAVED != null && JSON.stringify(planToSave()) === LAST_SAVED;
+  function planToSave() { return PLAN && SRV_PROF && !PLAN.profile ? Object.assign({}, PLAN, { profile: null }) : PLAN; }
+  /** Reemplaza el plan local por el que el servidor acaba de guardar (misma edicion re-aplicada),
+      sin paso de deshacer y sin volver a guardarlo. Conserva traducciones y estado del Studio. */
+  FX.adoptServerPlan = function (plan, rev) {
+    if (!plan) return;
+    takeServerPlan(plan);             // mismo filtro que tras /direct (antes de tomar nota)
+    if (rev != null) FX.serverRev = rev;
+    FX.afterPlanReplaced(true);
+    clearTimeout(SAVE.timer); SAVE.dirty = false; saveHint();
   };
   function conflictToast() {
     toast("Este proyecto cambió en otra ventana: tus últimos cambios no se guardaron.", "alert", false, [
@@ -2340,7 +3196,7 @@
   /** Vaciado al salir: fetch keepalive (si cabe) para no perder los ultimos 1-2 s de edicion. */
   FX.flushOnExit = function () {
     if (!SAVE.dirty || SAVE.off || SAVE.conflict || typeof JOB === "undefined" || !JOB || JOB === "demo") return;
-    const body = JSON.stringify(Object.assign({ plan: PLAN }, FX.serverRev != null ? { base_rev: FX.serverRev } : {}));
+    const body = JSON.stringify(Object.assign({ plan: planToSave() }, FX.serverRev != null ? { base_rev: FX.serverRev } : {}));
     try { fetch(`/plan/${JOB}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body, keepalive: body.length < 60000 }); SAVE.dirty = false; } catch (e) { /* nada */ }
   };
   window.addEventListener("pagehide", () => FX.flushOnExit());
@@ -2433,6 +3289,7 @@
     const m = $("#pvm"); if (!m) return;
     V.pause();
     const vid = $("#pvmVid"); vid.classList.remove("on"); vid.pause(); vid.removeAttribute("src");
+    PV.file = null; const pw = $("#pvmWarn"); if (pw) pw.innerHTML = "";
     m.classList.add("on");
     $("#pvmMsg").textContent = "Preparando la vista previa real (540p con audio)…"; setBar("#pvmFill", 2); $("#pvmCancel").style.display = "";
     const body = isPro() ? Object.assign(engineOpts(), { plan: planForServer(), pro: true, fmt: FMT || "9:16", format: FMT || "9:16" })
@@ -2440,25 +3297,51 @@
     PV.t0 = Date.now(); PV.seenActive = false;
     try {
       const d = await jpost(`/preview/${JOB}`, body);
-      if (d.file) return playPreview(d.file);
+      if (d.file) { playPreview(d.file); PV.file = null; return; }
       PV.polling = true; pollPreview();
     } catch (e) {
       $("#pvmMsg").textContent = `No se pudo generar la vista previa: ${e.message || e}`; $("#pvmCancel").style.display = "none";
     }
   };
+  const REFRESH_END = { done: 1, canceled: 1, timeout: 1, error: 1, superseded: 1, skipped: 1 };
   async function pollPreview() {
     if (!PV.polling) return;
     let j; try { j = await jget(`/status/${JOB}?plan=0`); } catch (e) { return setTimeout(pollPreview, 1200); }
     const pv = j.preview || {};
     const st = j.preview_state || pv.state || (j.preview_file ? "done" : "");
+    const file = j.preview_file || pv.file;
+    const msg = j.preview_message || pv.message;
+    if (PV.file) {
+      // ya se reproduce: la musica IA aun se generaba (suena la procedural) y el servidor rehace
+      // la vista previa sola; al publicar el archivo nuevo se cambia conservando el instante
+      const mr = pv.music_refresh;
+      if (file && file !== PV.file && st === "done") {
+        swapPreview(file); $("#pvmMsg").textContent = msg || "Vista previa actualizada con la música IA.";
+        previewWarnings(pv);
+        if (!(j.preview_music_pending || pv.music_pending)) { PV.polling = false; return; }
+      } else if (mr && REFRESH_END[mr]) { PV.polling = false; $("#pvmMsg").textContent = msg || "Vista previa lista."; return; }
+      else if (st === "canceled" || st === "error") { PV.polling = false; return; }
+      else {
+        const rp = pv.refresh_pct != null ? ` · ${Math.round(+pv.refresh_pct)}%` : "";
+        $("#pvmMsg").textContent = mr === "rendering" ? `Actualizando la vista previa con la música IA${rp}…`
+          : "Suena la música provisional: la vista previa se actualiza sola cuando la música IA termine de componerse.";
+      }
+      return setTimeout(pollPreview, 1500);
+    }
     // no aceptar el resultado de una vista previa anterior
     const fresh = PV.seenActive || (pv.updated && pv.updated * 1000 >= PV.t0 - 1500);
     if (st === "queued" || st === "running") PV.seenActive = true;
     const pct = j.preview_pct != null ? +j.preview_pct : +(pv.pct || 0);
     setBar("#pvmFill", Math.max(2, pct || 0));
-    const msg = j.preview_message || pv.message;
     $("#pvmMsg").textContent = st === "queued" ? (msg || "En cola…") : `${msg || stageLabel(j.preview_stage || pv.stage) || "Renderizando"}${pct ? ` · ${Math.round(pct)}%` : ""}`;
-    if (fresh && st === "done" && (j.preview_file || pv.file)) { PV.polling = false; return playPreview(j.preview_file || pv.file); }
+    if (fresh && st === "done" && file) {
+      playPreview(file); previewWarnings(pv);
+      if (j.preview_music_pending || pv.music_pending) {
+        $("#pvmMsg").textContent = "Vista previa lista con música provisional: se actualiza sola con la música IA en cuanto termine.";
+        return setTimeout(pollPreview, 1500);
+      }
+      PV.polling = false; return;
+    }
     if (fresh && (st === "error" || st === "canceled")) {
       PV.polling = false; $("#pvmCancel").style.display = "none";
       $("#pvmMsg").textContent = st === "canceled" ? "Vista previa cancelada." : `La vista previa falló: ${j.preview_error || pv.error || ""}`;
@@ -2468,10 +3351,50 @@
   }
   function playPreview(file) {
     const vid = $("#pvmVid"); const url = /^\/|^https?:/.test(file) ? file : `/video/${encodeURIComponent(file)}`;
+    PV.file = file;
     vid.src = url + (url.includes("?") ? "&" : "?") + "v=" + Date.now(); vid.classList.add("on");
     setBar("#pvmFill", 100); $("#pvmMsg").textContent = "Vista previa real lista: es el mismo motor del export, a 540p."; $("#pvmCancel").style.display = "none";
     vid.play().catch(() => {});
   }
+  /** Cambia al archivo nuevo (musica IA) en el mismo instante y con el mismo estado de reproduccion. */
+  function swapPreview(file) {
+    const vid = $("#pvmVid"), t = vid.currentTime || 0, playing = !vid.paused;
+    const url = /^\/|^https?:/.test(file) ? file : `/video/${encodeURIComponent(file)}`;
+    PV.file = file;
+    vid.addEventListener("loadedmetadata", () => { try { vid.currentTime = Math.min(t, (vid.duration || t) - 0.05); } catch (e) { /* nada */ } if (playing) vid.play().catch(() => {}); }, { once: true });
+    vid.src = url + (url.includes("?") ? "&" : "?") + "v=" + Date.now();
+    toast("Vista previa actualizada con la música IA.", "music");
+  }
+  /** Avisos del render de la vista previa (codigos -> texto humano, con enlace al elemento). */
+  function previewWarnings(pv) {
+    const box = $("#pvmWarn"); if (!box) return;
+    FX.lastWarnings = (pv.warnings || []).concat((pv.skipped || []).map(x => `omitido: ${x}`));
+    box.innerHTML = warningsHtml(FX.lastWarnings);
+    wireWarnings(box, () => FX.closePreview());
+  }
+  /** Lista de avisos del render en lenguaje humano; los de un elemento llevan "Ver". */
+  function warningsHtml(list, noGo) {
+    const seen = new Set();
+    return (list || []).map(x => C.humanSkip(typeof x === "string" ? x : JSON.stringify(x), PLAN)).filter(h => { if (seen.has(h.msg)) return false; seen.add(h.msg); return true; })
+      .map(h => `<div class="wrow ${h.level}">${ICO("alert")}<span>${esc(h.msg)}</span>${h.id && !noGo ? `<button class="linkbtn" data-go="${esc(h.track)}:${esc(h.id)}">Ver</button>` : ""}</div>`).join("");
+  }
+  FX.warningsHtml = warningsHtml;
+  function wireWarnings(box, before) {
+    box.querySelectorAll("[data-go]").forEach(b => b.onclick = () => {
+      const [track, id] = b.dataset.go.split(":");
+      if (before) before();
+      FX.goToItem(track, id);
+    });
+  }
+  FX.wireWarnings = wireWarnings;
+  /** Lleva el editor a un elemento: lo selecciona, mueve el playhead y abre el inspector. */
+  FX.goToItem = function (track, id) {
+    if (typeof backToEditor === "function" && !$("#s-editor").classList.contains("on")) backToEditor();
+    const it = items(track).find(i => i.id === id); if (!it) return;
+    V.pause(); V.currentTime = Math.max(0, C.itemStart(track, it) + (C.isEvent(track) ? -0.1 : 0.05));
+    FX.select(track, id); FX.focusElem();
+    const el = document.querySelector(`[data-fx="${track}:${CSS.escape(id)}"]`); if (el) el.scrollIntoView({ block: "nearest", inline: "center" });
+  };
   FX.closePreview = function () { PV.polling = false; const m = $("#pvm"); m.classList.remove("on"); const v = $("#pvmVid"); v.pause(); };
   FX.cancelPreview = async function () { PV.polling = false; try { await fetch(`/cancel/${JOB}?only=preview`, { method: "POST" }); } catch (e) { /* nada */ } $("#pvmMsg").textContent = "Vista previa cancelada."; $("#pvmCancel").style.display = "none"; };
   function setBar(sel, pct) { const el = $(sel); if (el) el.style.width = Math.max(2, Math.min(100, pct)) + "%"; }
@@ -2494,12 +3417,13 @@
       return `<span class="stg ${cls}"><span class="d"></span>${l}</span>`;
     }).join("") : "";
     const w = $("#r-warn");
-    if (w) w.innerHTML = (j.warnings || []).map(x => `<div>${ICO("alert")}<span>${esc(typeof x === "string" ? x : JSON.stringify(x))}</span></div>`).join("");
+    if (w) w.innerHTML = warningsHtml(j.warnings || [], true);
   };
   FX.cancelRender = async function () {
     const b = $("#r-cancel"); if (b) { b.disabled = true; b.innerHTML = `<span class="spinner"></span> Cancelando…`; }
     window.RENDER_CANCELED = true;
-    try { await fetch(`/cancel/${JOB}`, { method: "POST" }); } catch (e) { /* el poll lo resolvera */ }
+    // solo el export (?only=job): la vista previa, la musica IA y el analisis de fondo siguen
+    try { await fetch(`/cancel/${JOB}?only=job`, { method: "POST" }); } catch (e) { /* el poll lo resolvera */ }
   };
 
   // ------------------------------------------------------------------ presets de marca
@@ -2559,6 +3483,11 @@
 
   // ------------------------------------------------------------------ inicio del editor
   FX.init = function () {
+    // el plan recien leido del servidor: mismo filtro que tras /direct, antes de tomar nota de el
+    if (isPro()) C.dedupeFx(PLAN.fx);
+    syncLocked();
+    FX.noteServerPlan(PLAN);
+    noteGrid();
     try { const v = localStorage.getItem("reelfy.exact"); if (v === "0") FX.exactOn = false; } catch (e) { /* sin storage */ }
     const bt = $("#btnExact"); if (bt) bt.classList.toggle("on", FX.exactOn);
     FX.syncMode();

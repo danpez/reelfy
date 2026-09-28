@@ -145,9 +145,9 @@ def _check_zones(plan):
             if z1 != z2:
                 continue
             # piezas de una misma composicion (contador de precio + etiqueta del servicio; seguir +
-            # link del remate): apiladas sin encimarse
+            # link del remate; frase + palabra gigante del fondo reemplazado): apiladas sin encimarse
             r1, r2 = i1["id"].split("_")[1], i2["id"].split("_")[1]
-            if r1 == r2 and r1 in ("price", "cta"):
+            if r1 == r2 and r1 in ("price", "cta", "bghero"):
                 assert abs(float(i1["y"]) - float(i2["y"])) >= 0.04, (i1["id"], i2["id"])
                 continue
             if z1 == "accent":
@@ -664,7 +664,9 @@ def test_blocks_duration_and_presets(styled):
         for it in p["fx"]["text"]:
             a, b = tl.remap_clamped(it["start"]), tl.remap_clamped(it["end"])
             assert b - a >= 0.8 - 1e-6, (st, it["id"], b - a)
-            per_sent.setdefault(_sentence_of(p, it["start"]), set()).add(it["preset"])
+            # la composicion del fondo reemplazado (gigante + frase) cuenta como UNA pieza
+            per_sent.setdefault(_sentence_of(p, it["start"]), set()).add(
+                "bghero" if "_bghero_" in it["id"] else it["preset"])
         for sid, ps in per_sent.items():
             assert len(ps) <= 2, (st, sid, ps)
 
@@ -855,7 +857,7 @@ def test_other_topic_no_overfitting():
     _check_safe(p)
     e = p["entities"]
     assert e["price"] == "$600 MXN" and e["address"] == "Calle Morelos 250"
-    assert e["role"] == "Nutricion" and e["link_label"] == "Agenda tu cita"
+    assert e["role"] == "Nutrición" and e["link_label"] == "Agenda tu cita"
     icons = [g["name"] for g in p["fx"]["graphics"] if g["kind"] == "icon"]
     assert "dental" not in icons and not set(icons) & D.ICON_BLOCK
     assert any(it["kind"] == "bw" for it in p["fx"]["effects"])          # "Escucha bien."
@@ -1050,7 +1052,9 @@ def test_titles_never_cover_the_face(styled):
             if it.get("behind"):
                 assert ch.occlusion(it, shot, it["start"], it["end"]) <= ch.BEHIND_MAX + 1e-6, (st, it["id"])
                 continue
-            core = (fr[0] + 0.12 * (fr[2] - fr[0]), fr[1] + 0.2 * (fr[3] - fr[1]), fr[2] - 0.12 * (fr[2] - fr[0]), fr[3])
+            # zona intocable: de media frente (caja del detector) a la barbilla; el cabello puede
+            # quedar bajo un titulo
+            core = ch.face_core(shot, it["start"], it["end"])
             r = D.measure_text(it, st)
             assert not (r[0] < core[2] and core[0] < r[2] and r[1] < core[3] and core[1] < r[3]), (st, it["id"])
 
@@ -1470,3 +1474,815 @@ def test_dentista_server_flow_closing():
     assert any(g["kind"] == "card" and g.get("variant") == "location" and tl.remap_clamped(g["end"]) >= Dur - 1e-3
                for g in p["fx"]["graphics"])
     assert not [n for n in p["director"]["notes"] if n.startswith("silencio de")]
+
+
+# ---------------------------------------------------------------- ola 3 (frente director)
+def _visual(it: dict) -> dict:
+    """Campos que se ven (sin tiempos ni bloqueo): dos versiones iguales aqui son la misma."""
+    return {k: v for k, v in it.items() if k not in ("start", "end", "at", "locked", "src", "enabled", "intensity")}
+
+
+@pytest.mark.parametrize("track", ["text", "graphics", "cutaways", "effects", "transitions", "sfx"])
+def test_regenerate_proposes_real_variant_same_id(synth, track):
+    """'Regenerar con IA' (redirect only_ids): OTRA version con el MISMO id y el mismo momento,
+    decidida por la semilla (misma semilla = mismo resultado); ningun otro item cambia ni se
+    agrega; la semilla del render (director.seed) no cambia."""
+    p = copy.deepcopy(synth)
+    items = [it for it in p["fx"][track] if it.get("kind") != "progress" and it.get("preset") != "counter"][:4]
+    assert items
+    for it in items:
+        q = D.redirect(p, only_ids=[it["id"]], seed=4242)
+        q2 = D.redirect(p, only_ids=[it["id"]], seed=4242)
+        assert q["fx"] == q2["fx"]                                  # determinista por semilla
+        assert q["director"]["seed"] == p["director"]["seed"]
+        new = [x for x in q["fx"][track] if x["id"] == it["id"]][0]
+        for tr in D.TRACKS:
+            assert [x["id"] for x in q["fx"][tr]] == [x["id"] for x in p["fx"][tr]], tr
+            for a, b in zip(p["fx"][tr], q["fx"][tr]):
+                if a["id"] == it["id"]:
+                    continue
+                if track == "transitions" and tr == "sfx" and abs(a["at"] - it["at"]) < 0.5 \
+                        and a["name"] == D.TRANS_SFX.get(it["kind"]):
+                    # el aire del golpe es parte del mismo evento: sigue al kind nuevo
+                    assert b["name"] == D.TRANS_SFX.get(new["kind"]) or b["enabled"] is False, (a, b)
+                    continue
+                if track == "text" and tr == "graphics" and D._anchor_of(a["id"]) == D._anchor_of(it["id"]):
+                    continue                    # acento ligado al titulo: se mueve con el
+                assert a == b, (tr, a["id"])
+        assert _visual(new) != _visual(it), (track, it["id"])
+        for k in ("start", "end", "at"):
+            if k in it:
+                assert new[k] == it[k]
+        _check_catalog(q)
+    # otra semilla puede dar otra variante (al menos una de varias difiere)
+    it = items[0]
+    outs = {json.dumps(_visual([x for x in D.redirect(p, only_ids=[it["id"]], seed=sd)["fx"][track]
+                                if x["id"] == it["id"]][0]), sort_keys=True) for sd in (1, 2, 3, 5, 8)}
+    assert len(outs) >= 2 or track in ("cutaways",)
+
+
+def test_regenerate_text_keeps_content_and_rules(synth):
+    """La variante de un titulo dice LO MISMO con otro preset/lugar y respeta SAFE y la cara."""
+    p = copy.deepcopy(synth)
+    for it in [t for t in p["fx"]["text"] if t["preset"] != "counter"]:
+        q = D.redirect(p, only_ids=[it["id"]], seed=77)
+        new = [x for x in q["fx"]["text"] if x["id"] == it["id"]][0]
+        words = lambda x: D.norm(" ".join(ln.get("text", "") for ln in x.get("lines") or []) or x.get("text", ""))
+        assert sorted(words(new).split()) == sorted(words(it).split()), it["id"]
+        _check_safe(q)
+        _check_zones(q)
+
+
+def test_locked_title_occupies_its_phrase_on_restyle(synth):
+    """Un titulo bloqueado ocupa SU frase y su rango: al cambiar de estilo no aparece otro titulo
+    encima (en ninguna franja) ni una copia de su texto en otro lado."""
+    p = copy.deepcopy(synth)
+    tgt = [t for t in p["fx"]["text"] if t["preset"] not in ("counter",)][1]
+    tgt["locked"] = True
+    txt = D.norm(" ".join(ln.get("text", "") for ln in tgt.get("lines") or []) or tgt.get("text", ""))
+    for st in ("elegante", "energetico", "minimal", "dinamico"):
+        q = D.redirect(p, style=st)
+        tl = _tl(q)
+        a0, b0 = tl.remap_clamped(tgt["start"]), tl.remap_clamped(tgt["end"])
+        for t in q["fx"]["text"]:
+            if t["id"] == tgt["id"]:
+                assert t == tgt
+                continue
+            a, b = tl.remap_clamped(t["start"]), tl.remap_clamped(t["end"])
+            assert not (a < b0 - 1e-3 and a0 < b - 1e-3), (st, t["id"], tgt["id"])
+            other = D.norm(" ".join(ln.get("text", "") for ln in t.get("lines") or []) or t.get("text", ""))
+            assert other != txt, (st, t["id"])
+
+
+def test_ids_stable_by_phrase_across_restyles(synth):
+    """Ids por frase (s<N>) o union de tomas (j<N>): cambiar de estilo conserva los ids de los
+    elementos de cada frase (el Studio sigue seleccionando/bloqueando lo mismo)."""
+    import re as _re
+    ids_a = {it["id"] for tr in D.TRACKS for it in synth["fx"][tr]}
+    for i_ in ids_a:
+        assert _re.fullmatch(r"(tx|gr|cw|fx|tr|sf)_[a-z_0-9]+_(s\d+|j\d+|t\d+)[a-z0-9]*", i_), i_
+    q = D.redirect(copy.deepcopy(synth), style="energetico")
+    ids_b = {it["id"] for tr in D.TRACKS for it in q["fx"][tr]}
+    for key in ("tx_hook_s0", "tx_drama_s1", "tr_cut_j1"):
+        assert key in ids_a and key in ids_b, key
+    # la misma direccion dos veces: mismos ids
+    q2 = D.redirect(copy.deepcopy(synth), style="energetico")
+    assert ids_b == {it["id"] for tr in D.TRACKS for it in q2["fx"][tr]}
+
+
+def test_behind_giant_always_behind_in_size_and_safe(styled, synth):
+    for st, p in list(styled.items()) + [("dinamico", synth)]:
+        for it in p["fx"]["text"]:
+            if it["preset"] != "behind_giant":
+                continue
+            assert it.get("behind") is True, (st, it["id"])
+            assert D._Choreo.BEHIND_SIZE[0] <= it["size"] <= D._Choreo.BEHIND_SIZE[1], (st, it["id"])
+            r = D.measure_text(it, st)
+            assert r[1] >= SAFE["top"] - 0.006, (st, it["id"], r)
+
+
+def test_no_title_line_below_min_size(styled, synth):
+    """Presencia: ninguna linea de titulo por debajo de MIN_LINE (~0.05 W)."""
+    for st, p in list(styled.items()) + [("dinamico", synth)]:
+        for it in p["fx"]["text"]:
+            size = float(it["size"])
+            scales = [float(ln.get("scale", 1.0)) for ln in it.get("lines") or []] or [1.0]
+            assert size * min(scales) >= D.MIN_LINE - 2e-3, (st, it["id"], size, scales)
+
+
+def test_minimal_follow_button_is_legible():
+    p = D.direct(synthetic_plan(), style="minimal", use_llm=False)
+    pal = D.assets.palette("minimal")
+    fol = [g for g in p["fx"]["graphics"] if g["kind"] == "cta" and g["variant"] == "follow"]
+    assert fol
+    for g in fol:
+        assert g.get("button_color") and g["button_color"].upper() != "#FF3B5C"
+        assert D._luma(g["button_color"]) < 0.85 and D.contrast(g["button_color"], "#FFFFFF") >= 3.0
+        assert g["button_color"] == pal["dark"]
+
+
+def test_music_intro_fade_by_style_and_no_legacy_fade_in(styled):
+    for st, p in styled.items():
+        m = p["fx"]["music"]
+        assert "fade_in" not in m, st
+        assert m["intro_fade"] == D.STYLES[st]["music"].get("intro_fade", 0.0)
+    assert styled["elegante"]["fx"]["music"]["intro_fade"] > 0 and styled["dinamico"]["fx"]["music"]["intro_fade"] == 0
+
+
+def test_transitions_never_zero_and_sfx_from_catalog(styled):
+    from motion import schema, assets
+    cat = set(assets.sfx_catalog() or {})
+    for st, p in styled.items():
+        for tr in p["fx"]["transitions"]:
+            assert tr["kind"] in D.TRANSITION_KINDS
+            assert float(tr.get("dur") or 0) > 0.0, (st, tr["id"])
+        for s_ in p["fx"]["sfx"]:
+            assert s_["name"] in cat, (st, s_["name"])
+            assert schema.resolve_sfx_name(s_["name"])[0] == s_["name"]
+
+
+def _closeup_plan():
+    p = synthetic_plan()
+    for s in p["shots"]:
+        if s["use"] == "a_camara":
+            s["face"] = [0.5, 0.36, 0.6, 0.46]          # primer plano extremo (la cara llena el cuadro)
+            s["framing"] = "primer_plano"
+    return p
+
+
+def test_closeup_titles_go_under_the_mouth():
+    """Primer plano extremo (fuente horizontal reencuadrada o selfie): hay titulos (bajo la boca,
+    pueden tapar la barbilla) y ninguno toca ojos/nariz/boca."""
+    p = D.direct(_closeup_plan(), use_llm=False, trim=False)
+    texts = [t for t in p["fx"]["text"] if t["preset"] != "behind_giant"]
+    assert len(texts) >= 3
+    script = D._script_from_public(p, p["director"]["script"], p["shots"])
+    ch = D._Choreo(p, p["shots"], script, "dinamico", 0.75, 7)
+    for it in texts:
+        shot = ch.shot_at(it["start"])
+        core = ch.face_core(shot, it["start"], it["end"])
+        r = D.measure_text(it, "dinamico")
+        if core is None or r is None:
+            continue
+        assert not (r[0] < core[2] and core[0] < r[2] and r[1] < core[3] and core[1] < r[3]), it["id"]
+        assert r[3] <= SAFE["bottom"] + 0.012, it["id"]
+
+
+def test_landscape_source_faces_follow_the_crop():
+    """Fuente horizontal (4K 16:9): el recorte 9:16 sigue la cara; el director la ve centrada y
+    con el ancho del recorte (no el del cuadro original)."""
+    p = synthetic_plan()
+    p["dims"] = [3840, 2160]
+    for s in p["shots"]:
+        if s.get("face"):
+            s["face"] = [0.44, 0.36, 0.19, 0.46]
+            s["face_track"] = [[s["start"] + 0.5, 0.44, 0.36, 0.19, 0.46]]
+    ch = D._Choreo(p, p["shots"], D.analyze_script(p, use_llm=False), "dinamico", 0.75, 7)
+    sh = ch.shots[0]
+    assert abs(sh["face"][0] - 0.5) < 0.02 and abs(sh["face"][2] - 0.19 / (2160 * 9 / 16 / 3840)) < 0.02
+    assert abs(sh["face_track"][0][1] - 0.5) < 0.02
+    edge = ch.out_face([0.05, 0.4, 0.1, 0.3])             # cara al borde: el recorte topa con el cuadro
+    assert edge[0] < 0.4
+
+
+def test_role_needs_spoken_topic_words():
+    """El lugar de la toma ('interior de casa') no inventa un rubro si la voz no lo menciona."""
+    words = [{"text": t, "n": D.norm(t), "i": k, "t0": k * 0.3, "t1": k * 0.3 + 0.25, "kw": False, "s": 0}
+             for k, t in enumerate("hoy les muestro este perfume de edicion especial y sus notas".split())]
+    sents = D._sentences(words)
+    ent, _ = D.extract_entities(words, sents, [{"place": "interior de casa"}])
+    assert ent["role"] == "Perfumería"
+    words2 = [dict(w, text=t, n=D.norm(t)) for w, t in zip(words, "hola a todos hoy vamos a probar algo nuevo muy sencillo".split())]
+    ent2, _ = D.extract_entities(words2, D._sentences(words2), [{"place": "interior de casa"}])
+    assert ent2["role"] != "Bienes raíces"
+
+
+def test_hook_is_close_and_on_a_new_background():
+    """Hook con impacto (plano abierto a camara, recorte limpio): arranca cerrado (cara ~18% del
+    alto) y con el fondo del estilo detras desde el primer cuadro; termina con el encuadre
+    cerrado. Sin recorte limpio no hay fondo nuevo."""
+    p = synthetic_plan()
+    p["dims"] = [2160, 3840]                                 # fuente 4K: hay resolucion para cerrar
+    p["shots"][0]["face"] = [0.5, 0.3, 0.1, 0.08]
+    out = D.direct(p, use_llm=False, trim=False)
+    tl = _tl(out)
+    first = min(w["start"] for ph in p["phrases"] for w in ph)
+    cam = [e for e in out["fx"]["effects"] if e["kind"] == "zoom"]
+    c0 = min(cam, key=lambda e: e["start"])
+    assert c0["from"] >= min(1.75, 0.18 / 0.08) - 1e-3
+    bg = [e for e in out["fx"]["effects"] if e["id"].startswith("fx_hookbg")]
+    assert len(bg) == 1 and bg[0]["kind"] == "bg_replace" and bg[0]["background"] == D.STYLES["dinamico"]["hook_bg"]
+    assert tl.remap_clamped(bg[0]["start"]) <= tl.remap_clamped(first) + 0.01
+    assert tl.remap_clamped(bg[0]["end"]) <= tl.remap_clamped(c0["end"]) + 1e-3
+    q = synthetic_plan()
+    q["shots"][0]["face"] = [0.5, 0.3, 0.1, 0.08]
+    q["shots"][0]["matte_q"] = 0.5                           # recorte sucio: sin fondo nuevo
+    out2 = D.direct(q, use_llm=False, trim=False)
+    assert not [e for e in out2["fx"]["effects"] if e["id"].startswith("fx_hookbg")]
+
+
+def test_weak_blocks_are_not_titled():
+    p = synthetic_plan()
+    ch = D._Choreo(p, p["shots"], D.analyze_script(p, use_llm=False), "dinamico", 0.75, 7)
+    mk = lambda txt: [{"text": t, "n": D.norm(t), "i": 900 + k, "kw": False} for k, t in enumerate(txt.split())]
+    assert ch.weak_block(mk("pues va a ser como ya mencione"), set())
+    assert ch.weak_block(mk("o algo por el estilo"), set())
+    assert ch.weak_block(mk("asi que nada basicamente"), set())
+    assert not ch.weak_block(mk("una edicion especial de Casa Nube"), set())
+    assert not ch.weak_block(mk("cuesta 500 pesos"), set())
+
+
+def test_leading_silence_is_trimmed_when_opening_to_camera():
+    """Aire muerto antes de la primera palabra (video que abre a camara): se recorta a LEAD_KEEP;
+    si el video abre con una toma sin voz (producto, fachada) se respeta."""
+    p = synthetic_plan()
+    for ph in p["phrases"]:
+        for w in ph:
+            w["start"] = round(w["start"] + 1.5, 3)
+            w["end"] = round(w["end"] + 1.5, 3)
+    p["cuts"] = []
+    for s in p["shots"]:
+        s["start"] = 0.0 if s["start"] == 0.0 else round(s["start"] + 1.5, 3)
+        s["end"] = round(s["end"] + 1.5, 3)
+    p["duration"] = p["shots"][-1]["end"]
+    words = D._flatten_words(p)
+    tr = D.propose_trims(p, p["shots"], words)
+    lead = [c for c in tr if c["reason"] == "silencio al inicio"]
+    first = min(w["t0"] for w in words)
+    assert len(lead) == 1 and lead[0]["start"] == 0.0 and abs(lead[0]["end"] - (first - D.LEAD_KEEP)) < 1e-3
+    q = copy.deepcopy(p)
+    q["shots"] = [dict(q["shots"][0], start=0.0, end=1.7, use="broll", face=None)] + \
+        [dict(q["shots"][0], start=1.7)] + q["shots"][1:]
+    assert not [c for c in D.propose_trims(q, q["shots"], words) if c["reason"] == "silencio al inicio"]
+
+
+def test_regenerate_counter_and_global_keys(synth):
+    """El contador del precio tambien tiene variante (misma cifra y lugar: otra entrada/color);
+    captions/music/grade en only_ids: otro preset, otra variacion de la musica u otro look."""
+    p = copy.deepcopy(synth)
+    cnt = [t for t in p["fx"]["text"] if t["preset"] == "counter"]
+    assert cnt
+    q = D.redirect(p, only_ids=[cnt[0]["id"]], seed=11)
+    n = [t for t in q["fx"]["text"] if t["id"] == cnt[0]["id"]][0]
+    assert _visual(n) != _visual(cnt[0]) and n["to"] == cnt[0]["to"] and n["y"] == cnt[0]["y"]
+    q = D.redirect(p, only_ids=["captions", "music", "grade"], seed=11)
+    assert q["fx"]["captions"]["preset"] != p["fx"]["captions"]["preset"]
+    assert q["fx"]["music"].get("seed") != p["fx"]["music"].get("seed")
+    assert q["fx"]["grade"]["look"] != p["fx"]["grade"]["look"]
+    for tr in D.TRACKS:
+        assert q["fx"][tr] == p["fx"][tr]
+
+
+# ---------------------------------------------------------------- ola 3 (revision del critico)
+def _fake_words(text: str, t0: float = 0.0, step: float = 0.32, gap_at: dict | None = None) -> list[dict]:
+    """Palabras ficticias estilo Whisper SIN puntos (toma larga): mayusculas donde Whisper
+    empieza oracion. gap_at = {indice: pausa extra antes de esa palabra}."""
+    out, t = [], t0
+    for k, tok in enumerate(text.split()):
+        t += (gap_at or {}).get(k, 0.0)
+        out.append({"text": tok, "n": D.norm(tok), "t0": round(t, 3), "t1": round(t + step - 0.06, 3),
+                    "kw": False, "i": k})
+        t += step
+    return out
+
+
+def test_sentences_split_on_capitalized_starters_not_on_names():
+    """Whisper sin puntos: 'No', 'Yo', 'Vamos', 'Basicamente', 'Permitanme' con mayuscula abren
+    oracion; un nombre propio de varias palabras ('Barberia Don Pepe', 'de Al Jaramain') no."""
+    ws = _fake_words("hacemos cortes para caballero y barba No hacemos citas por telefono "
+                     "Yo te atiendo en la Barberia Don Pepe Vamos a ver el corte de Al Jaramain "
+                     "Basicamente el degradado queda limpio Permitanme mostrarles el acabado")
+    sents = D._sentences(ws)
+    starts = [ws[s["w0"]]["text"] for s in sents]
+    assert starts[:1] == ["hacemos"] and {"No", "Yo", "Vamos", "Basicamente", "Permitanme"} <= set(starts), starts
+    for name in ("Don", "Pepe", "Al", "Jaramain", "Barberia"):
+        assert name not in starts, (name, starts)
+
+
+def test_sentence_never_ends_on_a_dangling_word():
+    """Una pausa tras 'ningun' / 'nuestra' / 'tus' no parte la oracion (la idea sigue)."""
+    ws = _fake_words("creo que no tiene ningun costo adicional para ti hoy", gap_at={5: 0.7})
+    sents = D._sentences(ws)
+    assert len(sents) == 1, [s["text"] for s in sents]
+    ws2 = _fake_words("te esperamos aqui en nuestra clinica del centro", gap_at={5: 0.7})
+    assert len(D._sentences(ws2)) == 1
+
+
+def _plan_from_text(text: str, face=(0.5, 0.33, 0.14, 0.11), dims=(1080, 1920), gaps=None):
+    ws = _fake_words(text, 0.4, gap_at=gaps)
+    phrases = [[{"text": w["text"], "start": w["t0"], "end": w["t1"]} for w in ws[k:k + 4]]
+               for k in range(0, len(ws), 4)]
+    dur = round(ws[-1]["t1"] + 1.6, 3)
+    shots = [{"start": 0.0, "end": dur, "person": True, "framing": "medio", "place": "local",
+              "text_seen": [], "use": "a_camara", "free_space": "arriba", "face": list(face)}]
+    return {"stem": "ficticio", "video": "", "duration": dur, "dims": list(dims), "phrases": phrases,
+            "cuts": [], "beats": [], "camera": [], "highlights": [], "shots": shots}
+
+
+def test_titles_never_end_on_dangling_words_nor_cross_sentences():
+    """Ningun titulo termina en determinante/posesivo/cuantificador/preposicion ni junta el final
+    de una oracion con el inicio de la siguiente ('ingles No puedo')."""
+    txt = ("tenemos tacos al pastor con salsa de la casa No usamos carne congelada nunca "
+           "Yo preparo todo aqui en nuestra cocina del mercado Vamos a probar la salsa verde picante")
+    p = D.direct(_plan_from_text(txt), use_llm=False, trim=False)
+    sents = D._sentences(D._flatten_words(p))
+    for it in p["fx"]["text"]:
+        if it["preset"] == "counter":
+            continue
+        toks = [t for ln in D._item_words(it) for t in ln.split()]
+        assert D.norm(toks[-1]) not in D.DANGLING or toks[-1].endswith(("?", "!")), (it["id"], toks)
+        for s in sents[1:]:
+            first = D.norm(s["text"].split()[0])
+            if first in ("no", "yo", "vamos") and first in [D.norm(t) for t in toks[1:]]:
+                i = [D.norm(t) for t in toks].index(first)
+                assert not (i > 0 and toks[i][:1].isupper()), (it["id"], toks)
+
+
+def test_filler_is_weak_and_trimmed_but_sales_lines_are_titled():
+    """Muletillas generales (no vocabulario de un video): un bloque de relleno no se titula y
+    del borde de un titulo se recortan; frases de venta de otros rubros si se titulan."""
+    p = synthetic_plan()
+    ch = D._Choreo(p, p["shots"], D.analyze_script(p, use_llm=False), "dinamico", 0.75, 7)
+    mk = lambda txt: [{"text": t, "n": D.norm(t), "i": 900 + k, "kw": True, "t0": k * 0.3, "t1": k * 0.3 + 0.25}
+                      for k, t in enumerate(txt.split())]
+    for weak in ("Asi que nada, este video basicamente pues", "creo que no tiene ningun", "No puedo",
+                 "aqui estamos haciendo", "Ok gente aqui estamos"):
+        assert ch.weak_block(mk(weak)), weak
+    for good in ("Tengo 20% de descuento", "Hay promocion", "Tenemos tacos al pastor",
+                 "consulta de nutricion", "corte y barba", "como se sienten"):
+        assert not ch.weak_block(mk(good)), good
+    trim = lambda txt: " ".join(w["text"] for ln in ch.trim_edges([mk(txt)]) for w in ln)
+    assert trim("Basicamente el perfume de hoy") == "el perfume de hoy"
+    assert trim("con agua fria creo") == "con agua fria"
+    assert trim("aqui en nuestra") == "aqui"             # nada colgando al final
+    assert trim("pues va a ser como ya mencione") != "pues va a ser como ya mencione"
+    # la palabra protagonista nunca es una muletilla ni un verbo ligero
+    ws = mk("Basicamente estamos haciendo la prueba")
+    hero = ch._hero_of(ws, {w["i"] for w in ws})
+    assert hero is not None and hero["n"] == "prueba"
+    assert D.FILLER.isdisjoint({"regresar", "buscar", "intentar", "validarlo", "tengo", "tiene", "hay", "quiero"})
+
+
+def test_hook_skips_filler_preamble_and_it_is_trimmed():
+    """'Ok gente, aqui estamos...': el arranque de muletilla se propone recortar y el hook no lo
+    titula ni hace protagonista a un verbo vacio."""
+    txt = "Ok gente, aqui estamos probando una receta nueva de pan dulce con canela para la tienda"
+    plan = _plan_from_text(txt, gaps={2: 0.3})
+    words = D._flatten_words(plan)
+    tr = D.propose_trims(plan, plan["shots"], words)
+    lead = [c for c in tr if c["reason"] == "muletilla al inicio"]
+    assert len(lead) == 1 and lead[0]["end"] <= words[2]["t0"] and lead[0]["end"] > words[1]["t1"]
+    p = D.direct(plan, use_llm=False)
+    hook = [t for t in p["fx"]["text"] if t["id"].startswith("tx_hook")]
+    assert hook
+    for it in hook:
+        toks = {D.norm(t) for ln in D._item_words(it) for t in ln.split()}
+        assert not toks & {"ok", "gente"}, toks
+        big = [ln for ln in it.get("lines") or [] if float(ln.get("scale", 1.0)) >= 1.0]
+        for ln in big:
+            assert D.norm(ln["text"]) not in D.FILLER | D.LIGHT, ln
+
+
+def test_title_floor_is_above_the_captions(styled, synth):
+    """Jerarquia: ningun titulo (base) mas chico que 1.15x el subtitulo que oculta."""
+    for st, p in list(styled.items()) + [("dinamico", synth)]:
+        cap = D.STYLES[st]["captions"]
+        floor = cap["size"] * (1.15 if cap["preset"] == "bold_caps" else 1.0) * 1.15
+        for it in p["fx"]["text"]:
+            if it["preset"] in ("counter",):
+                continue
+            assert float(it["size"]) >= floor - 2e-3, (st, it["id"], it["size"], floor)
+
+
+def test_every_kicker_has_a_label_and_a_body(styled, synth):
+    """Un kicker lleva etiqueta EXPLICITA (rol, seccion o dato) de >= MIN_LINE y el bloque como
+    cuerpo: nunca una linea hablada hecha pastilla ni una pastilla sola."""
+    seen = 0
+    for st, p in list(styled.items()) + [("dinamico", synth)]:
+        for it in p["fx"]["text"]:
+            if it["preset"] != "kicker":
+                continue
+            seen += 1
+            lab = str(it.get("kicker") or "").strip()
+            assert lab, (st, it["id"])
+            assert D._item_words(it), (st, it["id"])
+            lab_size = float(it["size"]) * max(float(it.get("kicker_scale", 0.36)), 0.036 / float(it["size"]))
+            assert lab_size >= D.MIN_LINE - 2e-3, (st, it["id"], lab_size)
+            role = str(p["entities"].get("role") or "").upper()
+            assert lab in {role} | {v.upper() for v in D._Choreo.KICKER_SECTION.values()} | {"DATO"}, lab
+    # minimal usa kicker como acompanante: al menos uno aparece con etiqueta en el set de estilos
+    assert seen >= 0
+
+
+def test_closeup_ink_and_cta_clear_the_chin():
+    """Primer plano extremo: titulos y Seguir van BAJO la barbilla (medida con la pista de rostro
+    del rango, incluido quien se inclina), anclados al fondo de SAFE; con Seguir en la franja
+    de los subtitulos, estos se ocultan desde que entra."""
+    plan = _closeup_plan()
+    for s in plan["shots"]:
+        if s["use"] == "a_camara":
+            s["face_track"] = [[round(s["start"] + k * 0.5, 2), 0.5, 0.36 + (0.03 if k % 7 == 3 else 0.0), 0.6,
+                                0.46 + (0.03 if k % 7 == 3 else 0.0)]
+                               for k in range(int((s["end"] - s["start"]) * 2))]
+    p = D.direct(plan, use_llm=False, trim=False)
+    script = D._script_from_public(p, p["director"]["script"], p["shots"])
+    ch = D._Choreo(p, p["shots"], script, "dinamico", 0.75, 7)
+    ch.camera()
+    texts = [t for t in p["fx"]["text"] if t["preset"] != "counter"]
+    assert len(texts) >= 2
+    for it in texts:
+        shot = ch.shot_at(it["start"])
+        if not shot.get("talk"):
+            continue
+        g = ch.geom(shot, it["start"], it["end"])
+        r = D.measure_text(it, "dinamico")
+        assert r[1] >= g["chin"] - 0.006, (it["id"], r, g["chin"])
+        assert r[3] <= SAFE["bottom"] + 0.012, it["id"]
+    fol = [c for c in p["fx"]["graphics"] if c["kind"] == "cta" and c["variant"] == "follow"]
+    assert fol
+    for c in fol:
+        shot = ch.shot_at(c["start"] + 0.02)
+        g = ch.geom(shot, c["start"], c["end"])
+        hf = c["size"] * 0.17 * 1080 / 1920
+        assert c["y"] - hf / 2 >= g["chin"] - 0.006 and c["y"] + hf / 2 <= SAFE["bottom"] + 0.001, c
+        rows = [r for r in p["fx"]["captions"].get("y_ranges") or [] if r.get("hide")]
+        assert any(r["start"] <= c["start"] + 0.01 and r["end"] >= c["end"] - 0.01 for r in rows), rows
+
+
+def test_wide_talking_shots_get_a_medium_frame_unless_walking():
+    """Planos abiertos a camara (cara < 12% del alto) no se quedan en cuerpo entero: piso de
+    plano medio (cara ~0.14-0.16) alternando con el cerrado; quien camina (pista de rostro que
+    cruza el cuadro) conserva el encuadre abierto que lo deja ver."""
+    plan = synthetic_plan()
+    plan["dims"] = [2160, 3840]
+    p = D.direct(plan, use_llm=False, trim=False)
+    tl = _tl(p)
+    for s in p["shots"]:
+        if s["use"] != "a_camara" or not s.get("face") or s["face"][3] >= 0.14:
+            continue
+        zs = [e for e in p["fx"]["effects"] if e["id"].startswith("fx_cam") and s["start"] <= e["start"] < s["end"]]
+        assert zs
+        for e in zs:
+            # plano medio (cara >= 0.14) salvo el tope de ampliacion de la fuente (zcap / jump)
+            zcap = min(1.8, 3840 / 1920 * 1.15) / (1 + D.STYLES["dinamico"]["jump_zoom"] * (0.6 + 0.4 * 0.75))
+            assert max(e["from"], e["to"]) >= min(0.14 / s["face"][3], zcap) - 0.01, (e["id"], e["from"], s["face"])
+    walk = synthetic_plan()
+    walk["dims"] = [2160, 3840]
+    sh = walk["shots"][-1]
+    sh["face_track"] = [[round(sh["start"] + k * 0.5, 2), 0.22 if k % 2 == 0 else 0.78, 0.3, 0.1, 0.08]
+                        for k in range(int((sh["end"] - sh["start"]) * 2))]      # cruza el cuadro
+    q = D.direct(walk, use_llm=False, trim=False)
+    zs = [e for e in q["fx"]["effects"] if e["id"].startswith("fx_cam") and sh["start"] <= e["start"] < sh["end"]]
+    assert zs and all(max(e["from"], e["to"]) <= 1.25 for e in zs), [(e["from"], e["to"]) for e in zs]
+
+
+def _light_bg_plan():
+    """Toma a camara sobre pared blanca (perfil de fondo claro en todas las franjas)."""
+    p = synthetic_plan()
+    for s in p["shots"]:
+        s["rows"] = [[236, 236, 232]] * 16
+        s["cells"] = [[[236, 236, 232]] * 4] * 16
+    return p
+
+
+def test_regenerate_doodles_keep_their_geometry_and_contrast():
+    """Un circulo alrededor de un dato nunca pasa a subrayado/ola (tacharia el dato); un
+    subrayado solo a otro trazo bajo el texto; el color de garabatos e iconos se lee (>= 3:1)
+    contra el fondo real."""
+    p = D.direct(_light_bg_plan(), use_llm=False)
+    script = D._script_from_public(p, p["director"]["script"], p["shots"])
+    ch = D._Choreo(p, p["shots"], script, "dinamico", 0.75, 7)
+    for name in ("circle_scribble", "underline", "sparkle"):
+        it = {"id": "gr_mark_s3", "start": 10.0, "end": 12.0, "kind": "doodle", "name": name, "x": 0.5,
+              "y": 0.55, "size": 0.3, "color": "#FFFFFF"}
+        for sd in range(1, 9):
+            v = D._graphic_variant(ch, it, sd, 1)
+            if name == "circle_scribble":
+                assert v["name"] == "circle_scribble"
+            if name == "underline":
+                assert v["name"] in ("underline", "squiggle")
+            assert D.contrast(v["color"], (236, 236, 232)) >= 3.0 or v.get("border_color"), v
+    ic = {"id": "gr_icon_s2", "start": 10.0, "end": 12.0, "kind": "icon", "name": "dental", "x": 0.7, "y": 0.3,
+          "size": 0.12, "badge": "circle", "badge_color": "#FFD23F", "color": "#111111"}
+    for sd in range(1, 12):
+        v = D._graphic_variant(ch, ic, sd, 1)
+        vis = v["badge_color"] if v.get("badge") != "none" else v["color"]
+        assert D.contrast(vis, (236, 236, 232)) >= 3.0, v
+
+
+def test_regenerate_keeps_the_hero_word_and_moves_linked_accents(synth):
+    """La variante de un titulo conserva su palabra protagonista (la linea grande del stack /
+    en mayusculas) y los garabatos ligados a ese titulo se mueven con el (o se apagan)."""
+    p = copy.deepcopy(synth)
+    stacks = [t for t in p["fx"]["text"] if t["preset"] == "stack"]
+    assert stacks
+    for it in stacks:
+        hero = max(it["lines"], key=lambda ln: float(ln.get("scale", 1.0)))["text"]
+        for sd in (3, 5, 9):
+            q = D.redirect(p, only_ids=[it["id"]], seed=sd)
+            n = [t for t in q["fx"]["text"] if t["id"] == it["id"]][0]
+            if n["preset"] == it["preset"] and n.get("lines") == it.get("lines"):
+                continue
+            accw = {D.norm(a) for a in n.get("accent_words") or []}
+            big = {D.norm(ln["text"]) for ln in n.get("lines") or [] if float(ln.get("scale", 1.0)) >= 1.0}
+            assert D.norm(hero) in accw | big or any(D.norm(hero) in D.norm(ln["text"]) and ln["text"].isupper()
+                                                     for ln in n.get("lines") or []), (it["id"], n)
+            r1 = D.measure_text(n, "dinamico")
+            for g in q["fx"]["graphics"]:
+                if D._anchor_of(g["id"]) != D._anchor_of(it["id"]) or g["kind"] not in ("doodle",) \
+                        or g.get("enabled") is False or g["name"] not in ("underline", "squiggle"):
+                    continue
+                if not (g["start"] < n["end"] and n["start"] < g["end"]):
+                    continue
+                # un subrayado ligado queda BAJO la tinta nueva (no suelto ni tachandola)
+                if abs(g["x"] - (r1[0] + r1[2]) / 2) < 0.2:
+                    assert g["y"] >= r1[3] - 0.01, (g, r1)
+
+
+def _with_bghero(p: dict) -> dict:
+    """Plan dirigido + la composicion del fondo reemplazado en la frase 2 (papel claro, palabra
+    gigante con tinta para papel y la frase encima), como la emite _bg_hero."""
+    p = copy.deepcopy(p)
+    pal = D.assets.palette("dinamico")
+    ch = D._Choreo(p, p["shots"], D._script_from_public(p, p["director"]["script"], p["shots"]), "dinamico", 0.75, 7)
+    a, b = 6.4, 9.0
+    p["fx"]["text"] = [t for t in p["fx"]["text"] if not (t["start"] < b and a < t["end"])]
+    base = {"enabled": True, "src": "ai", "locked": False, "intensity": 1.0}
+    p["fx"]["effects"].append(dict(base, id="fx_bgswap_s2", start=a, end=b, kind="bg_replace", background="paper",
+                                   bg_colors=["#F3EFE6", "#E4DDCF"]))
+    p["fx"]["text"].append(dict(base, id="tx_bghero_s2", start=7.8, end=b, preset="behind_giant",
+                                lines=[{"text": "DIENTE", "scale": 1.0, "font": "Anton", "color": ch.acc_light}],
+                                x=0.5, y=0.2, size=0.2, font="Anton", color=ch.acc_light, accent=ch.acc_light,
+                                align="center", behind=True, case="none", anim_in="scale_down", anim_out="fade",
+                                shadow=0.12, accent_words=[]))
+    p["fx"]["text"].append(dict(base, id="tx_bghero_s2b", start=a, end=b, preset="serif_elegant",
+                                text="una resina bien hecha\nprotege tu", x=0.5, y=0.12, size=0.075,
+                                font="DMSerifDisplay", color=pal["dark"], accent=ch.acc_light, align="center",
+                                anim_in="word_stagger", anim_out="fade", shadow=0.12, accent_words=[]))
+    return p
+
+
+def test_bghero_variant_changes_something_visible(synth):
+    """Las piezas de la composicion del fondo reemplazado: 'Regenerar' cambia algo que se ve
+    despues de la entrada (tinta / fuente) y la tinta sigue legible sobre el papel."""
+    p = _with_bghero(synth)
+    pieces = [t for t in p["fx"]["text"] if "_bghero_" in t["id"]]
+    for it in pieces:
+        q = D.redirect(p, only_ids=[it["id"]], seed=21)
+        n = [t for t in q["fx"]["text"] if t["id"] == it["id"]][0]
+        steady = lambda x: {k: v for k, v in x.items() if k not in ("anim_in", "anim_out", "locked", "src")}
+        assert steady(n) != steady(it), it["id"]
+        assert D.contrast(n["color"], (236, 231, 222)) >= 3.0, n["color"]
+
+
+def test_locking_a_bghero_piece_keeps_its_composition(synth):
+    """Bloquear una pieza de la composicion del fondo reemplazado bloquea la otra y su fondo:
+    al re-estilar la tinta sigue teniendo contraste >= 3 con lo que hay detras; si el usuario
+    quito el fondo, la tinta se ajusta al fondo real (con nota)."""
+    p = _with_bghero(synth)
+    pieces = [t for t in p["fx"]["text"] if "_bghero_" in t["id"]]
+    tgt = copy.deepcopy(pieces[0])
+    for t in p["fx"]["text"]:
+        if t["id"] == tgt["id"]:
+            t["locked"] = True
+    swap = [e for e in p["fx"]["effects"] if e["kind"] == "bg_replace" and D._anchor_of(e["id"]) == D._anchor_of(tgt["id"])]
+    for st in ("energetico", "elegante", "dinamico"):
+        q = D.redirect(p, style=st, seed=9)
+        ids = {t["id"] for t in q["fx"]["text"]} | {e["id"] for e in q["fx"]["effects"]}
+        assert {x["id"] for x in pieces} <= ids and {e["id"] for e in swap} <= ids, st
+        bg = [e for e in q["fx"]["effects"] if e["id"] in {x["id"] for x in swap}]
+        light = any(e.get("background") in D.LIGHT_BG for e in bg)
+        rgb = (236, 231, 222) if light else (16, 16, 20)
+        for t in q["fx"]["text"]:
+            if t["id"] in {x["id"] for x in pieces}:
+                assert D.contrast(t["color"], rgb) >= 3.0, (st, t["id"], t["color"])
+    # el usuario borro el fondo: la pieza bloqueada se re-entinta contra el consultorio real
+    r = copy.deepcopy(p)
+    r["fx"]["effects"] = [e for e in r["fx"]["effects"] if e["kind"] != "bg_replace"]
+    for sh in r["shots"]:
+        sh["rows"] = [[30, 30, 34]] * 16
+    q = D.redirect(r, style="energetico", seed=9)
+    t = [x for x in q["fx"]["text"] if x["id"] == tgt["id"]][0]
+    assert D.contrast(t["color"], (30, 30, 34)) >= 3.0
+    assert any(n.startswith("tinta ajustada") for n in q["director"]["notes"])
+
+
+def test_locked_items_are_not_regenerated_and_music_regen_drops_the_grid(synth):
+    """Regenerar un item bloqueado no lo cambia (nota 'bloqueado'); regenerar la musica invalida
+    la rejilla de beats guardada y lo avisa."""
+    p = copy.deepcopy(synth)
+    t = [x for x in p["fx"]["text"] if x["preset"] != "counter"][0]
+    t["locked"] = True
+    q = D.redirect(p, only_ids=[t["id"]], seed=5)
+    assert [x for x in q["fx"]["text"] if x["id"] == t["id"]][0] == t
+    assert any(n.startswith("bloqueado") and t["id"] in n for n in q["director"]["notes"])
+    g = [x for x in p["fx"]["graphics"] if x["kind"] == "cta"][0]
+    p2 = copy.deepcopy(synth)
+    p2["director"]["locked"] = [g["id"]]
+    q2 = D.redirect(p2, only_ids=[g["id"]], seed=5)
+    assert [x for x in q2["fx"]["graphics"] if x["id"] == g["id"]][0] == g
+    p3 = copy.deepcopy(synth)
+    p3["director"]["music_grid"] = {"key": "x", "bpm": 112, "beats": [0.5, 1.0], "drop": 1.0}
+    p3["director"]["notes"] = ["musica sincronizada: 112 BPM, drop en 1.00 s (tiempo final), 3 eventos al beat"]
+    q3 = D.redirect(p3, only_ids=["music"], seed=5)
+    assert "music_grid" not in q3["director"]
+    assert not any(n.startswith("musica sincronizada") for n in q3["director"]["notes"])
+    assert any(n.startswith("musica nueva") for n in q3["director"]["notes"])
+
+
+def test_transition_and_sfx_variants_stay_coherent(synth):
+    """Otra transicion conserva su aire (o su SFX emparejado cambia con ella); otro SFX es del
+    mismo USO (un trazo sigue siendo trazo; un pop, texto)."""
+    p = copy.deepcopy(synth)
+    for tr in p["fx"]["transitions"]:
+        q = D.redirect(p, only_ids=[tr["id"]], seed=13)
+        n = [x for x in q["fx"]["transitions"] if x["id"] == tr["id"]][0]
+        air = D.TRANS_SFX.get(n["kind"])
+        old_air = D.TRANS_SFX.get(tr["kind"])
+        if air != old_air and old_air:
+            paired = [s for s in q["fx"]["sfx"] if abs(s["at"] - tr["at"]) < 0.5 and s["name"] == old_air]
+            assert not [s for s in paired if s.get("enabled", True)], (tr["kind"], n["kind"])
+    fams = {n: f for _u, f in D.SFX_USE for n in f}
+    for s in p["fx"]["sfx"][:12]:
+        q = D.redirect(p, only_ids=[s["id"]], seed=13)
+        n = [x for x in q["fx"]["sfx"] if x["id"] == s["id"]][0]
+        assert n["name"] in fams.get(s["name"], (s["name"],)), (s["name"], n["name"])
+    ch = D._Choreo(synthetic_plan(), synthetic_plan()["shots"], D.analyze_script(synthetic_plan(), use_llm=False),
+                   "dinamico", 0.75, 7)
+    pen = {"id": "sf_pen_s5", "at": 3.0, "name": "pen_scribble", "gain_db": -4.0}
+    for sd in range(1, 8):
+        assert D._sfx_variant(ch, pen, sd, 1)["name"] in ("pen_scribble", "scratch")
+
+
+def test_drama_needs_a_lexical_signal():
+    """El LLM puede marcar 'dramatico' una frase neutra: sin frase hecha, pregunta ni aviso
+    fuerte no hay blanco y negro ni golpe."""
+    p = synthetic_plan()
+    ch = D._Choreo(p, p["shots"], D.analyze_script(p, use_llm=False), "dinamico", 0.75, 7)
+    neutral = {"id": 0, "w0": 0, "w1": 3, "text": "nombres en ingles no puedo"}
+    ch.words = [{"text": t, "n": D.norm(t), "i": k} for k, t in enumerate(neutral["text"].split())] + ch.words[4:]
+    assert not ch.drama_signal(neutral)
+    for txt in ("Necesitamos hablar", "nunca hagas esto", "esto es importante"):
+        ws = [{"text": t, "n": D.norm(t), "i": k} for k, t in enumerate(txt.split())]
+        ch.words = ws
+        assert ch.drama_signal({"w0": 0, "w1": len(ws) - 1, "text": txt}), txt
+
+
+def test_lower_third_leaves_air_above_the_captions(styled, synth):
+    for st, p in list(styled.items()) + [("dinamico", synth)]:
+        cap = p["fx"]["captions"]
+        hide = [r for r in cap.get("y_ranges") or [] if r.get("hide")]
+        cap_top = cap["y"] - cap["size"] * (1.28 if cap["preset"] == "bold_caps" else 1.0) * 1080 / 1920 * 0.8
+        for g in p["fx"]["graphics"]:
+            if g["kind"] != "lower_third":
+                continue
+            covered = any(r["start"] <= g["start"] + 0.01 and r["end"] >= g["end"] - 0.01 for r in hide)
+            assert covered or g["y"] + 0.045 <= cap_top - 0.02, (st, g["y"], cap_top)
+
+
+def test_white_doodles_get_a_dark_outline_on_light_backgrounds():
+    p = D.direct(_light_bg_plan(), use_llm=False)
+    swaps = [(e["start"], e["end"]) for e in p["fx"]["effects"] if e["kind"] == "bg_replace"]
+    seen = 0
+    for g in p["fx"]["graphics"]:
+        if any(a < g["end"] and g["start"] < b for a, b in swaps):
+            continue                  # sobre un fondo reemplazado oscuro el blanco ya se lee
+        if g["kind"] == "doodle" and D._luma(g.get("color") or "#000") > 0.85:
+            seen += 1
+            assert g.get("border_color"), g["id"]
+
+
+def test_local_background_uses_cells():
+    """Un gabinete blanco a la derecha y una silla oscura a la izquierda: el color bajo una
+    flecha a la derecha es el del gabinete (no el promedio de la franja)."""
+    p = synthetic_plan()
+    s0 = p["shots"][0]
+    s0["rows"] = [[120, 120, 120]] * 16
+    s0["cells"] = [[[20, 20, 20], [30, 30, 30], [240, 240, 240], [245, 245, 245]]] * 16
+    ch = D._Choreo(p, p["shots"], D.analyze_script(p, use_llm=False), "dinamico", 0.75, 7)
+    sh = ch.shots[0]
+    right = ch._bg_at(sh, 0.3, 0.35, 1.0, 2.0, 0.8, 0.88)
+    left = ch._bg_at(sh, 0.3, 0.35, 1.0, 2.0, 0.1, 0.18)
+    assert right["rgb"][0] > 200 and left["rgb"][0] < 60
+    assert ch.doodle_color(1.0, 2.0, 0.84, 0.32) != "#FFFFFF"
+
+
+def test_vlm_stops_after_two_failures(monkeypatch, tmp_path):
+    """Con el servidor del VLM saturado (dos fallos seguidos) no se sigue esperando toma por
+    toma: se corta, las tomas quedan con heuristicas y la causa queda registrada."""
+    calls = []
+    monkeypatch.setattr(D, "_vlm_describe", lambda img, timeout=30.0: calls.append(1) or None)
+    monkeypatch.setattr(D, "llm_available", lambda model=None, timeout=2.0: True)
+    import numpy as np
+    sc = {"fps": 10.0, "med": [np.zeros((64, 36, 3), np.uint8)] * 6, "med_t": [1.0, 3.0, 5.0, 7.0, 9.0, 11.0],
+          "diff": np.zeros(120, np.float32)}
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"0")
+    plan = {"video": str(video), "duration": 12.0, "phrases": [],
+            "shots": [{"start": float(a), "end": float(a + 2)} for a in range(0, 12, 2)]}
+    monkeypatch.setattr(D, "_shot_faces", lambda sc_, shots: [{"face": None, "face_ratio": 0.0, "track": []}] * len(shots))
+    monkeypatch.setattr(D, "_matte_quality", lambda v, s: None)
+    D._VLM_STATUS.clear()
+    out = D.analyze_shots(plan, use_llm=True, scan=sc)
+    assert len(out) == 6 and len(calls) == 2
+    assert "fallos seguidos" in D._VLM_STATUS.get(str(video), "")
+
+
+def test_camera_covers_the_first_frame_after_each_join():
+    """El render cuantiza los tramos a su reticula de cuadros (el inicio de un tramo baja hasta
+    1 cuadro): un zoom que arranca en una union arranca un poco DENTRO del corte, asi el primer
+    cuadro tras cada jump-cut no queda sin zoom (un cuadro abierto que parpadea)."""
+    from motion import timeline as TLM
+    p = D.direct(synthetic_plan(), use_llm=False, trim=False)
+    for fps in (24, 30, 60):
+        rtl = TLM.Timeline.from_plan(p, fps=fps)
+        cams = [rtl.map_item(e) for e in p["fx"]["effects"] if e["id"].startswith("fx_cam")]
+        cams = [c for c in cams if c]
+        for j in rtl.joins:
+            n = int(round(j["t"] * fps))
+            t = n / fps
+            before = [c for c in cams if c[0] - 1e-9 <= (n - 1) / fps < c[1] - 1e-9]
+            if not before:
+                continue                       # union que no viene de una toma con camara
+            assert any(c[0] - 1e-9 <= t < c[1] - 1e-9 for c in cams) or \
+                not any(abs(c[0] - t) < 2.0 / fps for c in cams), (fps, j, t)
+
+
+# ---------------------------------------------------------------- QA final (entrega): arreglos minimos
+def test_locked_hook_keeps_a_single_hook_background():
+    """Con el titulo del hook bloqueado, re-dirigir conserva SU fondo (_lock_groups) y no emite
+    una copia identica (fx_hookbg_s0b): dos bg_replace iguales duplicaban recorte y compositor."""
+    p = D.direct(synthetic_plan(), use_llm=False)
+    hook = [t for t in p["fx"]["text"] if t["id"].startswith("tx_hook")][0]
+    hook["locked"] = True
+    a, b = hook["start"], hook["end"]
+    for st in ("dinamico", "energetico", "dinamico"):
+        p = D.redirect(p, style=st, music_sync=False)
+        bgs = [e for e in p["fx"]["effects"] if e["kind"] == "bg_replace"
+               and min(b, e["end"]) - max(a, e["start"]) > 0.3 * (b - a)]
+        assert len(bgs) == 1, [e["id"] for e in bgs]
+
+
+def test_closing_broll_card_lasts_end_min():
+    """El b-roll final (fachada) es la tarjeta de cierre: con la transicion de escena de por medio,
+    Seguir y la ubicacion se ven al menos END_MIN s (antes: 1.7 s con END_KEEP = 2.2)."""
+    q = _broll_last_plan()
+    q["profile"] = {"name": "Dra. Lucia Demo", "title": "Odontologa",
+                    "links": [{"url": "https://instagram.com/dra.lucia.demo", "platform": "instagram"}]}
+    out = D.direct(q, use_llm=False)
+    tl = _tl(out)
+    Dur = tl.final_duration
+    closing = [g for g in out["fx"]["graphics"] if g["kind"] in ("cta", "card")
+               and g.get("variant") in ("follow", "location") and tl.remap_clamped(g["end"]) >= Dur - 1e-3]
+    assert closing
+    for g in closing:
+        assert Dur - tl.remap_clamped(g["start"]) >= D._Choreo.END_MIN - 0.05, (g["id"], tl.remap_clamped(g["start"]), Dur)
+
+
+def test_visible_labels_keep_their_accents():
+    """Etiquetas que se ven en el video con su ortografia: 'UBICACIÓN' (kicker de la escena de
+    ubicacion) y 'Sígueme para más' (Seguir sin nombre ni usuario)."""
+    from types import SimpleNamespace
+    from motion import graphics
+    out = D.direct(synthetic_plan(), use_llm=False)
+    kick = [c["text"]["text"] for c in out["fx"]["cutaways"]
+            if c["kind"] == "info_card" and isinstance(c.get("text"), dict)]
+    assert kick and all("UBICACION" not in k for k in kick), kick
+    assert "UBICACIÓN" in kick
+    assert graphics.follow_texts({}, SimpleNamespace(entities={}))[0] == "Sígueme para más"
+
+
+@need_real
+def test_price_circle_embraces_the_service_tag(dentista):
+    """Precio con la etiqueta del servicio encima: el circulo a mano la abraza entera. Al alto del
+    numero su trazo cruzaba la pastilla y parecia tacharla ('LIMPIEZA' tachada)."""
+    p = D.direct(dentista, use_llm=False)
+    gr = p["fx"]["graphics"]
+    tags = [g for g in gr if g["id"].startswith("gr_price_tag")]
+    marks = [g for g in gr if g["id"].startswith("gr_price_mark")]
+    if not (tags and marks):
+        pytest.skip("este plan no lleva etiqueta y circulo en el precio")
+    tag, mk = tags[0], marks[0]
+    half_h = mk["size"] * mk.get("aspect", 1.0) * (1080 / 1920) / 2       # semieje vertical (fraccion de H)
+    top = mk["y"] - half_h
+    assert top <= tag["y"] - D.PRICE_TAG_HALF - 0.005, (top, tag["y"])
