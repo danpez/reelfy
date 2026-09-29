@@ -195,18 +195,36 @@ def extract_audio(video, wav):
         raise RuntimeError(f"No se pudo extraer el audio del video: {tail}")
 
 
-def transcribe(wav, out_prefix, glossary=""):
+def need_dtw():
+    """El DTW de whisper solo hace falta sin el alineador MMS_FA (sin el modelo o si no carga):
+    con el alineador los tiempos son los suyos. El DTW obliga a apagar flash-attention (-nfa)
+    y eso cambia lo que whisper transcribe: en un video real se salto 4 retomas (38 palabras
+    dichas que quedaban sin subtitulos y fuera de la limpieza de tomas)."""
+    try:
+        return not (paths_mod.aligner_model_ready() and align_mod.preload())
+    except Exception:  # noqa: sin poder cargar el alineador, el plan B usa el DTW
+        return True
+
+
+def transcribe(wav, out_prefix, glossary="", dtw=None):
     """whisper.cpp with word-level timestamps -> JSON.
 
     `glossary` is a custom-vocabulary initial prompt (brand/proper-noun names)
     biasing the model — a real product feature. Carried through the whole audio.
     Fixed the visible 'Keruvin'->'Kerobin' error in testing.
+    `dtw`: tiempos DTW de whisper (None = solo si hacen falta, ver need_dtw).
     """
     # --dtw: token-level timestamps via cross-attention alignment (DTW).
-    # Much tighter caption sync than the default heuristic timing.
+    # Much tighter caption sync than the default heuristic timing (mediana de error de
+    # inicio ~45 ms vs ~340 ms, ya corregido en align.whisper_words).
+    # -nfa: con flash-attention (el default) whisper.cpp APAGA el DTW en silencio
+    # ("dtw_token_timestamps is not supported with flash_attn"); cuesta ~25 % más de
+    # tiempo de whisper. -ojf: el JSON trae los tokens con su t_dtw.
+    if dtw is None:
+        dtw = need_dtw()
     base = [str(WCLI), "-m", str(paths_mod.model_path()), "-f", str(wav),
-            "-l", "es", "-ml", "1", "-sow", "--dtw", "large.v3.turbo",
-            "-oj", "-of", str(out_prefix)]
+            "-l", "es", "-ml", "1", "-sow"] + (["--dtw", "large.v3.turbo", "-nfa"] if dtw else []) + \
+        ["-ojf", "-of", str(out_prefix)]
     if glossary:
         base += ["--prompt", glossary, "--carry-initial-prompt"]
     # Primer intento con GPU (Metal). En algunas GPUs recientes (p.ej. Apple M4)
@@ -227,19 +245,13 @@ def transcribe(wav, out_prefix, glossary=""):
 
 
 def load_words(json_path):
-    """Return [{'text','start','end'}] in seconds, cleaned."""
-    data = json.load(open(json_path))
-    words = []
-    for seg in data["transcription"]:
-        txt = seg["text"].strip()
-        if not txt:
-            continue
-        words.append({
-            "text": txt,
-            "start": seg["offsets"]["from"] / 1000.0,
-            "end": seg["offsets"]["to"] / 1000.0,
-        })
-    return words
+    """Return [{'text','start','end'}] in seconds, cleaned.
+
+    Con tokens DTW (salida -ojf de transcribe) los tiempos son los del DTW corregido;
+    si no (JSON viejo -oj, o el DTW falló) los de whisper. Cada palabra trae 'tsrc'
+    ('dtw'|'whisper'): align_words lo usa para elegir el plan B y lo quita."""
+    with open(json_path) as f:
+        return align_mod.whisper_words(json.load(f))
 
 
 def group_phrases(words):
@@ -726,7 +738,7 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
 
     step(6, "Extrayendo audio…"); extract_audio(video, wav)
     gloss = f"Nombres propios y términos: {glossary}." if glossary.strip() else ""
-    step(18, "Transcribiendo (español)…"); jp = transcribe(wav, prefix, gloss)
+    step(18, "Transcribiendo (español)…"); jp = transcribe(wav, prefix, gloss, dtw=True if not align else None)
     words = load_words(jp)
     if align:
         step(42, "Afinando la sincronía de subtítulos…")
@@ -741,17 +753,7 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
         captionsmart.annotate(phrases)     # marca word['kw'] y emoji por frase
     except Exception as e:  # noqa: sin LLM el video sale igual, solo sin resaltado
         print(f"   captionsmart falló ({e}); sin resaltado inteligente")
-    step(66, "Eligiendo los mejores momentos (IA)…")
-    highlights = hl.select_highlights(hl.build_sentences(words), n=n)
-    for h in highlights:
-        h["enabled"] = True
-    step(78, "Detectando momentos de énfasis…")
-    beats, _ = edit_mod.emphasis_beats(wav)
-    broll_sugg = broll_mod.suggest(hl.build_sentences(words), probe_duration(video),
-                                   topic=glossary)   # ancla el stock al tema/producto real
-    if broll_sugg:
-        print(f"   broll: {[b['query'] for b in broll_sugg]}")
-    step(84, "Detectando silencios y muletillas…")
+    step(64, "Detectando silencios…")
     keeps, src_len = edit_mod.keep_segments(str(wav), words)   # + pausas entre palabras
     cuts, t_prev = [], 0.0                 # complement of keeps = editable cut track
     for a, b in keeps:
@@ -760,11 +762,47 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
         t_prev = b
     if src_len - t_prev > 0.05:
         cuts.append({"start": round(t_prev, 2), "end": round(src_len, 2), "enabled": True})
+    # limpieza de tomas (retomas, arranques en falso, autocorrecciones, tartamudeos, errores):
+    # cortes src "takes" APARTE de los silencios (se traslapan; el timeline los funde). Van ANTES
+    # de los shorts: un short nunca lleva una toma repetida ni se mide con ella
+    step(68, "Buscando tomas repetidas y errores…")
+    import time
+    import takes as takes_mod
+    takes_meta, topic = None, None
+    try:
+        tk = takes_mod.detect(words, src_len, audio=str(wav), existing_cuts=cuts)
+        cuts = takes_mod.merge(cuts, tk["cuts"])
+        takes_meta = tk["meta"]
+        st = takes_meta["stats"]
+        print(f"   tomas: {st['enabled']} cortes (-{st['removed_s']:.1f}s), {st['suggested']} sugerencias")
+    except Exception as e:  # noqa: la limpieza es una mejora; sin ella el video sale igual
+        print(f"   limpieza de tomas falló ({e}); solo silencios")
+    eff = takes_mod.effective_words(words, cuts)     # lo que de verdad se dice en el video final
+    if takes_meta is not None:
+        step(71, "Entendiendo el tema del video (IA)…")
+        t_tp = time.time()
+        tp = takes_mod.topic(eff)                    # None sin LLM (nunca bloquea mas de ~40 s)
+        if tp:
+            takes_meta.update(topic=tp["topic"], summary=tp["summary"], sections=tp["sections"],
+                              llm=True)
+            topic = tp["topic"]
+        takes_meta["ms"] += int(round((time.time() - t_tp) * 1000))
+    step(74, "Eligiendo los mejores momentos (IA)…")
+    highlights = hl.select_highlights(hl.build_sentences(eff, cuts=cuts), n=n, cuts=cuts,
+                                      duration=src_len)
+    for h in highlights:
+        h["enabled"] = True
+    step(80, "Detectando momentos de énfasis…")
+    beats, _ = edit_mod.emphasis_beats(wav)
+    broll_sugg = broll_mod.suggest(hl.build_sentences(eff, cuts=cuts), probe_duration(video),
+                                   topic=glossary or topic or "")   # ancla el stock al tema real
+    if broll_sugg:
+        print(f"   broll: {[b['query'] for b in broll_sugg]}")
     step(90, "Calculando el seguimiento de cámara…")
     src_w, src_h = probe_dims(video)
     _, _, _, camera = reframe_track.build(video, src_w, src_h, str(cmds))
     step(100, "Análisis listo")
-    return {
+    plan = {
         "stem": stem, "video": str(video), "wav": str(wav),
         "dims": [src_w, src_h], "duration": probe_duration(video),
         "cmds_path": str(cmds), "camera": camera,
@@ -778,6 +816,11 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
         "cuts": cuts,
         "broll": broll_sugg,
     }
+    if takes_meta is not None:
+        plan["takes"] = takes_meta          # resumen de la limpieza (tema, secciones, stats)
+    if topic:
+        plan["topic"] = topic               # plan_meta / director: el tema real, no el saludo
+    return plan
 
 
 def _emoji_overlays(emoji_windows, stem):
@@ -873,7 +916,7 @@ def render_from_plan(plan, out_dir, dynamic=True, enhance_audio=False, style="cl
         if removed < 0.2:
             keeps = None                                    # nothing worth trimming
         else:
-            print(f"   trim fusionado al render: -{removed:.1f}s de silencios/muletillas")
+            print(f"   trim fusionado al render: -{removed:.1f}s de silencios y tomas repetidas")
 
     def remap(t):
         if not keeps:

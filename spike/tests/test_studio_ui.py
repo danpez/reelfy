@@ -559,3 +559,281 @@ def test_studio_dibuja_foto_y_logo_del_perfil():
     for frag in ("/profile/media/refresh", "media_status", "Obteniendo foto…", "media_off", "media_src", "/tlsource/",
                  "Cambiar", "PF.adoptLinkMedia", "PF.setLinkMedia"):
         assert frag in pf, frag
+
+
+# ================================================================ limpieza de tomas (Guion)
+@needs_node
+def test_limpieza_unitarias_node():
+    """Logica pura de la limpieza de tomas (tests/js/takes.test.js)."""
+    r = subprocess.run([NODE, "--test", str(SPIKE / "tests" / "js" / "takes.test.js")],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+
+
+def _cortes_con_tomas(rnd, dur):
+    """Silencios + tomas (src "takes") que se solapan entre si y con los silencios."""
+    cuts = []
+    for _ in range(rnd.randint(0, 14)):
+        s = round(rnd.uniform(0, dur), 3)
+        cuts.append({"start": s, "end": round(min(dur, s + rnd.uniform(0.05, 2.5)), 3), "enabled": rnd.random() > 0.1})
+    kinds = ["retoma", "arranque_fallido", "autocorreccion", "tartamudeo", "error", "digresion"]
+    for k in range(rnd.randint(0, 10)):
+        s = round(rnd.uniform(0, dur), 3)
+        lvl = rnd.choice(["alta", "media", "baja"])
+        c = {"id": f"tk_{k}", "start": s, "end": round(min(dur, s + rnd.uniform(0.2, 9.0)), 3), "src": "takes",
+             "kind": rnd.choice(kinds), "level": lvl, "conf": {"alta": 0.9, "media": 0.6, "baja": 0.3}[lvl],
+             "enabled": lvl != "baja", "group": f"tg_{k % 3}"}
+        if rnd.random() < 0.3:
+            c["enabled"], c["user"] = not c["enabled"], True
+        cuts.append(c)
+    rnd.shuffle(cuts)
+    return cuts
+
+
+@needs_node
+def test_limpieza_duraciones_js_igual_a_python(tmp_path):
+    """Lo que el Studio muestra de la limpieza sale igual que en el motor: tiempo final con tomas
+    solapadas con silencios (Timeline), vista previa de cada nivel (takes.apply_sensitivity),
+    resumen de las tomas (takes.stats) y lo quitado (jobstore._final_duration)."""
+    import sys
+    from motion import timeline as T
+    import takes as TK
+    sys.path.insert(0, str(SPIKE / "app"))
+    import jobstore
+    rnd = random.Random(17)
+    plans = []
+    for _ in range(50):
+        dur = round(rnd.uniform(20, 400), 3)
+        shots = [{"start": 0.0}] + [{"start": round(rnd.uniform(1, dur - 1), 3)} for _ in range(rnd.randint(0, 3))]
+        plans.append({"duration": dur, "cuts": _cortes_con_tomas(rnd, dur), "shots": sorted(shots, key=lambda s: s["start"])})
+    (tmp_path / "p.json").write_text(json.dumps(plans))
+    got = _node_json(tmp_path, "d.js",
+                     "const ps=JSON.parse(fs.readFileSync(%s,'utf8'));" % json.dumps(str(tmp_path / "p.json"))
+                     + "process.stdout.write(JSON.stringify(ps.map(p=>{const tl=C.timelineFromPlan(p,30);"
+                       "return {keeps:tl.keeps,final:tl.finalDuration,removed:C.removedByCategory(p.cuts,p.duration).total,"
+                       "levels:['suave','normal','a_fondo'].map(l=>C.levelFinal(p,l,30)),"
+                       "on:['suave','normal','a_fondo'].map(l=>C.applyLevel(p.cuts,l).map(c=>c.enabled!==false)),"
+                       "stats:C.takeStats(p.cuts)};})));")
+    for p, g in zip(plans, got):
+        tl = T.Timeline.from_plan(p, fps=30)
+        assert len(g["keeps"]) == len(tl.keeps)
+        for a, b in zip(g["keeps"], tl.keeps):
+            assert abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) < 1e-6
+        assert abs(g["final"] - tl.final_duration) < 1e-6
+        assert abs((p["duration"] - g["removed"]) - jobstore._final_duration(p["duration"], p["cuts"])) < 0.01
+        for lv, fin, on in zip(("suave", "normal", "a_fondo"), g["levels"], g["on"]):
+            cs = TK.apply_sensitivity(p["cuts"], lv)
+            assert on == [c.get("enabled", True) is not False for c in cs], lv
+            assert abs(fin - T.Timeline.from_plan(dict(p, cuts=cs), fps=30).final_duration) < 1e-6, lv
+        e = TK.stats(p["cuts"])
+        s = g["stats"]
+        assert (s["n"], s["enabled"], s["suggested"]) == (e["n"], e["enabled"], e["suggested"])
+        assert abs(s["removed_s"] - e["removed_s"]) < 0.011
+        assert set(s["by_kind"]) == set(e["by_kind"])
+        for k, v in e["by_kind"].items():
+            assert s["by_kind"][k]["n"] == v["n"] and abs(s["by_kind"][k]["s"] - v["s"]) < 0.011, k
+
+
+@needs_node
+def test_formato_16_9_por_defecto_de_punta_a_punta(tmp_path):
+    """Un solo video horizontal de mas de 3 min abre y se exporta en 16:9 (no vertical): el motor
+    y el Studio conocen el formato, el Studio lo elige al abrir y lo pide al montar el proyecto."""
+    from motion import render as R
+    import pipeline
+    assert R.FORMATS["16:9"] == (1920, 1080) and pipeline.FORMATS["16:9"] == (1920, 1080)
+    html = (STATIC / "index.html").read_text()
+    assert re.search(r'"16:9":\{cw:960,ch:540,ow:1920', html), "FMTS del Studio sin 16:9"
+    assert 'data-v="16:9"' in html
+    js = _inline_script()
+    assert "fmtFromPlan()" in js and "FXCore.defaultFormat(PLAN" in js
+    assert 'body.director.fmt="16:9"' in js and "FXCore.isLongLandscape(" in js      # /compose nace en 16:9
+    assert 'seg("#segFmt",chooseFormat)' in js                                         # la eleccion se guarda
+    got = _node_json(tmp_path, "f.js", "process.stdout.write(JSON.stringify(["
+                     "C.defaultFormat({duration:1146,dims:[3840,2160],shots:[{start:0,src:'a.mov'}]}),"
+                     "C.defaultFormat({duration:39,dims:[3840,2160]}),"
+                     "C.defaultFormat({duration:1146,dims:[2160,3840]}),"
+                     "C.defaultFormat({duration:600,dims:[1920,1080],studio:{fmt:'9:16'}})]));")
+    assert got == ["16:9", "9:16", "9:16", "9:16"]
+
+
+def test_clic_en_un_corte_o_short_solo_selecciona():
+    """Auditoria UX: un clic en un bloque de Cortes (o en un short ya seleccionado) NO lo cambia;
+    restaurar o apagar es explicito (boton del inspector, R o su interruptor) con deshacer."""
+    js = _inline_script()
+    cuts = js[js.index("function renderCutsLane"):js.index("function renderCapsLane")]
+    shorts = js[js.index("function renderShortsLane"):js.index("/* ---- presets ---- */")]
+    assert "c.enabled=!on" not in cuts and "c.enabled=" not in cuts
+    assert "h.enabled=!h.enabled" not in shorts
+    assert 'inspect({type:"cut",i:ci})' in cuts
+    assert '(e.key==="r"||e.key==="R")&&!meta&&SEL&&SEL.type==="cut"' in js
+    fx = (STATIC / "fx.js").read_text()
+    clean = fx[fx.index("limpieza de tomas (Guion)"):fx.index("inicio del editor")]
+    # en el guion el clic en un corte selecciona; cambiarlo solo desde el popover o con R
+    assert 'if (cut) { select(+cut.dataset.c, { seek: true }); return; }' in clean
+    assert 'C.toggleCut(c)' in clean and "src: \"ai\"" not in clean and "src:\"ai\"" not in clean
+
+
+# ---- E2E en un navegador real con un servidor aislado y datos SINTETICOS -------------------
+_GUION = [
+    ("Bienvenida", ["Hola a todos, bienvenidos otra vez al canal.", "Hoy les traigo la bicicleta que uso todos los días para ir al trabajo.",
+                    "Es una bici urbana sencilla, pero la he usado casi dos años y ya tengo una opinión clara."]),
+    ("Por qué la compré", ["La compré porque vivo a seis kilómetros de la oficina y el tráfico en la mañana es terrible.",
+                           "Quería algo ligero que pudiera subir por las escaleras sin sufrir."]),
+    ("Los cambios", ["Tiene veintiún cambios, aunque honestamente uso tres o cuatro nada más.",
+                     "Los cambios entran suaves, pero hay que ajustarlos cada tanto porque el cable se estira."]),
+    ("Los frenos", ["Los frenos de disco mecánicos frenan muy bien, incluso con el piso mojado.",
+                    "Las pastillas me duraron unos ocho meses y cambiarlas fue muy fácil."]),
+    ("Accesorios", ["Le agregué una parrilla trasera, dos luces y un candado de cadena.",
+                    "Las luces se cargan por cable y duran como una semana de trayectos."]),
+    ("Precio", ["Me costó alrededor de nueve mil pesos, más unos dos mil en accesorios.",
+                "Comparado con lo que gastaba en transporte, la recuperé en menos de un año."]),
+    ("Conclusión", ["Si están pensando en moverse en bici por la ciudad, se las recomiendo mucho.",
+                    "Cuéntenme en los comentarios qué bici usan ustedes y nos vemos en el próximo video."]),
+]
+
+
+def _plan_limpieza(n_words=2600, seed=5):
+    """Plan v2 sintetico de un video largo: palabras, silencios y tomas con el contrato de datos."""
+    from motion import schema
+    rnd = random.Random(seed)
+    words, takes, secs, t, gid, rep = [], [], [], 1.5, 0, 0
+
+    def say(text, gap):
+        nonlocal t
+        a = len(words)
+        toks = text.split()
+        for k, tok in enumerate(toks):
+            d = 0.16 + 0.035 * len(tok) + rnd.uniform(-0.03, 0.05)
+            words.append({"text": tok, "start": round(t, 3), "end": round(t + d, 3)})
+            t += d + rnd.uniform(0.04, 0.12)
+            if tok.endswith(",") and k < len(toks) - 1 and rnd.random() < 0.5:
+                t += rnd.uniform(0.5, 1.1)
+        t += gap
+        return a, len(words) - 1
+    while len(words) < n_words:
+        for title, sents in _GUION:
+            secs.append({"start": round(t - 0.2, 3), "title": f"{title} ({rep + 1})"})
+            for s in sents:
+                r = rnd.random()
+                if r < 0.22:
+                    gid += 1
+                    fails = [say(" ".join(s.split()[:rnd.randint(3, 5)]), rnd.uniform(0.5, 1.4)) for _ in range(1 + (rnd.random() < 0.3))]
+                    keep = say(s, rnd.uniform(0.4, 1.3))
+                    for fa, fb in fails:
+                        takes.append(("retoma", fa, fb, rnd.choice([0.9, 0.7, 0.4]), f"tg_{gid}", keep))
+                elif r < 0.32:
+                    a, b = say(" ".join(s.split()[:2]) + "...", rnd.uniform(0.6, 1.2))
+                    takes.append(("arranque_fallido", a, b, 0.75, None, say(s, rnd.uniform(0.4, 1.2))))
+                elif r < 0.40:
+                    a, b = say(f"{s.split()[0]} {s.split()[0]}", 0.08)
+                    takes.append(("tartamudeo", a, b, rnd.choice([0.9, 0.35]), None, say(s, rnd.uniform(0.4, 1.2))))
+                elif r < 0.46:
+                    toks = s.split()
+                    say(" ".join(toks[:3]), 0.05)
+                    a, b = say("nueve, no,", 0.1)
+                    takes.append(("autocorreccion", a, b, 0.66, None, say(" ".join(toks[3:]), rnd.uniform(0.4, 1.2))))
+                elif r < 0.50:
+                    a, b = say("Ay, perdón, se me fue la idea.", 0.8)
+                    takes.append(("error", a, b, 0.84, None, say(s, rnd.uniform(0.4, 1.2))))
+                else:
+                    say(s, rnd.uniform(0.25, 1.6))
+        rep += 1
+    dur = round(t + 2.0, 3)
+    cuts, prev = [], 0.0
+    for w in words:
+        if w["start"] - prev >= 0.45 and w["start"] - 0.08 - (prev + 0.1) > 0.1:
+            cuts.append({"start": round(prev + (0.1 if prev else 0.0), 2), "end": round(w["start"] - 0.08, 2), "enabled": True})
+        prev = w["end"]
+    lvl = lambda c: "alta" if c >= 0.8 else "media" if c >= 0.5 else "baja"
+    for k, (kind, a, b, conf, grp, keep) in enumerate(takes):
+        cuts.append({"id": f"tk_{k:04d}", "start": round(max(words[a - 1]["end"] + 0.1 if a else 0.0, words[a]["start"] - 0.25), 2),
+                     "end": round(words[b + 1]["start"] - 0.08, 2), "enabled": lvl(conf) != "baja", "src": "takes", "kind": kind,
+                     "conf": conf, "level": lvl(conf), "reason": "", "text": " ".join(w["text"] for w in words[a:b + 1]),
+                     "kept_text": " ".join(w["text"] for w in words[keep[0]:keep[0] + 8]),
+                     "keep_ref": {"start": words[keep[0]]["start"], "end": words[keep[1]]["end"]}, "group": grp or f"tg_s{k}", "w0": a, "w1": b})
+    cuts.sort(key=lambda c: c["start"])
+    phrases, cur = [], []
+    for w in words:
+        cur.append(w)
+        if len(cur) == 3 or w["text"][-1] in ".?!,":
+            phrases.append(cur); cur = []
+    if cur:
+        phrases.append(cur)
+    plan = schema.normalize({"version": 2, "duration": dur, "dims": [320, 180], "phrases": phrases, "camera": [], "beats": [], "broll": [],
+                             "highlights": [{"start": secs[1]["start"], "end": secs[1]["start"] + 50, "title": "Por qué la compré", "enabled": True}],
+                             "shots": [{"start": 0, "end": dur, "src": "bici.mov"}], "fx": {}})
+    plan["fx"]["music"] = {"enabled": False, "source": "none"}
+    plan["fx"]["grade"]["enabled"] = False
+    long_plan = dict(plan, cuts=cuts, takes={"version": 1, "sensitivity": "normal", "topic": "Reseña de una bicicleta urbana",
+                                             "summary": None, "sections": secs, "stats": {}, "llm": True, "ms": 1})
+    return long_plan, dict(plan, cuts=[c for c in cuts if c.get("src") != "takes"]), dur
+
+
+def test_plan_sintetico_de_limpieza_es_largo_y_valido():
+    """El plan del E2E cubre el caso de video largo (2500+ palabras, 250+ cortes)."""
+    import takes as TK
+    long_plan, old_plan, dur = _plan_limpieza()
+    n_words = sum(len(p) for p in long_plan["phrases"])
+    assert n_words >= 2500 and len(long_plan["cuts"]) >= 250 and dur > 180
+    assert not any(c.get("src") == "ai" for c in long_plan["cuts"])
+    assert TK.stats(long_plan["cuts"])["n"] >= 40
+    assert "takes" not in old_plan and all(c.get("src") != "takes" for c in old_plan["cuts"])
+
+
+def test_limpieza_e2e_en_navegador(tmp_path):
+    """E2E opcional en un navegador real (tests/js/limpieza_e2e.mjs) contra un servidor AISLADO
+    (tests/devserver.sh) con datos sinteticos. Se activa con REELFY_PLAYWRIGHT=ruta a
+    playwright-core (usa Chrome; REELFY_PW_CHANNEL cambia el canal)."""
+    import os
+    import socket
+    import sys
+    import time
+    import urllib.request
+    pw = os.environ.get("REELFY_PLAYWRIGHT")
+    if not (pw and NODE):
+        pytest.skip("E2E de la limpieza desactivado (define REELFY_PLAYWRIGHT)")
+    import paths
+    sys.path.insert(0, str(SPIKE / "app"))
+    data = tmp_path / "data"
+    (data / "input").mkdir(parents=True)
+    long_plan, old_plan, dur = _plan_limpieza()
+    vid = data / "input" / "takesui_long.mp4"
+    subprocess.run([str(paths.FFMPEG), "-y", "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size=320x180:rate=30:duration={dur}",
+                    "-f", "lavfi", "-i", f"sine=frequency=330:sample_rate=48000:duration={dur}", "-c:v", "libx264",
+                    "-preset", "ultrafast", "-crf", "36", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "48k", "-shortest",
+                    "-movflags", "+faststart", str(vid)], check=True, timeout=600)
+    (data / "input" / "takesui_old.mp4").symlink_to(vid)        # el Studio pide /source/<job>
+    code = ("import json,sys; sys.path[:0]=[%r,%r]; import jobstore; jobstore.init(); d=json.load(sys.stdin)\n"
+            "for jid,p in d.items():\n"
+            "    jobstore.create(jid, kind='analyze', ext='.mp4', plan=p, phase='review', message='Análisis listo')\n"
+            "    jobstore.update(jid, state='review', pct=100)\n") % (str(SPIKE / "app"), str(SPIKE / "scripts"))
+    long_plan["video"] = old_plan["video"] = str(vid)
+    subprocess.run([sys.executable, "-c", code], input=json.dumps({"takesui_long": long_plan, "takesui_old": old_plan}),
+                   text=True, check=True, env={**os.environ, "REELFY_DATA": str(data)}, timeout=120)
+    port = None
+    for p in range(8500, 8600):
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", p)) != 0:
+                port = p
+                break
+    assert port, "sin puerto libre en 8500-8599"
+    srv = subprocess.Popen([str(SPIKE / "tests" / "devserver.sh"), str(port), str(data)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        for _ in range(120):
+            try:
+                if urllib.request.urlopen(f"http://127.0.0.1:{port}/setup", timeout=2).status == 200:
+                    break
+            except Exception:  # noqa: aun arrancando
+                time.sleep(0.5)
+        out = os.environ.get("REELFY_E2E_SHOTS") or str(tmp_path / "shots")
+        r = subprocess.run([NODE, str(SPIKE / "tests" / "js" / "limpieza_e2e.mjs"), f"http://127.0.0.1:{port}", out],
+                           capture_output=True, text=True, timeout=1200, env={**os.environ})
+        assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-3000:]
+    finally:
+        import signal
+        try:
+            os.killpg(srv.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        srv.wait(timeout=30)

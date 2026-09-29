@@ -273,6 +273,26 @@ def test_map_words(tl):
     assert all(a["start"] <= b["start"] for a, b in zip(flat, flat[1:]))
 
 
+def test_map_words_sin_astillas_de_palabras_quitadas_por_una_toma():
+    """'ponemos el [el] agua': el corte de tomas quita el primer 'el' casi entero; la reticula de
+    cuadros expande el keep siguiente y dejaba una astilla de 35 ms que salia como subtitulo
+    ('el el agua'). Con drop_spans (word_cut_spans) la palabra se va con su toma; un silencio
+    que cruza una palabra dicha no la quita, y un corte de tomas apagado tampoco."""
+    from motion.timeline import word_cut_spans
+    ws = [{"text": "ponemos", "start": 20.368, "end": 20.808}, {"text": "el", "start": 20.888, "end": 20.968},
+          {"text": "el", "start": 20.988, "end": 21.088}, {"text": "agua", "start": 21.148, "end": 21.309},
+          {"text": "café.", "start": 27.87, "end": 30.19}]
+    cuts = [{"start": 20.805, "end": 20.96, "enabled": True, "src": "takes", "kind": "tartamudeo"},
+            {"start": 28.33, "end": 29.22, "enabled": True},                          # silencio
+            {"start": 5.0, "end": 6.0, "enabled": False, "src": "takes"},             # restaurado
+            {"start": 8.0, "end": 9.0, "enabled": True, "manual": True}]
+    assert word_cut_spans(cuts) == [(8.0, 9.0), (20.805, 20.96)]
+    t = Timeline(keeps_from_cuts(cuts, 40.0), 40.0, fps=30)
+    txt = lambda out: [w["text"] for ph in out for w in ph]                         # noqa: E731
+    assert txt(t.map_words([ws])) == ["ponemos", "el", "el", "agua", "café."]     # la astilla
+    assert txt(t.map_words([ws], drop_spans=word_cut_spans(cuts))) == ["ponemos", "el", "agua", "café."]
+
+
 def test_map_words_plan_real_sin_palabras_en_cortes():
     plan = load_plan_v1()
     t = Timeline.from_plan(plan, fps=30)

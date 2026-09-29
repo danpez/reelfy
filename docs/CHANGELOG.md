@@ -2,6 +2,56 @@
 
 Formato: cada versión = un tag `reelfy-v*` que dispara el build de los 3 instaladores.
 
+## v0.5.2 — 2026-09-29
+
+**Limpieza de tomas: Reelfy quita las repeticiones, correcciones y tomas fallidas.**
+
+### Limpieza de tomas (nuevo)
+- Al analizar, Reelfy detecta en la transcripción las frases que repites (se queda la última toma
+  completa), los arranques que dejas a medias, las correcciones ("19, no, 16" -> "16"), las palabras
+  repetidas de seguido y las groserías entre tomas fallidas. Respeta el énfasis ("muy, muy") y las
+  listas. Todo con reglas locales: medio segundo para un video de 19 min.
+- Nueva pestaña **Limpieza de tomas** en el Studio (se abre sola tras el análisis): el guion con lo
+  quitado tachado y su motivo, "Escuchar cómo queda", "Restaurar" y atajos (Espacio, R, flechas);
+  filtros por tipo, mapa de cortes, "Restaurar todo" con deshacer y resumen de la IA con el tema.
+- Nivel de limpieza **Suave / Normal / A fondo**; lo que restauras o ajustas a mano se respeta al
+  cambiar de nivel.
+- El tema del video lo entiende la IA local en una sola consulta (antes tomaba la primera frase).
+- Los shorts se eligen después de la limpieza y nunca terminan dentro de una toma quitada.
+
+### Subtítulos
+- Ya no se pierden palabras: el alineador fino se descargaba de GitHub y la app instalada no lo tenía
+  (hasta 1 de cada 10 palabras desaparecía y otras se quedaban segundos en pantalla). Ahora se usan los
+  tiempos por palabra de Whisper (DTW) corregidos con la energía de la voz: error mediano ~45 ms, sin
+  descargas extra.
+
+### Proyectos y espacio en disco
+- **Eliminar proyecto** (a la Papelera; tus videos originales no se tocan) y **Liberar espacio**
+  (borra vistas previas y archivos temporales; el proyecto sigue editable). Tamaño de cada proyecto y
+  uso total en la pantalla inicial.
+- Reelfy ya no borra proyectos viejos por su cuenta: avisa cuando queda poco espacio.
+- Importar el mismo video dos veces ya no lo guarda dos veces.
+- El video combinado ya no se recodifica al triple del peso del original (tope 1.2x la fuente, o copia
+  directa cuando no hace falta procesarlo).
+
+### Formato
+- Un video largo horizontal (más de 3 min) se exporta en 16:9 por defecto (antes salía vertical).
+  En ese caso los shorts no se generan todavía (se avisa).
+
+### Correcciones
+- El recorte de silencios ya no se come el final de frase dicho en voz baja ("...a mi punto de
+  vista."): una palabra transcrita con voz queda protegida; las respiraciones y pausas se siguen
+  quitando. En el video de 19 min de prueba: 11 palabras que se cortaban, ahora 0.
+- Palabras que el alineador estiraba sobre la pausa siguiente se tachaban en el Studio y salían de
+  los subtítulos aunque se oían; ahora se quedan del lado donde hay voz.
+- Al cerrar Reelfy ya no quedan procesos corriendo (generador de música, ffmpeg de vistas previas):
+  el motor corre en su propio grupo y se barre completo al salir.
+- Un clic en un corte o un short de la línea de tiempo solo lo selecciona (antes lo activaba o
+  desactivaba).
+- El texto "silencios y muletillas" decía algo que no se hacía; ahora dice "silencios".
+
+---
+
 ## v0.5.1 — 2026-09-28
 
 **Videos largos y cortes más rigurosos.**

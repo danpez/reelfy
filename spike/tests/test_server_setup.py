@@ -245,8 +245,9 @@ print("OK")
 
 
 def test_recoleccion_de_basura_del_disco(tmp_path):
-    """Trabajos purgados -> se borran sus archivos; exports: solo los N mas recientes por
-    trabajo; huerfanos y fuentes sin uso tras su antiguedad; caches con tope LRU."""
+    """Los proyectos NUNCA se purgan solos (aunque pasen de jobstore.KEEP_LAST): sus archivos y
+    sus fuentes se quedan; exports: solo los N mas recientes por trabajo; huerfanos y fuentes sin
+    uso tras su antiguedad; caches con tope LRU."""
     code = '''
 import server as S, jobstore
 from pathlib import Path
@@ -280,16 +281,18 @@ jobstore.update(ids[2], plan={"version": 2, "fx": {"graphics": [
 touch(S.INPUT / "dead00000000.mp4", old); touch(S.OUTPUT / "dead00000000_123456.mp4", old)
 touch(S.INPUT / "dead00000001.mp4")
 jobstore.KEEP_LAST = 2
-res = S.disk_gc("prueba")
-assert res["jobs_purged"] == 1, res
-j1 = ids[0]
-assert not list(S.INPUT.glob(f"{j1}*")) and not list(S.OUTPUT.glob(f"{j1}*"))
-assert not list(S.paths.WORK.glob(f"{j1}*")) and not (S.paths.WORK / f"compose_{j1}").exists()
-assert not list(S.MUSIC_OUT.glob(f"music_{j1}_*"))
-for jid in ids[1:]:
+for _ in range(100):                     # la limpieza del arranque (a los 5 s) puede estar corriendo
+    res = S.disk_gc("prueba")
+    if "skipped" not in res:
+        break
+    time.sleep(0.1)
+assert "jobs_purged" not in res and "pressure_purged" not in res, res
+assert sorted(jobstore.all_ids()) == sorted(ids)             # ningun proyecto se purga solo
+for jid in ids:
     assert (S.INPUT / f"{jid}.mp4").exists() and (S.OUTPUT / f"{jid}_a1b2c3.mp4").exists()
-assert not (S.SOURCES / f"{srcs[0]}.mov").exists()          # su trabajo se purgo
-assert (S.SOURCES / f"{srcs[1]}.mov").exists() and (S.SOURCES / f"{srcs[2]}_proxy.mp4").exists()
+    assert (S.paths.WORK / f"{jid}.wav").exists() and (S.MUSIC_OUT / f"music_{jid}_0f0f0f.wav").exists()
+for sid in srcs:
+    assert (S.SOURCES / f"{sid}.mov").exists() and (S.SOURCES / f"{sid}_proxy.mp4").exists()
 assert not (S.SOURCES / "5ce0000000aa.mov").exists() and (S.SOURCES / "5ce0000000bb.mov").exists()
 assert (S.SOURCES / "5ce0000000cc.png").exists() and (S.SOURCES / "5ce0000000cc_t.jpg").exists()
 assert not (S.INPUT / "dead00000000.mp4").exists() and not (S.OUTPUT / "dead00000000_123456.mp4").exists()

@@ -1466,6 +1466,394 @@
     return { code: c, msg, id: f ? f.item.id : null, track: f ? f.track : null, level };
   }
 
+  // ------------------------------------------------------------------ limpieza de tomas
+  /* Cortes de limpieza: registros de plan.cuts con src "takes" (tomas repetidas, arranques en
+     falso, correcciones...), APARTE de los silencios; pueden solaparse con ellos y keepsFromCuts
+     funde los habilitados (igual que timeline.keeps_from_cuts). Todo en segundos de la FUENTE.
+     `enabled` es reversible; `user: true` = lo decidio el usuario (re-detectar lo respeta);
+     `edges: true` = el usuario movio sus bordes; `guard: true` = el motor lo dejo apagado para no
+     perder una palabra (ningun nivel lo enciende solo). */
+  const TAKE_KINDS = ["retoma", "arranque_fallido", "autocorreccion", "tartamudeo", "error", "digresion"];
+  const TAKE_LABEL = { retoma: "Toma repetida", arranque_fallido: "Arranque en falso", autocorreccion: "Corrección",
+    tartamudeo: "Tartamudeo", error: "Error", digresion: "Fuera de tema", silencio: "Silencio", manual: "Manual", ai: "Recorte IA" };
+  const TAKE_PLURAL = { retoma: "Tomas repetidas", arranque_fallido: "Arranques en falso", autocorreccion: "Correcciones",
+    tartamudeo: "Tartamudeos", error: "Errores", digresion: "Fuera de tema", silencio: "Silencios", manual: "Cortes manuales", ai: "Recortes IA" };
+  const TAKE_CHIP = { retoma: "Tomas repetidas", arranque_fallido: "Arranques", autocorreccion: "Correcciones",
+    tartamudeo: "Tartamudeos", error: "Errores", digresion: "Fuera de tema" };
+  /** Niveles de limpieza: que seguridades quedan cortadas por defecto (lo demas, sugerencia). */
+  const TAKE_LEVELS = { suave: ["alta"], normal: ["alta", "media"], a_fondo: ["alta", "media", "baja"] };
+  const LEVEL_LABEL = { suave: "Suave", normal: "Normal", a_fondo: "A fondo" };
+  const LONG_VIDEO_S = 180;             // s: "video largo" (formato 16:9 por defecto si es horizontal)
+  const FORMATS = ["9:16", "1:1", "4:5", "16:9", "original"];
+
+  const isTakeCut = c => !!c && typeof c === "object" && c.src === "takes";
+  const cutOn = c => !!c && c.enabled !== false;
+  /** Categoria de un corte: tipo de toma, "manual", "ai" (recorte del director) o "silencio". */
+  function cutKind(c) {
+    if (isTakeCut(c)) return TAKE_KINDS.includes(c.kind) ? c.kind : "retoma";
+    if (c && c.manual) return "manual";
+    if (c && c.src === "ai") return "ai";
+    return "silencio";
+  }
+  function cutPrio(c) { return isTakeCut(c) ? 3 : c && c.manual ? 2 : c && c.src === "ai" ? 1 : 0; }
+  /** Seguridad de una toma ("alta" | "media" | "baja"); sin `level`, por su `conf`. */
+  function takeLevel(c) {
+    if (c && ["alta", "media", "baja"].includes(c.level)) return c.level;
+    const f = c ? +c.conf : NaN;
+    return f >= 0.8 ? "alta" : f >= 0.5 ? "media" : "baja";
+  }
+  /** Rayas del medidor de seguridad (1..4). */
+  function confBars(c) {
+    const f = c ? +c.conf : NaN;
+    if (isFinite(f)) return Math.max(1, Math.min(4, Math.round(f * 4)));
+    return { alta: 4, media: 3, baja: 1 }[takeLevel(c)];
+  }
+
+  /** Palabras del plan en orden: [{text, start, end}] (sin vacias; un `end` roto = `start`). */
+  function planWords(phrases) {
+    const out = [];
+    (phrases || []).forEach(p => (p || []).forEach(w => {
+      if (!w || typeof w !== "object") return;
+      const t = String(w.text == null ? "" : w.text).trim(), s = +w.start, e = +w.end;
+      if (!t || !isFinite(s)) return;
+      out.push({ text: t, start: s, end: isFinite(e) && e >= s ? e : s });
+    }));
+    return out.sort((a, b) => a.start - b.start);
+  }
+
+  /** A que corte pertenece cada palabra, por su punto medio (start <= m < end).
+      owner[i] = indice en `cuts` o -1; si varios la cubren gana toma > manual > IA > silencio y,
+      a igualdad, el habilitado y luego el que empieza antes. removed[i] = 1 si algun corte
+      HABILITADO la cubre (no sale en el video). Un silencio solo cuenta si cubre la palabra entera
+      (+-SIL_TOL): una palabra dicha y estirada sobre la pausa sigue en el video. O((n + m) log). */
+  const SIL_TOL = 0.05;
+  function wordsInCuts(words, cuts) {
+    const ws = words || [], cs = cuts || [], n = ws.length;
+    const owner = new Array(n).fill(-1), removed = new Array(n).fill(0);
+    const idx = [];
+    cs.forEach((c, i) => { if (c && isFinite(+c.start) && isFinite(+c.end) && +c.end > +c.start) idx.push(i); });
+    idx.sort((a, b) => +cs[a].start - +cs[b].start || a - b);
+    const mid = ws.map(w => (w.start + w.end) / 2);
+    const order = ws.map((_, i) => i).sort((a, b) => mid[a] - mid[b] || a - b);
+    let k = 0, act = [];
+    order.forEach(i => {
+      const m = mid[i];
+      while (k < idx.length && +cs[idx[k]].start <= m) act.push(idx[k++]);
+      if (act.length) act = act.filter(j => +cs[j].end > m);
+      let best = -1;
+      act.forEach(j => {
+        const c = cs[j];
+        // un SILENCIO que solo tapa lo estirado de una palabra dicha no la quita ('café.' con la
+        // pausa siguiente dentro): el render la conserva (map_words) y aqui no sale tachada
+        if (cutPrio(c) === 0 && !(+c.start <= ws[i].start + SIL_TOL && +c.end >= ws[i].end - SIL_TOL)) return;
+        if (cutOn(c)) removed[i] = 1;
+        if (best < 0) { best = j; return; }
+        const b = cs[best], pc = cutPrio(c), pb = cutPrio(b);
+        if (pc > pb || (pc === pb && cutOn(c) && !cutOn(b))) best = j;
+      });
+      owner[i] = best;
+    });
+    return { owner, removed };
+  }
+  /** Primera y ultima palabra de cada corte: {ci: [w0, w1]} (inclusivo). */
+  function cutSpans(owner) {
+    const sp = {};
+    (owner || []).forEach((ci, i) => { if (ci < 0) return; const s = sp[ci]; if (!s) sp[ci] = [i, i]; else s[1] = i; });
+    return sp;
+  }
+  function lowerBound(arr, x) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; } return lo; }
+  /** Cortes sin palabras (silencios, recortes entre palabras): donde van en el texto.
+      -> {indice de palabra: [ci, ...]} = antes de esa palabra (n = al final). */
+  function wordlessAt(words, cuts, spans) {
+    const ws = words || [], mids = ws.map(w => (w.start + w.end) / 2), out = {};
+    (cuts || []).forEach((c, ci) => {
+      if (!c || (spans && spans[ci]) || !(+c.end > +c.start)) return;
+      const at = lowerBound(mids, (+c.start + +c.end) / 2);
+      (out[at] = out[at] || []).push(ci);
+    });
+    Object.keys(out).forEach(k => out[k].sort((a, b) => +cuts[a].start - +cuts[b].start || a - b));
+    return out;
+  }
+
+  /** Grupos de tomas (mismo `group`): {groups: {g: {cuts: [ci por inicio], keep_ref}},
+      ord: {ci: {group, i, n}}}. n cuenta la toma elegida (keep_ref): "1 de 3" = dos cortadas y
+      una que se queda. Una toma sin grupo es su propio grupo. */
+  function takeGroups(cuts) {
+    const cs = cuts || [], groups = {}, ord = {};
+    cs.forEach((c, i) => {
+      if (!isTakeCut(c)) return;
+      const g = c.group != null && c.group !== "" ? String(c.group) : `_${i}`;
+      const G = groups[g] = groups[g] || { cuts: [], keep_ref: null };
+      G.cuts.push(i);
+      if (!G.keep_ref && c.keep_ref && isFinite(+c.keep_ref.start)) G.keep_ref = { start: +c.keep_ref.start, end: +c.keep_ref.end };
+    });
+    Object.keys(groups).forEach(g => {
+      const G = groups[g];
+      G.cuts.sort((a, b) => +cs[a].start - +cs[b].start || a - b);
+      const n = G.cuts.length + (G.keep_ref ? 1 : 0);
+      G.cuts.forEach((ci, k) => { ord[ci] = { group: g, i: k + 1, n }; });
+    });
+    return { groups, ord };
+  }
+  /** Etiqueta de un corte en el guion: "Toma repetida · 1 de 3", las siguientes "2 de 3". */
+  function cutTag(c, o, full) {
+    const k = cutKind(c), base = TAKE_LABEL[k] || "Corte";
+    if (k === "retoma" && o && o.n > 1) return o.i === 1 || full ? `${base} · ${o.i} de ${o.n}` : `${o.i} de ${o.n}`;
+    return base;
+  }
+  /** Donde va la marca "Toma elegida": {indice de palabra: grupo} (primera palabra de keep_ref
+      que no esta en el grupo), solo en grupos de tomas repetidas con algun corte habilitado. */
+  function keptMarks(words, cuts, groups, owner) {
+    const ws = words || [], starts = ws.map(w => w.start), out = {};
+    Object.keys(groups || {}).forEach(g => {
+      const G = groups[g];
+      if (!G.keep_ref || !G.cuts.some(ci => cutKind(cuts[ci]) === "retoma" && cutOn(cuts[ci]))) return;
+      const mine = new Set(G.cuts);
+      let i = lowerBound(starts, G.keep_ref.start - 0.08);
+      while (i < ws.length && owner && owner[i] >= 0 && mine.has(owner[i])) i++;
+      if (i < ws.length && ws[i].start <= G.keep_ref.end + 0.05) out[i] = g;
+    });
+    return out;
+  }
+
+  function unionLen(iv) {
+    const a = iv.filter(x => x[1] > x[0]).sort((x, y) => x[0] - y[0]);
+    let tot = 0, s = -Infinity, e = -Infinity;
+    a.forEach(([x, y]) => { if (x > e) { if (e > s) tot += e - s; s = x; e = y; } else if (y > e) e = y; });
+    if (e > s) tot += e - s;
+    return tot;
+  }
+  /** Resumen de las tomas (forma de plan.takes.stats): n, habilitadas, sugerencias (apagadas sin
+      tocar) y segundos que quita cada tipo (union de sus cortes habilitados). */
+  function takeStats(cuts) {
+    const by = {}, all = []; let n = 0, en = 0, sug = 0;
+    (cuts || []).forEach(c => {
+      if (!isTakeCut(c)) return;
+      n++;
+      const k = cutKind(c), b = by[k] = by[k] || { n: 0, enabled: 0, iv: [] };
+      b.n++;
+      if (cutOn(c)) { en++; b.enabled++; b.iv.push([+c.start, +c.end]); all.push([+c.start, +c.end]); }
+      else if (!c.user) sug++;
+    });
+    const out = { n, enabled: en, suggested: sug, removed_s: round3(unionLen(all)), by_kind: {} };
+    Object.keys(by).forEach(k => { out.by_kind[k] = { n: by[k].n, enabled: by[k].enabled, s: round3(unionLen(by[k].iv)) }; });
+    return out;
+  }
+  /** Tiempo quitado por categoria sin contar dos veces lo solapado: cada instante cortado es del
+      corte de mayor prioridad que lo cubre (toma > manual > IA > silencio).
+      -> {total, cats: {categoria: s}} (segundos de la fuente, antes de la reticula de cuadros). */
+  function removedByCategory(cuts, duration) {
+    const dur = +duration > 0 ? +duration : Infinity, ev = [];
+    (cuts || []).forEach(c => {
+      if (!cutOn(c)) return;
+      const s = Math.max(0, +c.start), e = Math.min(dur, +c.end);
+      if (e > s) ev.push([s, e, c]);
+    });
+    ev.sort((a, b) => a[0] - b[0]);
+    const pts = [...new Set(ev.flatMap(x => [x[0], x[1]]))].sort((a, b) => a - b);
+    const cats = {}; let total = 0, k = 0, act = [];
+    for (let j = 0; j + 1 < pts.length; j++) {
+      const a = pts[j], b = pts[j + 1];
+      while (k < ev.length && ev[k][0] <= a) act.push(ev[k++]);
+      act = act.filter(x => x[1] > a);
+      if (!act.length) continue;
+      let best = act[0];
+      act.forEach(x => { if (cutPrio(x[2]) > cutPrio(best[2])) best = x; });
+      const kd = cutKind(best[2]);
+      cats[kd] = (cats[kd] || 0) + (b - a); total += b - a;
+    }
+    Object.keys(cats).forEach(kd => { cats[kd] = round3(cats[kd]); });
+    return { total: round3(total), cats };
+  }
+  /** Cuantos cortes hay de cada categoria (chips del guion). */
+  function kindCounts(cuts) {
+    const out = {};
+    (cuts || []).forEach(c => { if (c && +c.end > +c.start) { const k = cutKind(c); out[k] = (out[k] || 0) + 1; } });
+    return out;
+  }
+
+  /** La toma queda cortada en este nivel (solo para las que el usuario no toco). Una apagada por
+      seguridad (guard: dejaria una palabra en un fragmento que la linea de tiempo absorbe) no la
+      enciende ningun nivel: solo el usuario. */
+  function levelOn(c, level) { return !(c && c.guard) && (TAKE_LEVELS[level] || TAKE_LEVELS.normal).includes(takeLevel(c)); }
+  /** Cortes con las tomas como las deja el nivel (copias; las de user:true no cambian). */
+  function applyLevel(cuts, level) {
+    return (cuts || []).map(c => (isTakeCut(c) && !c.user ? Object.assign({}, c, { enabled: levelOn(c, level) }) : c));
+  }
+  /** Duracion final si se aplicara el nivel (vista previa de "queda m:ss"). */
+  function levelFinal(plan, level, fps) {
+    return timelineFromPlan(Object.assign({}, plan, { cuts: applyLevel((plan && plan.cuts) || [], level) }), fps).finalDuration;
+  }
+  /** El usuario movio los bordes de un corte (arrastre en el timeline o Inicio/Fin del
+      inspector): una toma queda user:true y edges:true (re-detectar y los niveles la respetan). */
+  function markEdges(c) {
+    if (isTakeCut(c)) { c.user = true; c.edges = true; }
+    return c;
+  }
+  /** Tomas que devuelve el motor (POST /takes) sobre los cortes locales: reemplazan las src "takes"
+      salvo las que el usuario toco (user o edges: esas ganan, las devuelva o no el motor); los
+      silencios, manuales y recortes de la IA quedan. -> cortes nuevos ordenados por inicio. */
+  function adoptTakeCuts(local, fromServer) {
+    const mine = new Map((local || []).filter(c => isTakeCut(c) && (c.user || c.edges) && c.id).map(c => [c.id, c]));
+    const got = (fromServer || []).filter(isTakeCut).map(c => mine.get(c.id) || c);
+    const ids = new Set(got.map(c => c.id));
+    mine.forEach((c, id) => { if (!ids.has(id)) got.push(c); });
+    return (local || []).filter(c => !isTakeCut(c)).concat(got).sort((a, b) => +a.start - +b.start);
+  }
+  /** Motivo de una toma con la hora de la toma que se queda en el reloj que se muestra: el motor
+      la escribe en tiempo de la FUENTE ("Lo repites mejor en 16:05"); el guion de Limpieza cuenta
+      en tiempo FINAL (map = tl.remapClamped), donde esa toma puede estar minutos antes. */
+  function takeReason(c, map, fmt) {
+    const r = c && c.reason != null ? String(c.reason).trim() : "";
+    const k = c && c.keep_ref ? +c.keep_ref.start : NaN;
+    if (!r || !isTakeCut(c) || !isFinite(k) || typeof map !== "function") return r;
+    const t = (fmt || fmtClock)(map(k));
+    return r.replace(/\ben \d+:\d{2}(?::\d{2})?(?=$|[\s.,;)])/, `en ${t}`);
+  }
+  /** Restaura (false) o vuelve a cortar (true) en su lugar; una toma queda user:true. */
+  function setCutEnabled(c, on) {
+    if (!c) return false;
+    c.enabled = !!on;
+    if (isTakeCut(c)) c.user = true;
+    return c.enabled;
+  }
+  function toggleCut(c) { return setCutEnabled(c, !cutOn(c)); }
+  /** Varios cortes a la vez ("Restaurar todo…"). -> cuantos cambiaron. */
+  function setCutsEnabled(cuts, idxs, on) {
+    let n = 0;
+    (idxs || []).forEach(i => { const c = (cuts || [])[i]; if (c && cutOn(c) !== !!on) { setCutEnabled(c, on); n++; } });
+    return n;
+  }
+  const inKind = (c, kind) => (kind === "silencio" ? !!c && !isTakeCut(c) && !c.manual && c.src !== "ai" : isTakeCut(c) && cutKind(c) === kind);
+  /** La categoria esta encendida: algun corte suyo habilitado. */
+  function kindOn(cuts, kind) { return (cuts || []).some(c => inKind(c, kind) && cutOn(c)); }
+  /** Enciende o apaga una categoria completa. Apagar = todos restaurados (user:true). Encender =
+      vuelven a lo que decide el nivel (sin user, salvo los de bordes movidos); si el nivel no corta
+      ninguno, todos los que no estan apagados por seguridad (guard) o, si solo quedan esos, todos.
+      Silencios: todos dentro o fuera. -> cuantos cambiaron. */
+  function setKindEnabled(cuts, kind, on, level) {
+    const cs = (cuts || []).filter(c => inKind(c, kind));
+    const want = c => (!on ? false : kind === "silencio" ? true : levelOn(c, level));
+    const any = on && kind !== "silencio" && cs.some(want);
+    const safe = cs.some(c => !c.guard);
+    let n = 0;
+    cs.forEach(c => {
+      const v = on && kind !== "silencio" && !any ? !(safe && c.guard) : want(c);
+      if (cutOn(c) !== v) n++;
+      c.enabled = v;
+      if (isTakeCut(c)) { if (!on || !any) c.user = true; else if (!c.edges) delete c.user; }
+    });
+    return n;
+  }
+  /** Cortes que se recorren en la revision (por inicio): los del filtro (tipo de toma) o, con
+      "todos", los de limpieza: tomas (+ silencios si se muestran). Los cortes manuales y los
+      recortes de la IA se ven en el guion pero son de Edicion: ni cuentan en "Todos" ni los
+      toca "Restaurar todo". */
+  function reviewItems(cuts, filter, sil) {
+    const cs = cuts || [], out = [];
+    cs.forEach((c, i) => {
+      if (!c || !(+c.end > +c.start)) return;
+      const k = cutKind(c);
+      if (filter && filter !== "todos") { if (k !== filter) return; }
+      else if (k === "silencio" ? !sil : !isTakeCut(c)) return;
+      out.push(i);
+    });
+    return out.sort((a, b) => +cs[a].start - +cs[b].start || a - b);
+  }
+
+  /** Secciones utiles para el guion: ordenadas, la primera desde 0 si empieza en los primeros
+      30 s (lo de antes es su introduccion) y sin capitulos pegados: una que empieza a menos de
+      `minGap` s de la anterior se descarta (la IA a veces devuelve dos casi en el mismo punto). */
+  function cleanSections(sections, o) {
+    const minGap = (o && o.minGap) || 20, out = [];
+    (sections || []).filter(s => s && isFinite(+s.start))
+      .map(s => ({ start: Math.max(0, +s.start), title: String(s.title == null ? "" : s.title).trim() }))
+      .sort((a, b) => a.start - b.start)
+      .forEach(s => {
+        if (!out.length) out.push(s.start < 30 ? Object.assign(s, { start: 0 }) : s);
+        else if (s.start - out[out.length - 1].start >= minGap) out.push(s);
+      });
+    return out;
+  }
+  /** Parrafos del guion: [{w0, w1 (exclusivo), sec}] sobre `words`. Nuevo parrafo en fin de
+      oracion (. ? ! …) con >= minWords, en una pausa >= gap s, al llegar a maxWords o al empezar
+      una seccion; nunca parte un corte de toma. sec = indice en `sections` (ordenadas) o -1. Una
+      seccion (tiempos de la IA) abre parrafo al inicio de su oracion: hasta 3 palabras atras o,
+      si no hay, al terminar la oracion en curso (hasta 6 palabras adelante, sin partir una toma). */
+  function scriptParagraphs(words, owner, cuts, sections, o) {
+    const opt = o || {}, minW = opt.minWords || 24, maxW = opt.maxWords || 90, gapS = opt.gap || 2.0;
+    const ws = words || [], n = ws.length, secs = (sections || []).map(s => +s.start);
+    if (!n) return [];
+    const secAt = t => { let k = -1; secs.forEach((s, j) => { if (s <= t + 1e-6) k = j; }); return k; };
+    const sameTake = i => owner && owner[i] >= 0 && owner[i] === owner[i - 1] && isTakeCut(cuts[owner[i]]);
+    const endS = t => /[.?!…]["»”)]?$/.test(t);
+    const out = [];
+    let cur = { w0: 0, sec: secAt(ws[0].start) }, ns = cur.sec + 1, pend = null;
+    for (let i = 1; i < n; i++) {
+      const prev = ws[i - 1], w = ws[i], len = i - cur.w0;
+      let brk = -1;
+      while (ns < secs.length && secs[ns] <= w.start + 1e-6) {
+        let back = -1;
+        for (let q = i; q >= Math.max(cur.w0 + 1, i - 3); q--) if (endS(ws[q - 1].text)) { if (!sameTake(q)) back = q; break; }
+        pend = { sec: ns, until: i + 6, back };
+        ns++;
+      }
+      if (pend) {
+        if (pend.back >= 0) brk = pend.back;
+        else if ((endS(prev.text) || i >= pend.until) && !sameTake(i)) brk = i;
+      } else if (!sameTake(i) && (len >= maxW || (endS(prev.text) && len >= minW) || (w.start - prev.end >= gapS && len >= 8))) brk = i;
+      if (brk >= 0) { cur.w1 = brk; out.push(cur); cur = { w0: brk, sec: pend ? pend.sec : cur.sec }; pend = null; }
+    }
+    cur.w1 = n; out.push(cur);
+    return out;
+  }
+
+  /** "Escuchar como queda": de `pad` s antes a `pad` s despues del corte en tiempo FINAL (los
+      cortes habilitados se saltan). -> [inicio, fin] en tiempo original. */
+  function listenRange(tl, c, pad) {
+    const p = pad == null ? 2 : +pad;
+    const a = Math.max(0, tl.remapClamped(+c.start) - p), b = Math.min(tl.finalDuration, tl.remapClamped(+c.end) + p);
+    return [tl.inverse(a), tl.inverse(b)];
+  }
+  /** Duracion legible: "8.4 s" (menos de un minuto) o "m:ss". */
+  function fmtLen(s) {
+    const v = Math.max(0, +s || 0);
+    return v < 59.95 ? `${v.toFixed(1)} s` : fmtClock(v);
+  }
+
+  /** Es UN solo video horizontal de mas de 3 min (un video de YouTube, no un short). `dims`
+      = {w, h} de display (el reproductor ya aplica la rotacion); si no, plan.dims. */
+  function isLongLandscape(plan, dims) {
+    if (!plan) return false;
+    const d = dims && +dims.w > 0 && +dims.h > 0 ? [+dims.w, +dims.h] : Array.isArray(plan.dims) ? [+plan.dims[0], +plan.dims[1]] : null;
+    if (!d || !(d[0] > d[1]) || !(+plan.duration > LONG_VIDEO_S)) return false;
+    return new Set((plan.shots || []).map(s => s && s.src).filter(Boolean)).size <= 1;
+  }
+  /** Formato de salida del proyecto: el que eligio el usuario (plan.studio.fmt) o, por defecto,
+      16:9 para un solo video horizontal largo y 9:16 para lo demas. */
+  function defaultFormat(plan, dims) {
+    const st = plan && plan.studio && plan.studio.fmt;
+    if (FORMATS.includes(st)) return st;
+    return isLongLandscape(plan, dims) ? "16:9" : "9:16";
+  }
+  /** Formato al ABRIR el proyecto -> {fmt, legacy}. El elegido (plan.studio.fmt, que el analisis
+      anota al nacer el proyecto) manda. Sin el, un plan de antes del formato por proyecto (tampoco
+      tiene plan.takes) se edito y exporto en 9:16: se queda en 9:16 (legacy: el Studio lo anota,
+      nunca cambia de formato ni re-analiza solo por abrirlo). Uno nuevo: defaultFormat. */
+  function projectFormat(plan, dims) {
+    const st = plan && plan.studio && plan.studio.fmt;
+    if (FORMATS.includes(st)) return { fmt: st, legacy: false };
+    if (!plan || !plan.takes) return { fmt: "9:16", legacy: !!plan };
+    return { fmt: defaultFormat(plan, dims), legacy: false };
+  }
+  /** Los shorts son VERTICALES (Reels, TikTok, Shorts) y el motor los corta del video final: con
+      una salida horizontal (16:9, u "original" de una fuente horizontal) no se piden. */
+  function shortsFor(fmt, dims) {
+    if (fmt === "16:9") return false;
+    if (fmt === "original" && dims && +dims.w > +dims.h) return false;
+    return true;
+  }
+
   return {
     MIN_KEEP, MIN_FRAG, SNAP_S, TRACKS, EVENT_TRACKS, RULER_STEPS, SAFE, XC, SYM_W, SNAP_X, PRO_LANGS, MIXERS,
     symDefaults, ltCentered, setLowerThirdAlign, snapCenterX, lowerThirdReveal, lowerThirdX,
@@ -1487,5 +1875,10 @@
     activeBump, italicOf, textUsable,
     textFields, setTextFields, textState, textStatus, translationRequest, applyTranslation, restoreOriginalTexts,
     dropReemitted,
+    TAKE_KINDS, TAKE_LABEL, TAKE_PLURAL, TAKE_CHIP, TAKE_LEVELS, LEVEL_LABEL, LONG_VIDEO_S, FORMATS,
+    isTakeCut, cutOn, cutKind, takeLevel, confBars, planWords, wordsInCuts, cutSpans, wordlessAt, takeGroups, cutTag,
+    keptMarks, unionLen, takeStats, removedByCategory, kindCounts, levelOn, applyLevel, levelFinal,
+    setCutEnabled, toggleCut, setCutsEnabled, kindOn, setKindEnabled, reviewItems, cleanSections, scriptParagraphs, listenRange, fmtLen,
+    markEdges, adoptTakeCuts, takeReason, isLongLandscape, defaultFormat, projectFormat, shortsFor,
   };
 });

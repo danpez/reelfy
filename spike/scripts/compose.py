@@ -16,10 +16,18 @@ Lienzo: dims de display del primer video. Un lienzo VERTICAL se limita a 1.5x la
 9:16 (1620x2880): el base del render es de 1080x1920 (la camara hace zoom sobre el base, no
 sobre la fuente), asi que un 4K vertical (2160x3840) solo cuesta ~33 % mas CPU y disco sin
 mejorar la salida. Horizontal/cuadrado no se limitan: el recorte 9:16 necesita su altura.
+
+Disco: el intermedio NUNCA pesa mas que su fuente. El bitrate se limita a 1.2x el de la fuente
+de mas bitrate del montaje (y a un maximo sano, REELFY_COMPOSE_MAX_MBPS): un 4K de iPhone a
+25 Mbps se reescribia a ~75 Mbps (3x la fuente). Un UNICO video completo que ya cumple el
+formato del intermedio (H.264/HEVC SDR bt709 8 bits, sin rotar, al tamano del lienzo, a los fps
+del montaje, con audio, sin recortes ni fundidos ni volumen) no se re-codifica: el video se
+copia tal cual (sin perdida, en segundos) y solo el audio se normaliza a AAC 48 kHz estereo.
 """
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 
 import paths
@@ -32,6 +40,11 @@ FPS_DEFAULT = 30
 MAX_VERTICAL = (int(os.environ.get("REELFY_COMPOSE_MAX_W", "1620")),
                 int(os.environ.get("REELFY_COMPOSE_MAX_H", "2880")))
 COMPOSE_JOBS = max(1, int(os.environ.get("REELFY_COMPOSE_JOBS", "2")))
+# bitrate del intermedio: <= SRC_FACTOR x la fuente y <= MAX_BPS (4K30 "sin perdida" = ~75 Mbps)
+SRC_FACTOR = 1.2
+MAX_BPS = float(os.environ.get("REELFY_COMPOSE_MAX_MBPS", "60")) * 1e6
+MIN_BPS = 500_000                # minimo tecnico del encoder
+COPY_CODECS = ("h264", "hevc")   # se pueden copiar a mp4 sin re-codificar
 
 
 def canvas_size(w, h):
@@ -45,10 +58,57 @@ def canvas_size(w, h):
     return w - w % 2, h - h % 2
 
 
-def _vbitrate(w, h, fps=FPS_DEFAULT):
-    """Bitrate del intermedio: visualmente sin perdida para cualquier resolucion
-    (12M se quedaba corto en 4K: bloques en sombras y degradados)."""
-    return video_io.hq_bitrate(w, h, fps)
+def _vbitrate(w, h, fps=FPS_DEFAULT, src_bps=None):
+    """Bitrate del intermedio: visualmente sin perdida para cualquier resolucion (12M se quedaba
+    corto en 4K: bloques en sombras y degradados), pero nunca mas de SRC_FACTOR x el de la fuente
+    (`src_bps`; re-codificar a mas bitrate no agrega calidad, solo disco) ni de MAX_BPS."""
+    br = min(float(video_io.hq_bitrate(w, h, fps)), MAX_BPS)
+    if src_bps:
+        br = min(br, SRC_FACTOR * float(src_bps))
+    return str(int(max(MIN_BPS, br)))
+
+
+@lru_cache(maxsize=64)
+def _src_bitrate_cached(path, size, mtime):
+    r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "stream=bit_rate:format=bit_rate", "-of", "default=nw=1", path],
+                       capture_output=True, text=True, timeout=30)
+    vals = {}
+    for ln in (r.stdout or "").splitlines():
+        k, _, v = ln.partition("=")
+        try:
+            vals.setdefault(k.strip(), []).append(int(v))
+        except ValueError:
+            continue
+    # ffprobe imprime primero el del stream y luego el del formato (ambos con la clave bit_rate):
+    # el del stream es el del video; sin el (mkv/webm) el total del archivo, que lo incluye
+    got = vals.get("bit_rate") or []
+    return got[0] if got else None
+
+
+def src_bitrate(path):
+    """Bitrate del VIDEO de la fuente en bit/s (el total del archivo si el contenedor no lo
+    dice), o None si no se puede saber (imagen, archivo ilegible)."""
+    try:
+        st = Path(path).stat()
+        return _src_bitrate_cached(str(path), st.st_size, int(st.st_mtime_ns))
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def spec_bitrate(items, w, h, fps=FPS_DEFAULT):
+    """Bitrate UNICO de todos los segmentos del montaje (el concat sin re-codificar junta
+    segmentos con los mismos parametros): tope = SRC_FACTOR x la fuente de video de MAS bitrate.
+    Sin videos (solo imagenes) o sin poder medir alguno: el de siempre, con el maximo sano."""
+    rates = []
+    for s in items or []:
+        if s.get("type", "video") == "image" or not s.get("path"):
+            continue
+        b = src_bitrate(s["path"])
+        if not b:
+            return _vbitrate(w, h, fps)
+        rates.append(b)
+    return _vbitrate(w, h, fps, max(rates) if rates else None)
 
 
 def _color_tags():
@@ -84,10 +144,11 @@ def _has_audio(path):
     return bool(r.stdout.strip())
 
 
-def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0, fin=0.0, fout=0.0):
+def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0, fin=0.0, fout=0.0, br=None):
     """Recorta [in,out] y normaliza a WxH/fps con audio 48k estéreo (silencio si
     no tiene). cover-crop para llenar el lienzo. `vol` volumen (0=mudo); `fin`/`fout`
-    desvanecen VIDEO (a/desde negro) y AUDIO al inicio/fin del clip."""
+    desvanecen VIDEO (a/desde negro) y AUDIO al inicio/fin del clip. `br` bitrate del
+    montaje (spec_bitrate); sin el, el tope de esta fuente."""
     dur = max(0.1, t_out - t_in)
     fin = max(0.0, min(float(fin), dur / 2)); fout = max(0.0, min(float(fout), dur / 2))
     info = video_io.probe(src)
@@ -110,12 +171,12 @@ def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0, fin=0.0, fout=0.0):
         # 1a pista de audio explícita (los iPhone traen una 2a pista APAC espacial)
         cmd += ["-map", "0:v:0", "-map", "0:a:0"]
     cmd += ["-vf", ",".join(vf), "-af", ",".join(af), "-c:v", "h264_videotoolbox",
-            "-b:v", _vbitrate(w, h, fps)] + _color_tags() + [
+            "-b:v", br or _vbitrate(w, h, fps, src_bitrate(src))] + _color_tags() + [
             "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)]
     _run(cmd)
 
 
-def _norm_image(src, dur, out, w, h, fps, fin=0.0, fout=0.0):
+def _norm_image(src, dur, out, w, h, fps, fin=0.0, fout=0.0, br=None):
     """Imagen fija -> clip de `dur` s a WxH/fps con audio en silencio (+ fade opcional)."""
     fin = max(0.0, min(float(fin), dur / 2)); fout = max(0.0, min(float(fout), dur / 2))
     # RGB -> YUV con matriz bt709 explícita (coincide con la etiqueta de color del intermedio)
@@ -129,16 +190,16 @@ def _norm_image(src, dur, out, w, h, fps, fin=0.0, fout=0.0):
     vf = ",".join(vf + [SETPARAMS])
     _run([FFMPEG, "-y", "-loop", "1", "-t", f"{dur:.3f}", "-i", str(src),
           "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
-          "-vf", vf, "-c:v", "h264_videotoolbox", "-b:v", _vbitrate(w, h, fps)] + _color_tags() + [
+          "-vf", vf, "-c:v", "h264_videotoolbox", "-b:v", br or _vbitrate(w, h, fps)] + _color_tags() + [
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", "-shortest", str(out)])
 
 
-def _norm_black(dur, out, w, h, fps):
+def _norm_black(dur, out, w, h, fps, br=None):
     """Segmento NEGRO con silencio (para rellenar huecos de posicionamiento libre)."""
     _run([FFMPEG, "-y", "-f", "lavfi", "-t", f"{dur:.3f}", "-i",
           f"color=c=black:s={w}x{h}:r={fps}",
           "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
-          "-vf", f"format=yuv420p,{SETPARAMS}", "-c:v", "h264_videotoolbox", "-b:v", _vbitrate(w, h, fps)] + _color_tags() + [
+          "-vf", f"format=yuv420p,{SETPARAMS}", "-c:v", "h264_videotoolbox", "-b:v", br or _vbitrate(w, h, fps)] + _color_tags() + [
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", "-shortest", str(out)])
 
 
@@ -150,7 +211,7 @@ def _overlay_xy(pos, W, H, mx, my):
     }.get(pos, ("(W-w)/2", "(H-h)/2"))
 
 
-def _concat_xfade(parts, trans, out, w=1080, h=1920, fps=FPS_DEFAULT):
+def _concat_xfade(parts, trans, out, w=1080, h=1920, fps=FPS_DEFAULT, br=None):
     """Une los segmentos con TRANSICIONES: crossfade (xfade+acrossfade) en los
     bordes que lo pidan; los demás bordes usan un xfade de ~1 frame (corte limpio),
     para mantener un solo grafo uniforme. Re-encoda (necesario para mezclar)."""
@@ -175,7 +236,7 @@ def _concat_xfade(parts, trans, out, w=1080, h=1920, fps=FPS_DEFAULT):
     fc.append(f"{vprev}format=yuv420p,{SETPARAMS}[vout]")
     _run([FFMPEG, "-y", *inputs, "-filter_complex", ";".join(fc),
           "-map", "[vout]", "-map", aprev, "-c:v", "h264_videotoolbox",
-          "-b:v", _vbitrate(w, h, fps)] + _color_tags() + [
+          "-b:v", br or _vbitrate(w, h, fps)] + _color_tags() + [
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)])
 
 
@@ -210,6 +271,46 @@ def _shots(seq, parts, trans):
         out.append({"start": round(start, 3), "end": round(acc, 3), "src": src, "index": i,
                     "kind": kind})
     return out
+
+
+def copy_source(seq, spec, W, H, fps):
+    """Si el montaje es UN solo video completo que ya cumple el formato del intermedio, su probe
+    (se copia el video sin re-codificar); si no, None. Conservador: cualquier procesado (recorte,
+    fundido, volumen, capas, otro lienzo, HDR, rotacion, otros fps, sin audio) re-codifica."""
+    if len(seq) != 1 or seq[0][0] != "clip" or spec.get("overlays"):
+        return None
+    s = seq[0][1]
+    if s.get("type", "video") != "video" or not s.get("path") or s.get("trans"):
+        return None
+    if float(s.get("start", 0) or 0) > 0.05 or s.get("mute") or \
+            abs(float(s.get("vol", 1.0) if s.get("vol") is not None else 1.0) - 1.0) > 1e-3:
+        return None
+    if float(s.get("fadeIn", 0) or 0) > 0.01 or float(s.get("fadeOut", 0) or 0) > 0.01:
+        return None
+    i = video_io.probe(s["path"])
+    dur = float(i.get("duration") or 0)
+    t_in, t_out = float(s.get("in", 0) or 0), float(s.get("out", 0) or 0)
+    if dur <= 0 or t_in > 0.05 or t_out < dur - 0.05:
+        return None
+    if i.get("codec") not in COPY_CODECS or i.get("pix_fmt") != "yuv420p" or i.get("hdr") or \
+            i.get("dovi") or int(i.get("rotation") or 0) != 0 or not i.get("has_audio"):
+        return None
+    if (int(i.get("w") or 0), int(i.get("h") or 0)) != (int(W), int(H)):
+        return None
+    if abs(float(i.get("fps") or 0) - float(fps)) > 0.05:
+        return None
+    if video_io.source_matrix(i) != ("bt709", "tv"):
+        return None
+    return i
+
+
+def _copy_video(src, out, info):
+    """Video tal cual (sin perdida, sin re-codificar) + primera pista de audio normalizada a
+    AAC 48 kHz estereo (como los segmentos normalizados). Las pistas de datos del iPhone (mebx) y
+    la 2a pista de audio espacial no se copian."""
+    tag = ["-tag:v", "hvc1"] if info.get("codec") == "hevc" else []
+    _run([FFMPEG, "-y", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", *tag,
+          "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)])
 
 
 def compose(spec, out, work, on_step=None, info=None):
@@ -261,6 +362,28 @@ def compose(spec, out, work, on_step=None, info=None):
         seq.append(("clip", s, s.get("trans")))
         cursor = max(cursor, st) + _len(s)
 
+    # 0) un solo video completo que ya es un intermedio valido: se copia (sin re-codificar)
+    if not upper:
+        src_info = copy_source(seq, spec, W, H, fps)
+        if src_info is not None:
+            s0 = seq[0][1]
+            step("Preparando 0/1…")
+            tmp = work / "copy.mp4"                 # temporal + renombrado: nunca queda a medias
+            _copy_video(s0["path"], tmp, src_info)
+            Path(tmp).replace(out)
+            step("Preparando 1/1…")
+            if info is not None:
+                d = round(float(probe(out)["dur"] or 0.0), 3)
+                info["copied"] = True
+                info["shots"] = [{"start": 0.0, "end": d, "index": 0, "kind": "clip",
+                                  "src": Path(str(s0.get("name") or s0.get("path") or "")).name}]
+            return str(out)
+
+    # bitrate UNICO del montaje: <= 1.2x la fuente de mas bitrate (y <= MAX_BPS)
+    br = spec_bitrate(main, W, H, fps)
+    if info is not None:
+        info["bitrate"] = int(br)
+
     # 1) normalizar cada segmento (COMPOSE_JOBS a la vez; el orden de `parts` es el de seq)
     parts = [work / f"seg_{i:03d}.mp4" for i in range(len(seq))]
     trans = [None if kind == "black" else tr for kind, _d, tr in seq]
@@ -269,16 +392,16 @@ def compose(spec, out, work, on_step=None, info=None):
         kind, data, _tr = seq[i]
         seg = parts[i]
         if kind == "black":
-            _norm_black(float(data), seg, W, H, fps)
+            _norm_black(float(data), seg, W, H, fps, br)
             return
         s = data
         fin = float(s.get("fadeIn", 0) or 0); fout = float(s.get("fadeOut", 0) or 0)
         if s.get("type") == "image":
-            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout)
+            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout, br)
         else:
             t_in = float(s.get("in", 0)); t_out = float(s.get("out", t_in + 5))
             vol = 0.0 if s.get("mute") else float(s.get("vol", 1.0))
-            _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout)
+            _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout, br)
 
     n = len(seq)
     step(f"Preparando 0/{n}…")
@@ -313,7 +436,7 @@ def compose(spec, out, work, on_step=None, info=None):
     has_trans = any(t and t.get("type") == "crossfade" and float(t.get("dur", 0)) > 0.05
                     for t in trans[1:])
     if has_trans and len(parts) > 1:
-        _concat_xfade(parts, trans, main_mp4, W, H, fps)
+        _concat_xfade(parts, trans, main_mp4, W, H, fps, br)
     else:
         listf = work / "concat.txt"
         listf.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts))
@@ -333,10 +456,10 @@ def compose(spec, out, work, on_step=None, info=None):
         seg = work / f"up_{j:03d}.mp4"
         fin = float(s.get("fadeIn", 0) or 0); fout = float(s.get("fadeOut", 0) or 0)
         if s.get("type") == "image":
-            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout)
+            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout, br)
         else:
             _norm_video(s["path"], float(s.get("in", 0)), float(s.get("out", 5)), seg, W, H, fps,
-                        0.0 if s.get("mute") else float(s.get("vol", 1.0)), fin, fout)
+                        0.0 if s.get("mute") else float(s.get("vol", 1.0)), fin, fout, br)
         upper_segs.append((seg, float(s.get("start", 0) or 0), _len(s)))
 
     inputs = ["-i", str(main_mp4)]
@@ -370,6 +493,6 @@ def compose(spec, out, work, on_step=None, info=None):
     fc.append(f"[{last}]format=yuv420p,{SETPARAMS}[vout]")
     _run([FFMPEG, "-y", *inputs, "-filter_complex", ";".join(fc),
           "-map", "[vout]", "-map", "0:a?", "-c:v", "h264_videotoolbox",
-          "-b:v", _vbitrate(W, H, fps)] + _color_tags() + [
+          "-b:v", br] + _color_tags() + [
           "-c:a", "aac", "-b:a", "192k", str(out)])
     return str(out)

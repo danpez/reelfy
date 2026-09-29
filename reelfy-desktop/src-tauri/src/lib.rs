@@ -134,6 +134,13 @@ fn spawn_engine(app: &tauri::AppHandle) -> Option<Child> {
 
     let mut cmd = Command::new(&py);
     cmd.arg("-u").arg(&server);
+    // grupo de procesos propio: al cerrar se barre TODO lo que el motor lanzó (música, ffmpeg de
+    // proxies, workers de un export) aunque el motor no alcance a apagarlo (stop_engine)
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.env("REELFY_PORT", PORT.to_string());
     // el motor se apaga solo (y su ollama) si esta app muere sin cerrarlo (server._watch_parent)
     cmd.env("REELFY_PARENT_PID", std::process::id().to_string());
@@ -313,15 +320,28 @@ fn stop_engine(app: &tauri::AppHandle) {
         // el ollama quedaba huérfano comiendo RAM tras cerrar la app.
         #[cfg(unix)]
         {
-            unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+            let pgid = c.id() as i32; // spawn_engine lo hizo líder de su grupo
+            unsafe { libc::kill(pgid, libc::SIGTERM) };
+            let mut salio = false;
             for _ in 0..50 {
                 if matches!(c.try_wait(), Ok(Some(_))) {
-                    return;
+                    salio = true;
+                    break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
+            if !salio {
+                let _ = c.kill(); // no salió a la buena: forzar
+                let _ = c.wait();
+            }
+            // lo que haya quedado vivo en el grupo del motor (ace-synth, un ffmpeg): fuera
+            unsafe { libc::killpg(pgid, libc::SIGKILL) };
+            return;
         }
-        let _ = c.kill(); // no salió a la buena (o Windows): forzar
-        let _ = c.wait();
+        #[allow(unreachable_code)]
+        {
+            let _ = c.kill(); // Windows: forzar
+            let _ = c.wait();
+        }
     }
 }

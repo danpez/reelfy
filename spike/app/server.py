@@ -48,7 +48,7 @@ SPIKE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SPIKE / "scripts"))
 import paths  # noqa: E402
 
-ENGINE_VERSION = "0.5.1"
+ENGINE_VERSION = "0.5.2"
 
 # ---- LLM embebido: si el binario de ollama viene en el bundle, corre en un
 # puerto propio con modelos en DATA. El pipeline (highlights/translate) y el director
@@ -204,10 +204,53 @@ def _stop_ollama():
 # uvicorn (>=0.29) vuelve a lanzar SIGTERM/SIGINT al terminar su apagado ordenado: el proceso
 # muere por la senal y los atexit NO corren (por eso el ollama quedaba huerfano aunque la app
 # mandara SIGTERM). El apagado de la app (lifespan) si corre antes: ahi se apaga el ollama.
+_SERVING = False     # True solo en el servidor real (no al importarlo en pruebas)
+
+
+def _descendants(pid: int) -> list[int]:
+    """PIDs de los hijos, nietos... de `pid` (pgrep -P, macOS y Linux)."""
+    out, todo = [], [pid]
+    while todo:
+        try:
+            r = subprocess.run(["pgrep", "-P", str(todo.pop())], capture_output=True, text=True, timeout=5)
+        except Exception:  # noqa: sin pgrep no hay a quien buscar
+            break
+        kids = [int(x) for x in r.stdout.split() if x.isdigit()]
+        out += kids
+        todo += kids
+    return out
+
+
+def _kill_children(wait: float = 1.5) -> list[int]:
+    """Al apagar el motor termina lo que lanzo y sigue vivo (ace-synth generando musica, el
+    ffmpeg de un proxy, workers de un export): antes el motor salia y esos procesos quedaban
+    huerfanos comiendo CPU. SIGTERM y, a quien no salga en `wait` s, SIGKILL. -> PIDs."""
+    if os.name == "nt":
+        return []
+    kids = _descendants(os.getpid())
+    for k in kids:
+        try:
+            os.kill(k, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    t = time.time() + wait
+    while kids and time.time() < t:
+        time.sleep(0.1)
+        kids = [k for k in kids if _proc_cmd(k)]          # los que siguen (sin zombis ya recogidos)
+    for k in kids:
+        try:
+            os.kill(k, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return kids
+
+
 @asynccontextmanager
 async def _lifespan(_app):
     yield
     _stop_ollama()
+    if _SERVING:
+        _kill_children()
 
 
 app.router.lifespan_context = _lifespan
@@ -269,6 +312,7 @@ def _watch_parent(pid: int, on_orphan, every: float = 2.0) -> threading.Thread:
 
 def _orphan_exit():
     _stop_ollama()
+    _kill_children()
     os._exit(0)
 
 
@@ -1606,6 +1650,7 @@ def _kick_analysis(job_id, plan, fmt="9:16", force=False, eo=None):
                     e_, f_, prefetch_music=False,
                     on_pct=lambda st, p: tick(stage=st, pct=round(float(p), 1)),
                     cancel=lambda: ev.is_set() or bool(_EXPORTING)))
+                _claim_cache(jid, res)                     # base/voz de este proyecto
                 tick.set(state="done", pct=100, stage="done", t=round(time.time() - t0, 1),
                          matte=bool(res.get("matte")), grade=bool(res.get("grade")),
                          skipped=res.get("skipped") or [])
@@ -1941,6 +1986,12 @@ def _finish_analysis(job_id, prog, plan, params, bar=None):
                 if name:
                     s["src"] = name
         prog.cancel.check()
+    if d.get("fmt") in ("9:16", "1:1", "4:5", "16:9", "original") and isinstance(plan, dict) and \
+            not (plan.get("studio") or {}).get("fmt"):
+        # formato con el que nace el proyecto (el analisis de fondo prepara el video base en el): el
+        # Studio lo abre asi, sin re-analizar; un plan sin plan.studio.fmt ni plan.takes es de antes
+        # del formato por proyecto y se queda en 9:16
+        plan["studio"] = dict(plan.get("studio") or {}, fmt=d["fmt"])
     jobstore.update(job_id, state="review", phase="review", pct=100, stage="review",
                     message="Análisis listo", plan=plan, warnings=warns)
     fmt = d.get("fmt") or "9:16"
@@ -1993,11 +2044,17 @@ def _compose(job_id, job):
     bar.set(lo, "Montando tu línea de tiempo…", "compose", force=True)
     t0 = time.time()
     info = {}
+    video.unlink(missing_ok=True)       # un reintento nunca reescribe un enlace duro compartido
     compose_mod.compose(spec, str(video), paths.WORK / f"compose_{job_id}", on_step=cstep,
                         info=info)
     shutil.rmtree(paths.WORK / f"compose_{job_id}", ignore_errors=True)   # segmentos 4K
+    # el mismo montaje de otro proyecto (p. ej. el mismo video importado otra vez): un enlace
+    twin = dedupe_import(video, full=True)
+    how = "video copiado sin re-codificar" if info.get("copied") else \
+        f"{(info.get('bitrate') or 0) / 1e6:.1f} Mbps"
     print(f"   compose: {len(spec.get('main') or [])} clips en {time.time() - t0:.1f}s "
-          f"(lienzo {info.get('W')}x{info.get('H')}, carga {_load()})")
+          f"(lienzo {info.get('W')}x{info.get('H')}, {how}"
+          f"{', igual a ' + twin.name if twin else ''}, carga {_load()})")
     plan = pipeline.analyze(video, p.get("glossary", ""), p.get("n", 2),
                             on_step=_analysis_progress(bar, *PHASE_ANALYZE_AFTER_COMPOSE))
     dur = float(plan.get("duration") or 0) or None
@@ -2151,6 +2208,7 @@ def _render_pro(job_id, job):
         stats = R.render_pro(plan, out, opts)
     except V.Canceled:
         raise JobCanceled()
+    _claim_cache(job_id, stats)
     st = {k: stats[k] for k in STATS_KEYS if k in stats}
     if isinstance(st.get("music"), dict):
         st["music"] = {k: v for k, v in st["music"].items() if k != "wav"}   # ruta local
@@ -2203,29 +2261,6 @@ def _rm(p):
         return True
     except OSError:
         return False
-
-
-def _job_files(job_id):
-    """Archivos pesados de un trabajo: entrada (video compuesto), exports, vistas previas,
-    musica escuchable, audio/transcripcion del analisis y restos del montaje."""
-    out = []
-    for d in (INPUT, OUTPUT, paths.WORK):
-        if d.exists():
-            out += [p for p in d.glob(f"{job_id}*") if _JOB_RE.match(p.name)]
-    if MUSIC_OUT.exists():
-        out += list(MUSIC_OUT.glob(f"music_{job_id}_*"))
-    c = paths.WORK / f"compose_{job_id}"
-    if c.exists():
-        out.append(c)
-    return out
-
-
-def _purge_job_files(ids):
-    n = 0
-    for jid in ids or []:
-        for p in _job_files(jid):
-            n += _rm(p)
-    return n
 
 
 def _trim_exports(job_id, keep=KEEP_EXPORTS, protect=None):
@@ -2361,32 +2396,30 @@ def _busy():
 
 
 def disk_gc(reason=""):
-    """Recoleccion de basura del disco. Trabajos viejos (jobstore.KEEP_LAST) -> se borran sus
-    archivos; huerfanos; fuentes sin uso; tope de caches. Con poco disco libre (< MIN_FREE_GB)
-    purga tambien trabajos viejos hasta dejar los 5 mas recientes."""
+    """Recoleccion de basura del disco: huerfanos (archivos de trabajos que ya no estan en la
+    base), fuentes sin uso y tope de las caches REGENERABLES. Los proyectos NUNCA se purgan solos
+    (antes: los 50 mas recientes, o 5 con poco disco, sin avisar): con menos de MIN_FREE_GB libres
+    solo se avisa (`low_space`: /status y /storage lo muestran) y las caches se aprietan."""
     if not _GC_LOCK.acquire(blocking=False):
         return {"skipped": "en curso"}
     t0 = time.time()
     try:
         res = {"reason": reason}
-        ids = jobstore.housekeep()
-        res["jobs_purged"] = len(ids)
-        res["files"] = _purge_job_files(ids)
         res["orphans"] = _gc_orphans()
         res["sources"] = _gc_sources()
         free = _disk_free_gb()
         if not _busy():
             cap = CACHE_CAP_GB if free >= MIN_FREE_GB else max(0.5, min(CACHE_CAP_GB, free * 0.25))
             res["caches"] = _cap_caches(cap)
-        if _disk_free_gb() < MIN_FREE_GB:
-            ids = jobstore.housekeep(keep=5)
-            res["pressure_purged"] = len(ids)
-            res["files"] += _purge_job_files(ids)
-        res["free_gb"] = round(_disk_free_gb(), 1)
+        free = _disk_free_gb()
+        res["free_gb"] = round(free, 1)
+        res["low_space"] = free < MIN_FREE_GB
         res["t"] = round(time.time() - t0, 2)
-        if res["jobs_purged"] or res["files"] or res["orphans"] or res["sources"] or \
-                res.get("pressure_purged"):
+        if res["orphans"] or res["sources"]:
             print(f"   limpieza ({reason}): {res}")
+        if res["low_space"]:
+            print(f"   poco espacio en disco ({free:.1f} GB libres): se avisa; los proyectos se conservan")
+        _storage_invalidate()
         return res
     finally:
         _GC_LOCK.release()
@@ -2400,6 +2433,787 @@ def _gc_later(reason, delay=2.0):
         except Exception:  # noqa
             traceback.print_exc()
     threading.Thread(target=run, daemon=True, name="reelfy-gc").start()
+
+
+# ================================================================ almacenamiento (proyectos)
+# Un proyecto guarda su video (entrada: el compuesto o el subido), sus fuentes subidas, el analisis
+# (audio y transcripcion), exports, vistas previas, proxies e intermedios del motor. Nada se purga
+# solo: GET /storage cuenta el disco por categoria y por proyecto (en cache: no se recorren 40 GB en
+# cada pedido); POST /jobs/{id}/free-space borra SOLO lo regenerable (el proyecto sigue editable);
+# DELETE /jobs/{id} mueve a la Papelera todo lo que es SOLO de ese proyecto. Jamas se toca nada
+# fuera de DATA (los videos originales del usuario): lo de fuera ni se enumera y cada ruta se
+# verifica antes de moverla; un enlace simbolico se mueve como enlace, nunca su destino.
+LOW_SPACE_MSG = "Poco espacio: libera espacio o elimina proyectos"
+STORAGE_TTL_S = float(os.environ.get("REELFY_STORAGE_TTL", "60"))
+TRASH_DIR = paths.DATA / ".trash"            # Papelera de respaldo (fuera de macOS)
+_STAGE = paths.DATA / ".eliminando"          # el proyecto se junta aqui antes de ir a la Papelera
+_OUT_CACHE_RE = re.compile(r"_(?:draft_[0-9a-f]+(?:\.part)?\.mp4|proxy\.mp4|preview\.mp4|win\.mp4)$")
+_WORK_CACHE_SUF = ("_src720.mp4", "_src720.json", "_src720.part.mp4")
+_STORE = {"data": None, "t": 0.0, "dirty": True}
+_STORE_LOCK = threading.Lock()
+_DISK = {"t": 0.0, "free": None}
+_QHASH = {}                                  # (ruta, tamano, mtime, inodo) -> huella rapida
+DEDUP_CHUNK = 1 << 20
+import stat as _stat  # noqa: E402
+
+
+def _storage_invalidate():
+    _STORE["dirty"] = True
+
+
+def _disk_state():
+    """{free_gb, low_space, message?}. Libre del volumen de DATA, en cache 10 s (/status se sondea
+    varias veces por segundo)."""
+    now = time.time()
+    if _DISK["free"] is None or now - _DISK["t"] > 10:
+        try:
+            _DISK["free"] = _disk_free_gb()
+        except OSError:
+            _DISK["free"] = float("inf")
+        _DISK["t"] = now
+    free = _DISK["free"]
+    low = free < MIN_FREE_GB
+    out = {"free_gb": round(free, 1) if math.isfinite(free) else None, "low_space": low}
+    if low:
+        out["message"] = LOW_SPACE_MSG
+    return out
+
+
+def _in_data(p):
+    """La ruta vive DENTRO de DATA (y no es DATA). Un enlace simbolico cuenta por donde esta el
+    enlace (se mueve el enlace, jamas su destino); lo demas por su ruta real."""
+    base = paths.DATA.resolve()
+    p = Path(p)
+    try:
+        parent = p.parent.resolve()
+    except OSError:
+        return False
+    if parent != base and base not in parent.parents:
+        return False
+    if p.is_symlink():
+        return True
+    try:
+        real = p.resolve(strict=True)
+    except OSError:
+        return False
+    return real != base and base in real.parents
+
+
+def _sid_of(name):
+    return str(name).split(".")[0].split("_")[0]
+
+
+def _is_source_original(p):
+    n = p.name
+    return p.is_file() and ".part" not in n and not n.startswith(".") and \
+        not n.endswith(("_proxy.mp4", "_t.jpg", "_meta.json"))
+
+
+def _source_users():
+    """sid -> {ids de trabajos} que usan esa fuente subida: montaje (spec) y medios propios o del
+    perfil en su plan/parametros. Perfiles guardados y la cache de enlaces cuentan como el usuario
+    '*' (una fuente asi nunca se va con un proyecto)."""
+    users = {}
+    try:
+        src_dir = SOURCES.resolve()
+    except OSError:
+        src_dir = SOURCES
+    for jid, params in jobstore.all_params().items():
+        spec = (params or {}).get("spec") or {}
+        for it in (spec.get("main") or []) + (spec.get("overlays") or []):
+            if isinstance(it, dict) and it.get("path"):
+                p = Path(str(it["path"]))
+                try:
+                    inside = p.parent.resolve() == src_dir
+                except OSError:
+                    inside = False
+                if inside:
+                    users.setdefault(_sid_of(p.name), set()).add(jid)
+    for jid, sids in jobstore.sids_by_job().items():
+        for sid in sids:
+            users.setdefault(sid, set()).add(jid)
+    try:
+        from motion import profile as PR
+        keep = set()
+        for pr in _profiles_load():
+            keep |= PR.media_sids(pr)
+        keep |= _lm_cache_sids()
+    except Exception:  # noqa: sin perfiles legibles: nada extra que proteger
+        traceback.print_exc()
+        keep = set()
+    for sid in keep:
+        users.setdefault(sid, set()).add("*")
+    return users
+
+
+def _mc_head(n):
+    """Intermedio principal del que depende un acompanante de work/motion_cache (o el mismo
+    nombre): base_<k>.mp4(.json/.lock), fgbase_<k>.mp4(.json/.lock) y face_<k>_<firma>.npy ->
+    base_<k>.mp4; voice_<k>.wav(.json/.lock) -> voice_<k>.wav."""
+    if n.startswith("face_"):
+        return "base_" + n[len("face_"):].split("_")[0] + ".mp4"
+    if n.startswith("fgbase_"):
+        n = n[len("fg"):]
+    for suf in (".json", ".lock"):
+        if n.endswith(suf):
+            n = n[:-len(suf)]
+    return n
+
+
+def _mc_owners(job_ids):
+    """Intermedios de work/motion_cache -> {nombre: id del trabajo}. El base dice su fuente en su
+    .json (`src` = input/<id>.<ext>); la voz (y lo demas) por lo que el servidor anoto al generarlo
+    (jobstore.claim_cache). Cada uno arrastra sus acompanantes (_mc_head): .json, .lock, pista de
+    rostro y recorte del frente. Lo que no es de nadie (proyectos de antes de las anotaciones,
+    mattes, medios) lo poda el tope LRU de siempre o el "Liberar espacio" global."""
+    mc = paths.WORK / "motion_cache"
+    try:
+        names = set(os.listdir(mc))
+    except OSError:
+        return {}
+    ids = set(job_ids)
+    own = {}
+    for n in names:
+        if n.startswith("base_") and n.endswith(".mp4"):
+            try:
+                src = Path(str(json.loads((mc / f"{n}.json").read_text()).get("src") or ""))
+            except Exception:  # noqa
+                continue
+            if src.parent.name == "input" and src.stem in ids:
+                own[n] = src.stem
+    for jid, files in jobstore.cache_claims().items():
+        if jid in ids:
+            for n in files:
+                n = Path(str(n)).name
+                if n in names:
+                    own.setdefault(n, jid)
+    out = {}
+    for n in names:
+        jid = own.get(n) or own.get(_mc_head(n))
+        if jid:
+            out[n] = jid
+    return out
+
+
+def _walk(p, seen):
+    """(bytes, bytes_liberables) de una ruta sin seguir enlaces. Cada inodo cuenta una vez
+    (`seen`: los enlaces duros de la deduplicacion no se suman dos veces); liberable = lo que se
+    libera al quitar ESTA ruta (un archivo con otro enlace duro vivo no libera nada)."""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return 0, 0
+    if _stat.S_ISDIR(st.st_mode):
+        tot = fr = 0
+        try:
+            with os.scandir(p) as it:
+                for e in it:
+                    a, b = _walk(e.path, seen)
+                    tot += a
+                    fr += b
+        except OSError:
+            pass
+        return tot, fr
+    key = (st.st_dev, st.st_ino)
+    if key in seen:
+        return 0, 0
+    seen.add(key)
+    size = st.st_size
+    return size, (size if st.st_nlink <= 1 or _stat.S_ISLNK(st.st_mode) else 0)
+
+
+def _ls(d):
+    try:
+        return sorted(Path(d).iterdir())
+    except OSError:
+        return []
+
+
+def _storage_ctx():
+    """Lo que hace falta para repartir el disco entre proyectos (sin recorrer archivos)."""
+    rows = jobstore.recent(100000)
+    jobs = {r["id"]: r for r in rows}
+    return {"jobs": jobs, "users": _source_users(), "mc": _mc_owners(jobs.keys())}
+
+
+_UNIT_RE = re.compile(r"^([^._]+)(?:[._]|$)")      # id del trabajo = lo que va antes del primer . o _
+
+
+def _unit_index(ctx):
+    """Cada carpeta se lista UNA vez por recorrido (antes cada proyecto listaba y ordenaba INPUT,
+    OUTPUT, WORK, MUSIC_OUT y SOURCES: con 400 proyectos /jobs tardaba 24 s) -> mapas
+    {id del trabajo: [Path]} por carpeta, {sid: [Path]} de las fuentes, los intermedios del motor
+    por trabajo y las fuentes de cada trabajo."""
+    idx = {"input": {}, "output": {}, "work": {}, "music": {}, "sources": {}, "mc": {}, "sids": {}}
+    for key, d in (("input", INPUT), ("output", OUTPUT), ("work", paths.WORK)):
+        for p in _ls(d):
+            m = _UNIT_RE.match(p.name)
+            if m:
+                idx[key].setdefault(m.group(1), []).append(p)
+    for p in _ls(MUSIC_OUT):
+        if p.name.startswith("music_"):
+            jid = p.name[len("music_"):].split("_")[0]
+            if p.name.startswith(f"music_{jid}_"):
+                idx["music"].setdefault(jid, []).append(p)
+    if ctx.get("users"):
+        for p in _ls(SOURCES):
+            idx["sources"].setdefault(_sid_of(p.name), []).append(p)
+    for n, jid in (ctx.get("mc") or {}).items():
+        idx["mc"].setdefault(jid, []).append(n)
+    for sid, us in (ctx.get("users") or {}).items():
+        for jid in us:
+            idx["sids"].setdefault(jid, set()).add(sid)
+    return idx
+
+
+def _job_units(job_id, ctx):
+    """Archivos (o carpetas) del proyecto por categoria -> {"project", "exports", "cache": [Path],
+    "shared": [Path]}. `shared` = fuentes que otro proyecto (o un perfil) tambien usa: cuentan en
+    su tamano pero no se borran con el. Solo rutas DENTRO de DATA. Las carpetas se listan una sola
+    vez por `ctx` (_unit_index)."""
+    idx = ctx.get("idx")
+    if idx is None:
+        idx = ctx["idx"] = _unit_index(ctx)
+    out = {"project": [], "exports": [], "cache": [], "shared": []}
+    for p in idx["input"].get(job_id, ()):
+        out["project"].append(p)
+    for p in idx["output"].get(job_id, ()):
+        out["cache" if _OUT_CACHE_RE.search(p.name) else "exports"].append(p)
+    for p in idx["work"].get(job_id, ()):
+        out["cache" if p.name.endswith(_WORK_CACHE_SUF) else "project"].append(p)
+    c = paths.WORK / f"compose_{job_id}"
+    if c.exists():
+        out["cache"].append(c)
+    for p in idx["music"].get(job_id, ()):
+        out["project"].append(p)
+    for n in idx["mc"].get(job_id, ()):
+        out["cache"].append(paths.WORK / "motion_cache" / n)
+    for sid in sorted(idx["sids"].get(job_id, ())):
+        for p in idx["sources"].get(sid, ()):
+            if p.is_dir():
+                continue
+            if (ctx["users"].get(sid) or set()) - {job_id}:
+                out["shared"].append(p)
+            else:
+                out["cache" if p.name.endswith(("_proxy.mp4", "_proxy.part.mp4")) else "project"].append(p)
+    for k in out:
+        out[k] = [p for p in out[k] if _in_data(p)]
+    return out
+
+
+def _storage_scan():
+    """Recorrido COMPLETO de lo que Reelfy guarda en DATA (sin seguir enlaces) -> totales por
+    categoria y por proyecto. Categorias: exports (videos exportados), cache (regenerable: vistas
+    previas, proxies, intermedios del motor, musica en cache) y projects (proyectos: videos,
+    fuentes, analisis; + modelos de IA, base, logs)."""
+    t0 = time.time()
+    ctx = _storage_ctx()
+    seen = set()
+    per = {}
+    counted = set()                  # rutas ya contadas en algun proyecto
+    units = {jid: _job_units(jid, ctx) for jid in ctx["jobs"]}
+    for jid, u in units.items():
+        d = {"bytes": 0, "project_bytes": 0, "exports_bytes": 0, "cache_bytes": 0,
+             "frees_bytes": 0, "cache_frees_bytes": 0, "shared_bytes": 0}
+        for cat in ("project", "exports", "cache", "shared"):
+            for p in u[cat]:
+                a, b = _walk(p, set())           # por proyecto: cada proyecto cuenta lo suyo
+                d["bytes"] += a
+                if cat == "shared":
+                    d["shared_bytes"] += a
+                else:
+                    d[f"{cat}_bytes"] += a
+                    d["frees_bytes"] += b
+                    if cat == "cache":
+                        d["cache_frees_bytes"] += b
+        per[jid] = d
+    tot = {"exports": 0, "cache": 0, "projects": 0, "models": 0, "trash": 0}
+
+    def add(cat, p):
+        a, _ = _walk(p, seen)
+        tot[cat] += a
+        counted.add(str(p))
+
+    # 1) lo que es de algun proyecto (con su categoria)
+    for u in units.values():
+        for cat, key in (("project", "projects"), ("shared", "projects"), ("exports", "exports"),
+                         ("cache", "cache")):
+            for p in u[cat]:
+                if str(p) not in counted:
+                    add(key, p)
+    # 2) el resto de las carpetas de Reelfy
+    for p in _ls(OUTPUT):
+        if str(p) in counted:
+            continue
+        if p == MUSIC_OUT:
+            for q in _ls(p):
+                if str(q) not in counted:
+                    add("projects", q)
+        else:
+            add("cache" if _OUT_CACHE_RE.search(p.name) else "exports", p)
+    for p in _ls(INPUT):
+        if str(p) in counted:
+            continue
+        if p == SOURCES:
+            for q in _ls(p):
+                if str(q) not in counted:
+                    add("cache" if q.name.endswith(("_proxy.mp4", "_proxy.part.mp4")) else "projects", q)
+        else:
+            add("projects", p)
+    for p in _ls(paths.WORK):
+        if str(p) in counted:
+            continue
+        if p.name == "motion_cache":
+            for q in _ls(p):
+                if str(q) not in counted:
+                    add("cache", q)
+        elif p.name in ("music", "director_cache") or p.name.startswith("compose_") or \
+                p.name.endswith(_WORK_CACHE_SUF):
+            add("cache", p)
+        else:
+            add("projects", p)
+    for p in (paths.DATA / "models", paths.OLLAMA_MODELS, paths.DATA / "music-models"):
+        add("models", p)
+    for p in (paths.BRAND, paths.LOGS):
+        add("projects", p)
+    for p in _ls(paths.DATA):
+        if p.name.startswith("jobs.db"):
+            add("projects", p)
+    local_trash = _walk(TRASH_DIR, set())[0]       # papelera de respaldo: solo "Vaciar" la libera
+    for p in (TRASH_DIR, _STAGE):
+        add("trash", p)
+    # lo que "Liberar espacio" (free_all_space) de verdad borra: la cache de los proyectos y los
+    # intermedios del motor sin dueno (> 10 min). La musica IA y las respuestas del director en
+    # cache cuentan en cache_bytes pero no se borran (regenerarlas cuesta minutos de IA)
+    freeable = sum(d["cache_frees_bytes"] for d in per.values())
+    owned, now = set(ctx["mc"]), time.time()
+    for p in _ls(paths.WORK / "motion_cache"):
+        try:
+            if p.name not in owned and now - p.lstat().st_mtime > 600:
+                freeable += _walk(p, set())[1]
+        except OSError:
+            continue
+    disk = _disk_state()
+    total = sum(tot.values())
+    return {"total_bytes": total, "exports_bytes": tot["exports"], "cache_bytes": tot["cache"],
+            "freeable_bytes": freeable, "local_trash_bytes": local_trash,
+            "projects_bytes": tot["projects"] + tot["models"], "models_bytes": tot["models"],
+            "trash_bytes": tot["trash"], "free_gb": disk["free_gb"], "low_space": disk["low_space"],
+            "min_free_gb": MIN_FREE_GB, "message": disk.get("message"), "jobs": per,
+            "scan_s": round(time.time() - t0, 3), "at": round(time.time(), 1)}
+
+
+def storage_snapshot(force=False):
+    """Resultado de _storage_scan en cache (STORAGE_TTL_S, o hasta que algo lo invalide: borrar,
+    liberar, exportar, importar). El libre del disco y el aviso siempre al dia."""
+    with _STORE_LOCK:
+        d = _STORE["data"]
+        if force or d is None or _STORE["dirty"] or time.time() - _STORE["t"] > STORAGE_TTL_S:
+            _STORE["dirty"] = False
+            try:
+                d = _storage_scan()
+            except Exception:  # noqa: sin conteo no se cae nada
+                traceback.print_exc()
+                _STORE["dirty"] = True
+                d = d or {"total_bytes": 0, "exports_bytes": 0, "cache_bytes": 0, "freeable_bytes": 0,
+                          "local_trash_bytes": 0, "projects_bytes": 0, "models_bytes": 0,
+                          "trash_bytes": 0, "jobs": {}}
+            _STORE["data"], _STORE["t"] = d, time.time()
+    out = dict(d)
+    disk = _disk_state()
+    out.update(free_gb=disk["free_gb"], low_space=disk["low_space"], message=disk.get("message"),
+               age_s=round(time.time() - _STORE["t"], 1))
+    return out
+
+
+# ---- deduplicacion de importaciones: el mismo archivo importado dos veces ocupa UNA vez ----
+def _quick_hash(p):
+    """Huella rapida: tamano + sha1 de 1 MiB al inicio, a la mitad y al final (un 4K de 3 GB se
+    compara en milisegundos, sin leerlo entero)."""
+    st = os.stat(p)
+    key = (str(p), st.st_size, st.st_mtime_ns, st.st_ino)
+    if key in _QHASH:
+        return _QHASH[key]
+    n = st.st_size
+    h = hashlib.sha1(str(n).encode())
+    with open(p, "rb") as f:
+        for off in sorted({0, max(0, n // 2 - DEDUP_CHUNK // 2), max(0, n - DEDUP_CHUNK)}):
+            f.seek(off)
+            h.update(f.read(DEDUP_CHUNK))
+    if len(_QHASH) > 2000:
+        _QHASH.clear()
+    _QHASH[key] = f"{n}:{h.hexdigest()}"
+    return _QHASH[key]
+
+
+def _import_candidates(exclude):
+    """Importaciones guardadas: videos de los trabajos (input/<id>.<ext>) y fuentes subidas
+    originales (input/sources/<sid>.<ext>). Solo archivos reales dentro de DATA."""
+    ex = Path(exclude)
+    out = [p for p in _ls(INPUT) if p.is_file() and not p.is_symlink() and p != ex
+           and ".part" not in p.name and not p.name.startswith(".")]
+    out += [p for p in _ls(SOURCES) if not p.is_symlink() and p != ex and _is_source_original(p)]
+    return out
+
+
+def _find_twin(p, candidates, full=False):
+    """Otro archivo IDENTICO a `p` (mismo tamano y misma huella rapida; con full=True ademas byte
+    a byte) en el mismo volumen, o None. Nunca el mismo inodo."""
+    import filecmp
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    mine = None
+    for c in candidates:
+        try:
+            cs = os.stat(c)
+        except OSError:
+            continue
+        if cs.st_size != st.st_size or cs.st_dev != st.st_dev or cs.st_ino == st.st_ino:
+            continue
+        try:
+            mine = mine or _quick_hash(p)
+            if _quick_hash(c) != mine:
+                continue
+            if full and not filecmp.cmp(str(c), str(p), shallow=False):
+                continue
+        except OSError:
+            continue
+        return Path(c)
+    return None
+
+
+def _link_to(p, twin):
+    """Reemplaza `p` por un ENLACE DURO a `twin` (mismos bytes en un solo lugar del disco; borrar
+    uno de los dos proyectos no afecta al otro). Atomico: enlace temporal + renombrado."""
+    tmp = Path(p).with_name(f".{Path(p).name}.{uuid.uuid4().hex[:6]}.lnk")
+    try:
+        os.link(twin, tmp)
+        os.replace(tmp, p)
+        return True
+    except OSError as e:
+        tmp.unlink(missing_ok=True)
+        print(f"   deduplicacion: sin enlace duro ({e}); se conserva la copia")
+        return False
+
+
+def dedupe_import(p, full=False, candidates=None):
+    """Si `p` (recien importado) es identico a una importacion guardada, lo reemplaza por un
+    enlace a esa copia -> Path del gemelo o None."""
+    twin = _find_twin(p, _import_candidates(p) if candidates is None else candidates, full=full)
+    if twin is not None and _link_to(p, twin):
+        print(f"   importacion repetida: {Path(p).name} = {twin.name} (no se guarda otra copia)")
+        _storage_invalidate()
+        return twin
+    return None
+
+
+# ---- a la Papelera ----
+def _trash_bin():
+    b = os.environ.get("REELFY_TRASH_BIN")
+    if b is not None:
+        return b or None                 # "" = sin herramienta (pruebas / respaldo)
+    return "/usr/bin/trash" if paths.IS_MAC and Path("/usr/bin/trash").exists() else None
+
+
+def _osascript():
+    b = os.environ.get("REELFY_OSASCRIPT")
+    if b is not None:
+        return b or None
+    return shutil.which("osascript") if paths.IS_MAC else None
+
+
+def _to_trash(p):
+    """Mueve `p` (dentro de DATA) a la Papelera del usuario: /usr/bin/trash (macOS 15+), si no el
+    Finder (osascript) y, fuera de macOS o si ambos fallan, DATA/.trash. -> 'trash'|'finder'|'local'."""
+    p = Path(p)
+    if not _in_data(p):
+        raise RuntimeError(f"fuera de la carpeta de Reelfy: {p}")
+    b = _trash_bin()
+    if b:
+        try:
+            subprocess.run([b, str(p)], capture_output=True, text=True, timeout=300)
+        except Exception as e:  # noqa
+            print(f"   papelera ({b}): {e}")
+        if not os.path.lexists(p):
+            return "trash"
+    osa = _osascript()
+    if osa:
+        script = ('on run argv\ntell application "Finder" to delete (POSIX file (item 1 of argv) '
+                  'as alias)\nend run')
+        try:
+            subprocess.run([osa, "-e", script, str(p)], capture_output=True, text=True, timeout=300)
+        except Exception as e:  # noqa
+            print(f"   papelera (Finder): {e}")
+        if not os.path.lexists(p):
+            return "finder"
+    TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    dst = TRASH_DIR / p.name
+    if os.path.lexists(dst):
+        dst = TRASH_DIR / f"{p.name} {time.strftime('%Y-%m-%d %H.%M.%S')} {uuid.uuid4().hex[:4]}"
+    os.rename(p, dst)
+    return "local"
+
+
+def _safe_name(s, n=60):
+    s = re.sub(r"[\x00-\x1f/\\:*?\"<>|]+", " ", str(s or "")).strip(" .")
+    return re.sub(r"\s+", " ", s)[:n].strip() or "Proyecto"
+
+
+def _trash_project(job_id, title, items, manifest):
+    """Junta los archivos del proyecto en UNA carpeta ("Reelfy - <nombre> (<id>)", con su
+    proyecto.json y la estructura input/output/work de DATA) y la manda a la Papelera: un solo
+    elemento que se puede recuperar a mano. Renombrar dentro del mismo volumen es instantaneo; lo
+    que no se pueda juntar va a la Papelera suelto. -> (metodo, n_archivos)."""
+    base = paths.DATA.resolve()
+    folder = _STAGE / f"Reelfy - {_safe_name(title)} ({job_id})"
+    if os.path.lexists(folder):
+        folder = folder.with_name(f"{folder.name} {uuid.uuid4().hex[:4]}")
+    folder.mkdir(parents=True)
+    (folder / "proyecto.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1,
+                                                     default=str))
+    loose, n = [], 0
+    for p in items:
+        p = Path(p)
+        if not os.path.lexists(p):
+            continue
+        if not _in_data(p):
+            print(f"   eliminar {job_id}: se omite {p} (fuera de la carpeta de Reelfy)")
+            continue
+        try:
+            rel = p.parent.resolve().relative_to(base) / p.name
+            dst = folder / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(p, dst)              # un enlace simbolico se mueve como enlace
+            n += 1
+        except (OSError, ValueError):
+            loose.append(p)
+    how = _to_trash(folder)
+    for p in loose:
+        try:
+            _to_trash(p)
+            n += 1
+        except Exception as e:  # noqa
+            print(f"   eliminar {job_id}: {p}: {e}")
+    try:
+        _STAGE.rmdir()                     # vacia: no se deja la carpeta de paso en DATA
+    except OSError:
+        pass
+    return how, n
+
+
+# ---- proyectos: eliminar, liberar espacio ----
+def _busy_job(job_id, job):
+    """Motivo por el que el proyecto no se puede tocar ahora (o None)."""
+    if (job or {}).get("state") in ("queued", "running"):
+        return ("Este proyecto se está procesando (análisis o export). Espera a que termine o "
+                "cancélalo.")
+    if job_id in _EXPORTING:
+        return "Este proyecto se está exportando. Espera a que termine o cancélalo."
+    return None
+
+
+def _quiet_job(job_id, names=None, wait=10.0):
+    """Cancela y espera las tareas laterales del trabajo (leen y escriben sus archivos) y su
+    analisis diferido. -> True si ya no corre ninguna."""
+    with _TAKES_KICK_LOCK:
+        tm = _TAKES_KICK.pop(job_id, None)
+    if tm is not None:
+        tm.cancel()
+    for name in (names or [None]):
+        _cancel_side(job_id=job_id, name=name, wait=wait)
+    with _SIDE_LOCK:
+        return not any(v["thread"].is_alive() for k, v in _SIDE.items()
+                       if k[0] == job_id and (names is None or k[1] in names))
+
+
+def _gb(b):
+    return round(float(b or 0) / GB, 2)
+
+
+def _rm_bytes(p):
+    """Borra una ruta regenerable -> bytes que libera."""
+    _a, b = _walk(p, set())
+    return b if _rm(Path(p)) else 0
+
+
+def _free_job_cache(job_id, ctx):
+    """Borra lo REGENERABLE del proyecto: vistas previas, proxy 720p del Studio, proxies de sus
+    fuentes (si no las comparte), intermedios del motor (base, voz, rostro) y restos del montaje.
+    El video, el analisis, los exports y la edicion quedan: al abrirlo se regeneran solos."""
+    u = _job_units(job_id, ctx)
+    freed, n = 0, 0
+    for p in u["cache"]:
+        if os.path.lexists(p):
+            freed += _rm_bytes(p)
+            n += 1
+            if p.parent == SOURCES:              # su proxy del editor se regenera al pedirlo
+                _SRC_PROXY_KICKED.discard(_sid_of(p.name))
+    if n:
+        for name in ("proxy", "preview", "analysis"):
+            if jobstore.side_get(job_id, name):
+                jobstore.side_update(job_id, name, replace=True, state="freed",
+                                     message="Espacio liberado: se vuelve a preparar al abrirlo")
+    return freed, n
+
+
+def _drop_job_memory(job_id):
+    with _ENGINE_LOCK:
+        _ENGINE.pop(job_id, None)
+    _PHASE_SEEN.pop(job_id, None)
+    with _SIDE_LOCK:
+        for k in [k for k in _SIDE if k[0] == job_id]:
+            _SIDE.pop(k, None)
+        _JOB_LOCKS.pop(job_id, None)
+        _THUMB_LOCKS.pop(job_id, None)
+
+
+def _gc_lock(timeout=60.0):
+    if not _GC_LOCK.acquire(timeout=timeout):
+        raise HTTPException(409, "Se está limpiando el disco; inténtalo en unos segundos.")
+
+
+@app.delete("/jobs/{job_id}")
+def delete_job(job_id: str):
+    """Elimina el proyecto: TODO lo que es solo suyo (su video, sus fuentes subidas que ningun otro
+    proyecto usa, exports, vistas previas, proxies, analisis, musica e intermedios del motor) va a
+    la Papelera en una carpeta con su proyecto.json, y sale de la lista. Nunca toca nada fuera de
+    DATA (los videos originales). 409 mientras se analiza o exporta. -> {freed_bytes, freed_gb,
+    trash: trash|finder|local, files, shared}. `freed` = lo que se libera al vaciar la Papelera."""
+    job = _job_or_404(job_id)
+    why = _busy_job(job_id, job)
+    if why:
+        raise HTTPException(409, why)
+    if not _quiet_job(job_id):
+        raise HTTPException(409, "Todavía se está cerrando una tarea de este proyecto; inténtalo "
+                                 "en unos segundos.")
+    _gc_lock()
+    try:
+        full = jobstore.get(job_id) or {}
+        ctx = _storage_ctx()
+        u = _job_units(job_id, ctx)
+        items = u["project"] + u["exports"] + u["cache"]
+        freed = sum(_walk(p, set())[1] for p in items)
+        meta = (ctx["jobs"].get(job_id) or {})
+        title = meta.get("topic") or f"Proyecto {job_id[:6]}"
+        if not jobstore.delete(job_id):              # se encolo algo mientras tanto: gana eso
+            raise HTTPException(409, _busy_job(job_id, jobstore.get_light(job_id)) or
+                                "Este proyecto está ocupado.")
+        manifest = {"reelfy": ENGINE_VERSION, "id": job_id, "title": title,
+                    "deleted": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "files": [str(p) for p in items], "shared": [str(p) for p in u["shared"]],
+                    "job": {k: full.get(k) for k in ("kind", "ext", "params", "plan", "created",
+                                                      "updated", "plan_rev", "meta")}}
+        try:
+            how, n = _trash_project(job_id, title, items, manifest)
+        except Exception as e:  # noqa: lo que ya se junto sigue en DATA/.eliminando (recuperable)
+            traceback.print_exc()
+            raise HTTPException(500, f"No se pudo mover el proyecto a la Papelera ({e}). Sus "
+                                     f"archivos quedaron en {_STAGE}.")
+    finally:
+        _GC_LOCK.release()
+    _drop_job_memory(job_id)
+    _storage_invalidate()
+    print(f"   proyecto {job_id} eliminado: {n} archivos a la papelera ({how}), {_gb(freed)} GB")
+    return {"ok": True, "freed_bytes": freed, "freed_gb": _gb(freed), "trash": how, "files": n,
+            "shared": [p.name for p in u["shared"]]}
+
+
+@app.post("/jobs/{job_id}/free-space")
+def free_job_space(job_id: str):
+    """Libera espacio del proyecto SIN perderlo: borra solo lo regenerable (vistas previas, proxies,
+    intermedios del motor de este proyecto). Sigue editable; al abrirlo se regenera en segundo
+    plano. 409 mientras se analiza o exporta. -> {freed_bytes, freed_gb, files}."""
+    job = _job_or_404(job_id)
+    why = _busy_job(job_id, job)
+    if why:
+        raise HTTPException(409, why)
+    if not _quiet_job(job_id, names=("analysis", "preview", "proxy")):
+        raise HTTPException(409, "Todavía se está preparando este proyecto; inténtalo en unos "
+                                 "segundos.")
+    _gc_lock()
+    try:
+        freed, n = _free_job_cache(job_id, _storage_ctx())
+    finally:
+        _GC_LOCK.release()
+    _storage_invalidate()
+    return {"ok": True, "freed_bytes": freed, "freed_gb": _gb(freed), "files": n}
+
+
+@app.post("/storage/empty-trash")
+def empty_local_trash():
+    """Vacia la papelera de RESPALDO de Reelfy (DATA/.trash: ahi van los proyectos eliminados cuando
+    la Papelera del Mac no se pudo usar, p. ej. macOS 13/14 sin permiso para el Finder). Borrado
+    definitivo; la UI lo confirma antes. Solo rutas dentro de DATA. -> {freed_bytes, freed_gb, files}."""
+    _gc_lock()
+    try:
+        freed, n = 0, 0
+        for p in _ls(TRASH_DIR):
+            if _in_data(p):
+                freed += _rm_bytes(p)
+                n += 1
+    finally:
+        _GC_LOCK.release()
+    _storage_invalidate()
+    return {"ok": True, "freed_bytes": freed, "freed_gb": _gb(freed), "files": n}
+
+
+@app.get("/storage")
+def storage(refresh: int = 0):
+    """Disco que usa Reelfy: total y por categoria (exports / cache regenerable / proyectos +
+    modelos), por proyecto ({id: {bytes, frees_bytes, cache_frees_bytes, ...}}), libre del disco
+    y el aviso de poco espacio. `freeable_bytes` = lo que libera "Liberar espacio";
+    `local_trash_bytes` = la papelera de respaldo (POST /storage/empty-trash). En cache
+    (`age_s`); ?refresh=1 lo recalcula."""
+    return storage_snapshot(force=bool(refresh))
+
+
+@app.post("/storage/free-space")
+def free_all_space():
+    """"Liberar espacio" global: lo regenerable de TODOS los proyectos que no se estan procesando
+    (los ocupados se saltan) y los intermedios del motor que ya no son de ningun proyecto. Los
+    proyectos siguen editables. -> {freed_bytes, freed_gb, jobs, skipped}."""
+    _gc_lock()
+    try:
+        ctx = _storage_ctx()
+        freed, touched, skipped = 0, 0, []
+        with _SIDE_LOCK:
+            active = {k[0] for k, v in _SIDE.items() if v["thread"].is_alive()}
+        for jid, j in ctx["jobs"].items():
+            if _busy_job(jid, j) or jid in active:     # tareas de ese proyecto en curso: se salta
+                skipped.append(jid)
+                continue
+            f, n = _free_job_cache(jid, ctx)
+            freed += f
+            touched += 1 if n else 0
+        if not _busy():                       # intermedios sin dueno (ningun render los usa ahora)
+            mc = paths.WORK / "motion_cache"
+            owned = set(ctx["mc"])
+            now = time.time()
+            for p in _ls(mc):
+                try:
+                    old = now - p.lstat().st_mtime > 600
+                except OSError:
+                    continue
+                if p.name not in owned and old:
+                    freed += _rm_bytes(p)
+    finally:
+        _GC_LOCK.release()
+    _storage_invalidate()
+    return {"ok": True, "freed_bytes": freed, "freed_gb": _gb(freed), "jobs": touched,
+            "skipped": skipped}
+
+
+def _claim_cache(job_id, d):
+    """Anota los intermedios que el motor genero para el trabajo (base, voz, rostro)."""
+    try:
+        names = [Path(str(d[k])).name for k in ("base", "voice", "face_path")
+                 if isinstance(d, dict) and d.get(k)]
+        if names:
+            jobstore.claim_cache(job_id, names)
+    except Exception:  # noqa: es contabilidad, nunca tumba un render
+        traceback.print_exc()
 
 
 if not _CHILD:
@@ -2450,6 +3264,7 @@ async def analyze(video: UploadFile, glossary: str = Form(""), highlights: int =
     with open(dst, "wb") as f:
         while chunk := await video.read(1 << 20):
             await run_in_threadpool(f.write, chunk)
+    await run_in_threadpool(dedupe_import, dst)   # el mismo video otra vez: un enlace, no otra copia
     prof = await run_in_threadpool(_profile_param, profile, profile_id)
     await run_in_threadpool(jobstore.create, job_id, kind="analyze", ext=ext,
                             params={"glossary": glossary, "n": highlights,
@@ -2518,9 +3333,10 @@ def _source_meta(sid):
         return {}
 
 
-def _ingest_source(dst, sid, name, is_img):
+def _ingest_source(dst, sid, name, is_img, make_proxy=True):
     """Probe + miniatura de una fuente subida (bloqueante: corre en el threadpool). El proxy
-    del editor se genera en SEGUNDO PLANO (no retrasa la respuesta ni el event loop)."""
+    del editor se genera en SEGUNDO PLANO (no retrasa la respuesta ni el event loop);
+    make_proxy=False cuando ya se reutilizo el de una importacion identica."""
     import compose as compose_mod
     info = compose_mod.probe(dst)
     thumb = SOURCES / f"{sid}_t.jpg"
@@ -2541,9 +3357,49 @@ def _ingest_source(dst, sid, name, is_img):
     except Exception:  # noqa
         pass
     if not is_img:
+        _SRC_PROXY_KICKED.add(sid)       # /tlsource no lanza otro mientras este se codifica
+    if not is_img and make_proxy:
         threading.Thread(target=_make_proxy, args=(dst, sid, info), daemon=True,
                          name=f"reelfy-proxy-{sid}").start()
     return info, thumb
+
+
+def _reuse_source_proxy(old_sid, sid):
+    """Importacion identica a la fuente `old_sid`: su proxy del editor tambien se comparte (enlace
+    duro) en vez de volver a codificarlo. -> True si quedo enlazado."""
+    pv = SOURCES / f"{old_sid}_proxy.mp4"
+    if not pv.is_file():
+        return False
+    try:
+        os.link(pv, SOURCES / f"{sid}_proxy.mp4")
+        return True
+    except OSError:
+        return False
+
+
+_SRC_PROXY_KICKED = set()
+
+
+def _kick_source_proxy(sid, p):
+    """El proxy del editor de una fuente se borro ("Liberar espacio"): se regenera en segundo plano
+    la primera vez que se pide (mientras tanto se sirve el original). Una vez por proceso y fuente
+    (_make_proxy no hace nada si la fuente no lo necesita); nunca junto al de la importacion (dos
+    ffmpeg sobre el mismo temporal)."""
+    if sid in _SRC_PROXY_KICKED or p.suffix.lower() not in (".mp4", ".mov", ".m4v", ".mkv", ".webm"):
+        return False
+    _SRC_PROXY_KICKED.add(sid)
+
+    def run():
+        try:
+            info = _source_meta(sid)
+            if not info.get("w"):
+                import compose as compose_mod
+                info = compose_mod.probe(p)
+            _make_proxy(p, sid, info)
+        except Exception:  # noqa: el proxy es una optimizacion
+            traceback.print_exc()
+    threading.Thread(target=run, daemon=True, name=f"reelfy-proxy-{sid}").start()
+    return True
 
 
 @app.post("/sources")
@@ -2563,11 +3419,18 @@ async def add_sources(files: list[UploadFile]):
         with open(dst, "wb") as f:
             while chunk := await up.read(1 << 20):
                 await run_in_threadpool(f.write, chunk)
-        info, thumb = await run_in_threadpool(_ingest_source, dst, sid, up.filename or "", is_img)
+        # el mismo archivo ya importado (este u otro proyecto): un enlace a esa copia, no otra
+        twin = await run_in_threadpool(dedupe_import, dst)
+        reused = twin is not None and twin.parent == SOURCES and not is_img and \
+            await run_in_threadpool(_reuse_source_proxy, _sid_of(twin.name), sid)
+        info, thumb = await run_in_threadpool(_ingest_source, dst, sid, up.filename or "", is_img,
+                                              not reused)
         typ = "image" if is_img else "video"
         out.append({"id": sid, "name": up.filename, "type": typ, "ext": ext,
                     "dur": info.get("dur", 0), "w": info.get("w", 0), "h": info.get("h", 0),
-                    "thumb": f"/tlsource/{sid}/thumb" if thumb else None})
+                    "thumb": f"/tlsource/{sid}/thumb" if thumb else None,
+                    **({"dedup": True} if twin is not None else {})})
+    _storage_invalidate()
     return {"sources": out}
 
 
@@ -2599,6 +3462,7 @@ def source_file(sid: str):
         return FileResponse(proxy, headers={"Accept-Ranges": "bytes"})
     p = _resolve_source(sid)
     if p:
+        _kick_source_proxy(sid, p)       # borrado al liberar espacio: se regenera en 2o plano
         return FileResponse(p, headers={"Accept-Ranges": "bytes"})
     raise HTTPException(404, "No existe")
 
@@ -2725,9 +3589,19 @@ def cancel(job_id: str, only: str | None = None):
 def jobs_recent(limit: int = 20):
     """Proyectos recientes con el resumen de su plan: [{id, kind, state, phase, pct, message,
     error, created, updated, plan_rev, has_plan, version, topic, duration, final_duration,
-    style, shots, thumb}] (`thumb` = URL de la miniatura; null sin video)."""
-    out = jobstore.recent(max(1, min(50, int(limit))))
+    style, shots, thumb, size_bytes, frees_bytes, cache_frees_bytes, exports_bytes}] (`thumb` =
+    URL de la miniatura; null sin video. Tamanos: GET /storage, en cache; `frees_bytes` = lo que
+    libera eliminarlo, `cache_frees_bytes` = lo que libera "Liberar espacio")."""
+    out = jobstore.recent(max(1, min(500, int(limit))))
+    try:
+        sizes = storage_snapshot().get("jobs") or {}
+    except Exception:  # noqa: sin tamanos la lista sigue
+        traceback.print_exc()
+        sizes = {}
     for j in out:
+        z = sizes.get(j["id"]) or {}
+        j.update(size_bytes=z.get("bytes"), frees_bytes=z.get("frees_bytes"),
+                 cache_frees_bytes=z.get("cache_frees_bytes"), exports_bytes=z.get("exports_bytes"))
         ext = j.get("ext")
         ok = bool(ext) and (INPUT / f"{j['id']}{ext}").exists()
         if ok and not _thumb_paths(j["id"])[0].exists():
@@ -2830,6 +3704,7 @@ def _start_preview_pro(job_id, plan, fmt, eo=None):
         try:
             tick.set(state="running", message="Generando la vista previa real…")
             out, stats = draft(jid, ev, tick, lock)
+            _claim_cache(jid, stats)
         except V.Canceled:
             tick.set(state="canceled", message="Cancelada")
             return
@@ -3080,7 +3955,8 @@ def caption_groups_for(plan, fmt="9:16"):
     src = pr["plan"].get("phrases") or []
     tagged = [[dict(w, _oi=(i, j)) for j, w in enumerate(ph or []) if isinstance(w, dict)]
               for i, ph in enumerate(src)]
-    fin = tl.map_words(tagged)
+    from motion.timeline import word_cut_spans
+    fin = tl.map_words(tagged, drop_spans=word_cut_spans(pr["plan"].get("cuts")))
     bx, by, bw, bh = job["layout"]
     ctx = CX.FrameCtx(W=bw, H=bh, fps=job["fps"], quality="final", seed=job["seed"],
                       style=job["style"], words=job.get("words") or [],
@@ -3429,6 +4305,107 @@ def analysis_start(job_id: str, body: dict = Body(default={})):
     started = _kick_analysis(job_id, plan, fmt, force=True, eo=eo)
     _kick_src_proxy(job_id)
     return {"ok": True, "started": started}
+
+
+# ---- limpieza de tomas (retomas, arranques en falso, autocorrecciones, tartamudeos, errores) ----
+# scripts/takes.py sobre las palabras del plan guardado. Los cortes de tomas son registros src
+# "takes" APARTE de los silencios; los que el usuario toco (user: true, via PUT /plan) se respetan.
+# Cambiar la sensibilidad varias veces seguidas relanza UN solo analisis de fondo (debounce).
+TAKES_KICK_S = float(os.environ.get("REELFY_TAKES_KICK_S", "5"))
+_TAKES_KICK: dict = {}
+_TAKES_KICK_LOCK = threading.Lock()
+
+
+def _kick_analysis_later(job_id, fmt="9:16", delay=None):
+    """Analisis de fondo del plan GUARDADO tras `delay` s sin otro cambio (como el Studio)."""
+    delay = TAKES_KICK_S if delay is None else float(delay)
+
+    def fire():
+        with _TAKES_KICK_LOCK:
+            if _TAKES_KICK.get(job_id) is not tm:
+                return
+            _TAKES_KICK.pop(job_id, None)
+        try:
+            plan, _ = jobstore.get_plan(job_id)
+            if plan:
+                _kick_analysis(job_id, plan, fmt)
+        except Exception:  # noqa: el analisis de fondo es una optimizacion
+            traceback.print_exc()
+    tm = threading.Timer(max(0.0, delay), fire)
+    tm.daemon = True
+    with _TAKES_KICK_LOCK:
+        old = _TAKES_KICK.get(job_id)
+        if old is not None:
+            old.cancel()
+        _TAKES_KICK[job_id] = tm
+    tm.start()
+    return tm
+
+
+@app.post("/takes/{job_id}")
+def takes_run(job_id: str, body: dict = Body(default={})):
+    """Re-detecta las tomas del trabajo. body {sensitivity: suave|normal|a_fondo, use_llm, base_rev}
+    -> {plan_rev, takes (plan.takes), cuts (los src "takes")}. Reemplaza los cortes de tomas que el
+    usuario no toco y conserva silencios, manuales, recortes 'ai' y los user: true. Concurrencia
+    optimista como PUT /plan: con `base_rev` viejo (o si otro escritor gano mientras corria) -> 409
+    con la revision actual. El tema (LLM) solo se pide si el plan aun no lo tiene. Apagar o
+    restaurar una toma = PUT /plan con su `enabled` cambiado y user: true."""
+    import takes as takes_mod
+    _job_or_404(job_id)
+    body = body or {}
+    base = body.get("base_rev")
+    try:
+        base = int(base) if base is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "base_rev inválido")
+    sens = takes_mod.SENS_ALIASES.get(str(body.get("sensitivity") or "normal").strip().lower())
+    if sens is None:
+        raise HTTPException(400, "Sensibilidad inválida (suave, normal o a_fondo).")
+    use_llm = body.get("use_llm", True) is not False
+    plan, rev = jobstore.get_plan(job_id)
+    if not plan:
+        raise HTTPException(409, "El job no tiene plan; analiza el video primero.")
+
+    def conflict(cur):
+        return JSONResponse({"ok": False, "detail": "El plan cambió en el servidor (re-dirigido u otra "
+                                                     "ventana); recarga antes de limpiar las tomas.",
+                             "plan_rev": cur}, status_code=409)
+    if base is not None and base != rev:
+        return conflict(rev)
+    t0 = time.time()
+    words = takes_mod.plan_words(plan)
+    try:
+        dur = float(plan.get("duration") or 0.0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    wav = plan.get("wav")
+    audio = wav if wav and Path(str(wav)).exists() else None     # sin wav: bordes solo por tiempos
+    old_cuts = [c for c in plan.get("cuts") or [] if isinstance(c, dict)]
+    res = takes_mod.detect(words, dur, sensitivity=sens, audio=audio, existing_cuts=old_cuts)
+    cuts = takes_mod.merge(old_cuts, res["cuts"])
+    meta = res["meta"]
+    prev = plan.get("takes") if isinstance(plan.get("takes"), dict) else {}
+    if prev.get("topic"):
+        meta.update({k: prev.get(k) for k in ("topic", "summary", "sections", "llm")})
+    elif use_llm:
+        tp = takes_mod.topic(takes_mod.effective_words(words, cuts))
+        if tp:
+            meta.update(topic=tp["topic"], summary=tp["summary"], sections=tp["sections"], llm=True)
+    meta["stats"] = takes_mod.stats(cuts)          # con las tomas del usuario que se respetaron
+    meta["ms"] = int(round((time.time() - t0) * 1000))
+    if cuts == old_cuts and {k: v for k, v in prev.items() if k != "ms"} == \
+            {k: v for k, v in meta.items() if k != "ms"}:
+        meta["ms"] = prev.get("ms", meta["ms"])    # nada cambio: mismo plan, misma revision
+    new = dict(plan, cuts=cuts, takes=meta)
+    if meta.get("topic") and not plan.get("topic"):
+        new["topic"] = meta["topic"]
+    ok, new_rev = jobstore.update_plan(job_id, new, rev)
+    if not ok:
+        return conflict(new_rev)
+    if new_rev != rev:
+        _music_superseded(job_id, new, rev, new_rev)
+        _kick_analysis_later(job_id, _fmt_of(body))
+    return {"plan_rev": new_rev, "takes": meta, "cuts": [c for c in cuts if c.get("src") == "takes"]}
 
 
 _FX_CACHE = {}
@@ -4318,7 +5295,7 @@ def profile_put(job_id: str, body: dict = Body(...)):
 # capacidades de la API que el Studio puede consultar antes de usarlas
 API_FEATURES = ("captions", "source_proxy", "jobs_meta", "music_beats", "translate_texts",
                 "translate_titles", "preview_music_refresh", "music_sync", "air_optin", "media",
-                "profile", "profile_media")
+                "profile", "profile_media", "takes", "storage")
 
 
 @app.get("/settings")
@@ -4495,6 +5472,11 @@ def status(job_id: str, plan: int | None = None, rev: int | None = None):
             _PHASE_SEEN.pop(next(iter(_PHASE_SEEN)))
     if want:
         st["plan"], st["plan_rev"] = _lm_stored(job_id, *_sym_stored(job_id, *jobstore.get_plan(job_id)))
+    # poco disco: se AVISA (antes se purgaban proyectos viejos sin decir nada)
+    disk = _disk_state()
+    st["low_space"], st["disk_free_gb"] = disk["low_space"], disk["free_gb"]
+    if disk["low_space"]:
+        st["low_space_message"] = disk["message"]
     return JSONResponse(st)
 
 
@@ -4773,4 +5755,5 @@ def _hide_main_file():
 if __name__ == "__main__":
     import uvicorn
     _hide_main_file()
+    _SERVING = True
     uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("REELFY_PORT", 8000)))

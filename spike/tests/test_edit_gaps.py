@@ -76,3 +76,50 @@ def test_pausa_al_inicio_de_un_clip_antes_de_hablar(tmp_path):
 def test_sin_palabras_igual_que_antes(tmp_path):
     p = _audio(tmp_path, [(1.5, "voz"), (0.9, "silencio"), (1.6, "voz")])
     assert _keeps(p) == _keeps(p, None) == _keeps(p, [])
+
+
+def _voz_db(tmp_path, parts):
+    """parts: [(dur, dB)] tono de voz a ese nivel (None = silencio digital con ruido minimo)."""
+    rng = np.random.default_rng(3)
+    y = []
+    for d, lvl in parts:
+        n = int(d * SR)
+        t = np.arange(n) / SR
+        if lvl is None:
+            s = rng.normal(0, 10 ** (-85 / 20), n)
+        else:
+            s = 10 ** (lvl / 20) * np.sqrt(2) * np.sin(2 * np.pi * 180 * t)
+        y.append(s.astype(np.float32))
+    p = tmp_path / "v.wav"
+    sf.write(p, np.concatenate(y), SR)
+    return str(p)
+
+
+def test_final_de_frase_dicho_bajito_no_se_corta(tmp_path):
+    # voz normal (-20 dB) | "vista." dicha bajito (-48 dB) | silencio | voz
+    p = _voz_db(tmp_path, [(1.5, -20), (0.3, -48), (1.2, None), (1.5, -20)])
+    words = [{"text": "punto", "start": 0.9, "end": 1.2}, {"text": "de", "start": 1.2, "end": 1.5},
+             {"text": "vista.", "start": 1.5, "end": 1.8}, {"text": "Ahora", "start": 3.0, "end": 3.5}]
+    keeps, _ = edit.keep_segments(p, words)
+    assert any(a <= 1.5 and b >= 1.8 + 0.05 for a, b in keeps)      # la palabra queda entera
+    # la pausa despues de la palabra si se corta
+    assert not any(a < 2.4 < b for a, b in keeps)
+
+
+def test_palabra_alucinada_en_silencio_no_protege(tmp_path):
+    # whisper pone una palabra en pleno silencio: el silencio se corta igual
+    p = _voz_db(tmp_path, [(1.5, -20), (1.5, None), (1.5, -20)])
+    words = [{"text": "hola", "start": 1.0, "end": 1.5}, {"text": "gracias", "start": 2.0, "end": 2.4},
+             {"text": "adios", "start": 3.0, "end": 3.5}]
+    keeps, _ = edit.keep_segments(p, words)
+    assert not any(a < 2.2 < b for a, b in keeps)
+
+
+def test_palabra_estirada_solo_protege_su_nucleo(tmp_path):
+    # "nada." dicha 1.5-1.8 pero con tiempo estirado hasta 3.9: la pausa se sigue cortando
+    p = _voz_db(tmp_path, [(1.5, -20), (0.3, -24), (2.2, None), (1.5, -20)])
+    words = [{"text": "para", "start": 1.1, "end": 1.5}, {"text": "nada.", "start": 1.5, "end": 3.9},
+             {"text": "Ahora", "start": 4.0, "end": 4.5}]
+    keeps, _ = edit.keep_segments(p, words)
+    assert any(a <= 1.5 and b >= 1.8 for a, b in keeps)
+    assert not any(a < 3.0 < b for a, b in keeps)

@@ -109,6 +109,70 @@ def word_gap_silences(audio, words, dur):
     return out
 
 
+# Palabras dichas bajito. silencedetect (-32 dB por muestra) y la regla de pausas cuentan como
+# silencio el final de frase que alguien dice en voz baja ("...a mi punto de vista." a -52 dB
+# con la voz a -29 dB) y el corte se lo comia. Una palabra transcrita CON VOZ protege su nucleo
+# (su tiempo, topado a lo que tarda en decirse: una palabra estirada sobre una pausa no la
+# protege entera); las respiraciones y pausas sin palabra se siguen cortando.
+PROTECT_BEFORE = 0.02   # s de aire antes de la palabra protegida
+PROTECT_AFTER = 0.08    # s de aire despues (cola de la consonante final)
+PROTECT_STRETCH = 1.5   # nucleo = hasta 1.5x la duracion tipica de la palabra (+0.1 s)
+PROTECT_ABOVE_FLOOR = 10.0  # dB: la palabra tiene voz si su p90 queda 10 dB sobre el piso de ruido
+
+
+def _protect_words(sil, words, audio, dur):
+    """Silencios [(a, b)] (formato de _silences: el corte real es [a+PAD, b-PAD]) sin el
+    nucleo de ninguna palabra con voz. Las palabras sobre el piso de ruido (whisper que alucina
+    en el silencio) no protegen nada."""
+    import numpy as np
+    from motion.timeline import est_word_dur
+    ws = [w for w in (words or []) if w.get("end", 0) >= w.get("start", 0)]
+    if not sil or not ws:
+        return sil
+    y = audio if not isinstance(audio, (str, Path)) else _mono16k(audio)
+    hop = int(16000 * 0.02)
+    n = len(y) // hop
+    if n < 10:
+        return sil
+    db = 20 * np.log10(np.sqrt(np.mean(y[:n * hop].reshape(n, hop) ** 2, axis=1) + 1e-12) + 1e-9)
+    # piso de ruido: el 10% mas bajo (con silencio digital queda en ~-90), y nunca a menos de
+    # 15 dB de la mediana (grabacion casi sin pausas: el p10 seria voz bajita)
+    floor = min(float(np.percentile(db, 10)), float(np.percentile(db, 50)) - 15.0)
+    prot = []
+    for w in ws:
+        s = float(w["start"])
+        e = min(float(w["end"]), s + PROTECT_STRETCH * est_word_dur(w.get("text")) + 0.1)
+        e = max(e, s + 0.05)
+        i0, i1 = int(s / 0.02), max(int(s / 0.02) + 1, int(np.ceil(e / 0.02)))
+        seg = db[max(0, i0):min(n, i1)]
+        if seg.size and float(np.percentile(seg, 90)) > floor + PROTECT_ABOVE_FLOOR:
+            prot.append((s - PROTECT_BEFORE, e + PROTECT_AFTER))
+    if not prot:
+        return sil
+    prot = _merge(prot)
+    out = []
+    for a, b in sil:
+        ca, cb = a + PAD, b - PAD                      # el corte real
+        pieces = [(ca, cb)]
+        for pa, pb in prot:
+            if pb <= ca or pa >= cb:
+                continue
+            nxt = []
+            for x, z in pieces:
+                if pb <= x or pa >= z:
+                    nxt.append((x, z))
+                    continue
+                if pa > x:
+                    nxt.append((x, pa))
+                if pb < z:
+                    nxt.append((pb, z))
+            pieces = nxt
+        for x, z in pieces:
+            if z - x > 0.15:                            # un corte de < 0.15 s ya no vale la pena
+                out.append((max(0.0, x - PAD) if x > 0 else 0.0, min(dur, z + PAD) if z < dur else dur))
+    return out
+
+
 def _merge(iv):
     out = []
     for s, e in sorted(iv):
@@ -127,7 +191,9 @@ def keep_segments(video, words=None):
     sil = _silences(video)
     if words:
         try:
-            sil = _merge(sil + word_gap_silences(video, words, dur))
+            audio = _mono16k(video)
+            sil = _merge(sil + word_gap_silences(audio, words, dur))
+            sil = _protect_words(sil, words, audio, dur)
         except Exception as e:  # noqa: sin audio legible -> solo silencedetect
             print(f"   pausas entre palabras no disponibles ({e})")
     keeps, t = [], 0.0

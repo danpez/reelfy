@@ -139,6 +139,7 @@ desactivarlos con `enabled: false`.
 from __future__ import annotations
 
 import base64
+import bisect
 import copy
 import hashlib
 import json
@@ -1587,7 +1588,46 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
 
 
 # ---------------------------------------------------------------- paso 2: guion
+def _word_cut_spans(plan: dict) -> list[tuple[float, float]]:
+    """Tramos (fundidos y ordenados) de los cortes habilitados que quitan PALABRAS a proposito:
+    tomas repetidas (src "takes"), manuales y del usuario. Los silencios no cuentan (con el timing
+    crudo de Whisper una palabra dicha se estira sobre la pausa vecina y su punto medio cae en el
+    silencio sin que la palabra se corte) ni los recortes de la IA (src "ai": el director los
+    propone DESPUES de leer el guion y re-dirigir debe ver las mismas palabras)."""
+    iv = []
+    for c in plan.get("cuts") or []:
+        if not isinstance(c, dict) or c.get("enabled", True) is False:
+            continue
+        if not (c.get("src") in ("takes", "user", "manual") or c.get("manual")):
+            continue
+        try:
+            a, b = float(c["start"]), float(c["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if b > a:
+            iv.append((a, b))
+    out: list[list[float]] = []
+    for a, b in sorted(iv):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def _mid_in_spans(spans: list[tuple[float, float]], a: float, b: float) -> bool:
+    """El punto medio de [a, b] cae (estricto) dentro de un tramo de `spans` (fundidos y ordenados)."""
+    if not spans:
+        return False
+    m = (a + b) / 2
+    k = bisect.bisect_right(spans, (m, float("inf"))) - 1
+    return k >= 0 and spans[k][0] < m < spans[k][1]
+
+
 def _flatten_words(plan: dict) -> list[dict]:
+    """Palabras del guion: las que quedan en el video. Fuera las de una toma repetida o un corte
+    manual habilitado (su punto medio cae dentro): ni titulos ni enfasis sobre lo que se corto."""
+    word_cuts = _word_cut_spans(plan)
     ws = []
     for pi, ph in enumerate(plan.get("phrases") or []):
         for w in ph or []:
@@ -1598,6 +1638,8 @@ def _flatten_words(plan: dict) -> list[dict]:
             txt = str(w.get("text", "")).strip()
             if not txt:
                 continue
+            if _mid_in_spans(word_cuts, t0, max(t1, t0)):
+                continue
             ws.append({"text": txt, "n": norm(txt), "t0": t0, "t1": max(t1, t0 + 0.02),
                        "kw": bool(w.get("kw")), "ph": pi})
     ws.sort(key=lambda w: (w["t0"], w["t1"]))
@@ -1605,9 +1647,22 @@ def _flatten_words(plan: dict) -> list[dict]:
     for k in range(1, len(ws)):
         if ws[k]["t0"] < ws[k - 1]["t1"] - 1e-3:
             ws[k]["t0"] = min(ws[k - 1]["t1"], ws[k]["t1"] - 0.02)
+    # tiempo cortado a proposito entre dos palabras que quedan juntas en el video final: la pausa
+    # que ve el guion es la FINAL ('durante [40, no,] 50 minutos' no parte la oracion)
+    if word_cuts:
+        for k in range(1, len(ws)):
+            a, b = ws[k - 1]["t1"], ws[k]["t0"]
+            cut = sum(max(0.0, min(b, e) - max(a, s_)) for s_, e in word_cuts if s_ < b and e > a)
+            if cut > 0:
+                ws[k]["cut_before"] = cut
     for i, w in enumerate(ws):
         w["i"] = i
     return ws
+
+
+def _gap(words: list[dict], k: int) -> float:
+    """Pausa (tiempo final) entre la palabra k-1 y la k: sin lo que se corto a proposito."""
+    return words[k]["t0"] - words[k - 1]["t1"] - words[k].get("cut_before", 0.0)
 
 
 # palabras que abren oracion: con mayuscula a media transcripcion (Whisper sin puntos) marcan
@@ -1657,9 +1712,10 @@ def _sentences(words: list[dict]) -> list[dict]:
     punct = sum(1 for w in words if re.search(r"[.!?…]$", w["text"])) >= max(1, len(words) // 60)
     pause = 0.42 if punct else 0.62
     for k, w in enumerate(words):
-        if cur and (w["t0"] - cur[-1]["t1"] > 0.8) and not (
-                cur[-1]["text"].endswith(",") and w["t0"] - cur[-1]["t1"] < 2.5) and not (
-                cur[-1]["n"] in DANGLING and w["t0"] - cur[-1]["t1"] < 1.3 and not _cap_start(words, k)):
+        g = _gap(words, k) if cur else 0.0
+        if cur and (g > 0.8) and not (
+                cur[-1]["text"].endswith(",") and g < 2.5) and not (
+                cur[-1]["n"] in DANGLING and g < 1.3 and not _cap_start(words, k)):
             sents.append(cur)
             cur = []
         elif cur and _cap_start(words, k):
@@ -1667,7 +1723,7 @@ def _sentences(words: list[dict]) -> list[dict]:
             cur = []
         cur.append(w)
         end_p = bool(re.search(r"[.!?…]$", w["text"]))
-        nxt_gap = (words[k + 1]["t0"] - w["t1"]) if k + 1 < len(words) else 9
+        nxt_gap = _gap(words, k + 1) if k + 1 < len(words) else 9
         comma = w["text"].endswith(",") and nxt_gap < 2.5
         dangling = w["n"] in DANGLING and not end_p and nxt_gap < 1.3
         if end_p or (nxt_gap > pause and len(cur) >= 5 and not comma and not dangling
@@ -2591,6 +2647,14 @@ def _merge_llm(script: dict, llm: dict, words: list[dict]) -> None:
         script["topic"] = t
 
 
+def _takes_topic(plan: dict) -> str:
+    """Tema que entendio la limpieza de tomas (plan.takes.topic), sin juicios de valor y corto."""
+    tk = plan.get("takes") if isinstance(plan.get("takes"), dict) else {}
+    t = str(tk.get("topic") or "").strip().strip(".")
+    t = " ".join(w for w in t.split() if norm(w) not in _TOPIC_BLOCK)
+    return t if t and len(t.split()) <= 6 else ""
+
+
 def analyze_script(plan: dict, shots: list[dict] | None = None, use_llm: bool = True,
                    llm_result: dict | None = None) -> dict:
     """Guion estructurado: palabras, frases con seccion/enfasis/tratamiento/iconos, entidades."""
@@ -2614,6 +2678,12 @@ def analyze_script(plan: dict, shots: list[dict] | None = None, use_llm: bool = 
     if llm:
         _merge_llm(script, llm, words)
         script["llm"] = True
+    tt = _takes_topic(plan)
+    if tt:
+        # el tema de TODO el video (limpieza de tomas: una llamada con el inicio de cada oracion)
+        # manda sobre el del primer tramo del guion (en un video largo suele ser el saludo o el
+        # nombre del canal)
+        script["topic"] = tt
     info = _ocr_confirm(ent, shots or [])
     script["ocr"] = info
     return script
@@ -8851,13 +8921,24 @@ def _script_from_public(plan: dict, pub: dict, shots: list[dict]) -> dict:
     by = {s["id"]: s for s in pub.get("sentences") or []}
     ok = len(by) == len(sents) and all(by[s["id"]]["w0"] == s["w0"] and by[s["id"]]["w1"] == s["w1"]
                                        for s in sents if s["id"] in by)
+    # las palabras cambiaron (se restauro o se quito una toma repetida): cada frase que sigue
+    # IGUAL (mismos tiempos y texto) conserva lo que decidio la IA; solo las tocadas van con
+    # heuristicas. Enfasis y titulo son indices de palabra: se trasladan con el corrimiento
+    by_t = {} if ok else {(round(float(p_["t0"]), 2), round(float(p_["t1"]), 2), p_.get("text")): p_
+                          for p_ in pub.get("sentences") or [] if "t0" in p_ and "t1" in p_}
     for k, s in enumerate(sents):
         s["info"] = _classify(s, words, k, len(sents), anc)
-        if ok:
-            src = by[s["id"]]
-            for key in ("section", "emph", "fx", "icons", "energy", "tone", "title"):
-                if key in src:
-                    s["info"][key] = src[key]
+        src = by[s["id"]] if ok else by_t.get((round(s["t0"], 2), round(s["t1"], 2), s["text"]))
+        if src is None:
+            continue
+        shift = 0 if ok else s["w0"] - int(src.get("w0", s["w0"]))
+        for key in ("section", "emph", "fx", "icons", "energy", "tone", "title"):
+            if key not in src:
+                continue
+            v = src[key]
+            if shift and key in ("emph", "title") and isinstance(v, list):
+                v = [int(i) + shift for i in v if isinstance(i, (int, float))]
+            s["info"][key] = v
     e2 = dict(plan.get("entities") or {})
     # lo que fijo un perfil (anterior o vigente) no cuenta como dato del usuario: se recalcula
     pk = set(e2.get("profile_keys") or []) if isinstance(e2.get("profile_keys"), list) else set()
@@ -8871,7 +8952,8 @@ def _script_from_public(plan: dict, pub: dict, shots: list[dict]) -> dict:
         ent["role"] = str(e2["topic_role"] or "")   # el rubro que venia de la voz
     apply_profile_entities(ent, anc, words, _plan_profile(plan), pub.get("ocr"))
     return {"words": words, "sents": sents, "entities": ent, "anchors": anc,
-            "topic": pub.get("topic", ""), "llm": pub.get("llm", False), "ocr": pub.get("ocr", {})}
+            "topic": _takes_topic(plan) or pub.get("topic", ""), "llm": pub.get("llm", False),
+            "ocr": pub.get("ocr", {})}
 
 
 def choreograph(plan: dict, shots: list[dict], script: dict, style: str = "dinamico",

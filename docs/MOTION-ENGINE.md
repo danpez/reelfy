@@ -450,6 +450,114 @@ reservas o web, `phone`, `address`) y `entities.profile_keys` (las que vinieron 
 quitar el perfil se recalculan). El rubro de la voz queda en `entities.topic_role` (iconos del
 rubro y el prompt de la musica no cambian por escribir la profesion: misma pista).
 
+### 3.3 Limpieza de tomas (`plan.cuts` src `"takes"` y `plan.takes`; `scripts/takes.py`)
+Quien graba de corrido repite frases hasta que le salen, deja oraciones a medias, se corrige
+("son 19, no, 16") y se traba. `takes.detect(words, dur, sensitivity, audio, existing_cuts)`
+propone quitar los intentos malos y dejar la ULTIMA toma completa, con reglas deterministas y
+generales del espanol hablado (solo biblioteca estandar; ~0.5 s para 19 min):
+- R1 reinicio: un arranque repite (difuso: raiz, prefijo de 5 letras) el inicio de una toma de
+  hasta 40 s antes que queda cubierta por la nueva. Cadenas de intentos (cada uno un corte del
+  mismo `group`), retomas de cola (solo se rehace el final: se corta solo ese final; nunca una
+  cola que cierra la oracion tras una palabra colgante: 'Lo mas importante es [la X.] La X es lo
+  mas importante' es una reformulacion) y n-gramas repetidos. Intentos que se enciman = UN corte.
+  Una toma vieja que cierra una oracion y sigue con otra (>= 3 palabras) solo es retoma con una
+  entrada de >= 3 palabras y si la nueva arranca oracion: si no, lo de tras el cierre es el inicio
+  de la oracion que se queda. Anafora cuyo primer item esta antes ('es el primer horno que...,
+  es el primer horno en el que..., es el primer horno en el cual...'): no es retoma.
+- R2/R2b fragmento colgado ('no lo,' + pausa + reinicio), R3 oracion abandonada ('...' sobre
+  palabra colgante; si la oracion siguiente arranca con las palabras de su cola -'...de esta
+  batidora y que... Y que ademas no hace ruido'- solo se quita la cola; una oracion de mas de 12
+  palabras que no se vuelve a decir despues -ni hay voz sin transcribir pegada a la siguiente:
+  Whisper se trago su repeticion- ni la sigue una groseria queda como sugerencia: lleva
+  informacion), R4 autocorreccion ('X, no, Y', 'perdon', 'mejor dicho', ', digo,'), R5
+  groseria/comentario (solo se corta dentro de una cadena de retomas; aislado es sugerencia), R6
+  palabra funcional repetida ('la la'), R7 reformulacion tras pausa larga (nivel baja), R8 (con
+  audio, nivel baja) palabra colgante + >= 0.8 s de voz que Whisper no transcribio + pausa: Whisper
+  suele tragarse un intento repetido ('La [masa lleva harina de,] |pausa| La masa lleva...').
+- Vetos: enfasis ('muy, muy', 'no, no, no', 'asi es, asi es'), listas y anaforas ('es moderna, es
+  versatil, es elegante', 'uno, dos, tres'), conectores ('o sea', 'es decir').
+- Una muletilla pura ('pues,', 'eh') entre el intento malo y una pausa se va con el corte.
+
+Bordes: `[inicio de la primera palabra quitada, inicio de la primera que se queda)` con el aire de
+los silencios (`edit.GAP_PAD_OUT/IN`). Con el audio (`plan.wav`): si el inicio de Whisper cae en
+plena voz (llega tarde, hasta ~0.3 s) el borde va al hueco REAL que precede a esa voz (energia
+20 dB bajo la voz durante >= 50 ms: el cierre de una consonante no cuenta); si no, a la ventana de
+20 ms de menor energia a +-150 ms (dentro de una palabra que se queda solo si ahi es silencio).
+Whisper se suele tragar el arranque REPETIDO de la toma buena ('...que le da un... |pausa| [El
+secreto es la olla de] barro, que le da un sabor' -> solo 'barro, ...'): si tras la ULTIMA pausa
+(>= 0.25 s) antes de la palabra que se queda hay >= 0.6 s de voz sin transcribir pegada a ella, el
+corte termina en esa pausa (la toma buena no queda a medias); si tras esa pausa casi no hay voz,
+la voz sin transcribir de antes es otro intento tragado y se va con el corte. Palabras estiradas (> 1.2 s, timing crudo de Whisper: la pausa queda ANTES de la
+palabra) se acotan a su final. Garantias (pruebas `tests/test_takes.py`): ninguna palabra que se
+queda tiene su punto medio dentro de un corte de tomas, las quitadas si, y un corte de tomas no
+deja entre el y un silencio un tramo < `timeline.MIN_FRAG` con una palabra dentro (se acorta; si
+no alcanza queda como sugerencia).
+
+Contrato de cada corte (registros APARTE de los silencios; pueden traslaparse: `keeps_from_cuts`
+funde los habilitados; restaurar una toma no restaura los silencios de dentro):
+```json
+{"id": "tk_3f9c0a1b2d", "start": 42.31, "end": 47.95, "enabled": true, "src": "takes",
+ "kind": "retoma", "conf": 0.86, "level": "alta", "reason": "Lo repites mejor en 0:48",
+ "text": "Asi que este pan es...", "kept_text": "Asi que este pan es el mejor de la casa.",
+ "keep_ref": {"start": 48.03, "end": 51.2}, "group": "tg_2", "w0": 118, "w1": 123, "user": true}
+```
+(Datos ficticios.) `kind`: `retoma` (UI "Toma repetida"), `arranque_fallido` ("Arranque en
+falso"), `autocorreccion` ("Corrección"), `tartamudeo` ("Tartamudeo"), `error` ("Error"),
+`digresion` ("Fuera de tema"; reservado, las reglas no lo emiten); los silencios son "Silencio".
+`id` = hash del kind y de los tiempos de palabra redondeados (estable entre corridas y con o sin
+audio). `w0`/`w1` = indices (inclusive) de las palabras quitadas en la lista de palabras del plan
+(frases aplanadas). `keep_ref` = la toma que se queda (la del final de la cadena), null al final
+del video. `user: true` = el usuario la toco (toggle = PUT `/plan` con `enabled` cambiado y
+`user: true`): las re-detecciones la conservan tal cual. `edges: true` (+ `user`) = movio sus
+bordes (arrastre en el carril Cortes o Inicio/Fin del inspector): tambien se conserva, y
+encender la categoria no le quita `user`. `guard: true` = el motor la dejo apagada por
+seguridad (dejaria una palabra en un fragmento < MIN_FRAG, o mide menos que MIN_CUT): ningun
+nivel ni `apply_sensitivity` la vuelve a encender, solo el usuario. `reason` lleva la hora de
+la toma que se queda en tiempo de la FUENTE; el guion de Limpieza la reescribe en tiempo FINAL
+(`FXCore.takeReason`). NUNCA `src: "ai"` (`propose_trims` no propone nada si hay cortes "ai";
+con cortes "takes" corre normal).
+
+Niveles y sensibilidad: `alta` y `media` habilitados, `baja` = sugerencia (`enabled: false`).
+`suave` = solo `alta`; `normal` (default) = `alta` + `media`; `a_fondo` = todo (incluida la
+reformulacion R7). `takes.apply_sensitivity(cuts, s)` re-evalua sin re-detectar (respeta `user`).
+`takes.merge(old, new)` reemplaza los `src "takes"` salvo los `user`/`edges` y conserva
+silencios, manuales y "ai" (idempotente); el Studio hace lo mismo con `FXCore.adoptTakeCuts`.
+Solo sugerencia (`baja`) aunque parezca retoma: dos oraciones paralelas cerradas que comparten
+el marco y cambian 1-2 palabras de contenido ('Agregas una taza de harina. Agregas una taza de
+azucar.'; en una cadena de 3+ intentos con la misma entrada si se corta), y una oracion en '...'
+que la siguiente COMPLETA (minuscula, cifra o exclamacion corta: 'El secreto es... la
+mantequilla.') sin voz sin transcribir de por medio. Una groseria al final de la toma buena se
+corta sola (desde su clausula), nunca con la toma.
+
+`plan.takes = {version: 1, sensitivity, topic, summary, sections: [{start, title}], stats: {n,
+enabled, removed_s (union de los habilitados), suggested, by_kind: {kind: {n (todos), s (segundos
+habilitados)}}}, llm, ms}`. `takes.topic(words)`: UNA llamada al LLM (inicio de cada oracion, 16
+palabras; 4096 de contexto, sin razonamiento, temperatura 0; esquema `{tema, resumen,
+secciones: [{start_word, titulo}]}`), tope duro de 35 s en un hilo (el analisis nunca espera mas
+de ~40 s); sin LLM -> None. `plan.topic` = el tema (lo usan `plan_meta` y el director).
+
+En `pipeline.analyze` (despues de los silencios, ANTES de los shorts): "Detectando silencios…" ->
+"Buscando tomas repetidas y errores…" -> "Entendiendo el tema del video (IA)…" -> "Eligiendo los
+mejores momentos (IA)…". Los shorts (`highlights.select_highlights(sents, n, cuts)`) se eligen
+sobre las palabras que se quedan (`takes.effective_words`), con la duracion MIN/MAX medida en
+tiempo FINAL (sin silencios ni tomas), el prompt con tiempos finales y `num_ctx` segun el largo;
+un short nunca termina dentro de una toma ni a menos de 1 s antes de una, tambien de las
+sugeridas (los shorts no se recalculan al cambiar el nivel) (se extiende a la toma buena o
+retrocede). El b-roll se ancla al tema si no hay glosario.
+
+Medido en un video real de 19 min (whisper crudo, sin alineador; GT de un editor con 39 cortes
+recomendados): `normal` precision 1.00 / recall 0.80 por evento, 1.6 s quitados fuera del GT,
+-232 s; `a_fondo` 1.00 / 0.85. El LLM como detector fue peor (recall 0.74, 100 s): solo tema.
+Con el pipeline completo (whisper `-nfa` con DTW + MMS_FA, E2E por HTTP como el Studio):
+`normal` precision 0.97 / recall 0.72 (el unico corte fuera del GT es una palabra que de verdad
+se repite y el GT, hecho sobre otra transcripcion, no tenia), 1 palabra que el GT conserva
+quitada, -218 s sobre los silencios (861.5 s -> 724.7 s). Whisper con `-nfa` se trago 4 retomas
+enteras (38 palabras) que con flash-attn si transcribe (y al reves 2): lo que no se transcribe no
+se puede detectar y queda en el video. Por eso `pipeline.transcribe` solo pide el DTW (`--dtw`
++ `-nfa`) cuando hace falta: sin el alineador MMS_FA (o si no carga) o con `align=False`; con el
+alineador usa flash-attn (con flash-attn + MMS la limpieza dio 0.94 / 0.77). En los clips cortos
+de prueba (9 clips de 3 a 38 s) las dos opciones transcriben las mismas palabras.
+
 ## 4. Contrato de render (normativo)
 
 ### 4.1 FrameCtx (`motion/ctx.py`)
@@ -662,6 +770,12 @@ mezcla usa `seed` del plan. El matte por CoreML (fp16) difiere del de CPU en ~2e
   garantiza ritmo (evento visual cada 2-4 s segun intensidad), variedad (no repetir el mismo
   efecto seguido), transicion en cada cambio de toma, SFX por evento visual, hook visual en los
   primeros 2 s, CTA al final, no encimar titulos con subtitulos, respetar SAFE y la cara.
+- Palabras del guion (`_flatten_words`): sin las de una toma repetida o un corte manual
+  habilitado (punto medio dentro); los silencios y los recortes "ai" no quitan palabras (el
+  timing crudo estira palabras dichas sobre la pausa). `script.topic` = `plan.takes.topic` si
+  existe (tema de todo el video; el del primer tramo del guion suele ser el saludo o el canal).
+  Re-dirigir tras restaurar/quitar una toma: cada frase que sigue igual (tiempos y texto)
+  conserva lo que decidio la IA (enfasis y titulo trasladados al nuevo indice de palabra).
 - Sin LLM/VLM: heuristicas equivalentes (nunca falla el analisis). `llm_available` reintenta
   (2 s y luego 6 s) y solo recuerda un fallo 6 s; la cache de tomas con clave de VLM solo guarda
   descripciones reales (un VLM ocupado no deja el video en heuristicas para siempre). Al
@@ -1031,6 +1145,7 @@ Licencia (solo app empaquetada) en todo lo que procesa; `engine_ready` (whisper)
 | POST `/captions/{job}` | `{plan?, fmt?}` | Grupos REALES de subtitulos (los que dibuja el export: `text.caption_groups` sobre las frases en tiempo final, en la caja de layout): lista `[{start, end, text, words:[{text, start, end, kw?}], lines, accent, rect:[x0,y0,x1,y1], start_final, end_final}]` en tiempo ORIGINAL (salvo `*_final`); `words` = palabras del plan (texto sin el cambio de mayusculas del preset); `rect` normalizado a la caja 9:16. `[]` con subtitulos apagados. Cacheado por contenido; cabecera `X-Captions-Ms`. 400 si el plan no es v2. |
 | POST `/translate/{job}` | `{plan?, lang? ("en"), texts?, spans?, phrases?}` | Traduce con el LLM local para editar en vivo (NO se guarda: el Studio lo pone en el plan). `lang` en `es` (identidad), `en`, `pt` (portugues de Brasil), `fr`, `de`, `it` (otro -> 400); el idioma se le nombra al modelo en su propia lengua. Con `texts` [str]: solo esos textos -> `texts_<lang>` 1:1 (titulos y graficos del plan v2): cada titulo se traduce COMPLETO (sus lineas `\n` son partes de una frase) y vuelve con el MISMO numero de lineas y sus MAYUSCULAS; contexto = la frase hablada que lo cubre (`spans` [[start, end]] en tiempo original, o la busqueda del titulo en la transcripcion; solo en titulos de 4+ palabras). Lo que no respeta las lineas, sale en otro idioma (gallego, espanol) o tradujo tambien el contexto se reintenta estricto y sin contexto. `untranslated` = indices que quedaron iguales al original (lo neutro, como precios, no cuenta). `phrases:true` agrega los subtitulos. Sin `texts`: subtitulos del plan -> `phrases_<lang>` (mismo tramo por frase, palabras repartidas; `phrases_untranslated`) y titulos de highlights -> `titles_<lang>`. `{lang, ms, ...}`. **503** con el motivo si la IA local no tradujo NADA (Ollama caido o sin modelo): nunca devuelve el espanol como traduccion. |
 | POST `/analysis/{job}` | `{plan?, fmt?}` + opciones del proyecto (opcionales) | `{ok, started}`: (re)lanza el analisis de fondo |
+| POST `/takes/{job}` | `{sensitivity: "suave"\|"normal"\|"a_fondo", use_llm?: true, base_rev?, fmt?}` (alias `conservador`/`agresivo`) | `{plan_rev, takes, cuts}` (`takes` = `plan.takes`, `cuts` = los `src "takes"`; seccion 3.3). Re-detecta sobre las palabras del plan GUARDADO (bordes con `plan.wav` si existe), reemplaza las tomas que el usuario no toco y conserva silencios, manuales, "ai" y `user: true`. El tema (LLM) solo se pide si el plan no lo tiene. Con `base_rev` viejo, o si otro escritor gano mientras corria -> **409** `{ok:false, plan_rev}`. Sin cambios, misma revision. Relanza el analisis de fondo con debounce (`REELFY_TAKES_KICK_S`, 5 s: una rafaga de cambios = un analisis). 400 sensibilidad o base_rev invalidos; 404 job; 409 sin plan. `GET /settings` anuncia `features: ["takes", ...]` y `GET /jobs` trae `takes: {n, enabled, removed_s}` (segundos de mas sobre los silencios) por proyecto. |
 | POST `/cancel/{job}` | `?only=preview\|analysis\|direct\|music\|job` | sin `only`: cancela render/analisis del job y sus tareas laterales; con un EXPORT en curso cancela el export, el analisis de fondo y re-dirigir pero NO la vista previa (ni su actualizacion) ni la musica (son de la edicion). Con `only`: SOLO esa tarea lateral (cancelar la vista previa no mata un export en curso) o solo el trabajo principal (`job`). 400 con otro valor. |
 | GET `/source/{job}` | `?proxy=1` | Video del trabajo para el Studio. Con `proxy=1`: proxy H.264 con el lado corto a 720 (nunca agranda), GOP de ~1/3 s (seeks rapidos), MISMO reloj que el original (el Studio sigue en tiempo original), color bt709 (HDR con el tonemap del render) y audio AAC; se genera en segundo plano al llegar a `review`, al abrir un proyecto viejo (`GET /plan`) o con `POST /analysis` (tarea lateral `proxy`: `proxy_state/pct/url` en `/status`; prioridad baja `nice -n 10` para no quitarle CPU al analisis de fondo). Mismo reloj EXACTO: `-enc_time_base demux` conserva el pts de cada cuadro (±1 ms). Si aun no esta sirve el original y lo genera; cabecera `X-Reelfy-Proxy: ready\|pending\|none` (`none` = no habra proxy: p. ej. ya fallo para esta fuente, con el mismo tamano y fecha no se reintenta). |
 | GET `/jobs` | `?limit=` (20, max 50) | Proyectos recientes sin deserializar planes: `[{id, kind, state, phase, pct, message, error, created, updated, ext, plan_rev, has_plan, version, topic, duration, final_duration, style, shots, thumb}]` (`topic` = tema del director o el primer titulo; `final_duration` aproximada: duracion menos cortes; `thumb` = `/thumb/{id}` o null; null tambien con un trabajo en error sin plan o cuya miniatura ya fallo). |

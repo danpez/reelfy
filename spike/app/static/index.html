@@ -315,7 +315,8 @@
       box-shadow:0 0 10px rgba(255,176,32,.65)}
   .ph::before{content:"";position:absolute;top:-1px;left:-4.5px;width:10px;height:8px;background:var(--sel);
               clip-path:polygon(0 0,100% 0,50% 100%)}
-  .cutb{position:absolute;top:4px;bottom:4px;border-radius:5px;cursor:pointer;transition:filter .12s;
+  /* z-index 1: cada corte es su propio contexto (sus asas no tapan las de una toma encimada, z 2) */
+  .cutb{position:absolute;z-index:1;top:4px;bottom:4px;border-radius:5px;cursor:pointer;transition:filter .12s;
         background:repeating-linear-gradient(-45deg,#55201f,#55201f 3px,#421918 3px,#421918 7px);
         border:1px solid #7d2f2f}
   .cutb.off{background:var(--panel2);border-style:dashed;border-color:var(--line2);opacity:.4}
@@ -374,8 +375,50 @@
   .clip .m b{font-size:12px}.dl{color:var(--brand2);text-decoration:none;font-size:12px;font-weight:600;white-space:nowrap}
   .dl:hover{text-decoration:underline}
   .err{color:#ff8a8a;font-size:13.5px}
+  /* proyectos recientes: tamano en disco, menu "…" (liberar espacio / eliminar) y pie de almacenamiento
+     (bajo #recent: fx.css se carga despues y sus reglas .rrow ganarian a igual especificidad) */
+  #recent .rrow{cursor:pointer;transition:border-color .12s,opacity .22s var(--ease),transform .22s var(--ease)}
+  #recent .rrow .rmain{display:flex;align-items:center;gap:10px;flex:1;min-width:0;border:0;background:none;color:inherit;
+               font:inherit;text-align:left;padding:0;cursor:pointer}
+  #recent .rrow .rmain:disabled{cursor:default}
+  #recent .rrow.off{cursor:default}#recent .rrow.off:hover{border-color:var(--line)}#recent .rrow.off .rn{color:var(--muted)}
+  #recent .rrow .rsz{color:var(--muted);font-size:11.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  #recent .rrow .rmore{flex:none;width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;padding:0;
+               border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);cursor:pointer}
+  #recent .rrow .rmore:hover,#recent .rrow .rmore[aria-expanded=true]{color:var(--text);border-color:var(--line2)}
+  #recent .rrow.busy{opacity:.55;pointer-events:none}
+  #recent .rrow.gone{opacity:0;transform:translateX(10px)}
+  .rall{display:block;margin:2px auto 0}
+  .rlnk{border:0;background:none;color:var(--brand2);font:inherit;font-weight:600;cursor:pointer;padding:0}
+  .rlnk:hover{text-decoration:underline}.rlnk:disabled{color:var(--muted);opacity:.75;cursor:default;text-decoration:none}
+  .rfoot{margin-top:10px;text-align:center;color:var(--muted);font-size:11.5px;font-variant-numeric:tabular-nums}
+  .rfoot .rtrash{margin-top:4px}
+  .pmsg.plow{color:var(--brand2);font-weight:600}
+  .cutb.tk .clb .ic{width:12px;height:12px;display:block}
+  .rfoot .rlow{color:var(--brand2);font-weight:600;margin-bottom:4px}
+  .rmenu{position:fixed;z-index:60;min-width:228px;background:#10141b;border:1px solid var(--line2);border-radius:10px;padding:5px;
+         box-shadow:0 24px 60px -18px rgba(0,0,0,.85)}
+  .rmenu[hidden]{display:none}
+  .rmenu button{display:flex;align-items:center;gap:9px;width:100%;border:0;background:none;color:var(--text);font:inherit;
+                font-size:12.5px;padding:8px 10px;border-radius:7px;cursor:pointer;text-align:left}
+  .rmenu button:hover:not(:disabled),.rmenu button:focus-visible{background:var(--panel2);outline:none}
+  .rmenu button:disabled{color:var(--faint);cursor:default}
+  .rmenu .rmx{margin-left:auto;color:var(--muted);font-size:11.5px;font-variant-numeric:tabular-nums}
+  .rmenu .rdanger{color:#ff8a8a}
+  .rmenu hr{border:0;border-top:1px solid var(--line);margin:4px 2px}
+  .rdlg{background:var(--panel);border:1px solid var(--line2);border-radius:14px;padding:24px;width:min(440px,calc(100vw - 32px));
+        box-shadow:0 24px 60px -18px rgba(0,0,0,.85)}
+  .rdlg .rdi{width:44px;height:44px;margin:0 auto 12px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+             background:rgba(255,90,90,.12);border:1px solid rgba(255,110,110,.35);color:#ff8a8a}
+  .rdlg h3{margin:0 0 8px;font-size:16px;overflow-wrap:anywhere}
+  .rdlg p{margin:0;color:var(--muted);font-size:13px;line-height:1.55}
+  .rdlg .rbtns{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}
+  .rdlg .rdi .ic{width:20px;height:20px}
+  .rdlg .rbtns .btn{justify-content:center;padding:11px 12px;white-space:nowrap;min-width:0}
+  .rdlg .rbtns .rdel{background:#d33c3c;box-shadow:none}
+  @media (max-width:480px){ #recent .rrow .ro{display:none} }   /* telefono: la fila entera abre; mas lugar para el nombre */
 </style>
-<link rel="stylesheet" href="/static/fx.css?v=75288bcf">
+<link rel="stylesheet" href="/static/fx.css?v=cd67d9a4">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute">
@@ -434,6 +477,11 @@
     <g id="i-target"><circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="2.8"/><path d="M12 1.8v3.5M12 18.7v3.5M1.8 12h3.5M18.7 12h3.5"/></g>
     <g id="i-magnet"><path d="M5 4.5h4v7a3 3 0 0 0 6 0v-7h4v7a7 7 0 0 1-14 0z"/><path d="M5 8h4M15 8h4"/></g>
     <g id="i-x"><path d="M6 6l12 12M18 6L6 18"/></g>
+    <g id="i-right"><path d="M9.5 5.5l6.5 6.5-6.5 6.5"/></g>
+    <g id="i-left"><path d="M14.5 5.5L8 12l6.5 6.5"/></g>
+    <g id="i-restore"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.5V9H9"/></g>
+    <g id="i-book"><path d="M4.5 5.5A1.5 1.5 0 0 1 6 4h13.5v14H6a1.5 1.5 0 0 0-1.5 1.5z"/><path d="M4.5 19.5A1.5 1.5 0 0 0 6 21h13.5v-3"/></g>
+    <g id="i-pausebar"><rect x="7" y="5.5" width="3.2" height="13" rx="1" fill="currentColor" stroke="none"/><rect x="13.8" y="5.5" width="3.2" height="13" rx="1" fill="currentColor" stroke="none"/></g>
   </defs>
 </svg>
 
@@ -556,11 +604,48 @@
     <h3><svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Procesando con IA…</h3>
     <div class="bar"><i id="a-fill"></i></div>
     <div class="pmsg" id="a-msg">Iniciando…</div>
+    <div class="pmsg plow" id="a-low" role="status" hidden></div>
     <div class="hint">Al terminar entrarás al editor con todo lo generado, listo para ajustar.</div>
   </div></section>
 
   <section class="screen" id="s-editor"><div class="card">
+    <div class="modebar" id="modeBar">
+      <div class="mb-l">
+        <button class="btn ghost mini ico" id="undoBtn2" title="Deshacer (⌘Z)" aria-label="Deshacer"><svg class="ic" viewBox="0 0 24 24"><use href="#i-undo"/></svg></button>
+        <button class="btn ghost mini ico" id="redoBtn2" title="Rehacer (⇧⌘Z)" aria-label="Rehacer"><svg class="ic" viewBox="0 0 24 24"><use href="#i-redo"/></svg></button>
+      </div>
+      <div class="mseg" id="segMode" role="tablist" aria-label="Modo del Studio">
+        <button data-v="clean" role="tab" aria-selected="false"><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Limpieza de tomas<span class="mbadge" id="cleanCnt"></span></button>
+        <button data-v="edit" role="tab" aria-selected="true" class="sel"><svg class="ic" viewBox="0 0 24 24"><use href="#i-layers"/></svg>Edición</button>
+      </div>
+      <div class="mb-r" id="finLbl" title="Duración final del video, ya sin los tramos cortados"></div>
+    </div>
     <div class="studio">
+      <div class="cleanpane" id="cleanPane">
+        <div class="gsh">
+          <div class="gtop"><h2>Guion</h2><span class="gsub">Lo tachado no sale en el video. Haz clic en un corte para escucharlo o restaurarlo.</span></div>
+          <div class="gchips" id="gChips" role="toolbar" aria-label="Filtrar cortes"></div>
+        </div>
+        <div class="gtr" id="gTr" tabindex="0" role="region" aria-label="Guion del video"></div>
+        <div class="gfoot">
+          <div class="gf-l"><button class="tgl" id="gSil" role="switch" aria-checked="false" aria-labelledby="gSilLbl"></button><span id="gSilLbl">Mostrar silencios</span></div>
+          <div class="gf-c">
+            <button class="btn ghost mini ico" id="gPrev" title="Corte anterior (↑)" aria-label="Corte anterior"><svg class="ic" viewBox="0 0 24 24"><use href="#i-left"/></svg></button>
+            <span id="gPos" aria-live="polite"></span>
+            <button class="btn ghost mini ico" id="gNext" title="Corte siguiente (↓)" aria-label="Corte siguiente"><svg class="ic" viewBox="0 0 24 24"><use href="#i-right"/></svg></button>
+          </div>
+          <div class="gf-r"><button class="btn ghost mini" id="gRestAll">Restaurar todo…</button></div>
+        </div>
+        <div class="gconfirm" id="gConfirm" role="dialog" aria-modal="false"></div>
+      </div>
+      <div class="cleanside" id="cleanSide">
+        <div class="ccard cmap">
+          <div class="mh"><span>Dónde se quitó, en todo el video</span><span id="cmapDur"></span></div>
+          <div class="mapbar" id="cmapBar"><canvas id="cmapCv"></canvas><i class="mph" id="cmapPh"></i></div>
+          <div class="mapch" id="cmapCh"></div>
+        </div>
+        <div class="ccard csum" id="cSum"></div>
+      </div>
       <div class="stage">
         <div class="cvwrap" id="cvwrap">
           <canvas id="cv" width="540" height="960"></canvas>
@@ -668,7 +753,7 @@
         </div>
         <div class="pgroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-insp"/></svg>Procesado</h4>
           <div class="optrow">
-            <label class="swlabel v1only"><input type="checkbox" class="toggle" id="dynamic" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Cortes + zoom <span class="info" data-tip="Recorta silencios y muletillas automáticamente y hace acercamientos suaves en los momentos de énfasis.">i</span></label>
+            <label class="swlabel v1only"><input type="checkbox" class="toggle" id="dynamic" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Cortes + zoom <span class="info" data-tip="Recorta los silencios automáticamente y hace acercamientos suaves en los momentos de énfasis. Las tomas repetidas se revisan en Limpieza de tomas.">i</span></label>
             <label class="swlabel" id="enhanceRow"><input type="checkbox" class="toggle" id="enhance" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-mic"/></svg>Audio estudio <span class="info" data-tip="Limpia el ruido, quita golpes de aire y nivela el volumen al estándar de redes (-14 LUFS). En la edición IA siempre está activo.">i</span></label>
           </div>
           <div class="optrow v1only">
@@ -754,6 +839,7 @@
     <div class="stages" id="r-stages"></div>
     <div class="bar"><i id="r-fill"></i></div>
     <div class="pmsg" id="r-msg">Montando…</div>
+    <div class="pmsg plow" id="r-low" role="status" hidden></div>
     <div class="pstat">
       <span>Progreso <b id="r-pct">0%</b></span>
       <span>Transcurrido <b id="r-el">0s</b></span>
@@ -804,9 +890,9 @@
 
 <video id="srcVid" style="display:none" playsinline></video>
 
-<script src="/static/fxcore.js?v=75288bcf"></script>
-<script src="/static/fx.js?v=75288bcf"></script>
-<script src="/static/profile.js?v=75288bcf"></script>
+<script src="/static/fxcore.js?v=cd67d9a4"></script>
+<script src="/static/fx.js?v=cd67d9a4"></script>
+<script src="/static/profile.js?v=cd67d9a4"></script>
 <script>
 const $=s=>document.querySelector(s);
 /* tooltips flotantes (position:fixed) para que NO se corten dentro de paneles con overflow */
@@ -1280,6 +1366,12 @@ async function asmApply(){
     overlays:ASM.overlays.map(o=>({sid:o.sid,type:o.type,start:o.start,dur:o.dur,pos:o.pos,size:o.size})),
     glossary:$("#asmGloss").value||"", highlights:Math.max(1,Math.min(5,parseInt($("#highlights").value,10)||2)),
     director:($("#asmStyle").value==="none"?false:{style:$("#asmStyle").value,intensity:0.75}) };
+  // un solo video horizontal de mas de 3 min (un video de YouTube): el proyecto nace en 16:9 y el
+  // primer analisis prepara el video base en ese formato (el Studio abre con el mismo por defecto)
+  if(body.director&&ASM.clips.length===1&&ASM.clips[0].type!=="image"){
+    const c=ASM.clips[0], s=ASM.sources.find(x=>x.id===c.sid)||{};
+    if(FXCore.isLongLandscape({duration:clipLen(c),dims:[+s.w||0,+s.h||0],shots:[]})) body.director.fmt="16:9";
+  }
   // perfil de la persona elegido antes de analizar: el director lo integra (rotulo, Seguir, reservas, cierre)
   const prof=window.PF&&PF.forCompose(); if(prof&&body.director) body.profile=prof;
   // opciones del proyecto que el Studio ya conoce: el primer analisis prepara el video base con ellas
@@ -1370,8 +1462,12 @@ async function runSingle(){
   if(r.detail) return fail(r.detail);
   JOB=r.job_id; poll();
 }
+/** Poco disco (lo avisa /status): analizar y exportar son lo que llena el disco. */
+function lowSpaceMsg(j){ return j&&j.low_space?`${j.low_space_message||"Poco espacio en el disco"}${j.disk_free_gb!=null?` (quedan ${(+j.disk_free_gb).toFixed(1)} GB)`:""}: si se llena, el proceso falla.`:""; }
+function showLow(sel,j){ const el=$(sel); if(!el) return; const m=lowSpaceMsg(j); el.textContent=m; el.hidden=!m; }
 async function poll(){
   let j; try{ j=await(await fetch("/status/"+JOB+(PLAN?"?plan=0":""))).json(); }catch(e){ return setTimeout(poll,1200); }
+  if(j.phase==="analyzing") showLow("#a-low",j); else if(j.phase==="rendering") showLow("#r-low",j);
   if(j.phase==="analyzing"){ setBar("#a-fill",j.pct); $("#a-msg").textContent=j.message; }
   else if(j.phase==="review"){
     if(!PLAN&&!j.plan){ try{ j.plan=(await(await fetch("/plan/"+JOB)).json()).plan; }catch(e){ return setTimeout(poll,1200); } }
@@ -1398,6 +1494,8 @@ function restore(s){
   PLAN=JSON.parse(s);
   // el idioma elegido no se deshace (es del proyecto, como el formato): se conserva en el plan
   if(PLAN&&((PLAN.studio&&PLAN.studio.lang)||"es")!==LANG) PLAN.studio=Object.assign({},PLAN.studio,{lang:LANG});
+  // el formato elegido tampoco se deshace (plan.studio.fmt)
+  if(PLAN&&STUDIO_FMT&&((PLAN.studio&&PLAN.studio.fmt)||null)!==STUDIO_FMT) PLAN.studio=Object.assign({},PLAN.studio,{fmt:STUDIO_FMT});
   const legacy=SEL&&!["fx","music","captions"].includes(SEL.type);
   if(legacy) SEL=null;
   FX.afterPlanReplaced();
@@ -1406,17 +1504,22 @@ function restore(s){
 }
 function undo(){ if(!UNDO.length)return; REDO.push(JSON.stringify(PLAN)); restore(UNDO.pop()); }
 function redo(){ if(!REDO.length)return; UNDO.push(JSON.stringify(PLAN)); restore(REDO.pop()); }
-function updUndo(){ const u=$("#undoBtn"), r=$("#redoBtn"); if(u)u.disabled=!UNDO.length; if(r)r.disabled=!REDO.length; }
+function updUndo(){ ["#undoBtn","#undoBtn2"].forEach(q=>{ const u=$(q); if(u)u.disabled=!UNDO.length; }); ["#redoBtn","#redoBtn2"].forEach(q=>{ const r=$(q); if(r)r.disabled=!REDO.length; }); }
 
 /* ============ EDITOR ============ */
 const V=$("#srcVid"), CV=$("#cv"), CTX=CV.getContext("2d");
 // Si el formato es "Original", re-aplica el aspecto real cuando el video cargue.
-V.addEventListener("loadedmetadata",()=>{ if(FMT==="original") setFormat("original"); });
+V.addEventListener("loadedmetadata",()=>{
+  if(FMT==="original") setFormat("original");
+  // sin formato elegido: el de la fuente con sus dimensiones de display (el reproductor ya aplica la rotacion)
+  else if(PLAN&&!STUDIO_FMT&&EDITOR_JOB===JOB){ const f=FXCore.defaultFormat(PLAN,{w:V.videoWidth,h:V.videoHeight}); if(f!==FMT){ setFormat(f); segSet("#segFmt",FMT); } }
+});
 const OS=document.createElement("canvas");
 const OCTX=OS.getContext("2d");
 const FMTS={"9:16":{cw:540,ch:960,ow:1080,max:338},"1:1":{cw:720,ch:720,ow:1080,max:380},
             "4:5":{cw:648,ch:810,ow:1080,max:360},"16:9":{cw:960,ch:540,ow:1920,max:560}};
 let CW=540,CH=960,OW=1080;
+let STUDIO_FMT=null;                  // formato que eligio el usuario en este proyecto (plan.studio.fmt)
 function setFormat(v){
   FMT=v;
   let f;
@@ -1431,11 +1534,31 @@ function setFormat(v){
   }
   CW=f.cw; CH=f.ch; OW=f.ow;
   CV.width=CW; CV.height=CH;
-  CV.style.aspectRatio=`${CW} / ${CH}`; CV.style.maxWidth=f.max+"px";
+  CV.style.aspectRatio=`${CW} / ${CH}`; CV.style.maxWidth=`min(100%, ${f.max}px)`;   // nunca mas ancho que su columna
   OS.height=48; OS.width=Math.max(2,Math.round(48*CW/CH));
   if(typeof FX!=="undefined"){ FX.syncOverlayRect(); if(PLAN) FX.planDirty(); }
 }
 setFormat("9:16");
+/** Formato del proyecto al abrirlo (FXCore.projectFormat): el elegido (plan.studio.fmt, que el
+    analisis anota al nacer el proyecto) o, en uno nuevo, el de la fuente: UN solo video horizontal
+    de mas de 3 min sale en 16:9 (un video de YouTube, no un short); lo demas en 9:16. Un proyecto
+    de antes del formato por proyecto se edito y exporto en 9:16: se queda asi y se anota en el plan
+    (nunca cambia de formato ni se re-analiza solo por abrirlo). -> {auto: formato AUTOMATICO distinto
+    del que preparo el analisis (hay que re-analizar), legacy: anotar el 9:16 en el plan}. */
+function fmtFromPlan(){
+  const st=PLAN&&PLAN.studio&&PLAN.studio.fmt;
+  STUDIO_FMT=FXCore.FORMATS.includes(st)?st:null;
+  const pf=FXCore.projectFormat(PLAN,V.videoWidth?{w:V.videoWidth,h:V.videoHeight}:null), f=pf.fmt;
+  if(f!==FMT) setFormat(f);
+  if(pf.legacy) STUDIO_FMT=f;
+  segSet("#segFmt",FMT);
+  return {auto:!STUDIO_FMT&&f!=="9:16", legacy:pf.legacy};
+}
+/** El usuario elige el formato: queda en el plan (sobrevive a recargar, a reabrir y a deshacer). */
+function chooseFormat(v){
+  setFormat(v); STUDIO_FMT=v;
+  if(PLAN&&((PLAN.studio&&PLAN.studio.fmt)||null)!==v){ PLAN.studio=Object.assign({},PLAN.studio,{fmt:v}); FX.planDirty(); }
+}
 const CAPSTYLE={
   clasico:{size:78,active:"#ffb020",upper:false,kw:"#7cff32",outline:5},
   amarillo:{size:84,active:"#ffe14d",upper:true,kw:"#3690ff",outline:6},
@@ -1507,8 +1630,9 @@ function openEditor(){
   if(JOB&&JOB!=="demo"){ const u=new URL(location.href); if(u.searchParams.get("job")!==JOB){ u.searchParams.set("job",JOB); history.replaceState(null,"",u.pathname+u.search); } }
   FX.syncMode();
   if(!EDITOR_WIRED){ wireEditorOnce(); EDITOR_WIRED=true; }
+  let fmtAuto=false, fmtLegacy=false;
   if(EDITOR_JOB!==JOB){
-    langFromPlan();
+    langFromPlan(); const ff=fmtFromPlan(); fmtAuto=ff.auto; fmtLegacy=ff.legacy;
     FX.openSource(); EDITOR_JOB=JOB; UNDO=[]; REDO=[];
     // sin un seek el navegador no decodifica ningun cuadro: arranca en el primer tramo conservado
     V.addEventListener("loadeddata",()=>{ if(V.currentTime<0.001){ const k=FXCore.keepsFromCuts(PLAN.cuts||[],PLAN.duration||0); V.currentTime=(k.length?k[0][0]:0)+0.001; } },{once:true});
@@ -1518,10 +1642,16 @@ function openEditor(){
   TL.zoom=1;
   renderTL(); renderList(); renderSubs(); renderBroll();
   FX.init();
+  // proyecto de antes del formato por proyecto: su 9:16 queda anotado en el plan (despues de que el
+  // Studio tomo nota del plan del servidor, para que el autoguardado lo mande)
+  if(fmtLegacy&&JOB&&JOB!=="demo"){ PLAN.studio=Object.assign({},PLAN.studio,{fmt:STUDIO_FMT}); FX.planDirty(); }
+  // formato por defecto distinto del analisis inicial: se prepara el video base en ese formato
+  if(fmtAuto) FX.forceAnalysis();
+  FX.clean.open();
   setTimeout(()=>{ renderTL(); FX.syncOverlayRect(); },80);
 }
 function wireEditorOnce(){
-  seg("#segStyle",v=>STYLE=v); seg("#segAnim",v=>ANIM=v); seg("#segFmt",setFormat); seg("#segPlat",v=>PLATFORM=v);
+  seg("#segStyle",v=>STYLE=v); seg("#segAnim",v=>ANIM=v); seg("#segFmt",chooseFormat); seg("#segPlat",v=>PLATFORM=v);
   $("#broll").addEventListener("change", async e=>{
     if(!e.target.checked){ renderBroll(); renderTL(); return; }
     const st = await (await fetch("/settings")).json();
@@ -1624,7 +1754,8 @@ function wireEditorOnce(){
     PLAN.cuts.push({start:+t.toFixed(2),end:+dur.toFixed(2),enabled:true,manual:true});
     PLAN.cuts.sort((a,b)=>a.start-b.start); afterCutsChange(); };
 }
-function afterCutsChange(){ FX.invalidateTimeline(); renderTL(); FX.planDirty(); FX.renderDirectorStats(); }
+/** Tras cambiar los cortes (ci = el corte tocado, para refrescar solo su parrafo del guion). */
+function afterCutsChange(ci){ FX.invalidateTimeline(); renderTL(); FX.planDirty(); FX.renderDirectorStats(); FX.clean.refresh(ci); }
 
 /* ---- geometria del timeline: px/seg (precision para eventos cortos) ---- */
 const LABW=134;                       // igual que --lab-w de fx.css
@@ -1695,12 +1826,15 @@ function renderCutsLane(){
   (PLAN.cuts||[]).forEach((c,ci)=>{
     const el=document.createElement("div");
     const on=c.enabled!==false;
-    el.className="cutb"+(on?"":" off")+(c.manual?" manual":"")+(c.src==="ai"?" ai":"")+(SEL&&SEL.type==="cut"&&SEL.i===ci?" selel":"");
+    const take=FXCore.isTakeCut(c), kind=FXCore.cutKind(c);
+    el.className="cutb"+(on?"":" off")+(c.manual?" manual":"")+(c.src==="ai"?" ai":"")+(take?" tk":"")+(SEL&&SEL.type==="cut"&&SEL.i===ci?" selel":"");
+    if(take) el.style.setProperty("--k",FX.clean.rgb(kind));
     const setPos=()=>{ el.style.left=(c.start*px)+"px"; el.style.width=Math.max(4,(c.end-c.start)*px)+"px"; };
     setPos();
-    el.title=(on?"Tramo cortado":"Restaurado")+` (${(c.end-c.start).toFixed(2)} s)`+(c.src==="ai"?` · propuesto por la IA${c.reason?": "+c.reason:""}`:"")
-      +" · clic activa/restaura · bordes ajustan"+(c.manual?" · doble clic elimina":"");
-    el.innerHTML=((c.end-c.start)*px>24&&c.src==="ai"?`<span class="clb">IA</span>`:"")+`<div class="hnd l"></div><div class="hnd r"></div>`;
+    el.title=(take?FXCore.TAKE_LABEL[kind]+" · ":"")+(on?"Tramo cortado":"Restaurado")+` (${(c.end-c.start).toFixed(2)} s)`+(c.src==="ai"?` · propuesto por la IA${c.reason?": "+c.reason:""}`:"")
+      +(take&&c.reason?` · ${c.reason}`:"")+" · clic selecciona · R restaura o vuelve a cortar · bordes ajustan"+(c.manual?" · doble clic elimina":"");
+    const lbw=(c.end-c.start)*px;
+    el.innerHTML=(lbw>24&&c.src==="ai"?`<span class="clb">IA</span>`:take&&lbw>20?`<span class="clb">${lbw>96?FXCore.TAKE_LABEL[kind]:ICO("scissors")}</span>`:"")+`<div class="hnd l"></div><div class="hnd r"></div>`;
     el.onpointerdown=e=>{
       if(e.button!==0) return; e.stopPropagation(); e.preventDefault();
       if(FX.busy()) return;
@@ -1714,8 +1848,9 @@ function renderCutsLane(){
         if(mode==="l") c.start=+Math.min(Math.max(0,v),c.end-0.1).toFixed(3); else c.end=+Math.max(Math.min(dur,v),c.start+0.1).toFixed(3);
         setPos(); if(V.paused) V.currentTime=mode==="l"?c.start:c.end;
       },()=>{
-        if(began){ afterCutsChange(); if(SEL&&SEL.type==="cut"&&SEL.i===ci) inspect(SEL); return; }
-        mut(); c.enabled=!on; inspect({type:"cut",i:ci}); afterCutsChange();
+        if(began){ FXCore.markEdges(c); afterCutsChange(ci); if(SEL&&SEL.type==="cut"&&SEL.i===ci) inspect(SEL); return; }
+        // un clic solo SELECCIONA (restaurar o volver a cortar: boton del inspector o R, con deshacer)
+        inspect({type:"cut",i:ci}); renderCutsLane();
       });
     };
     el.ondblclick=()=>{ if(!c.manual)return; mut(); PLAN.cuts.splice(ci,1); inspect(null); afterCutsChange(); };
@@ -1783,7 +1918,7 @@ function renderShortsLane(){
         setPos(); updateBadge(i);
       },()=>{
         if(began){ renderList(); if(SEL&&SEL.type==="short"&&SEL.i===i) inspect(SEL); FX.planDirty(); return; }
-        if(SEL&&SEL.type==="short"&&SEL.i===i){ mut(); h.enabled=!h.enabled; renderList(); }
+        // un clic solo SELECCIONA (exportarlo o no: su interruptor en la lista o el boton del inspector)
         inspect({type:"short",i}); renderShortsLane();
       });
     };
@@ -1823,7 +1958,7 @@ async function deletePreset(){
 }
 function applyPreset(name){
   const c=PRESETS[name]; if(!c)return;
-  STYLE=c.style||"clasico"; ANIM=c.anim||"pop"; setFormat(c.format||"9:16");
+  STYLE=c.style||"clasico"; ANIM=c.anim||"pop"; chooseFormat(c.format||"9:16");
   CAPC=c.cap_color||null; CAPF=c.cap_font||"Arial"; CAPS=c.cap_scale||1; CAPPOS=c.cap_pos||null;
   ZAMT=c.zoom_amt??0.10; AIR=c.air??0.16;
   LOGO_ON=!!c.logo_on; LOGO_POS=c.logo_pos||"br"; LOGO_SIZE=c.logo_size||0.14;
@@ -1964,6 +2099,9 @@ function draw(){
     const ci=activeCutIndex(t);
     if(ci>=0&&!(SEL&&SEL.type==="cut"&&SEL.i===ci)){ const c=PLAN.cuts[ci]; if(c.end<dur-0.05) V.currentTime=c.end+0.01; else V.pause(); }
   }
+  // "Escuchar cómo queda" (Limpieza de tomas): se detiene al final del tramo
+  const LR=FX.clean.listenRange;
+  if(LR&&!V.paused&&t>=LR.end-0.01){ V.pause(); FX.clean.listenRange=null; }
   const vw=V.videoWidth, vh=V.videoHeight;
   if(vw){
     // ---- encuadre: fondo desenfocado + aire + tracking + zoom (como el export) ----
@@ -2004,6 +2142,7 @@ function draw(){
   if(!SCRUBBING) $("#scrub").value=Math.round(t/dur*1000);
   $("#tcur").textContent=fmtT(t);
   highlightLiveWord(t);
+  FX.clean.tick(t);
   duckMusic();
   FX.tick(t,!V.paused);
   FX.drawOverlay(t);
@@ -2200,7 +2339,7 @@ function wireTransport(){
     else{ V.pause(); M&&M.pause(); }
   };
   V.onplay=()=>{ setPlayIcon(true); if(!FX.isPro()&&$("#music").checked&&M)M.play().catch(()=>{}); FX.onPlay(); };
-  V.onpause=()=>{ setPlayIcon(false); M&&M.pause(); FX.onSeekOrPause(); };
+  V.onpause=()=>{ setPlayIcon(false); M&&M.pause(); FX.clean.listenRange=null; FX.onSeekOrPause(); };
   V.onseeked=()=>{ if(V.paused) FX.onSeekOrPause(); };
   const scrub=$("#scrub");
   scrub.oninput=()=>{ SCRUBBING=true; V.currentTime=scrub.value/1000*PLAN.duration; };
@@ -2215,6 +2354,7 @@ function wireTransport(){
   };
   document.addEventListener("keydown",e=>{
     if(!$("#s-editor").classList.contains("on")||e.target.isContentEditable||/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+    if(FX.clean.onKey(e)) return;
     if(FX.onKey(e)) return;
     const meta=e.metaKey||e.ctrlKey;
     if(e.code==="Space"){ e.preventDefault(); play.onclick(); }
@@ -2229,6 +2369,7 @@ function wireTransport(){
     else if(e.key==="Home"){ V.currentTime=0; }
     else if(e.key==="End"){ V.currentTime=Math.max(0,PLAN.duration-0.05); }
     else if((e.key==="Delete"||e.key==="Backspace")&&SEL&&SEL.type==="cut"&&PLAN.cuts[SEL.i]&&PLAN.cuts[SEL.i].manual){ e.preventDefault(); mut(); PLAN.cuts.splice(SEL.i,1); inspect(null); afterCutsChange(); }
+    else if((e.key==="r"||e.key==="R")&&!meta&&SEL&&SEL.type==="cut"&&PLAN.cuts[SEL.i]){ e.preventDefault(); FX.clean.toggle(SEL.i); inspect(SEL); }
     else if((e.key==="i"||e.key==="I")&&SEL&&SEL.type==="short"){ mut();
       const h=PLAN.highlights[SEL.i]; h.start=Math.min(+V.currentTime.toFixed(2),h.end-2);
       renderTL(); renderList(); inspect(SEL); }
@@ -2276,17 +2417,18 @@ function inspect(sel){
     b.insertAdjacentHTML("beforeend",`<div class="hint">I / O fijan el inicio y el fin en el playhead.</div>`);
   }else if(sel.type==="cut"){
     const c=PLAN.cuts[sel.i]; if(!c){ inspect(null); return; }
-    headH("scissors","214,84,79",c.manual?"Corte manual":c.src==="ai"?"Recorte propuesto por la IA":"Silencio detectado",
-      `${(c.end-c.start).toFixed(2)} s · ${c.enabled!==false?"se corta":"restaurado"}`);
+    const take=FXCore.isTakeCut(c), kind=FXCore.cutKind(c);
+    headH("scissors",take?FX.clean.rgb(kind):"214,84,79",take?FXCore.TAKE_LABEL[kind]:c.manual?"Corte manual":c.src==="ai"?"Recorte propuesto por la IA":"Silencio detectado",
+      `${(c.end-c.start).toFixed(2)} s · ${c.enabled!==false?"se corta":"restaurado"}`+(take?` · seguridad ${FXCore.takeLevel(c)}`:""));
     if(c.reason){ const r=document.createElement("div"); r.className="hint"; r.style.marginBottom="10px"; r.textContent="Motivo: "+c.reason; b.appendChild(r); }
-    b.appendChild(numf("Inicio",c.start,v=>{c.start=Math.max(0,Math.min(v,c.end-0.1));}));
-    b.appendChild(numf("Fin",c.end,v=>{c.end=Math.min(PLAN.duration,Math.max(v,c.start+0.1));}));
+    b.appendChild(numf("Inicio",c.start,v=>{c.start=Math.max(0,Math.min(v,c.end-0.1)); FXCore.markEdges(c); afterCutsChange(sel.i);}));
+    b.appendChild(numf("Fin",c.end,v=>{c.end=Math.min(PLAN.duration,Math.max(v,c.start+0.1)); FXCore.markEdges(c); afterCutsChange(sel.i);}));
     const row=document.createElement("div"); row.className="btnrow"; row.style.marginTop="8px";
-    row.appendChild(btn(c.enabled!==false?"scissors":"eye",c.enabled!==false?"Restaurar tramo":"Volver a cortar",()=>{ mut(); c.enabled=c.enabled===false; afterCutsChange(); inspect(sel); }));
+    row.appendChild(btn(c.enabled!==false?"restore":"scissors",c.enabled!==false?"Restaurar tramo":"Volver a cortar",()=>{ FX.clean.toggle(sel.i); inspect(sel); }));
     row.appendChild(btn("play","Revisar",()=>{ inspect(sel); V.currentTime=Math.max(0,c.start-0.8); ensureAudio(); AC&&AC.resume(); V.play().catch(()=>{}); }));
     if(c.manual) row.appendChild(btn("trash","Eliminar",()=>{ mut(); PLAN.cuts.splice(sel.i,1); inspect(null); afterCutsChange(); }));
     b.appendChild(row);
-    b.insertAdjacentHTML("beforeend",`<div class="hint">Con el corte seleccionado, al reproducir se escucha el tramo para revisarlo.</div>`);
+    b.insertAdjacentHTML("beforeend",`<div class="hint">Con el corte seleccionado, al reproducir se escucha el tramo para revisarlo. R restaura o vuelve a cortar.</div>`);
   }else if(sel.type==="beat"){
     headH("zoom","251,176,32","Zoom de énfasis",fmtT(PLAN.beats[sel.i]));
     b.appendChild(numf("Zoom en",PLAN.beats[sel.i],v=>{PLAN.beats[sel.i]=Math.max(0,Math.min(v,PLAN.duration));}));
@@ -2361,6 +2503,11 @@ function renderSubs(){
 /* ---- export ---- */
 $("#render").onclick=async()=>{
   if(FX.busy()) return;
+  if(JOB&&JOB!=="demo"){
+    let st=null; try{ st=await(await fetch("/status/"+JOB+"?plan=0")).json(); }catch(e){ st=null; }
+    if(st&&st.low_space&&!confirm(lowSpaceMsg(st)+"\n\nExportar un video largo necesita varios GB libres. ¿Exportar de todos modos?")) return;
+    showLow("#r-low",st);
+  }
   if(FX.isPro()) await FX.saveNow();
   V.pause(); M&&M.pause(); FX.onPlay();
   window.RENDER_CANCELED=false;
@@ -2452,7 +2599,7 @@ function showResults(){
   });
   $("#backEditor").style.display=PLAN?"inline-flex":"none";
   // avisos del render (medio ilegible, SFX desconocido, transicion lejos de un corte...) con "Ver"
-  const rw=$("#resWarn"); rw.innerHTML=FX.isPro()?FX.warningsHtml(FX.lastWarnings||[]):""; FX.wireWarnings(rw);
+  const rw=$("#resWarn"); rw.innerHTML=FX.isPro()?FX.shortsNote()+FX.warningsHtml(FX.lastWarnings||[]):""; FX.wireWarnings(rw);
   show("#s-results");
 }
 $("#backEditor").onclick=()=>{ RESULTS=[]; backToEditor(); };
@@ -2491,32 +2638,184 @@ if(location.hash==="#demo"){
     cuts:[{start:5.2,end:6.1,enabled:true},{start:14.8,end:15.6,enabled:true},
           {start:29.3,end:30.4,enabled:true},{start:44,end:44.7,enabled:false},
           {start:58.2,end:59.5,enabled:true},{start:74.1,end:74.9,enabled:true}],
+    takes:{version:1,sensitivity:"normal",topic:"Demostración del Studio",summary:null,sections:[{start:0,title:"Inicio"}],stats:{},llm:false,ms:0},
     highlights:[{start:6,end:34,title:"El secreto del estudio",reason:"demo",enabled:true},
                 {start:52,end:81,title:"Cómo se exporta todo",reason:"demo",enabled:true}]};
+  const fw=PLAN.phrases.flat();
+  PLAN.cuts.push({id:"tk_demo1",start:fw[4].start,end:fw[7].end,enabled:true,src:"takes",kind:"retoma",conf:0.9,level:"alta",
+    reason:"Lo repites mejor enseguida",text:fw.slice(4,8).map(w=>w.text).join(" "),group:"tg_1",keep_ref:{start:fw[8].start,end:fw[11].end}},
+    {id:"tk_demo2",start:fw[20].start,end:fw[21].end,enabled:false,src:"takes",kind:"tartamudeo",conf:0.35,level:"baja",reason:"Palabras repetidas"});
   openEditor();
 }
 /* proyectos recientes en la pantalla inicial: en la app de escritorio no hay barra de URL, asi
    que esta es la forma de volver a un proyecto. GET /jobs ya trae el resumen de cada plan (tema,
-   duracion final, estilo, miniatura): una sola peticion, sin leer los planes. */
-(async function recentProjects(){
+   duracion final, estilo, miniatura) y su tamano en disco: una sola peticion, sin leer los planes.
+   Cada proyecto tiene un menu "…": "Liberar espacio" (borra solo lo regenerable: sigue editable) y
+   "Eliminar proyecto…" (a la Papelera, con confirmacion). Pie: "Reelfy usa X GB · Liberar espacio"
+   (GET /storage, en cache) y el aviso de poco disco: el servidor ya no borra proyectos solo. */
+const RP={list:[],all:false,st:null};
+const rpEsc=x=>String(x==null?"":x).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const rpBytes=b=>{ b=+b||0; return b>=2**30?(b/2**30).toFixed(1)+" GB":b>=2**20?Math.round(b/2**20)+" MB":b>0?"menos de 1 MB":"0 MB"; };
+const rpName=j=>j.topic?String(j.topic):`Proyecto ${j.id.slice(0,6)}`;
+const rpOpen=j=>j.has_plan!==false&&["review","done"].includes(j.phase);
+const rpToast=(m,ic)=>{ if(window.FX&&FX.toast) FX.toast(m,ic); };
+const RP_DOTS=`<svg class="ic" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="18.5" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>`;
+const RP_DISK=`<svg class="ic" viewBox="0 0 24 24"><rect x="3.5" y="13" width="17" height="6.5" rx="2"/><path d="M6 13l2.2-7.5h7.6L18 13"/><path d="M16.5 16.3h.01"/></svg>`;
+async function rpJson(u,opt){
+  const r=await fetch(u,opt); let j=null; try{ j=await r.json(); }catch(e){ j=null; }
+  if(!r.ok) throw new Error((j&&j.detail)||`Error ${r.status}`);
+  return j;
+}
+async function recentProjects(){
   if(new URLSearchParams(location.search).get("job")||location.hash==="#demo") return;
-  let list=[]; try{ list=await(await fetch("/jobs?limit=12")).json(); }catch(e){ return; }
-  list=(Array.isArray(list)?list:[]).filter(j=>j&&j.has_plan!==false&&["review","done"].includes(j.phase)).slice(0,6);
-  const box=$("#recent"); if(!list.length||!box) return;
+  const box=$("#recent"); if(!box) return;
+  let list=[];
+  const stP=rpJson("/storage").catch(()=>null);
+  try{ list=await rpJson("/jobs?limit=200"); }catch(e){ return; }
+  // se pueden abrir los que tienen plan; los que fallaron solo se listan si ocupan disco (para borrarlos)
+  RP.list=(Array.isArray(list)?list:[]).filter(j=>j&&(rpOpen(j)||(["error"].includes(j.phase)&&(+j.size_bytes||0)>=2**20)));
+  RP.st=await stP;
+  rpRender();
+}
+function rpRender(){
+  const box=$("#recent"); if(!box) return;
+  if(!RP.list.length&&!(RP.st&&(RP.st.low_space||(+RP.st.local_trash_bytes||0)>0))){ box.innerHTML=""; return; }
   const ago=t=>{ const d=Math.max(0,Date.now()/1000-(+t||0)); return d<90?"hace un momento":d<3600?`hace ${Math.round(d/60)} min`:d<86400?`hace ${Math.round(d/3600)} h`:`hace ${Math.round(d/86400)} d`; };
   const STY={dinamico:"Dinámico",elegante:"Elegante",minimal:"Minimal",energetico:"Energético"};
-  const esc=x=>String(x==null?"":x).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  box.innerHTML=`<h5>${ICO("layers")}Proyectos recientes</h5>`+list.map(j=>{
-    const name=j.topic?String(j.topic):`Proyecto ${j.id.slice(0,6)}`;
+  const shown=RP.all?RP.list:RP.list.slice(0,6);
+  const rows=shown.map(j=>{
+    const name=rpName(j), open=rpOpen(j);
     const d=j.final_duration!=null?j.final_duration:j.duration;
-    const meta=[d?fmtT(d):"",j.version===2?("edición IA"+(STY[j.style]?" · "+STY[j.style]:"")):"clásico",j.shots>1?`${j.shots} tomas`:""].filter(Boolean).join(" · ");
-    return `<button class="rrow" data-id="${esc(j.id)}">`
-      +(j.thumb?`<img class="rth" src="${esc(j.thumb)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'rth none'}))">`:`<span class="rth none"></span>`)
-      +`<span class="rtx"><span class="rn">${esc(name)}</span><span class="rs">${esc(meta)}</span><span class="rs">${j.phase==="done"?"exportado":"en edición"} · ${ago(j.updated||j.created)}</span></span>`
-      +`<span class="ro">Abrir${ICO("toend")}</span></button>`;
+    const meta=j.has_plan===false?"sin análisis":[d?fmtT(d):"",j.version===2?("edición IA"+(STY[j.style]?" · "+STY[j.style]:"")):"clásico",j.shots>1?`${j.shots} tomas`:""].filter(Boolean).join(" · ");
+    const state=open?(j.phase==="done"?"exportado":"en edición"):"no se terminó";
+    return `<div class="rrow${open?"":" off"}" data-id="${rpEsc(j.id)}">`
+      +`<button class="rmain"${open?` title="Abrir «${rpEsc(name)}»"`:" disabled"}>`
+      +(j.thumb?`<img class="rth" src="${rpEsc(j.thumb)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'rth none'}))">`:`<span class="rth none"></span>`)
+      +`<span class="rtx"><span class="rn">${rpEsc(name)}</span><span class="rs">${rpEsc(meta)}</span><span class="rs">${state} · ${ago(j.updated||j.created)}</span></span>`
+      +(j.size_bytes!=null?`<span class="rsz" title="Espacio que ocupa en tu disco">${rpBytes(j.size_bytes)}</span>`:"")
+      +(open?`<span class="ro">Abrir${ICO("toend")}</span>`:"")+`</button>`
+      +`<button class="rmore" aria-haspopup="menu" aria-expanded="false" aria-label="Acciones de «${rpEsc(name)}»" title="Más acciones">${RP_DOTS}</button></div>`;
   }).join("");
-  box.querySelectorAll(".rrow").forEach(b=>b.onclick=()=>{ location.search="?job="+encodeURIComponent(b.dataset.id); });
-})();
+  const more=RP.list.length>6?`<button class="rlnk rall" id="rAll">${RP.all?"Mostrar solo los recientes":`Mostrar todos (${RP.list.length})`}</button>`:"";
+  const st=RP.st;
+  const foot=st?`<div class="rfoot">${st.low_space?`<div class="rlow" role="status">${rpEsc(st.message||"Poco espacio: libera espacio o elimina proyectos")}${st.free_gb!=null?` (quedan ${(+st.free_gb).toFixed(1)} GB)`:""}</div>`:""}`
+    +`Reelfy usa ${rpBytes(st.total_bytes)} · <button class="rlnk" id="rFree"${rpFreeable(st)>0?"":" disabled"} title="Borra vistas previas y archivos temporales. Tus proyectos siguen editables.">Liberar espacio</button>`
+    // proyectos eliminados que no pudieron ir a la Papelera del Mac: siguen ocupando disco aqui
+    +((+st.local_trash_bytes||0)>0?`<div class="rtrash">Papelera de Reelfy: ${rpBytes(st.local_trash_bytes)} · <button class="rlnk" id="rTrash" title="Borra para siempre los proyectos eliminados que no pudieron ir a la Papelera del Mac.">Vaciar papelera de Reelfy</button></div>`:"")
+    +`</div>`:"";
+  box.innerHTML=(rows?`<h5>${ICO("layers")}Proyectos recientes</h5>`+rows:"")+more+foot;
+  box.querySelectorAll(".rrow").forEach(r=>{
+    const j=RP.list.find(x=>x.id===r.dataset.id); if(!j) return;
+    r.onclick=e=>{ if(e.target.closest(".rmore")||!rpOpen(j)) return; location.search="?job="+encodeURIComponent(j.id); };
+    r.querySelector(".rmore").onclick=e=>{ e.stopPropagation(); rpMenu(e.currentTarget,j); };
+  });
+  const all=$("#rAll"); if(all) all.onclick=()=>{ RP.all=!RP.all; rpRender(); };
+  const fr=$("#rFree"); if(fr) fr.onclick=()=>rpFreeAll(fr);
+  const tb=$("#rTrash"); if(tb) tb.onclick=()=>rpEmptyTrash(tb);
+}
+/* lo que "Liberar espacio" de verdad borra (sin freeable_bytes, servidor viejo: la cache) */
+const rpFreeable=st=>+(st&&st.freeable_bytes!=null?st.freeable_bytes:st&&st.cache_bytes)||0;
+/* menu "…" de un proyecto (flotante: no lo recorta la tarjeta). Flechas, Esc y clic fuera lo cierran. */
+function rpMenuClose(focus){
+  const m=$("#rMenu"); if(!m||m.hidden) return;
+  m.hidden=true; const b=m._btn; m._btn=null;
+  if(b){ b.setAttribute("aria-expanded","false"); if(focus) b.focus(); }
+}
+function rpMenu(btn,j){
+  let m=$("#rMenu");
+  if(m&&!m.hidden&&m._btn===btn){ rpMenuClose(true); return; }
+  rpMenuClose(false);
+  if(!m){
+    m=document.createElement("div"); m.id="rMenu"; m.className="rmenu"; m.setAttribute("role","menu"); m.hidden=true; document.body.appendChild(m);
+    document.addEventListener("pointerdown",e=>{ const mm=$("#rMenu"); if(mm&&!mm.hidden&&!mm.contains(e.target)&&!e.target.closest(".rmore")) rpMenuClose(false); });
+    window.addEventListener("resize",()=>rpMenuClose(false)); window.addEventListener("scroll",()=>rpMenuClose(false),true);
+    m.addEventListener("keydown",e=>{
+      const its=[...m.querySelectorAll("button:not(:disabled)")], i=its.indexOf(document.activeElement);
+      if(e.key==="Escape"){ e.preventDefault(); rpMenuClose(true); }
+      else if(e.key==="ArrowDown"||e.key==="ArrowUp"){ e.preventDefault(); if(its.length) its[(i+(e.key==="ArrowDown"?1:its.length-1))%its.length].focus(); }
+      else if(e.key==="Tab") rpMenuClose(false);
+    });
+  }
+  const cf=+j.cache_frees_bytes||0;
+  m.innerHTML=`<button role="menuitem" data-a="free"${cf>0&&rpOpen(j)?"":" disabled"} title="Borra vistas previas y archivos temporales. Tu proyecto sigue editable.">${RP_DISK}Liberar espacio<span class="rmx">${cf>0?rpBytes(cf):"nada que liberar"}</span></button>`
+    +`<hr><button role="menuitem" data-a="del" class="rdanger">${ICO("trash")}Eliminar proyecto…</button>`;
+  m.querySelector('[data-a="free"]').onclick=()=>{ rpMenuClose(false); rpFree(j); };
+  m.querySelector('[data-a="del"]').onclick=()=>{ rpMenuClose(false); rpDelete(j); };
+  m._btn=btn; btn.setAttribute("aria-expanded","true"); m.hidden=false;
+  const r=btn.getBoundingClientRect(), W=m.offsetWidth, H=m.offsetHeight;
+  const x=Math.max(8,Math.min(r.right-W,innerWidth-W-8));           // borde derecho alineado con el boton
+  const y=r.bottom+6+H<=innerHeight-8?r.bottom+6:Math.max(8,r.top-6-H);
+  m.style.left=x+"px"; m.style.top=y+"px";
+  const first=m.querySelector("button:not(:disabled)"); if(first) first.focus();
+}
+function rpRow(id){ return document.querySelector(`#recent .rrow[data-id="${CSS.escape(id)}"]`); }
+/* confirmacion de eliminar (Esc o clic fuera = Cancelar; el foco empieza en Cancelar) -> Promise<bool> */
+function rpConfirm(name,size){
+  return rpDialog(`¿Eliminar «${rpEsc(name)}»?`,
+    `<p>Se moverá a la Papelera. Liberará ${rpEsc(size)} al vaciar la Papelera.</p><p>Tus videos originales no se tocan.</p>`,"Mover a la Papelera");
+}
+function rpDialog(title,body,ok){
+  return new Promise(res=>{
+    const prev=document.activeElement;
+    const w=document.createElement("div"); w.className="modal on"; w.setAttribute("role","dialog"); w.setAttribute("aria-modal","true"); w.setAttribute("aria-labelledby","rDlgT");
+    w.innerHTML=`<div class="box rdlg"><div class="rdi">${ICO("trash")}</div><h3 id="rDlgT">${title}</h3>`+body
+      +`<div class="rbtns"><button class="btn ghost" data-a="no">Cancelar</button><button class="btn rdel" data-a="si">${rpEsc(ok)}</button></div></div>`;
+    const done=v=>{ document.removeEventListener("keydown",key,true); w.remove(); if(prev&&prev.focus) prev.focus(); res(v); };
+    const key=e=>{ if(e.key==="Escape"){ e.preventDefault(); e.stopPropagation(); done(false); }
+      else if(e.key==="Tab"){ const bs=[...w.querySelectorAll("button")], i=bs.indexOf(document.activeElement); e.preventDefault(); bs[(i+(e.shiftKey?bs.length-1:1))%bs.length].focus(); } };
+    w.onclick=e=>{ if(e.target===w) done(false); };
+    w.querySelector('[data-a="no"]').onclick=()=>done(false);
+    w.querySelector('[data-a="si"]').onclick=()=>done(true);
+    document.addEventListener("keydown",key,true);
+    document.body.appendChild(w); w.querySelector('[data-a="no"]').focus();
+  });
+}
+async function rpRefreshStorage(){ try{ RP.st=await rpJson("/storage"); }catch(e){} }
+async function rpDelete(j){
+  const name=rpName(j);
+  if(!await rpConfirm(name,rpBytes(j.frees_bytes!=null?j.frees_bytes:j.size_bytes))) return;
+  const row=rpRow(j.id); if(row) row.classList.add("busy");
+  try{
+    const r=await rpJson("/jobs/"+encodeURIComponent(j.id),{method:"DELETE"});
+    // sin la Papelera del Mac (macOS 13/14 sin permiso para el Finder) queda en la de Reelfy
+    rpToast(r&&r.trash==="local"?"Proyecto eliminado. Quedó en la papelera de Reelfy: vacíala abajo para liberar el espacio."
+      :"Proyecto eliminado. Está en la Papelera: el espacio se libera al vaciarla.","trash");
+    if(row){ row.classList.remove("busy"); row.classList.add("gone"); }
+    RP.list=RP.list.filter(x=>x.id!==j.id);
+    await Promise.all([rpRefreshStorage(),new Promise(r=>setTimeout(r,230))]);
+    rpRender();
+  }catch(e){ if(row) row.classList.remove("busy"); rpToast(e.message||String(e),"alert"); }
+}
+async function rpFree(j){
+  const row=rpRow(j.id); if(row) row.classList.add("busy");
+  try{
+    const r=await rpJson("/jobs/"+encodeURIComponent(j.id)+"/free-space",{method:"POST"});
+    rpToast(r.freed_bytes>0?`Liberé ${rpBytes(r.freed_bytes)}. Tu proyecto sigue editable.`:"No había nada que liberar en este proyecto.","check");
+    j.size_bytes=Math.max(0,(+j.size_bytes||0)-(+r.freed_bytes||0)); j.frees_bytes=Math.max(0,(+j.frees_bytes||0)-(+r.freed_bytes||0)); j.cache_frees_bytes=0;
+    await rpRefreshStorage(); rpRender();
+  }catch(e){ if(row) row.classList.remove("busy"); rpToast(e.message||String(e),"alert"); }
+}
+async function rpEmptyTrash(btn){
+  const size=rpBytes(RP.st&&RP.st.local_trash_bytes);
+  if(!await rpDialog("¿Vaciar la papelera de Reelfy?",`<p>Se borran para siempre ${rpEsc(size)} de proyectos eliminados que no pudieron ir a la Papelera del Mac.</p><p>No se puede deshacer. Tus videos originales no se tocan.</p>`,"Vaciar papelera")) return;
+  btn.disabled=true;
+  try{
+    const r=await rpJson("/storage/empty-trash",{method:"POST"});
+    rpToast(r.freed_bytes>0?`Liberé ${rpBytes(r.freed_bytes)}.`:"La papelera de Reelfy ya estaba vacía.","check");
+    await rpRefreshStorage(); rpRender();
+  }catch(e){ btn.disabled=false; rpToast(e.message||String(e),"alert"); }
+}
+async function rpFreeAll(btn){
+  btn.disabled=true;
+  try{
+    const r=await rpJson("/storage/free-space",{method:"POST"});
+    rpToast(r.freed_bytes>0?`Liberé ${rpBytes(r.freed_bytes)}. Tus proyectos siguen editables.`:"No había nada que liberar.","check");
+    const list=await rpJson("/jobs?limit=200").catch(()=>null);
+    if(Array.isArray(list)){ const by=Object.fromEntries(list.map(x=>[x.id,x])); RP.list=RP.list.map(x=>by[x.id]||x); }
+    await rpRefreshStorage(); rpRender();
+  }catch(e){ btn.disabled=false; rpToast(e.message||String(e),"alert"); }
+}
+recentProjects();
 /* perfil de la persona para el proximo video (pantalla inicial y ensamblado) */
 PF.mountPicker($("#homeProfile")); PF.mountPicker($("#asmProfile"),true);
 /* reabrir un proyecto existente con ?job=ID (tambien sobrevive a recargar la pagina) */

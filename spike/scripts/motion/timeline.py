@@ -67,6 +67,31 @@ def keeps_from_cuts(cuts: Iterable[dict] | None, duration: float,
     return keeps
 
 
+def word_cut_spans(cuts: Iterable[dict] | None) -> list[tuple[float, float]]:
+    """Tramos (fuente, fundidos y ordenados) de los cortes habilitados que quitan PALABRAS a
+    proposito: tomas (src "takes"), manuales y del usuario. Una palabra con el punto medio dentro
+    se fue con el corte aunque la reticula de cuadros deje una astilla suya (map_words)."""
+    iv = []
+    for c in cuts or []:
+        if not isinstance(c, dict) or c.get("enabled", True) is False:
+            continue
+        if not (c.get("src") in ("takes", "user", "manual") or c.get("manual")):
+            continue
+        try:
+            s, e = float(c["start"]), float(c["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if e > s:
+            iv.append((s, e))
+    out: list[list[float]] = []
+    for s, e in sorted(iv):
+        if out and s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return [(s, e) for s, e in out]
+
+
 def _shot_changes_orig(shots, end: float) -> list[float]:
     """Tiempos ORIGINALES de cambio de toma (inicio de cada toma salvo la primera)."""
     out = []
@@ -90,6 +115,119 @@ def _merge(keeps: Iterable[tuple[float, float]]) -> list[tuple[float, float]]:
         else:
             out.append([a, b])
     return [(a, b) for a, b in out]
+
+
+# ---------------------------------------------------------------------- tiempos de palabras
+# Subtitulos: ninguna palabra DICHA se pierde ni se estira sobre una pausa. Sin el alineador
+# fino, whisper deja palabras de duracion 0 (el render las descartaba) y palabras que duran
+# segundos (la pausa anterior queda dentro de la palabra). Valores medidos contra MMS_FA.
+WORD_MIN = 0.08          # s: duracion minima visible de una palabra (karaoke)
+WORD_S_PER_LETTER = 0.065  # s por letra al hablar (mediana en espanol)
+WORD_S_PER_DIGIT = 0.2   # s por cifra ('2024' se dice 'dos mil veinticuatro')
+WORD_TINY_TARGET = 0.30  # s: tope de lo que se presta a una palabra de duracion ~0
+STRETCH_MIN_S = 1.0      # s: una palabra mas larga que esto...
+STRETCH_FACTOR = 2.5     # ...y que 2.5x su duracion estimada esta estirada sobre una pausa
+STRETCH_KEEP = 1.3       # al encogerla se queda con 1.3x su duracion estimada
+
+
+def est_word_dur(text) -> float:
+    """Duracion tipica de decir una palabra (s), por letras y cifras."""
+    t = str(text or "")
+    letters = sum(1 for c in t if c.isalpha())
+    digits = sum(1 for c in t if c.isdigit())
+    return min(1.5, max(WORD_MIN, WORD_S_PER_LETTER * letters + WORD_S_PER_DIGIT * digits))
+
+
+def fix_word_times(words, keep: str = "end", min_dur: float = WORD_MIN, lo: float = 0.0,
+                   hi: float | None = None, cap: bool = True) -> list[dict]:
+    """Tiempos de palabras utilizables para subtitulos, SIN quitar ninguna (misma longitud y
+    orden; copias que conservan los demas campos):
+      1) inicios monotonos dentro de [lo, hi] y fin >= inicio;
+      2) sin traslapes (una palabra termina a mas tardar cuando empieza la siguiente);
+      3) `cap`: una palabra estirada (> STRETCH_MIN_S y > STRETCH_FACTOR x lo estimado) se
+         encoge a STRETCH_KEEP x lo estimado conservando su final (`keep='end'`: el timing
+         crudo de whisper mete la pausa ANTES de la palabra) o su inicio (`keep='start'`);
+      4) duracion minima `min_dur`: una racha de palabras de duracion ~0 toma tiempo del hueco
+         siguiente, de la palabra siguiente, del hueco anterior y de la anterior (en ese orden,
+         sin dejar a las vecinas por debajo de su minimo ni de la mitad de lo que duran) y se
+         reparte por letras.
+    """
+    out = [dict(w) for w in words or []]
+    n = len(out)
+    if not n:
+        return out
+    S, E = [], []
+    for w in out:
+        try:
+            s = float(w.get("start") or 0.0)
+            e = float(w.get("end") if w.get("end") is not None else s)
+        except (TypeError, ValueError):
+            s = e = S[-1] if S else float(lo or 0.0)
+        if e < s:
+            s, e = e, s
+        S.append(s)
+        E.append(e)
+    lo = float(lo or 0.0)
+    hi = float(hi) if hi is not None else max(max(E), lo)
+    est = [est_word_dur(w.get("text")) for w in out]
+    # 1) orden
+    for i in range(n):
+        S[i] = min(max(S[i], lo, S[i - 1] if i else lo), hi)
+        E[i] = min(max(E[i], S[i]), hi)
+    # 2) sin traslapes
+    for i in range(n - 1):
+        if E[i] > S[i + 1]:
+            E[i] = S[i + 1]
+    # 3) estiradas sobre una pausa
+    if cap:
+        for i in range(n):
+            if E[i] - S[i] > max(STRETCH_MIN_S, STRETCH_FACTOR * est[i]):
+                d = STRETCH_KEEP * est[i]
+                if keep == "start":
+                    E[i] = S[i] + d
+                else:
+                    S[i] = E[i] - d
+    # 4) duracion minima (rachas contiguas de palabras de duracion ~0)
+    if min_dur > 0:
+        tiny = [E[i] - S[i] < min_dur - 1e-9 for i in range(n)]
+
+        def spare(k):
+            """Lo que la vecina k puede prestar sin bajar de su minimo (y de la mitad de lo
+            que dura)."""
+            cur = E[k] - S[k]
+            return max(0.0, cur - max(min_dur, min(0.6 * est[k], 0.5 * cur)))
+
+        i = 0
+        while i < n:
+            if not tiny[i]:
+                i += 1
+                continue
+            j = i
+            while j + 1 < n and tiny[j + 1] and S[j + 1] - E[j] < 1e-3:
+                j += 1
+            tgt = [min(max(min_dur, est[k]), WORD_TINY_TARGET) for k in range(i, j + 1)]
+            need = sum(tgt)
+            s, e = S[i], E[j]
+            nxt_lim = S[j + 1] if j + 1 < n else hi
+            e += min(max(0.0, need - (e - s)), max(0.0, nxt_lim - e))    # hueco siguiente
+            if need - (e - s) > 1e-9 and j + 1 < n and not tiny[j + 1]:  # palabra siguiente
+                e += min(need - (e - s), spare(j + 1))
+                S[j + 1] = max(S[j + 1], e)
+            prv_lim = E[i - 1] if i else lo
+            if need - (e - s) > 1e-9:                                     # hueco anterior
+                s -= min(need - (e - s), max(0.0, s - prv_lim))
+            if need - (e - s) > 1e-9 and i and not tiny[i - 1]:          # palabra anterior
+                s -= min(need - (e - s), spare(i - 1))
+                E[i - 1] = min(E[i - 1], s)
+            have, t = e - s, s
+            for k, g in zip(range(i, j + 1), tgt):
+                d = have * g / need
+                S[k], E[k] = t, t + d
+                t += d
+            i = j + 1
+    for w, s, e in zip(out, S, E):
+        w["start"], w["end"] = s, e
+    return out
 
 
 class Timeline:
@@ -316,27 +454,51 @@ class Timeline:
             out.append(d)
         return out
 
-    def map_words(self, phrases: Iterable[Iterable[dict]] | None, min_dur: float = 0.01) -> list[list[dict]]:
+    def map_words(self, phrases: Iterable[Iterable[dict]] | None, min_dur: float = 0.01,
+                  drop_spans: Iterable[tuple[float, float]] | None = None) -> list[list[dict]]:
         """Frases (listas de palabras con start/end originales) -> tiempos finales.
 
         Palabras enteramente dentro de un corte se descartan; las que lo cruzan se recortan.
         Frases que se quedan sin palabras se descartan. Se conservan los demas campos.
+        `drop_spans` (word_cut_spans: tomas y cortes manuales): una palabra con el punto medio
+        dentro se descarta aunque la reticula de cuadros (que expande los keeps) deje una astilla
+        suya en tiempo conservado ('el [el] agua' no sale como subtitulo de 30 ms).
+
+        Ninguna palabra DICHA se pierde: una palabra de duracion ~0 (timing crudo de whisper)
+        o que queda con menos de `min_dur` s se conserva si su punto medio cae en tiempo
+        conservado, y en tiempo final `fix_word_times` le presta una duracion corta (hueco o
+        vecinas) y encoge las palabras estiradas sobre una pausa (conserva su final).
         """
-        out = []
-        for ph in phrases or []:
-            nw = []
+        flat: list[tuple[int, dict]] = []
+        spans = list(drop_spans or [])
+        for pi, ph in enumerate(phrases or []):
             for w in ph or []:
                 try:
-                    r = self.map_range(float(w["start"]), float(w["end"]))
+                    s, e = float(w["start"]), float(w["end"])
                 except (KeyError, TypeError, ValueError):
                     continue
+                if e < s:
+                    s, e = e, s
+                if spans and any(a < (s + e) / 2.0 < b for a, b in spans):
+                    continue                # la quito una toma o un corte manual
+                r = self.map_range(s, e)
                 if r is None or r[1] - r[0] < min_dur:
-                    continue
+                    tm = self.remap((s + e) / 2.0)
+                    if tm is None:
+                        continue            # se fue con el corte
+                    r = (tm, tm)
                 d = dict(w)
-                d["start"], d["end"] = round(r[0], 4), round(r[1], 4)
-                nw.append(d)
-            if nw:
-                out.append(nw)
+                d["start"], d["end"] = r[0], r[1]
+                flat.append((pi, d))
+        fixed = fix_word_times([d for _, d in flat], keep="end", lo=0.0, hi=self.final_duration)
+        out: list[list[dict]] = []
+        last = None
+        for (pi, _), d in zip(flat, fixed):
+            d["start"], d["end"] = round(d["start"], 4), round(d["end"], 4)
+            if pi != last:
+                out.append([])
+                last = pi
+            out[-1].append(d)
         return out
 
     # ------------------------------------------------------------------ utilidades

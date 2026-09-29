@@ -54,7 +54,10 @@ del UI se pasa como `--prompt ... --carry-initial-prompt` para escribir bien mar
 timing de cada palabra (mediana ~6 ms) para el efecto karaoke. Se exportó de PyTorch a
 ONNX int8 → misma calidad, 1.7× más rápido, ~1.5 GB menos de instalador, e igual en
 Windows (antes degradado). Export: `scripts/export_aligner_onnx.py`; validación:
-`scripts/validate_aligner.py`.
+`scripts/validate_aligner.py`. La alineación forzada a veces arrastra palabras a una pausa
+lejos de donde se dijeron (la Viterbi reparte el texto a su modo): si discrepa del DTW de
+whisper en más de 1 s, cae en silencio y el DTW cae en voz, manda el DTW (`_prefer_voice`;
+si no, el corte de ese silencio borraba de los subtítulos palabras que sí se oyen).
 
 ### 2.3 LLM local — `qwen3.5:4b` (Apache-2.0) sobre `ollama` embebido
 El cerebro de decisiones (env `REELFY_LLM_MODEL`, default `qwen3.5:4b`, texto + vision;

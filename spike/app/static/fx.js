@@ -1054,8 +1054,18 @@
     if (forMs) WATCH.until = Math.max(WATCH.until, Date.now() + forMs);
     scheduleWatch(j ? 1500 : 200);
   };
+  let FREED_KICK = null, LOW_WARNED = null;
   function handleStatus(j) {
     if (!j || typeof j !== "object") return;
+    // "Liberar espacio" borro el video base y la voz de este proyecto: al abrirlo se vuelven a
+    // preparar en segundo plano (si no, cuadro exacto y vista previa van lentos hasta exportar)
+    const ana = j.analysis_state || (j.analysis && j.analysis.state) || null;
+    if (ana === "freed" && FREED_KICK !== JOB && isPro()) { FREED_KICK = JOB; FX.forceAnalysis(); }
+    // poco disco: el aviso sale tambien aqui (analizar y exportar son lo que llena el disco)
+    if (j.low_space && LOW_WARNED !== JOB) {
+      LOW_WARNED = JOB;
+      toast(`${j.low_space_message || "Poco espacio en el disco"}${j.disk_free_gb != null ? ` (quedan ${(+j.disk_free_gb).toFixed(1)} GB)` : ""}. El export puede fallar: libera espacio desde la pantalla de inicio.`, "alert", false, null, true);
+    } else if (j.low_space === false && LOW_WARNED === JOB) LOW_WARNED = null;
     // proxy del video: listo -> se cambia la fuente; cualquier otro estado final (error, cancelado)
     // o sin tarea de proxy -> se deja el original y se deja de sondear por el
     if (SRC.state === "pending") {
@@ -1211,6 +1221,7 @@
     if (window.renderSubs) renderSubs();
     FX.renderAll();
     if (isPro()) syncMusicCache();
+    FX.clean.refresh();
     FX.planDirty();
   };
 
@@ -3269,7 +3280,7 @@
   /* Autoguardado (PUT /plan) con concurrencia optimista: base_rev = la revision del servidor sobre
      la que edita el Studio. Si otra ventana (o un re-dirigir) cambio el plan -> 409 y no se pisa:
      se avisa con opciones. Se vacia al salir (pagehide / Nuevo video). */
-  let SAVE = { timer: null, off: false, dirty: false, inflight: null, conflict: false };
+  let SAVE = { timer: null, off: false, dirty: false, inflight: null, conflict: false, hold: null };
   FX.isDirty = () => SAVE.dirty || !!SAVE.inflight;
   FX.markDirty = function () {
     if (SAVE.off || typeof JOB === "undefined" || !JOB || JOB === "demo") return;
@@ -3283,8 +3294,15 @@
     h.textContent = txt != null ? txt : SAVE.conflict ? "Sin guardar: el proyecto cambió en otra ventana" : SAVE.dirty || SAVE.inflight ? "Guardando…" : "Guardado";
     h.classList.toggle("warn", !!SAVE.conflict);
   }
+  /** Retiene el autoguardado mientras el motor escribe el plan (p. ej. POST /takes con base_rev):
+      al terminar se guarda lo pendiente sobre la revision nueva en vez de chocar con ella (409). */
+  FX.holdSaves = function (p) {
+    SAVE.hold = p;
+    p.then(() => { if (SAVE.hold === p) SAVE.hold = null; if (SAVE.dirty) FX.markDirty(); });
+  };
   FX.saveNow = async function (force) {
     clearTimeout(SAVE.timer);
+    if (SAVE.hold) await SAVE.hold;
     if (SAVE.off || !SAVE.dirty || typeof JOB === "undefined" || !JOB || JOB === "demo") return true;
     if (SAVE.inflight) { await SAVE.inflight; if (!SAVE.dirty) return true; }
     if (SAVE.conflict && !force) return false;
@@ -3366,6 +3384,9 @@
     return JSON.stringify([tlObj().keeps.map(k => [r(k[0]), r(k[1])]), m, b, FMT]);
   }
   FX.resetAnalysisSig = () => { try { ANA_SIG = isPro() ? analysisSig() : null; } catch (e) { ANA_SIG = null; } };
+  /** Relanza el analisis de fondo aunque la firma no cambio (p. ej. el formato por defecto del
+      proyecto no es el del analisis inicial). */
+  FX.forceAnalysis = function () { if (!isPro()) return; ANA_SIG = "*"; FX.kickAnalysis(); };
   FX.kickAnalysis = function () {
     const sig = analysisSig();
     if (ANA_SIG === null) { ANA_SIG = sig; return; }          // primer guardado: el servidor ya analizo este plan
@@ -3554,9 +3575,16 @@
 
   // ------------------------------------------------------------------ export por etapas
   function stageLabel(s) { const f = STAGES.find(x => x[0] === s); return f ? f[1] : (s ? String(s) : ""); }
+  /** Los shorts son verticales: con una salida horizontal no se piden (saldrian en 16:9). */
+  FX.shortsOn = () => C.shortsFor(FMT || "9:16", typeof V !== "undefined" && V && V.videoWidth ? { w: V.videoWidth, h: V.videoHeight } : null);
+  FX.shortsNote = function () {
+    const hl = ((PLAN && PLAN.highlights) || []).filter(h => h && h.enabled !== false);
+    if (!isPro() || !hl.length || FX.shortsOn()) return "";
+    return `<div class="wrow skip">${ICO("alert")}<span>Los shorts son verticales: con el formato ${esc(FMT === "original" ? "original (horizontal)" : FMT)} no se generan. Exporta en 9:16 para tenerlos.</span></div>`;
+  };
   FX.renderBody = function () {
     const base = typeof renderOpts === "function" ? renderOpts() : {};
-    return Object.assign({}, base, { plan: planForServer(), fmt: FMT || "9:16", format: FMT || "9:16", shorts: true });
+    return Object.assign({}, base, { plan: planForServer(), fmt: FMT || "9:16", format: FMT || "9:16", shorts: FX.shortsOn() });
   };
   FX.renderStatus = function (j) {
     const box = $("#r-stages"); if (!box) return;
@@ -3564,13 +3592,13 @@
     if (cur !== "shorts" && /short/i.test(j.message || "") && (cur === "mux" || cur === "done")) cur = "shorts";
     const order = STAGES.map(s => s[0]);
     const ci = order.indexOf(cur);
-    box.innerHTML = isPro() || cur ? STAGES.filter(s => s[0] !== "director" || cur === "director").map(([k, l], i) => {
+    box.innerHTML = isPro() || cur ? STAGES.filter(s => (s[0] !== "director" || cur === "director") && (s[0] !== "shorts" || cur === "shorts" || FX.shortsOn())).map(([k, l], i) => {
       const idx = order.indexOf(k);
       const cls = cur === k ? "cur" : (ci >= 0 && idx < ci ? "done" : "");
       return `<span class="stg ${cls}"><span class="d"></span>${l}</span>`;
     }).join("") : "";
     const w = $("#r-warn");
-    if (w) w.innerHTML = warningsHtml(j.warnings || [], true);
+    if (w) w.innerHTML = FX.shortsNote() + warningsHtml(j.warnings || [], true);
   };
   FX.cancelRender = async function () {
     const b = $("#r-cancel"); if (b) { b.disabled = true; b.innerHTML = `<span class="spinner"></span> Cancelando…`; }
@@ -3633,6 +3661,596 @@
     if (!sticky) toastTimer = setTimeout(() => TOAST.classList.remove("on"), acts.length ? 5200 : 3600);
   }
   FX.toast = toast;
+
+  // ------------------------------------------------------------------ limpieza de tomas (Guion)
+  /* Modo "Limpieza de tomas": el guion completo con lo que se quita tachado (tomas repetidas,
+     arranques en falso, correcciones, tartamudeos, errores y, si se piden, silencios), un mapa de
+     los cortes en todo el video y el "Resumen de la IA" con el nivel de limpieza. Un clic en un
+     corte lo SELECCIONA (nunca lo cambia); restaurar o quitar es explicito (boton o R) y se
+     deshace con ⌘Z. Todo se guarda por la via de siempre (PUT /plan con base_rev). El guion de
+     un video largo (2500+ palabras, 250+ cortes) se arma como un solo HTML y los parrafos fuera
+     de pantalla no se maquetan (content-visibility); un cambio suelto re-dibuja solo su parrafo. */
+  const KRGB = { retoma: "182,156,255", arranque_fallido: "255,138,196", autocorreccion: "108,180,255", tartamudeo: "63,214,194",
+    error: "255,128,112", digresion: "245,196,81", silencio: "163,172,189", manual: "236,160,120", ai: "196,181,253" };
+  const CAT_ORDER = ["silencio", "retoma", "arranque_fallido", "autocorreccion", "tartamudeo", "error", "digresion", "manual", "ai"];
+  const WHY = {
+    retoma: "Dijiste esta idea más de una vez; queda la última toma, la más completa.",
+    arranque_fallido: "Empezaste la frase y la retomaste enseguida.",
+    autocorreccion: "Te corregiste; queda la versión corregida.",
+    tartamudeo: "Palabras repetidas sin querer.",
+    error: "Un error o una expresión que no va en el video.",
+    digresion: "Esta parte se sale del tema del video.",
+    silencio: "Pausa sin voz.", manual: "Corte que hiciste a mano.", ai: "Recorte propuesto por la IA.",
+  };
+  const CL = FX.clean = { mode: "edit", filter: "todos", sil: false, sel: -1, busy: null, listenRange: null, userScroll: 0 };
+  let GW = { words: [], starts: [], owner: [], removed: [], spans: {}, wordless: {}, groups: {}, ord: {}, kept: {}, paras: [], pstart: [], secs: [], sig: "", live: -1 };
+  let CL_REQ = 0;
+  CL.rgb = k => KRGB[k] || KRGB.silencio;
+  const cleanOn = () => CL.mode === "clean" && !!PLAN && !!$("#s-editor") && $("#s-editor").classList.contains("on");
+  const lsGet = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* sin storage */ } };
+  const fmtM = s => (typeof fmtT === "function" ? fmtT(s) : C.fmtClock(s));
+
+  /** Palabras, dueños de cada palabra, grupos, parrafos y secciones del plan actual. */
+  function prep() {
+    const cuts = PLAN.cuts || [];
+    const words = C.planWords(PLAN.phrases);
+    const { owner, removed } = C.wordsInCuts(words, cuts);
+    const spans = C.cutSpans(owner);
+    const { groups, ord } = C.takeGroups(cuts);
+    const secs = C.cleanSections(PLAN.takes && PLAN.takes.sections);
+    const paras = C.scriptParagraphs(words, owner, cuts, secs);
+    GW = { words, starts: words.map(w => w.start), owner, removed, spans, wordless: C.wordlessAt(words, cuts, spans), groups, ord,
+      kept: C.keptMarks(words, cuts, groups, owner), paras, pstart: paras.map(p => p.w0), secs,
+      sig: `${words.length}|${paras.map(p => p.w0).join(",")}|${secs.length}|${CL.sil ? 1 : 0}|${CL.filter}`, live: -1 };
+  }
+  const paraOf = w => { let lo = 0, hi = GW.pstart.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (GW.pstart[m] <= w) lo = m; else hi = m - 1; } return lo; };
+  const inFilter = ci => { const c = PLAN.cuts[ci]; return CL.filter === "todos" || C.cutKind(c) === CL.filter; };
+  const reviewList = () => C.reviewItems(PLAN.cuts, CL.filter, CL.sil);
+
+  // ---- guion
+  function wordHtml(i, cls) { return `<span class="gw${cls || ""}" data-i="${i}">${esc(GW.words[i].text)}</span>`; }
+  function tagOf(ci) {
+    const c = PLAN.cuts[ci], k = C.cutKind(c), take = C.isTakeCut(c);
+    if (C.cutOn(c)) return C.cutTag(c, GW.ord[ci]);
+    return take && !c.user ? `¿Quitar? · ${C.TAKE_LABEL[k]}` : "Conservado";
+  }
+  function cutCls(ci) {
+    const c = PLAN.cuts[ci], take = C.isTakeCut(c), on = C.cutOn(c);
+    return `k-${C.cutKind(c)}${on ? " on" : take && !c.user ? " sug" : " kept"}${inFilter(ci) ? "" : " dim"}${ci === CL.sel ? " sel" : ""}`;
+  }
+  function chipHtml(ci) {
+    const c = PLAN.cuts[ci], k = C.cutKind(c);
+    if (k === "silencio" && !CL.sil) return "";
+    const lbl = k === "silencio" ? "" : `${esc(C.TAKE_LABEL[k])} · `;
+    return `<span class="gsil ${cutCls(ci)}" data-c="${ci}" style="--k:${CL.rgb(k)}" title="${esc(C.TAKE_LABEL[k])} de ${C.fmtLen(c.end - c.start)}">`
+      + `<svg class="ic" viewBox="0 0 24 24"><use href="#i-${k === "silencio" ? "pausebar" : "scissors"}"/></svg>${lbl}${C.fmtLen(c.end - c.start)}</span> `;
+  }
+  function chipsAt(i) { return (GW.wordless[i] || []).map(chipHtml).join(""); }
+  function keptHtml() { return `<span class="gkept">${ICO("check")}Toma elegida</span>`; }
+  function paraHtml(k) {
+    const p = GW.paras[k], ws = GW.words, tl = tlObj();
+    let h = "", i = p.w0;
+    while (i < p.w1) {
+      h += chipsAt(i);
+      if (GW.kept[i] != null) h += keptHtml();
+      const ci = GW.owner[i];
+      if (ci < 0) { h += wordHtml(i) + " "; i++; continue; }
+      // palabras seguidas del mismo corte = un solo tramo tachado (los silencios de adentro no se muestran)
+      let j = i, inner = [];
+      while (j + 1 < p.w1 && GW.owner[j + 1] === ci) { j++; (GW.wordless[j] || []).forEach(x => { if (C.cutKind(PLAN.cuts[x]) !== "silencio") inner.push(x); }); }
+      const c = PLAN.cuts[ci], on = C.cutOn(c);
+      let wh = "";
+      for (let w = i; w <= j; w++) wh += wordHtml(w, !on && GW.removed[w] ? " rm" : "") + (w < j ? " " : "");
+      h += `<span class="gcut ${cutCls(ci)}" data-c="${ci}" style="--k:${CL.rgb(C.cutKind(c))}"><span class="gtag">${esc(tagOf(ci))}</span>${wh}</span> `
+        + inner.map(chipHtml).join("");
+      i = j + 1;
+    }
+    if (k === GW.paras.length - 1) h += chipsAt(ws.length);
+    // tiempo FINAL de la primera palabra que se queda; un parrafo cortado entero no sale en el video
+    // (su tiempo final seria el del parrafo siguiente, repetido): marca atenuada con el original
+    let kw = p.w0; while (kw < p.w1 && GW.removed[kw]) kw++;
+    const ts = kw < p.w1 ? `<span class="gts">${fmtM(tl.remapClamped(ws[kw].start))}</span>`
+      : `<span class="gts" style="opacity:.5" title="Se corta entero (en el original: ${fmtM(ws[p.w0].start)})">—</span>`;
+    return `<div class="gpara" data-p="${k}">${ts}<div class="gtx">${h}</div></div>`;
+  }
+  function chapHtml(si) {
+    const s = GW.secs[si];
+    return `<div class="gchap">${ICO("book")}<span class="gct">${si + 1} · ${esc(s.title || "Sección")}</span><span class="ln"></span><span class="t">${fmtM(tlObj().remapClamped(s.start))}</span></div>`;
+  }
+  function emptyHtml() {
+    if (CL.busy && CL.busy.first) return `<div class="gempty"><span class="spinner"></span><div><b>Buscando tomas repetidas…</b><span>Leo el guion completo y comparo cada frase con las que siguen. En un video largo puede tardar hasta un minuto; puedes seguir revisando mientras tanto.</span></div></div>`;
+    if (PLAN.takes) return "";
+    return `<div class="gempty">${ICO("scissors")}<div><b>Buscar tomas repetidas</b><span>Este proyecto se analizó antes de la limpieza de tomas. La IA puede encontrar las frases que repetiste, los arranques en falso y las correcciones para quitarlas; todo queda para que lo revises aquí.</span></div>`
+      + `<button class="btn mini" data-a="find">${ICO("spark")}Buscar tomas repetidas</button></div>`;
+  }
+  function renderScript() {
+    const tr = $("#gTr"); if (!tr) return;
+    const top = tr.scrollTop;
+    let h = emptyHtml();
+    if (!GW.words.length) h += `<div class="gnone">No encontré voz en este video. Puedes recortar a mano en Edición.</div>`;
+    let sec = -1;
+    GW.paras.forEach((p, k) => {
+      if (p.sec >= 0 && p.sec !== sec) { sec = p.sec; h += chapHtml(sec); }
+      h += paraHtml(k);
+    });
+    tr.innerHTML = h;
+    tr.scrollTop = top;
+    GW.live = -1;
+  }
+  /** Re-dibuja solo los parrafos de un corte (y el de su "Toma elegida"). */
+  function renderParasOf(ci) {
+    const tr = $("#gTr"); if (!tr) return false;
+    const ks = new Set(), sp = GW.spans[ci];
+    if (sp) { for (let k = paraOf(sp[0]); k <= paraOf(sp[1]); k++) ks.add(k); }
+    else Object.keys(GW.wordless).forEach(w => { if (GW.wordless[w].includes(ci)) ks.add(paraOf(Math.min(+w, GW.words.length - 1))); });
+    // su "Toma elegida" aparece o se va segun queden cortes habilitados en el grupo
+    const G = GW.ord[ci] && GW.groups[GW.ord[ci].group];
+    if (G && G.keep_ref) { let lo = 0, hi = GW.starts.length; while (lo < hi) { const m = (lo + hi) >> 1; if (GW.starts[m] < G.keep_ref.start - 0.08) lo = m + 1; else hi = m; } if (lo < GW.words.length) ks.add(paraOf(lo)); }
+    if (!ks.size) return false;
+    for (const k of ks) { const el = tr.querySelector(`.gpara[data-p="${k}"]`); if (!el) return false; el.outerHTML = paraHtml(k); }
+    return true;
+  }
+
+  // ---- chips, pie, mapa y resumen
+  function renderChips() {
+    const box = $("#gChips"); if (!box) return;
+    const cnt = C.kindCounts(PLAN.cuts);
+    const kinds = ["retoma", "arranque_fallido", "autocorreccion", "tartamudeo", "error"].concat(cnt.digresion ? ["digresion"] : []);
+    const chip = (v, label, n) => `<button class="gchip${CL.filter === v ? " on" : ""}" data-f="${v}" aria-pressed="${CL.filter === v}"${v !== "todos" ? ` style="--k:${CL.rgb(v)}"` : ""}${n || v === "todos" ? "" : " disabled"}>`
+      + `${v !== "todos" ? '<span class="d"></span>' : ""}${label} <b>${n}</b></button>`;
+    box.innerHTML = chip("todos", "Todos", C.reviewItems(PLAN.cuts, "todos", CL.sil).length) + kinds.map(k => chip(k, C.TAKE_CHIP[k], cnt[k] || 0)).join("");
+  }
+  function renderFoot() {
+    const it = reviewList(), k = it.indexOf(CL.sel), pos = $("#gPos");
+    if (pos) pos.textContent = !it.length ? "Sin cortes que revisar" : k >= 0 ? `Corte ${k + 1} de ${it.length}` : `${it.length} corte${it.length === 1 ? "" : "s"}`;
+    ["#gPrev", "#gNext"].forEach(q => { const b = $(q); if (b) b.disabled = !it.length; });
+    const sil = $("#gSil"); if (sil) { sil.setAttribute("aria-checked", String(CL.sil)); sil.classList.toggle("on", CL.sil); }
+    const ra = $("#gRestAll");
+    if (ra) { const anyOn = it.some(ci => C.cutOn(PLAN.cuts[ci])); ra.textContent = anyOn || !it.length ? "Restaurar todo…" : "Quitar todo…"; ra.disabled = !it.length; ra.dataset.on = anyOn ? "1" : "0"; }
+  }
+  function drawMap() {
+    const cv = $("#cmapCv"), bar = $("#cmapBar"); if (!cv || !bar || !PLAN) return;
+    const W = bar.clientWidth, H = bar.clientHeight; if (!W || !H) return;
+    const dpr = window.devicePixelRatio || 1, d = dur();
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+    const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+    const cs = (PLAN.cuts || []).map((c, i) => [c, i]).filter(x => x[0] && +x[0].end > +x[0].start);
+    // silencios abajo, tomas encima (se ven aunque se solapen)
+    cs.sort((a, b) => (C.isTakeCut(a[0]) ? 1 : 0) - (C.isTakeCut(b[0]) ? 1 : 0) || a[0].start - b[0].start);
+    cs.forEach(([c, i]) => {
+      const k = C.cutKind(c), x = +c.start / d * W, w = Math.max(1.5, (c.end - c.start) / d * W);
+      if (C.cutOn(c)) { g.fillStyle = `rgba(${CL.rgb(k)},${k === "silencio" ? 0.55 : 1})`; g.fillRect(x, 4, w, H - 8); }
+      else if (C.isTakeCut(c)) { g.strokeStyle = `rgba(${CL.rgb(k)},.6)`; g.lineWidth = 1; g.strokeRect(x + 0.5, 5.5, Math.max(0.5, w - 1), H - 11); }
+      if (i === CL.sel) { g.strokeStyle = "#e9edf4"; g.lineWidth = 1.5; g.strokeRect(x - 1.5, 1.5, w + 3, H - 3); }
+    });
+    g.fillStyle = "rgba(236,239,245,.28)";
+    GW.secs.forEach((s, k) => { if (k) g.fillRect(Math.round(s.start / d * W), 0, 1, H); });
+    const ch = $("#cmapCh");
+    if (ch) {
+      let last = -1e9, h = "";
+      GW.secs.forEach(s => {
+        const x = s.start / d * W, lw = Math.min(160, 12 + String(s.title).length * 6.4);
+        const right = x + lw > W;
+        if ((right ? W - lw : x) < last + 8) return;
+        h += `<span style="${right ? "right:0" : `left:${x.toFixed(1)}px`};max-width:${Math.round(lw)}px">${esc(s.title || "Sección")}</span>`;
+        last = right ? W : x + lw;
+      });
+      ch.innerHTML = h; ch.style.display = GW.secs.length ? "" : "none";
+    }
+    const md = $("#cmapDur"); if (md) md.textContent = `${fmtM(d)} original`;
+  }
+  function renderSum() {
+    const box = $("#cSum"); if (!box || !PLAN) return;
+    const tk = PLAN.takes || null, d = dur(), fin = tlObj().finalDuration, rem = C.removedByCategory(PLAN.cuts, d);
+    const topic = (tk && tk.topic) || PLAN.topic || null;
+    const cur = (tk && tk.sensitivity) || "normal";
+    let h = `<div class="cs-h"><h3>${ICO("spark")}Resumen de la IA</h3><div class="cs-tot"><span>${fmtM(d)}</span>${ICO("right")}<b>${fmtM(fin)}</b><em>−${fmtM(Math.max(0, d - fin))}</em></div></div>`;
+    h += `<p class="cs-topic">${topic ? `<b>Tema:</b> ${esc(topic)}` : `<span>La IA todavía no detectó el tema de este video.</span>`}</p>`;
+    if (tk && tk.summary) h += `<p class="cs-sum">${esc(tk.summary)}</p>`;
+    if (tk && tk.llm === false) h += `<div class="cs-deg">${ICO("alert")}<span>La IA de lenguaje no respondió: busqué las tomas solo con reglas.</span><button class="btn ghost mini" data-a="retry"${CL.busy ? " disabled" : ""}>Reintentar con IA</button></div>`;
+    const cats = CAT_ORDER.filter(k => rem.cats[k] > 0.05);
+    if (cats.length) {
+      h += `<div class="cs-stack" role="img" aria-label="Tiempo quitado por categoría">${cats.map(k => `<i style="--k:${CL.rgb(k)};flex-grow:${rem.cats[k]}" title="${esc(C.TAKE_PLURAL[k])}: ${C.fmtLen(rem.cats[k])}"></i>`).join("")}</div>`;
+      h += `<div class="cs-leg">${cats.map(k => `<span><i style="--k:${CL.rgb(k)}"></i>${esc(C.TAKE_PLURAL[k])} <b>${C.fmtLen(rem.cats[k])}</b></span>`).join("")}</div>`;
+    } else h += `<p class="cs-none">Todavía no se quita nada del video.</p>`;
+    if (tk) {
+      const busy = CL.busy && !CL.busy.first;
+      h += `<div class="cs-lvh"><h4>Nivel de limpieza</h4><span>${busy ? `<span class="spinner"></span> La IA está recalculando…` : "Lo que tocaste a mano se respeta"}</span></div>`;
+      h += `<div class="cs-lv" role="radiogroup" aria-label="Nivel de limpieza">` + ["suave", "normal", "a_fondo"].map(lv =>
+        `<button role="radio" aria-checked="${cur === lv}" class="${cur === lv ? "on" : ""}" data-lv="${lv}"${CL.busy ? " disabled" : ""}>${C.LEVEL_LABEL[lv]}<small>queda ${fmtM(C.levelFinal(PLAN, lv, 30))}</small></button>`).join("") + `</div>`;
+    }
+    const st = C.takeStats(PLAN.cuts), cnt = C.kindCounts(PLAN.cuts);
+    const tile = (k, n, full) => {
+      const on = C.kindOn(PLAN.cuts, k);
+      return `<div class="cs-cat${on ? "" : " off"}${full ? " full" : ""}" style="--k:${CL.rgb(k)}"><i></i><div><b>${esc(C.TAKE_PLURAL[k])}</b><span>${n} · ${fmtM(rem.cats[k] || 0)}</span></div>`
+        + `<button class="tgl${on ? " on" : ""}" role="switch" aria-checked="${on}" aria-label="${esc(C.TAKE_PLURAL[k])}" data-kind="${k}"${n ? "" : " disabled"}></button></div>`;
+    };
+    h += `<div class="cs-cats">` + (tk ? C.TAKE_KINDS.map(k => tile(k, (st.by_kind[k] || {}).n || 0)).join("") : "") + tile("silencio", cnt.silencio || 0, true) + `</div>`;
+    box.innerHTML = h;
+  }
+  /** Contador de la pestaña y "Duración final" de la barra de modos (en los dos modos). */
+  CL.chrome = function () {
+    if (!PLAN) return;
+    const n = (PLAN.cuts || []).filter(C.isTakeCut).length, b = $("#cleanCnt");
+    if (b) { b.textContent = n ? String(n) : ""; b.classList.toggle("on", n > 0); }
+    const f = $("#finLbl"); if (f) f.innerHTML = `Duración final <b>${fmtM(tlObj().finalDuration)}</b> de ${fmtM(dur())}`;
+  };
+
+  // ---- seleccion y popover
+  function markSel() {
+    const tr = $("#gTr"); if (!tr) return;
+    tr.querySelectorAll("[data-c].sel").forEach(x => x.classList.remove("sel"));
+    if (CL.sel >= 0) tr.querySelectorAll(`[data-c="${CL.sel}"]`).forEach(x => x.classList.add("sel"));
+  }
+  function popHtml(ci) {
+    const c = PLAN.cuts[ci], k = C.cutKind(c), take = C.isTakeCut(c), on = C.cutOn(c), len = +c.end - +c.start;
+    const lvl = take ? C.takeLevel(c) : null, bars = take ? C.confBars(c) : 0;
+    const tl = tlObj(), why = C.takeReason(c, t => tl.remapClamped(t), fmtM) || WHY[k] || WHY.silencio;
+    const kept = take && c.kept_text ? `<p class="gp-kept">Se queda: «${esc(String(c.kept_text).slice(0, 90))}${String(c.kept_text).length > 90 ? "…" : ""}»</p>` : "";
+    const state = on ? `Se quitan ${C.fmtLen(len)}` : take && !c.user ? `Sugerencia: quitaría ${C.fmtLen(len)}` : `Se conservan ${C.fmtLen(len)}`;
+    return `<div class="gph"><span class="gptag">${ICO(take ? "restore" : k === "silencio" ? "pausebar" : "scissors")}${esc(C.cutTag(c, GW.ord[ci], true))}</span>`
+      + (take ? `<span class="gconf">Seguridad ${lvl} <i aria-hidden="true">${[1, 2, 3, 4].map(b => `<b${b > bars ? ' class="o"' : ""}></b>`).join("")}</i></span>` : "") + `</div>`
+      + `<p>${esc(why)}</p>${kept}<div class="gpm">${fmtM(tlObj().remapClamped(+c.start))} · ${state}</div>`
+      + `<div class="pair"><button class="btn ghost mini" data-a="listen">${ICO("play")}Escuchar cómo queda</button>`
+      + `<button class="btn ghost mini" data-a="toggle">${ICO(on ? "restore" : "scissors")}${on ? "Restaurar" : "Quitar"}</button></div>`
+      + `<div class="gkeys"><span><kbd>Espacio</kbd> escuchar</span><span><kbd>R</kbd> ${on ? "restaurar" : "quitar"}</span><span><kbd>↑</kbd><kbd>↓</kbd> otro corte</span></div>`;
+  }
+  function renderPop() {
+    const tr = $("#gTr"); if (!tr) return;
+    let pop = $("#gPop");
+    if (CL.sel < 0 || !PLAN.cuts[CL.sel] || !tr.querySelector(`[data-c="${CL.sel}"]`)) { if (pop) pop.remove(); return; }
+    if (!pop) { pop = document.createElement("div"); pop.id = "gPop"; pop.className = "gpop"; pop.setAttribute("role", "dialog"); }
+    if (pop.parentNode !== tr) tr.appendChild(pop);
+    const c = PLAN.cuts[CL.sel];
+    pop.style.setProperty("--k", CL.rgb(C.cutKind(c)));
+    pop.setAttribute("aria-label", C.TAKE_LABEL[C.cutKind(c)]);
+    pop.innerHTML = popHtml(CL.sel);
+    placePop();
+  }
+  /** Popover bajo la ultima linea del corte (o encima si abajo no cabe en lo visible). */
+  function placePop() {
+    const tr = $("#gTr"), pop = $("#gPop"); if (!tr || !pop || CL.sel < 0) return;
+    const el = tr.querySelector(`[data-c="${CL.sel}"]`); if (!el) return;
+    const rs = el.getClientRects(), tb = tr.getBoundingClientRect();
+    const first = rs[0] || el.getBoundingClientRect(), last = rs[rs.length - 1] || first;
+    const pw = Math.min(360, tr.clientWidth - 24);
+    pop.style.width = pw + "px";
+    const x0 = (rs.length > 1 ? last.left : first.left) - tb.left;
+    const left = Math.max(12, Math.min(tr.clientWidth - pw - 12, x0));
+    const ph = pop.offsetHeight;
+    const below = last.bottom - tb.top + tr.scrollTop + 10, above = first.top - tb.top + tr.scrollTop - 10 - ph;
+    const up = below + ph > tr.scrollTop + tr.clientHeight && above >= tr.scrollTop;
+    pop.style.left = left + "px"; pop.style.top = (up ? above : below) + "px";
+    pop.classList.toggle("up", up);
+    pop.style.setProperty("--ax", Math.max(14, Math.min(pw - 26, x0 - left + 14)) + "px");
+  }
+  function select(ci, o) {
+    const opt = o || {};
+    CL.sel = ci >= 0 && PLAN.cuts[ci] ? ci : -1;
+    markSel(); renderPop(); renderFoot(); drawMap();
+    if (CL.sel < 0) return;
+    const c = PLAN.cuts[CL.sel];
+    if (opt.scroll) scrollToSel();
+    else { const tr = $("#gTr"), el = tr.querySelector(`[data-c="${CL.sel}"]`); if (el) revealPop(el.getBoundingClientRect().top - tr.getBoundingClientRect().top + tr.scrollTop); }
+    if (opt.seek && V.paused) V.currentTime = +c.start + 0.001;
+  }
+  CL.select = select;
+  /** Lleva el corte al tercio superior del guion (flechas) y deja ver su popover. */
+  function scrollToSel() {
+    const tr = $("#gTr"), el = tr && tr.querySelector(`[data-c="${CL.sel}"]`); if (!el) return;
+    const tb = tr.getBoundingClientRect(), r = el.getBoundingClientRect(), y = r.top - tb.top + tr.scrollTop;
+    if (y < tr.scrollTop + 8 || r.bottom - tb.top > tr.clientHeight * 0.6) tr.scrollTop = Math.max(0, y - tr.clientHeight / 4);
+    placePop(); revealPop(y);
+  }
+  /** Si el popover queda cortado abajo, desplaza lo justo (sin sacar de la vista el corte). */
+  function revealPop(y) {
+    const tr = $("#gTr"), pop = $("#gPop"); if (!tr || !pop || pop.classList.contains("up")) return;
+    const pb = pop.offsetTop + pop.offsetHeight + 12;
+    if (pb > tr.scrollTop + tr.clientHeight) { tr.scrollTop = Math.max(tr.scrollTop, Math.min(y - 8, pb - tr.clientHeight)); placePop(); }
+  }
+  function step(dir) {
+    const it = reviewList(); if (!it.length) return;
+    let k = it.indexOf(CL.sel);
+    if (k < 0) {
+      const t = V.currentTime || 0;
+      if (dir > 0) { k = it.findIndex(ci => +PLAN.cuts[ci].start >= t - 0.01); if (k < 0) k = 0; }
+      else { k = -1; it.forEach((ci, j) => { if (+PLAN.cuts[ci].start < t - 0.01) k = j; }); if (k < 0) k = it.length - 1; }
+    } else k = Math.max(0, Math.min(it.length - 1, k + dir));
+    select(it[k], { scroll: true, seek: true });
+  }
+  CL.step = step;
+  /** Palabras del corte para los avisos: «las primeras cinco…» (o su duracion si no tiene). */
+  const NOUN = { retoma: "la toma repetida", arranque_fallido: "el arranque en falso", autocorreccion: "la corrección",
+    tartamudeo: "el tartamudeo", error: "el error", digresion: "la parte fuera de tema", silencio: "el silencio",
+    manual: "el corte manual", ai: "el recorte de la IA" };
+  function excerpt(ci) {
+    const sp = GW.spans[ci], c = PLAN.cuts[ci];
+    if (!sp) return `${NOUN[C.cutKind(c)] || "el corte"} de ${C.fmtLen(c.end - c.start)}`;
+    const ws = GW.words.slice(sp[0], Math.min(sp[1] + 1, sp[0] + 5)).map(w => w.text).join(" ");
+    return `«${ws}${sp[1] - sp[0] >= 5 ? "…" : ""}»`;
+  }
+
+  // ---- acciones
+  /** Restaura o vuelve a cortar (un paso de deshacer; las tomas quedan user:true). */
+  CL.toggle = function (ci) {
+    const c = PLAN && PLAN.cuts && PLAN.cuts[ci]; if (!c || FX.busy()) return;
+    mut();
+    const on = C.toggleCut(c);
+    if (typeof afterCutsChange === "function") afterCutsChange(ci);
+    if (CL.mode !== "clean") prep();                 // el aviso cita las palabras del corte
+    toast(`${on ? "Quitaste" : "Restauraste"} ${excerpt(ci)} (${fmtM(tlObj().remapClamped(+c.start))}).`, on ? "scissors" : "restore", true);
+  };
+  /** "Escuchar cómo queda": 2 s antes y 2 s despues del corte, saltando los cortes habilitados. */
+  CL.listen = function (ci) {
+    const c = PLAN.cuts[ci]; if (!c) return;
+    if (CL.listenRange && !V.paused) { V.pause(); CL.listenRange = null; return; }
+    if (SEL && SEL.type === "cut" && window.inspect) inspect(null);     // un corte seleccionado se reproduciria
+    const [a, b] = C.listenRange(tlObj(), c, 2);
+    CL.listenRange = { end: b };
+    V.currentTime = a + 0.001;
+    if (window.ensureAudio) ensureAudio();
+    if (typeof AC !== "undefined" && AC) AC.resume();
+    V.play().catch(() => {});
+  };
+  CL.setFilter = function (f) {
+    CL.filter = f && f !== CL.filter ? f : "todos";
+    if (CL.sel >= 0 && !inFilter(CL.sel)) CL.sel = -1;
+    CL.render();
+  };
+  CL.setSil = function (on) {
+    CL.sil = !!on; lsSet("reelfy.clean.sil", CL.sil ? "1" : "0");
+    if (CL.sel >= 0 && C.cutKind(PLAN.cuts[CL.sel]) === "silencio" && !GW.spans[CL.sel] && !CL.sil) CL.sel = -1;
+    CL.render();
+  };
+  function confirmBox(html, onOk, okLabel) {
+    const box = $("#gConfirm"); if (!box) return;
+    box.innerHTML = `<p>${html}</p><div class="pair"><button class="btn ghost mini" data-a="no">Cancelar</button><button class="btn mini" data-a="ok">${esc(okLabel)}</button></div>`;
+    box.classList.add("on");
+    const close = () => { box.classList.remove("on"); box.innerHTML = ""; document.removeEventListener("keydown", esc_, true); };
+    const esc_ = e => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+    document.addEventListener("keydown", esc_, true);
+    box.querySelector('[data-a="no"]').onclick = close;
+    box.querySelector('[data-a="ok"]').onclick = () => { close(); onOk(); };
+    box.querySelector('[data-a="ok"]').focus();
+  }
+  CL.restoreAll = function () {
+    const it = reviewList(); if (!it.length || FX.busy()) return;
+    const on = it.some(ci => C.cutOn(PLAN.cuts[ci]));
+    const n = it.filter(ci => C.cutOn(PLAN.cuts[ci]) === on).length;
+    const what = CL.filter === "todos" ? (CL.sil ? "cortes (con los silencios)" : "cortes de limpieza") : C.TAKE_PLURAL[CL.filter].toLowerCase();
+    confirmBox(on ? `¿Restaurar ${n} ${what}? Todo vuelve a salir en el video. Puedes deshacerlo con ⌘Z.`
+      : `¿Quitar ${n} ${what}? Se cortan del video. Puedes deshacerlo con ⌘Z.`, () => {
+      mut();
+      const k = C.setCutsEnabled(PLAN.cuts, it, !on);
+      if (typeof afterCutsChange === "function") afterCutsChange();
+      toast(`${on ? "Restauraste" : "Quitaste"} ${k} corte${k === 1 ? "" : "s"}.`, on ? "restore" : "scissors", true);
+    }, on ? "Restaurar" : "Quitar");
+  };
+  CL.setKind = function (kind, on) {
+    if (FX.busy()) return;
+    mut();
+    const n = C.setKindEnabled(PLAN.cuts, kind, on, (PLAN.takes && PLAN.takes.sensitivity) || "normal");
+    if (typeof afterCutsChange === "function") afterCutsChange();
+    toast(`${C.TAKE_PLURAL[kind]}: ${on ? "se cortan" : "se conservan"}${n ? ` (${n})` : ""}.`, on ? "scissors" : "restore", true);
+  };
+  /** Nivel de limpieza: se aplica al instante con lo detectado (lo que el usuario toco no cambia)
+      y el motor re-detecta con ese nivel (POST /takes) sin otro paso de deshacer. */
+  CL.setLevel = function (lv) {
+    if (!PLAN.takes || CL.busy || FX.busy()) return;
+    const cur = PLAN.takes.sensitivity || "normal"; if (lv === cur) return;
+    const before = tlObj().finalDuration;
+    mut();
+    PLAN.cuts = C.applyLevel(PLAN.cuts, lv);
+    PLAN.takes = Object.assign({}, PLAN.takes, { sensitivity: lv });
+    CL.sel = -1;
+    if (typeof afterCutsChange === "function") afterCutsChange();
+    const after = tlObj().finalDuration, dd = after - before;
+    toast(`Nivel de limpieza: ${C.LEVEL_LABEL[lv]}. Queda ${fmtM(after)}${Math.abs(dd) >= 0.5 ? ` (${dd < 0 ? "−" : "+"}${fmtM(Math.abs(dd))})` : ""}.`, "check", true);
+    if (JOB && JOB !== "demo") CL.findTakes(lv, { llm: PLAN.takes.llm !== false, quiet: true });
+  };
+  /** POST /takes: detecta (o re-detecta) las tomas del proyecto con base_rev. Las tomas que el
+      usuario toco (user:true) se conservan en el servidor y aqui. `first`: busqueda inicial. */
+  CL.findTakes = async function (level, o) {
+    const opt = o || {};
+    if (CL.busy || !JOB || JOB === "demo") return;
+    const lv = level || (PLAN.takes && PLAN.takes.sensitivity) || "normal";
+    const req = ++CL_REQ, first = !PLAN.takes;
+    CL.busy = { level: lv, first }; CL.render();
+    let release = null;
+    try {
+      if (!(await FX.saveNow()) && FX.isDirty()) { toast("No se pudieron guardar tus últimos cambios; intenta de nuevo en un momento.", "alert"); return; }
+      // mientras el motor trabaja, el autoguardado espera (si no, chocaria con la revision nueva)
+      FX.holdSaves(new Promise(r => { release = r; }));
+      const r = await fetch(`/takes/${JOB}`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sensitivity: lv, use_llm: opt.llm !== false, base_rev: FX.serverRev != null ? FX.serverRev : null,
+          fmt: (typeof FMT !== "undefined" && FMT) || "9:16" }) });
+      let d = null; try { d = await r.json(); } catch (e) { d = null; }
+      d = d || {};
+      if (r.status === 409) { toast("Este proyecto cambió en otra ventana: recárgalo para recalcular la limpieza.", "alert", false, [["Recargar", () => location.reload()]], true); return; }
+      if (r.status === 405 || (r.status === 404 && /not found/i.test(d.detail || ""))) { toast("Esta versión del motor todavía no busca tomas repetidas.", "alert"); return; }
+      if (!r.ok) throw new Error(d.detail || `Error ${r.status}`);
+      if (d.plan_rev != null) FX.serverRev = d.plan_rev;
+      // se deshizo o se cambio de nivel mientras tanto: el plan local manda (se guarda encima)
+      if (req !== CL_REQ || (!first && (!PLAN.takes || (PLAN.takes.sensitivity || "normal") !== lv))) { FX.markDirty(); return; }
+      const before = tlObj().finalDuration;
+      if (first) mut();
+      adoptTakes(d);
+      if (typeof afterCutsChange === "function") afterCutsChange();
+      const after = tlObj().finalDuration, n = (d.cuts || []).length;
+      if (first) {
+        toast(n ? `Encontré ${n} toma${n === 1 ? "" : "s"} para quitar. Queda ${fmtM(after)}.` : "No encontré tomas repetidas en este video.", "spark", !!n);
+        if (n && CL.mode !== "clean") CL.setMode("clean");
+      } else if (Math.abs(after - before) >= 0.5) toast(`La IA ajustó la limpieza: queda ${fmtM(after)}.`, "spark");
+    } catch (e) {
+      toast((first ? "No se pudieron buscar las tomas" : "No se pudo recalcular la limpieza") + ": " + (e.message || e), "alert");
+    } finally {
+      if (release) release();
+      if (req === CL_REQ) CL.busy = null;
+      CL.render();
+    }
+  };
+  /** Toma las tomas del servidor: reemplaza las src "takes" (las que el usuario toco aqui ganan). */
+  function adoptTakes(d) {
+    PLAN.cuts = C.adoptTakeCuts(PLAN.cuts, d.cuts);
+    if (d.takes && typeof d.takes === "object") PLAN.takes = d.takes;
+    CL.sel = -1;
+    if (SEL && SEL.type === "cut" && window.inspect) inspect(null);
+  }
+
+  // ---- modo, render y refresco
+  CL.setMode = function (m) {
+    CL.mode = m === "clean" ? "clean" : "edit";
+    const st = document.querySelector(".studio");
+    if (st) st.classList.toggle("mclean", CL.mode === "clean");
+    document.body.classList.toggle("mclean", CL.mode === "clean");
+    $$("#segMode button").forEach(b => { const on = b.dataset.v === CL.mode; b.classList.toggle("sel", on); b.setAttribute("aria-selected", String(on)); });
+    if (JOB && JOB !== "demo") lsSet(`reelfy.mode.${JOB}`, CL.mode);
+    toastTop();
+    if (CL.mode === "clean") {
+      // la seleccion del timeline pasa al guion (un corte seleccionado se reproduciria en vez de saltarse)
+      // si ese corte se ve ahi: un silencio sin palabras con "Mostrar silencios" apagado no se ve, y
+      // Espacio / R actuarian sobre un corte invisible
+      if (SEL && SEL.type === "cut") {
+        const i = SEL.i, c = PLAN.cuts[i];
+        if (window.inspect) inspect(null);
+        prep();
+        CL.sel = c && (C.cutKind(c) !== "silencio" || CL.sil || GW.spans[i]) ? i : -1;
+      }
+      CL.render();
+      requestAnimationFrame(() => { drawMap(); placePop(); if (CL.sel >= 0) scrollToSel(); });
+    } else {
+      const s = CL.sel; CL.sel = -1; const pop = $("#gPop"); if (pop) pop.remove();
+      if (typeof renderTL === "function") renderTL();
+      if (s >= 0 && PLAN.cuts[s] && window.inspect) { inspect({ type: "cut", i: s }); if (window.renderCutsLane) renderCutsLane(); }
+    }
+    setTimeout(() => FX.syncOverlayRect(), 60);
+  };
+  /** Los avisos del modo limpieza van justo bajo la barra de modos (no tapan el pie del guion). */
+  function toastTop() {
+    const mb = $("#modeBar"); if (!mb) return;
+    const r = mb.getBoundingClientRect();
+    if (r.height) document.body.style.setProperty("--toast-top", Math.round(r.bottom + 8) + "px");
+  }
+  CL.render = function () {
+    if (!PLAN) return;
+    CL.chrome();
+    if (CL.mode !== "clean") { CL.stale = true; return; }
+    CL.stale = false;
+    prep();
+    if (CL.sel >= 0 && !PLAN.cuts[CL.sel]) CL.sel = -1;
+    renderChips(); renderScript(); renderFoot(); drawMap(); renderSum(); renderPop();
+  };
+  /** Tras cambiar los cortes: ci = el corte tocado (re-dibuja solo su parrafo), sin ci todo. */
+  CL.refresh = function (ci) {
+    if (!PLAN) return;
+    CL.chrome();
+    if (CL.mode !== "clean") { CL.stale = true; return; }
+    const sig = GW.sig;
+    if (typeof ci === "number" && ci >= 0 && PLAN.cuts[ci]) {
+      prep();
+      if (GW.sig === sig && renderParasOf(ci)) {
+        markSel(); renderChips(); renderFoot(); drawMap(); renderSum(); renderPop(); GW.live = -1;
+        return;
+      }
+    }
+    CL.render();
+  };
+  /** Al abrir el proyecto: Limpieza si hay tomas detectadas (o si fue el ultimo modo usado). */
+  CL.open = function () {
+    CL.wire();
+    CL.sil = lsGet("reelfy.clean.sil") === "1";
+    CL.sel = -1; CL.filter = "todos"; CL.listenRange = null;
+    const saved = JOB && JOB !== "demo" ? lsGet(`reelfy.mode.${JOB}`) : null;
+    const hasTakes = (PLAN.cuts || []).some(C.isTakeCut);
+    CL.setMode(saved === "clean" || saved === "edit" ? saved : hasTakes ? "clean" : "edit");
+    CL.chrome();
+  };
+  /** Cada cuadro: playhead del mapa y palabra que suena en el guion. */
+  CL.tick = function (t) {
+    if (CL.mode !== "clean" || !PLAN) return;
+    const ph = $("#cmapPh");
+    if (ph) { const x = (Math.max(0, Math.min(1, t / dur())) * 100).toFixed(2) + "%"; if (ph._x !== x) { ph.style.left = x; ph._x = x; } }
+    const st = GW.starts; if (!st.length) return;
+    let lo = 0, hi = st.length; while (lo < hi) { const m = (lo + hi) >> 1; if (st[m] <= t) lo = m + 1; else hi = m; }
+    let i = lo - 1; if (i >= 0 && t > GW.words[i].end + 0.3) i = -1;
+    if (i === GW.live) return;
+    const tr = $("#gTr"); if (!tr) return;
+    const old = tr.querySelector(".gw.live"); if (old) old.classList.remove("live");
+    GW.live = i;
+    const el = i >= 0 ? tr.querySelector(`.gw[data-i="${i}"]`) : null;
+    if (!el) return;
+    el.classList.add("live");
+    // al reproducir, el guion sigue a la voz (salvo que el usuario este desplazandose)
+    if (!V.paused && Date.now() - CL.userScroll > 2500) {
+      const tb = tr.getBoundingClientRect(), r = el.getBoundingClientRect();
+      if (r.top < tb.top + 30 || r.bottom > tb.bottom - 30) tr.scrollTop += r.top - tb.top - tr.clientHeight / 3;
+    }
+  };
+  CL.onKey = function (e) {
+    if (!cleanOn() || e.metaKey || e.ctrlKey || e.altKey) return false;
+    if ($("#gConfirm") && $("#gConfirm").classList.contains("on")) return false;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); step(e.key === "ArrowDown" ? 1 : -1); return true; }
+    if (CL.sel < 0) return false;
+    if (e.code === "Space") { e.preventDefault(); CL.listen(CL.sel); return true; }
+    if (e.key === "r" || e.key === "R") { e.preventDefault(); CL.toggle(CL.sel); return true; }
+    if (e.key === "Escape") { e.preventDefault(); select(-1); return true; }
+    return false;
+  };
+  /** Eventos del modo (una sola vez; todo por delegacion: el guion se re-dibuja seguido). */
+  CL.wire = function () {
+    if (CL.wired) return; CL.wired = true;
+    $$("#segMode button").forEach(b => b.onclick = () => CL.setMode(b.dataset.v));
+    const u2 = $("#undoBtn2"), r2 = $("#redoBtn2");
+    if (u2) u2.onclick = () => { if (window.undo) undo(); };
+    if (r2) r2.onclick = () => { if (window.redo) redo(); };
+    const tr = $("#gTr");
+    tr.addEventListener("click", e => {
+      const a = e.target.closest("[data-a]");
+      if (a) {
+        const act = a.dataset.a;
+        if (act === "listen") CL.listen(CL.sel);
+        else if (act === "toggle") CL.toggle(CL.sel);
+        else if (act === "find") CL.findTakes("normal", { llm: true });
+        a.blur(); tr.focus({ preventScroll: true });
+        return;
+      }
+      if (e.target.closest(".gpop")) return;
+      const cut = e.target.closest("[data-c]");
+      if (cut) { select(+cut.dataset.c, { seek: true }); return; }
+      const w = e.target.closest(".gw");
+      if (CL.sel >= 0) select(-1);
+      if (w && GW.words[+w.dataset.i]) V.currentTime = GW.words[+w.dataset.i].start + 0.001;
+    });
+    tr.addEventListener("dblclick", e => {
+      const w = e.target.closest(".gw"); if (!w || e.target.closest("[data-c]") || !GW.words[+w.dataset.i]) return;
+      V.currentTime = GW.words[+w.dataset.i].start + 0.001;
+      if (window.ensureAudio) ensureAudio();
+      V.play().catch(() => {});
+    });
+    ["wheel", "touchmove"].forEach(ev => tr.addEventListener(ev, () => { CL.userScroll = Date.now(); }, { passive: true }));
+    $("#gChips").addEventListener("click", e => { const b = e.target.closest("[data-f]"); if (b && !b.disabled) CL.setFilter(b.dataset.f); });
+    $("#gSil").onclick = () => CL.setSil(!CL.sil);
+    $("#gPrev").onclick = () => step(-1);
+    $("#gNext").onclick = () => step(1);
+    $("#gRestAll").onclick = () => CL.restoreAll();
+    $("#cSum").addEventListener("click", e => {
+      const lv = e.target.closest("[data-lv]"); if (lv && !lv.disabled) { CL.setLevel(lv.dataset.lv); return; }
+      const k = e.target.closest("[data-kind]"); if (k && !k.disabled) { CL.setKind(k.dataset.kind, k.getAttribute("aria-checked") !== "true"); return; }
+      const a = e.target.closest("[data-a]");
+      if (a && a.dataset.a === "retry") CL.findTakes((PLAN.takes && PLAN.takes.sensitivity) || "normal", { llm: true });
+    });
+    const bar = $("#cmapBar");
+    const tAt = e => { const r = bar.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * dur(); };
+    bar.addEventListener("click", e => { V.currentTime = tAt(e); });
+    bar.addEventListener("mousemove", e => {
+      const t = tAt(e), tol = 3 / Math.max(1, bar.clientWidth) * dur();
+      let best = null;
+      (PLAN.cuts || []).forEach(c => { if (c && t >= +c.start - tol && t <= +c.end + tol && (!best || C.isTakeCut(c) > C.isTakeCut(best))) best = c; });
+      bar.title = best ? `${fmtM(+best.start)} · ${C.TAKE_LABEL[C.cutKind(best)]} · ${C.fmtLen(best.end - best.start)}${C.cutOn(best) ? "" : " (conservado)"}` : fmtM(t);
+    });
+    window.addEventListener("resize", () => { if (CL.mode === "clean") { drawMap(); placePop(); toastTop(); } });
+  };
 
   // ------------------------------------------------------------------ inicio del editor
   FX.init = function () {

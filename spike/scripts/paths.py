@@ -74,12 +74,15 @@ MODEL_SIZE = 1_624_555_275  # bytes, para % de descarga
 # descargado a DATA en la app.
 _ALIGNER_REPO = SPIKE / "models/mms_fa_int8.onnx"
 _ALIGNER_DATA = DATA / "models/mms_fa_int8.onnx"
-# Se aloja en el repo PÚBLICO de releases (clipfy es privado y sus assets
-# requerirían autenticación para descargarse).
-ALIGNER_URL = os.environ.get(
-    "REELFY_ALIGNER_URL",
-    "https://github.com/danpez/reelfy-releases/releases/download/models-v1/mms_fa_int8.onnx")
-ALIGNER_SIZE = 357_386_092  # bytes, para verificar que la descarga quedó completa
+# SIN URL por defecto: el repo de releases de GitHub quedó inaccesible y MMS_FA es
+# CC-BY-NC (no se puede redistribuir en una app de pago). Sin el modelo, los subtítulos
+# usan el DTW de whisper + la energía del audio (align.py, plan B: mediana ~45 ms de error
+# de inicio). REELFY_ALIGNER_URL (http/https, p. ej. un espejo propio) reactiva la descarga.
+ALIGNER_URL = os.environ.get("REELFY_ALIGNER_URL", "").strip()
+try:    # bytes, para verificar que la descarga quedó completa (otro espejo/export: env)
+    ALIGNER_SIZE = int(os.environ.get("REELFY_ALIGNER_SIZE") or 357_386_092)
+except ValueError:
+    ALIGNER_SIZE = 357_386_092
 
 
 def model_path():
@@ -92,10 +95,22 @@ def aligner_model_path():
     return _ALIGNER_REPO if _ALIGNER_REPO.exists() else _ALIGNER_DATA
 
 
-def aligner_ready():
+def aligner_model_ready():
     """El modelo del alineador existe Y está completo (tamaño coincide)."""
     p = aligner_model_path()
     return p.exists() and p.stat().st_size >= ALIGNER_SIZE - 1_000_000
+
+
+def aligner_downloadable():
+    """Hay de dónde bajar el modelo del alineador (REELFY_ALIGNER_URL http/https)."""
+    return ALIGNER_URL.lower().startswith(("http://", "https://"))
+
+
+def aligner_ready():
+    """Nada pendiente del alineador: el modelo está completo, o no hay de dónde bajarlo
+    (sin URL configurada los subtítulos usan el plan B de align.py, sin descarga). El
+    setup/opcionales solo intentan bajarlo cuando esto es False."""
+    return aligner_model_ready() or not aligner_downloadable()
 
 
 def engine_ready():

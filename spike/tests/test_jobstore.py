@@ -16,6 +16,9 @@ import jobstore  # noqa: E402
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(jobstore, "DB", tmp_path / "jobs.db")
     monkeypatch.setattr(jobstore, "_local", threading.local())
+    # otro modulo de pruebas importa el servidor EN este proceso y deja un worker vivo: sin esto
+    # tomaria los trabajos en cola de estas bases temporales (y los correria de verdad)
+    monkeypatch.setattr(jobstore, "_claim_next", lambda: None)
     jobstore.init()
     return jobstore
 
@@ -173,6 +176,42 @@ def test_housekeep_devuelve_los_ids_purgados(store):
     ids = store.housekeep(keep=2)
     assert sorted(ids) == ["h1", "h2"]
     assert sorted(store.all_ids()) == ["h0", "h3", "h4"]
+
+
+def test_arrancar_no_purga_proyectos_viejos(store, monkeypatch):
+    """Antes init() conservaba solo los KEEP_LAST mas recientes (sin avisar): ya no."""
+    monkeypatch.setattr(store, "KEEP_LAST", 2)
+    for i in range(6):
+        store.create(f"v{i}", kind="analyze", ext=".mp4")
+        store.update(f"v{i}", state="done", phase="done")
+    assert store.init() == []
+    assert sorted(store.all_ids()) == [f"v{i}" for i in range(6)]
+
+
+def test_delete_solo_si_no_esta_en_proceso(store):
+    store.create("d1", kind="compose", ext=".mp4")                    # en cola
+    assert store.delete("d1") is False and store.get("d1")
+    store.update("d1", state="running")
+    assert store.delete("d1") is False and store.get("d1")
+    store.update("d1", state="review", phase="review")
+    assert store.delete("d1") is True and store.get("d1") is None
+    assert store.delete("d1") is False                                  # ya no existe
+
+
+def test_intermedios_anotados_por_trabajo(store, monkeypatch):
+    """claim_cache: nombres unicos, los mas recientes al final, con tope; cache_claims() los junta;
+    sids_by_job(): fuentes que el plan o los parametros referencian ({"sid": ...})."""
+    monkeypatch.setattr(store, "CACHE_FILES_MAX", 3)
+    store.create("m1", kind="compose", ext=".mp4",
+                 params={"profile": {"avatar": {"sid": "0123456789ab"}}},
+                 plan={"version": 2, "fx": {"graphics": [{"media": {"sid": "ba9876543210"}}]}})
+    store.claim_cache("m1", ["base_a.mp4", "voice_a.wav"])
+    store.claim_cache("m1", ["base_b.mp4", "base_a.mp4", None, ""])
+    assert store.cache_claims() == {"m1": ["voice_a.wav", "base_b.mp4", "base_a.mp4"]}
+    store.claim_cache("m1", ["voice_b.wav"])
+    assert store.get("m1")["cache_files"] == ["base_b.mp4", "base_a.mp4", "voice_b.wav"]
+    assert store.claim_cache("no_existe", ["x"]) is None
+    assert store.sids_by_job() == {"m1": {"0123456789ab", "ba9876543210"}}
 
 
 def test_status_aplana_tiempo_y_mensaje_de_tareas_laterales(store):

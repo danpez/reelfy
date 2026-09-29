@@ -26,6 +26,11 @@ Motor pro (v0.5):
     analisis en segundo plano, musica): {nombre: {state, pct, stage, file, error, ...}}.
   - `meta`: resumen liviano del plan (tema, duracion, version) que se recalcula en cada
     escritura del plan: "Proyectos recientes" (GET /jobs) no deserializa planes.
+  - `cache_files`: nombres de los intermedios de work/motion_cache (base, voz) que el motor
+    genero PARA este trabajo (el servidor los anota): "Liberar espacio" y "Eliminar proyecto"
+    saben cuales son suyos (la voz no dice de que fuente salio).
+  - Los proyectos NUNCA se purgan solos (antes: los 50 mas recientes, o 5 con poco disco). Solo
+    se borran con delete() (DELETE /jobs/{id}: sus archivos van a la Papelera).
 """
 import hashlib
 import json
@@ -39,20 +44,21 @@ import traceback
 import paths
 
 DB = paths.DATA / "jobs.db"
-KEEP_LAST = 50          # housekeeping: conservar los N trabajos más recientes
+KEEP_LAST = 50          # housekeep() explicito (ya no corre solo: los proyectos no se purgan)
+CACHE_FILES_MAX = 64    # nombres de intermedios anotados por trabajo (los mas recientes)
 
 _local = threading.local()
 _handlers: dict = {}
 _wake = threading.Event()
 _side_lock = threading.Lock()   # lectura-modificacion-escritura atomica de `side`
 
-_JSON_COLS = ("params", "plan", "clips", "warnings", "side", "meta")
+_JSON_COLS = ("params", "plan", "clips", "warnings", "side", "meta", "cache_files")
 _COLS = ("id", "kind", "state", "phase", "pct", "message", "eta", "elapsed",
          "ext", "params", "plan", "clips", "error", "created", "updated",
-         "stage", "warnings", "plan_rev", "side", "plan_hash", "meta")
+         "stage", "warnings", "plan_rev", "side", "plan_hash", "meta", "cache_files")
 # columnas agregadas despues de v0.4 (migracion en caliente de un jobs.db existente)
 _NEW_COLS = {"stage": "TEXT", "warnings": "TEXT", "plan_rev": "INTEGER DEFAULT 0",
-             "side": "TEXT", "plan_hash": "TEXT", "meta": "TEXT"}
+             "side": "TEXT", "plan_hash": "TEXT", "meta": "TEXT", "cache_files": "TEXT"}
 CANCELED_EXPORT_MSG = "Export cancelado. Tu edición sigue aquí."
 # claves de las tareas laterales que /status aplana como <tarea>_<clave>
 SIDE_FLAT = ("state", "pct", "file", "stage", "error", "done", "t", "message", "music_pending",
@@ -105,10 +111,19 @@ def plan_meta(plan):
         dur = float(plan.get("duration") or 0)
     except (TypeError, ValueError):
         dur = 0.0
-    return {"version": plan.get("version") or 1, "topic": str(topic)[:120] if topic else None,
-            "duration": round(dur, 2),
-            "final_duration": round(_final_duration(dur, plan.get("cuts")), 2) if dur else None,
-            "style": d.get("style"), "shots": len(plan.get("shots") or [])}
+    out = {"version": plan.get("version") or 1, "topic": str(topic)[:120] if topic else None,
+           "duration": round(dur, 2),
+           "final_duration": round(_final_duration(dur, plan.get("cuts")), 2) if dur else None,
+           "style": d.get("style"), "shots": len(plan.get("shots") or [])}
+    # limpieza de tomas (cortes src "takes"): cuantas hay, cuantas activas y cuanto quitan de mas
+    # (sobre los silencios), contado de los cortes (los toggles del Studio no tocan plan.takes)
+    tk = [c for c in plan.get("cuts") or [] if isinstance(c, dict) and c.get("src") == "takes"]
+    if tk:
+        rest = [c for c in plan.get("cuts") or [] if isinstance(c, dict) and c.get("src") != "takes"]
+        extra = _final_duration(dur, rest) - _final_duration(dur, plan.get("cuts")) if dur else 0.0
+        out["takes"] = {"n": len(tk), "enabled": sum(1 for c in tk if c.get("enabled") is not False),
+                        "removed_s": round(max(0.0, extra), 2)}
+    return out
 
 
 def plan_hash(plan):
@@ -152,7 +167,7 @@ def init():
             cx.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typ}")
     cx.commit()
     recover()
-    return _housekeep()
+    return []       # sin purga automatica: los proyectos viejos se conservan (aviso de poco disco)
 
 
 def recover():
@@ -186,8 +201,8 @@ def recover():
 
 def _housekeep(keep=None):
     """Borra las filas de los trabajos mas viejos (conserva los `keep` mas recientes que no
-    esten en proceso). Devuelve los ids purgados: el servidor borra sus ARCHIVOS (entrada,
-    exports, vistas previas, musica)."""
+    esten en proceso). Devuelve los ids purgados. Ya NO se llama sola (ni al arrancar ni con poco
+    disco): perder un proyecto sin aviso es peor que quedarse sin espacio."""
     keep = KEEP_LAST if keep is None else int(keep)
     cx = _cx()
     ids = [r["id"] for r in cx.execute(
@@ -205,6 +220,62 @@ def housekeep(keep=None):
 
 def all_ids():
     return [r["id"] for r in _cx().execute("SELECT id FROM jobs").fetchall()]
+
+
+def delete(job_id):
+    """Borra la fila del trabajo SOLO si no esta en proceso (en cola o corriendo): la condicion va
+    en el mismo DELETE (atomico: un export que se encola a la vez gana y esto devuelve False).
+    -> True si se borro."""
+    cx = _cx()
+    cur = cx.execute("DELETE FROM jobs WHERE id=? AND state NOT IN ('queued', 'running')", (job_id,))
+    cx.commit()
+    return cur.rowcount > 0
+
+
+def claim_cache(job_id, names):
+    """Anota intermedios de work/motion_cache (nombres de archivo) como de este trabajo. Los mas
+    recientes al final; se conservan los ultimos CACHE_FILES_MAX."""
+    names = [str(n) for n in names or [] if n]
+    if not names:
+        return None
+    with _side_lock:
+        cx = _cx()
+        row = cx.execute("SELECT cache_files FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return None
+        try:
+            cur = json.loads(row["cache_files"]) if row["cache_files"] else []
+        except Exception:  # noqa
+            cur = []
+        cur = [n for n in cur if n not in names] + list(dict.fromkeys(names))
+        cur = cur[-CACHE_FILES_MAX:]
+        cx.execute("UPDATE jobs SET cache_files=? WHERE id=?", (json.dumps(cur), job_id))
+        cx.commit()
+        return cur
+
+
+def cache_claims():
+    """{id: [nombres de intermedios]} de todos los trabajos que anotaron alguno."""
+    out = {}
+    for r in _cx().execute("SELECT id, cache_files FROM jobs WHERE cache_files IS NOT NULL").fetchall():
+        try:
+            out[r["id"]] = list(json.loads(r["cache_files"]) or [])
+        except Exception:  # noqa
+            continue
+    return out
+
+
+def sids_by_job():
+    """{id: set(sids)} de las fuentes subidas (/sources) que cada trabajo usa como medio propio o
+    en el perfil ({"sid": ...} en su plan o en sus parametros). Las del montaje (spec.main/overlays)
+    salen de all_params()."""
+    out = {}
+    for r in _cx().execute("SELECT id, params, plan FROM jobs WHERE plan LIKE '%\"sid\"%' "
+                           "OR params LIKE '%\"sid\"%'").fetchall():
+        s = set(_SID_RE.findall(r["plan"] or "")) | set(_SID_RE.findall(r["params"] or ""))
+        if s:
+            out[r["id"]] = s
+    return out
 
 
 def all_params():

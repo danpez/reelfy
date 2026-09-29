@@ -118,3 +118,38 @@ def test_el_apagado_del_servidor_apaga_el_ollama(monkeypatch):
             assert calls == []
     asyncio.run(run())
     assert calls == [1]
+
+
+@posix
+def test_al_apagar_termina_los_procesos_que_lanzo(monkeypatch):
+    # un "motor" (bash) con dos hijos que siguen vivos (como ace-synth y el ffmpeg de un proxy) y
+    # un nieto: al apagar se terminan todos; nada queda huerfano
+    motor = subprocess.Popen(["bash", "-c", "sleep 30 & (sleep 31 & wait) & wait"])
+    try:
+        time.sleep(0.4)
+        hijos = S._descendants(motor.pid)
+        assert len(hijos) >= 3
+        monkeypatch.setattr(S.os, "getpid", lambda: motor.pid)
+        S._kill_children(wait=1.0)
+        monkeypatch.undo()
+        time.sleep(0.3)
+        vivos = [k for k in hijos if S._proc_cmd(k) and "defunct" not in S._proc_cmd(k)]
+        assert vivos == []
+        motor.wait(timeout=5)                       # sin hijos, el wait del motor termina
+    finally:
+        if motor.poll() is None:
+            motor.kill()
+
+
+def test_el_apagado_de_pruebas_no_mata_procesos_del_proceso_de_pruebas(monkeypatch):
+    # importado en pruebas (TestClient) el lifespan NO barre hijos: solo el servidor real
+    llamado = []
+    monkeypatch.setattr(S, "_kill_children", lambda *a, **k: llamado.append(1))
+    monkeypatch.setattr(S, "_stop_ollama", lambda: None)
+    import asyncio
+
+    async def run():
+        async with S.app.router.lifespan_context(S.app):
+            pass
+    asyncio.run(run())
+    assert S._SERVING is False and llamado == []

@@ -444,7 +444,7 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
             out.append(d)
         return out
 
-    phrases = tl.map_words(plan.get("phrases") or [])
+    phrases = tl.map_words(plan.get("phrases") or [], drop_spans=T.word_cut_spans(plan.get("cuts")))
     words = _flat_words(phrases)
 
     # ---- texto
