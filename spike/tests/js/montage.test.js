@@ -59,7 +59,8 @@ test("montageClips: la linea de tiempo del montaje con su slot, toma, union y co
   assert.deepEqual(cs.map(c => c.sid), ["C", "D", "E", "F", "G"]);
   assert.deepEqual(starts(cs), [0, 2.4, 4.9, 8.4, 11.6]);
   contiguous(cs);
-  assert.deepEqual(cs[1].montage, { slot: "s01", cand: "c12", join: "splice", conf: 0.9, setup: 2 });
+  // cam/ic: la camara real del tramo y si es del intercalado (cambios de camara con aceleracion)
+  assert.deepEqual(cs[1].montage, { slot: "s01", cand: "c12", join: "splice", conf: 0.9, setup: 2, cam: 2, ic: false });
   assert.equal(cs[0].montage.join, null);
   assert.equal(cs[2].montage.join, "section");
   assert.equal(cs[3].vol, 1.3);
@@ -87,7 +88,7 @@ test("swapTake: cambia la toma, re-empaca lo que sigue y conserva la union de en
   const neu = r.clips.find(c => c._id === r.first);
   assert.equal(neu._id, cs[2]._id, "el primer tramo conserva su id (seleccion estable)");
   assert.deepEqual([neu.sid, neu.in, neu.out], ["E", 0.5, 4.0]);
-  assert.deepEqual(neu.montage, { slot: "s02", cand: "c22", join: "section", conf: 0.55, setup: 3 });
+  assert.deepEqual(neu.montage, { slot: "s02", cand: "c22", join: "section", conf: 0.55, setup: 3, cam: 3, ic: false });
   near(r.delta, 3.5 - 3.5);
   // c22 dura lo mismo que c21 (3.5 s): nada se mueve
   assert.deepEqual(starts(r.clips), [0, 2.4, 4.9, 8.4, 11.6]);

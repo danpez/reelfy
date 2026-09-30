@@ -880,7 +880,8 @@ def test_montaje_revision_ui_cableado():
     css = (STATIC / "fx.css").read_text()
     # transcripcion por clip: la UI la pide solo cuando se puede armar con IA; el Studio nunca
     assert 'fd.append("transcribe",words?"1":"0")' in js and "uploadEach(files,prog,null,nv>1)" in js
-    assert "},my.hold,true);" in js, "Armar con IA pide la transcripcion de cada clip"
+    # Armar con IA pide la transcripcion de cada clip (los recursos del guion no se transcriben)
+    assert "},my.hold,i=>!my.assetIdx.has(i));" in js, "Armar con IA pide la transcripcion de cada clip"
     assert 'fd.append("files", file); fd.append("transcribe", "0");' in fx
     # los cambios de tomas se guardan hasta que la composicion termina (review/done), no al aceptarla
     assert "if(ASM.montageJob) asmSaved(ASM.montageJob,null);" not in js
@@ -967,3 +968,306 @@ def test_montaje_e2e_en_navegador(tmp_path):
         except ProcessLookupError:
             pass
         srv.wait(timeout=30)
+
+
+# ================================================================ recursos del guion y aceleraciones
+@needs_node
+def test_recursos_y_aceleraciones_unitarias_node():
+    """Logica pura de los recursos del guion (marcas, clasificacion, colocacion con su linea), los
+    cambios de camara con aceleracion y el color de acento (tests/js/recursos.test.js)."""
+    r = subprocess.run([NODE, "--test", str(SPIKE / "tests" / "js" / "recursos.test.js")],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+
+
+def _port_scenarios(n=60, seed=11):
+    """Lineas de tiempo SINTETICAS de un montaje (camaras, uniones, palabras y duraciones al azar)."""
+    rnd = random.Random(seed)
+    out = []
+    for k in range(n):
+        n_it = rnd.randint(2, 6)
+        sids = [f"{c}{k}" for c in "ABCDEFG"][:max(2, n_it)]
+        cams = {s: (rnd.choice([1, 2, 3, None]) if rnd.random() < 0.9 else None) for s in sids}
+        order = [{"sid": s, "name": s + ".MOV", "setup": cams[s]} for s in sids]
+        tl, slots, words, durs, t = [], [], {}, {}, 0.0
+        for i in range(n_it):
+            sid = rnd.choice(sids)
+            a = round(rnd.uniform(0.0, 2.0), 2)
+            b = round(a + rnd.uniform(0.6, 4.0), 2)
+            durs[sid] = max(durs.get(sid, 0.0), round(b + rnd.uniform(0.0, 1.5), 2))
+            slot, cand = f"s{i // 2 + 1:02d}", f"c{i}"
+            flags = rnd.choice([[], ["intercalado"], ["parcial"], ["variante"]])
+            slots.append({"id": slot, "lines": [f"L{i // 2 + 1:02d}"], "chosen": cand,
+                          "cands": [{"id": cand, "sid": sid, "in": a, "out": b, "setup": rnd.choice([1, 2, None]),
+                                     "flags": flags}]})
+            tl.append({"slot": slot, "cand": cand, "sid": sid, "in": a, "out": b, "start": round(t, 6),
+                       "join": None if not tl else rnd.choice(["splice", "line", "section"])})
+            t += b - a
+        for s in sids:
+            ws, x = [], rnd.uniform(0.0, 0.5)
+            while x < durs.get(s, 3.0) + 1.0:
+                w = rnd.uniform(0.1, 0.6)
+                ws.append({"text": "w", "start": round(x, 3), "end": round(x + w, 3)})
+                x += w + rnd.choice([0.02, 0.05, 0.1, 0.3, 0.5, 0.9])
+            words[s] = ws
+            durs.setdefault(s, 3.0)
+        # varias partes con el mismo id de slot: el JS los agrupa igual (slotClipIdx) que el motor (timeline)
+        merged = {}
+        for s in slots:
+            merged.setdefault(s["id"], {"id": s["id"], "lines": s["lines"], "chosen": s["chosen"], "cands": []})
+            merged[s["id"]]["cands"] += s["cands"]
+        overrides = {i: rnd.choice([True, False]) for i in range(1, n_it) if rnd.random() < 0.25}
+        out.append({"montage": {"order": order, "slots": list(merged.values()), "timeline": tl},
+                    "words": words, "durs": durs, "overrides": overrides})
+    return out
+
+
+@needs_node
+def test_port_de_montage_en_fxcore_igual_al_motor(tmp_path):
+    """fxcore.js decide lo mismo que scripts/montage.py (el dueno de las reglas): marcas del guion
+    (split_annotation), nombres de archivo (match_asset / classify) y aceleraciones en los cambios de
+    camara (plan_ramps, con lo que eligio el usuario). Asi el timeline del ensamble muestra lo que
+    compose va a hacer."""
+    import copy
+    import sys
+    sys.path.insert(0, str(SPIKE / "scripts"))
+    import montage as M
+    lines = ["Ya abrimos. - Agregar video_horno", "Hola.- AÑADIR Foto Pan.jpg", "Masa — insertar foto_masa, el video_horno",
+             "Cada mañana | Muestra la foto_pan.", "Lanzamos [imagen_cartel]", "Dos {logo} [Poner foto uno]", "Hola [pausa]",
+             "[pausa] Hola", "un e-mail bien", "foto1 y foto2 - Pon foto1 y foto2", "Esto - add clip_a; clip_b",
+             "Frase normal - agregando cosas", "Hola [Horno]", "Termina {x} [y_2] - Agregar z_3", "sin nada"]
+    known = ["horno.mp4", "foto_masa.jpg"]
+    files = [{"sid": "a1", "name": "PAN_0101.MOV", "kind": "video"}, {"sid": "b2", "name": "Video Horno.mp4", "kind": "video"},
+             {"sid": "c3", "name": "foto_pan_dulce.jpg", "kind": "image"}, {"sid": "d4", "name": "video_a.mp4", "kind": "video"},
+             {"sid": "e5", "name": "video_b.mp4", "kind": "video"}]
+    names = ["video_horno", "foto_pan", "video", "b2", "video_horno_de_lena_grande", "nada", "VIDEO-A"]
+    script = "Uno. - Agregar video_horno\nDos [foto_pan]\n- Agregar video_a\nTres {falta_x}"
+    sc = _port_scenarios()
+    got = _node_json(tmp_path, "port.js", """
+const lines=%s, known=%s, files=%s, names=%s, script=%s, sc=%s;
+const out={lines:lines.map(l=>[C.lineRefs(l).text,C.lineRefs(l).names,C.lineRefs(l,known.map(n=>({name:n}))).names]),
+  match:names.map(n=>C.matchAsset(n,files)), cls:C.classifyFiles(files,script), ramps:[]};
+sc.forEach(s=>{
+  const src=Object.keys(s.durs).map(id=>({id,type:"video",dur:s.durs[id]}));
+  const cs=C.montageClips(s.montage,src,(()=>{let n=0;return()=>"k"+n++;})());
+  Object.keys(s.overrides).forEach(i=>{ cs[+i].rampUser=s.overrides[i]; });
+  C.syncRamps(cs,{words:s.words});
+  out.ramps.push(cs.map(c=>[c.ramp_in||null,c.ramp_out||null]));
+});
+process.stdout.write(JSON.stringify(out));
+""" % tuple(json.dumps(x, ensure_ascii=False) for x in (lines, known, files, names, script, sc)))
+    keys = [M.asset_key(n) for n in known]
+    for l, (t, ns, ns_known) in zip(lines, got["lines"]):
+        assert [t, ns] == list(M.split_annotation(l, [])), l
+        assert ns_known == M.split_annotation(l, keys)[1], l
+    for n, i in zip(names, got["match"]):
+        f = M.match_asset(n, files)
+        assert i == (files.index(f) if f else -1), n
+    cls = M.classify(files, script)
+    assert [files[i]["sid"] for i in got["cls"]["clips"]] == [f["sid"] for f in cls["clips"]]
+    assert sorted(files[i]["sid"] for i in got["cls"]["assets"]) == sorted(f["sid"] for f in cls["assets"])
+    assert {r["name"]: (files[r["idx"]]["sid"] if r["idx"] >= 0 else None) for r in got["cls"]["refs"]} == cls["refs"]
+    n_ramps = 0
+    for s, js in zip(sc, got["ramps"]):
+        m = copy.deepcopy(s["montage"])
+        clips = [{"sid": sid, "words": w, "dur": s["durs"][sid]} for sid, w in s["words"].items()]
+        tl = M.plan_ramps(m, clips, dict(s["overrides"]))
+        py = [[x.get("ramp_in"), x.get("ramp_out")] for x in tl]
+        assert js == py, (s["montage"]["timeline"], s["overrides"], js, py)
+        n_ramps += sum(1 for a, b in py if a or b)
+    assert n_ramps >= 10, "los escenarios deben ejercitar aceleraciones de verdad"
+
+
+@needs_node
+def test_colocacion_de_recursos_igual_al_motor(tmp_path):
+    """fxcore.placeInserts con las tomas del montaje coloca cada recurso donde montage.plan_inserts
+    (line_times de la toma en uso, reparto de varios por linea, minimo 2 s, sin encimarse y el ajuste
+    del video: speed de 0.8x a 1.4x, trim o su propia duracion)."""
+    import sys
+    sys.path.insert(0, str(SPIKE / "scripts"))
+    import montage as M
+    rnd = random.Random(5)
+    scen = []
+    for k in range(40):
+        n = rnd.randint(1, 5)
+        lines, slots, tl, t = [], [], [], 0.0
+        for i in range(n):
+            lid = f"L{i + 1:02d}"
+            ins = rnd.choice([[], ["foto_a"], ["video_b"], ["foto_a", "video_b"], ["falta_c"]])
+            lines.append({"id": lid, "text": "linea", "inserts": ins})
+            a = round(rnd.uniform(0, 1), 2)
+            b = round(a + rnd.uniform(0.8, 5.0), 2)
+            w0 = round(a + rnd.uniform(0.05, 0.3), 2)
+            w1 = round(max(w0 + 0.1, b - rnd.uniform(0.05, 0.3)), 2)
+            sid = f"S{i}"
+            slots.append({"id": f"s{i}", "lines": [lid], "chosen": "c1", "cands": [
+                {"id": "c1", "sid": sid, "in": a, "out": b, "line_times": {lid: [w0, w1]}}]})
+            tl.append({"slot": f"s{i}", "cand": "c1", "sid": sid, "in": a, "out": b, "start": round(t, 6)})
+            t += b - a
+        m = {"script": {"lines": lines}, "slots": slots, "timeline": tl}
+        assets = [{"sid": "FA", "name": "foto_a.jpg", "kind": "image", "dur": 0},
+                  {"sid": "VB", "name": "video_b.mp4", "kind": "video", "dur": round(rnd.uniform(0.5, 9.0), 2)}]
+        m["inserts"] = M.plan_inserts(m, assets)
+        scen.append({"m": m, "assets": assets})
+    got = _node_json(tmp_path, "ins.js", """
+const sc=%s;
+process.stdout.write(JSON.stringify(sc.map(s=>{
+  const src=s.assets.map(a=>({id:a.sid,type:a.kind,dur:a.dur}));
+  const cs=C.montageClips(s.m,src,(()=>{let n=0;return()=>"k"+n++;})());
+  return C.placeInserts(s.m,cs,{sources:src}).map(x=>[x.id,x.start,x.end,x.fit,x.speed,x.status]);
+})));
+""" % json.dumps(scen))
+    n = 0
+    for s, js in zip(scen, got):
+        py = [[x["id"], x["start"], x["end"], x["fit"], x["speed"], x["status"]] for x in s["m"]["inserts"]]
+        assert len(js) == len(py)
+        for a, b in zip(js, py):
+            assert a[0] == b[0] and a[3:] == b[3:] and abs(a[1] - b[1]) < 2e-3 and abs(a[2] - b[2]) < 2e-3, (a, b)
+            n += 1
+    assert n >= 20
+
+
+def test_recursos_y_aceleraciones_cableado():
+    """La UI de los recursos del guion y de los cambios de camara esta cableada al contrato."""
+    html = (STATIC / "index.html").read_text()
+    js = _inline_script()
+    fx = (STATIC / "fx.js").read_text()
+    css = (STATIC / "fx.css").read_text()
+    # inicio: imagenes elegibles, "Recursos del guion" con su estado y "Agregar archivo"
+    assert 'accept:"video/*,image/*",multiple:true' in js and 'id="guionRefs"' in html
+    for txt in ("Recursos del guion", "Encontrado entre tus archivos", "Agregar archivo", "Falta"):
+        assert txt in js, txt
+    assert "FXCore.classifyFiles(" in js and "assets:mtAssets().map(s=>s.id)" in js
+    # un recurso no se transcribe ni cuenta como clip escuchado
+    assert "i=>!my.assetIdx.has(i)" in js and '"Recurso del guion"' in js
+    # ensamble: pista Recursos, marcadores de camara con deshacer, panel y cuerpo de /compose
+    assert 'id="asmMediaTrk"' in html and 'id="asmMedia"' in html
+    assert "FXCore.syncRamps(" in js and "FXCore.toggleRamp(" in js and "asmPush();" in js
+    assert "Cambio de cámara con aceleración" in js and 'class="rampmk' not in js and 'b.className="rampmk"' in js
+    assert '"/montage/"+encodeURIComponent(job)+"/asset"' in js
+    assert "inserts:ASM.montage?asmInserts():null" in js
+    assert "insEdits:ASM.insEdits||{}" in js, "los recursos editados viajan en deshacer y en el guardado local"
+    assert "FloatCard" in js and "/static/floatcard.js" in html
+    # Studio: pista Recursos (seleccionar, mover, recortar, quitar, cambiar archivo) y vista previa
+    assert 'media: { label: "Recursos"' in fx and "function inspectMedia(" in fx and "FX.replaceMedia" in fx
+    assert "FCm.drawCard(" in fx and "FCm.bgFilter(" in fx and 'HITS.push({ track: "media", id: it.id, bb, fixed: true })' in fx
+    # color de acento: un solo control, amarillo por defecto, sin azul
+    assert 'id="accentBody"' in html and "Color de acento" in html and "C.applyAccent(PLAN" in fx
+    assert 'p.k !== "accent"' in fx, "el color de la palabra activa es el acento del proyecto"
+    for f in ("index.html", "fx.js", "fxcore.js", "fx.css"):
+        assert "84a2f8" not in (STATIC / f).read_text().lower(), f"{f}: azul fijo"
+    assert "--trk-media" in css and ".rampmk" in css and ".mt-res" in css
+    # el repo es publico: nada del material real de un cliente
+    for f in ("index.html", "fx.js", "fxcore.js", "fx.css"):
+        low = (STATIC / f).read_text().lower()
+        for w in ("carrusel", "meta_ads", "dentista", "paseo club", "paseoclub"):
+            assert w not in low, f"{f}: {w}"
+
+
+def test_version_de_floatcard_es_el_hash_del_contenido():
+    """floatcard.js (vista en vivo de los recursos, port de motion/media.py) tambien va con ?v=<hash>."""
+    import hashlib
+    h = hashlib.sha1((STATIC / "floatcard.js").read_bytes()).hexdigest()[:8]
+    vs = re.findall(r'/static/floatcard\.js\?v=([0-9a-f]+)', (STATIC / "index.html").read_text())
+    assert vs == [h], f"version {vs} != {h}: recalcula el ?v= de floatcard.js"
+
+
+@needs_node
+def test_revision_marcas_y_nombres_igual_al_motor(tmp_path):
+    """fxcore (lineRefs / matchAsset / classifyFiles) decide lo MISMO que montage.py en los casos de la
+    revision: frases con guion largo y verbo (se dicen), '[1]' / '{a}' (nunca por prefijo), una toma
+    cuyo nombre es el principio del recurso pedido (sigue siendo toma), al reves solo imagenes."""
+    import sys
+    sys.path.insert(0, str(SPIKE / "scripts"))
+    import montage as M
+    lines = ["Nuestra meta — agregar valor a cada familia del barrio.", "Súmate — agrega tu negocio hoy.",
+             "Tenemos un reto - mostrar resultados reales.", "Hay una regla | pon tu marca primero.",
+             "Te damos una muestra - muestra gratis para ti.", "La clave — poner al cliente primero",
+             "Súmate — agrega 3 negocios hoy", "Hola. - Agregar foto_1, la tienda de mi barrio",
+             "Abrimos temprano - agregar foto del local", "Hola. — Mostrar Foto Local.jpg", "Somos. [1]",
+             "Y bien. {a}", "Hola [agregar foto del local]", "Uno - Pon foto1 y foto2", "Vamos - add e-mail"]
+    known = ["Foto del local.HEIC", "foto1.png"]
+    files = [{"sid": "1f3a9c0d2b4e", "name": "IMG_0375.MOV", "kind": "video"},
+             {"sid": "a07c55e1d9f2", "name": "Marta.mov", "kind": "video"},
+             {"sid": "b17c55e1d9f3", "name": "Marta 2.mov", "kind": "video"},
+             {"sid": "c27c55e1d9f4", "name": "logo.png", "kind": "image"},
+             {"sid": "d37c55e1d9f5", "name": "foto_local_final.jpg", "kind": "image"},
+             {"sid": "e47c55e1d9f6", "name": "toma_pan_1.mov", "kind": "video", "has_words": True}]
+    names = ["1", "1f3a", "1f3a9c0d2b4e", "img", "img_03", "marta_en_el_taller", "logo_nuevo", "foto_local",
+             "foto", "toma_pan", "Marta"]
+    script = ("Somos tres socios. [1]\nHola, soy Marta. - Agregar marta_en_el_taller\nY {logo_nuevo}\n"
+              "Nuestra meta — agregar valor a cada familia.\nPan. {toma_pan}\nFin. [foto_local]")
+    got = _node_json(tmp_path, "rev.js", """
+const lines=%s, known=%s, files=%s, names=%s, script=%s;
+process.stdout.write(JSON.stringify({lines:lines.map(l=>[C.lineRefs(l).text,C.lineRefs(l).names,C.lineRefs(l,known.map(n=>({name:n}))).names]),
+  match:names.map(n=>C.matchAsset(n,files)), cls:C.classifyFiles(files,script)}));
+""" % tuple(json.dumps(x, ensure_ascii=False) for x in (lines, known, files, names, script)))
+    keys = [M.asset_key(n) for n in known]
+    for l, (t, ns, ns_known) in zip(lines, got["lines"]):
+        assert [t, ns] == list(M.split_annotation(l, [])), l
+        assert ns_known == M.split_annotation(l, keys)[1], l
+    for n, i in zip(names, got["match"]):
+        f = M.match_asset(n, files)
+        assert i == (files.index(f) if f else -1), n
+    cls = M.classify(files, script)
+    assert [files[i]["sid"] for i in got["cls"]["clips"]] == [f["sid"] for f in cls["clips"]]
+    assert sorted(files[i]["sid"] for i in got["cls"]["assets"]) == sorted(f["sid"] for f in cls["assets"])
+    assert {r["name"]: (files[r["idx"]]["sid"] if r["idx"] >= 0 else None) for r in got["cls"]["refs"]} == cls["refs"]
+    # las tomas se quedan como tomas; la imagen pedida al reves y la del prefijo por palabras, recursos
+    assert [f["name"] for f in cls["clips"]] == ["IMG_0375.MOV", "Marta.mov", "Marta 2.mov", "toma_pan_1.mov"]
+    assert cls["refs"] == {"marta_en_el_taller": None, "logo_nuevo": "c27c55e1d9f4",                  # "[1]": acotacion
+                           "toma_pan": None, "foto_local": "d37c55e1d9f5"}
+
+
+@needs_node
+def test_ajuste_del_video_igual_en_ensamble_y_compose(tmp_path):
+    """El ensamble (fxcore.insertFit) y compose._media_fit ajustan IGUAL un video a su tramo: mas largo
+    hasta 1.4x se acelera, mas se recorta, un poco mas corto (desde 0.8x) se alenta, mas corto dura lo
+    suyo (el ensamble acorta el recurso y compose lo pasa a 1x)."""
+    import sys
+    sys.path.insert(0, str(SPIKE / "scripts"))
+    import compose
+    grid = [round(0.5 + 0.05 * k, 2) for k in range(31)]          # d / slot de 0.5 a 2.0
+    slot = 5.0
+    got = _node_json(tmp_path, "fit.js", "process.stdout.write(JSON.stringify(%s.map(r=>C.insertFit('video', r*%r, %r, 0))));"
+                     % (json.dumps(grid), slot, slot))
+    for r, f in zip(grid, got):
+        d = r * slot
+        s2 = f.get("len", slot)                                    # el ensamble acorta el recurso
+        fit, sp, _src = compose._media_fit("video", d, s2, {"fit": f["fit"], "speed": f["speed"], "src_in": 0})
+        if f.get("len") is not None or (f["fit"] == "speed" and f["speed"] == 1):
+            assert (fit, sp) == ("hold", 1.0), (r, f, fit, sp)                 # a 1x: lo mismo
+        else:
+            assert fit == f["fit"] and sp == pytest.approx(f["speed"], abs=1e-3), (r, f, fit, sp)
+
+
+def test_revision_ui_cableado():
+    """Regresiones de UI de la revision: la tarjeta de un recurso se dibuja ANTES de graficos (como el
+    render); elegir un recurso suelta el clip (Supr quita el recurso, nunca un clip); 'Deshacer' tras
+    cambiar el archivo de un recurso vuelve al de antes; el marcador de la aceleracion no tapa el
+    agarre de recorte."""
+    fx = (STATIC / "fx.js").read_text()
+    live = fx[fx.index("FX.drawLive = function"):]
+    live = live[:live.index("pauseIdleMedia(")]
+    assert live.index('activeRange("media", t)') < live.index('activeRange("graphics", t)')
+    assert live.index('activeRange("cutaways", t)') < live.index('activeRange("media", t)')
+    js = _inline_script()
+    sel_ins = js[js.index("function asmSelectInsert("):]
+    sel_ins = sel_ins[:sel_ins.index("\n}")]
+    assert "ASM.sel=null" in sel_ins
+    sel = js[js.index("function asmSelect(track,id){"):]
+    assert "ASM.insSel=null" in sel[:sel.index("\n")]
+    key = js[js.index('e.key==="Delete"||e.key==="Backspace"'):]
+    key = key[:key.index('else if(e.key==="s"')]
+    assert key.index("ASM.insSel&&!ASM.sel") < key.index("asmDelSel()") and "mtInsertToggle(" in key
+    f = js[js.index("function mtInsertFile("):]
+    f = f[:f.index("function mtInsertToggle(")]
+    pin = f.index("ASM.insEdits[id]=Object.assign({},ASM.insEdits[id]||{},{sid:cur.sid||null")
+    assert pin < f.index("asmPush();") < f.index('"/montage/"+encodeURIComponent(job)+"/asset"')
+    assert f.rindex("{sid:src.id,") > f.index('"/montage/"+encodeURIComponent(job)+"/asset"')
+    assert "delete e.sid" not in f
+    css = (STATIC / "fx.css").read_text()
+    rule = re.search(r"\.rampmk\{([^}]*)\}", css).group(1)
+    assert "top:0" in rule and "top:50%" not in rule and "height:16px" in rule
+    # el ajuste que alenta un video no dice "acelerado"
+    assert "más lento" in js and "más lento" in fx

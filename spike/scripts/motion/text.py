@@ -1888,7 +1888,7 @@ def _probe_center(preset: str, fn, item: dict, dur: float, ctx) -> None:
     if w <= 2 or h <= 2 or w * h > 4.2e7:
         return
     pc = C.FrameCtx(W=ctx.W, H=ctx.H, fps=ctx.fps, n=ctx.n, t=ctx.t, t_orig=ctx.t_orig,
-                    quality=ctx.quality, seed=ctx.seed, style=ctx.style, words=ctx.words,
+                    quality=ctx.quality, seed=ctx.seed, style=ctx.style, accent=ctx.accent, words=ctx.words,
                     entities=ctx.entities)
     arr, surf = C.new_frame(w, h)
     cv = surf.getCanvas()

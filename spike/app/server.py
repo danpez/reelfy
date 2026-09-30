@@ -48,7 +48,7 @@ SPIKE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SPIKE / "scripts"))
 import paths  # noqa: E402
 
-ENGINE_VERSION = "0.5.3"
+ENGINE_VERSION = "0.5.4"
 
 # ---- LLM embebido: si el binario de ollama viene en el bundle, corre en un
 # puerto propio con modelos en DATA. El pipeline (highlights/translate) y el director
@@ -1235,7 +1235,7 @@ def _direct_plan(plan, d, on_step=None, use_llm=True):
             not (prev_vlm and prev_vlm != "heuristico"):
         warns.append("director: la IA de visión no describió las tomas (tiempo agotado o modelo "
                      "no disponible); tomas con heurísticas")
-    out = _sym(_apply_music(out, mover))
+    out = _sym(_accent_keep(plan, _apply_music(out, mover)))
     print(f"   director: {d['style']} {d['intensity']} seed {d['seed']} en {time.time() - t0:.1f}s "
           f"(llm={dd.get('llm')}, vlm={dd.get('vlm')}, music_sync={kw.get('music_sync', 'auto')}, "
           f"timings={dd.get('timings')})")
@@ -1267,18 +1267,105 @@ def _sym(plan):
         from motion import director
         fn = getattr(director, "symmetrize", None)
         if fn is None:
-            return plan
+            return _accent_apply(plan)
         out = fn(json.loads(json.dumps(plan)))
     except Exception:  # noqa: nunca se pierde el plan por la simetria
         traceback.print_exc()
-        return plan
+        return _accent_apply(plan)
     if not _is_v2(out):
-        return plan
+        return _accent_apply(plan)
     d = out.get("director")
     if not isinstance(d, dict):
         d = out["director"] = {}
     d["sym"] = SYM_VERSION
+    return _accent_apply(out)
+
+
+# ---- color de acento del proyecto (plan.fx.accent): la palabra activa de los subtitulos y el acento de
+# titulos y tarjetas. Sin acento propio todo queda como siempre (amarillo #FFD23F; nunca un color de
+# marca fijo). Con acento propio, lo que la IA pinto con el acento de su estilo (o el amarillo de
+# siempre) pasa al del proyecto: al dirigir, re-dirigir o regenerar tambien (todo pasa por _sym).
+# Un acento blanco/negro/gris (estilo Minimal) no se busca en los items. = fxcore.applyAccent.
+DEFAULT_ACCENT = "#FFD23F"
+_ACCENT_KEYS = ("accent", "color", "badge_color", "bg", "box", "highlight", "button_color", "border_color",
+                "arrow_color")
+
+
+def _hex(v):
+    s = str(v or "").strip()
+    m = re.fullmatch(r"#?([0-9a-fA-F]{6})", s)
+    if m:
+        return "#" + m.group(1).upper()
+    m = re.fullmatch(r"#?([0-9a-fA-F]{3})", s)
+    return "#" + "".join(c * 2 for c in m.group(1)).upper() if m else None
+
+
+def _chromatic(h):
+    h = _hex(h)
+    if not h:
+        return False
+    n = int(h[1:], 16)
+    rgb = (n >> 16 & 255, n >> 8 & 255, n & 255)
+    return max(rgb) - min(rgb) >= 40
+
+
+def _accent_keep(src, out):
+    """El acento del proyecto sobrevive a lo que devuelve el director (lo copia de `src` si falta)."""
+    acc = _hex(((src or {}).get("fx") or {}).get("accent")) if isinstance(src, dict) else None
+    if acc and _is_v2(out) and not _hex(out["fx"].get("accent")):
+        out["fx"]["accent"] = acc
     return out
+
+
+def _accent_apply(plan):
+    """Plan v2 con acento propio -> el mismo plan (en sitio) con ese acento en subtitulos y en lo que
+    la IA pinto con el acento de su estilo. Nunca lanza."""
+    try:
+        if not _is_v2(plan):
+            return plan
+        fx = plan["fx"]
+        acc = _hex(fx.get("accent"))
+        if not acc:
+            return plan
+        try:
+            from motion import assets as A
+            pal = A.palette((plan.get("director") or {}).get("style")).get("accent")
+        except Exception:  # noqa: sin paleta, solo el amarillo de siempre
+            pal = None
+        olds = {x for x in (_hex(pal), DEFAULT_ACCENT) if x and _chromatic(x) and x != acc}
+
+        def walk(x, depth=0):
+            if depth > 4 or not isinstance(x, (dict, list)):
+                return
+            if isinstance(x, list):
+                for y in x:
+                    walk(y, depth + 1)
+                return
+            for k in _ACCENT_KEYS:
+                if isinstance(x.get(k), str) and _hex(x[k]) in olds:
+                    x[k] = acc
+            for k in ("lines", "text", "card", "graphics", "items"):
+                if isinstance(x.get(k), (dict, list)):
+                    walk(x[k], depth + 1)
+        # solo lo de la IA: lo bloqueado o lo del usuario conserva su color (un titulo que el usuario
+        # dejo amarillo a proposito sigue amarillo al dirigir, re-dirigir o regenerar otra cosa)
+        def ai(it):
+            return isinstance(it, dict) and not it.get("locked") and it.get("src") != "user"
+        for tk in ("text", "graphics", "cutaways"):
+            for it in fx.get(tk) or []:
+                if ai(it):
+                    walk(it)
+        for it in fx.get("text") or []:
+            if ai(it) and it.get("accent_words") and not it.get("accent"):
+                it["accent"] = acc
+        caps = fx.get("captions") if isinstance(fx.get("captions"), dict) else {}
+        if isinstance(caps.get("highlight"), str) and _hex(caps["highlight"]) in olds:
+            caps["highlight"] = acc
+        caps["accent"] = acc
+        fx["captions"] = caps
+    except Exception:  # noqa: el acento nunca tumba un plan
+        traceback.print_exc()
+    return plan
 
 
 def _sym_stored(job_id, plan, rev):
@@ -1387,7 +1474,25 @@ def _plan_from(body, job_id):
         plan, _ = jobstore.get_plan(job_id)
     if not plan:
         raise HTTPException(409, "El job no tiene plan; analiza el video primero.")
-    return _not_montage(plan)
+    return _media_paths(_not_montage(plan))
+
+
+def _media_paths(plan):
+    """Recursos (plan.fx.media: imagen o video como tarjeta flotante) con la ruta de su archivo en
+    este equipo: el Studio solo conoce el `sid` (uno agregado o reemplazado ahi no trae `path`). Sin
+    archivo -> path None (el motor no lo dibuja). En sitio; nunca lanza."""
+    try:
+        fx = plan.get("fx") if isinstance(plan, dict) else None
+        for it in (fx or {}).get("media") or []:
+            if not isinstance(it, dict) or not it.get("sid"):
+                continue
+            src = _resolve_source(it["sid"])
+            it["path"] = str(src) if src else None
+            if src and it.get("kind") not in ("image", "video"):
+                it["kind"] = "image" if _is_image(src) else "video"
+    except Exception:  # noqa: sin rutas el recurso no sale, el resto del plan si
+        traceback.print_exc()
+    return plan
 
 
 # ---- opciones del proyecto para el motor pro (marca, aire, audio de estudio) ----
@@ -1836,7 +1941,7 @@ def _music_resync(jid, ev, tick, tgt):
     out = director.redirect(tgt["orig"], tgt.get("style"), tgt.get("intensity"), tgt.get("seed"), **kw)
     if tgt.get("music") is not None:
         out = _apply_music(out, tgt["music"])
-    out = _sym(out)
+    out = _sym(_accent_keep(tgt["orig"], out))
     grid = (out.get("director") or {}).get("music_grid")
     if ev.is_set() or not grid:
         tick.set(state="ready", resync="available",
@@ -2112,11 +2217,26 @@ def _compose(job_id, job):
             plan["shots"] = shots
         if montage is not None:
             plan["montage"] = montage
+    _media_off(plan, montage)
     if isinstance(plan.get("montage"), dict) and p.get("script"):
         sc = plan["montage"].setdefault("script", {})
         if isinstance(sc, dict) and not sc.get("text"):
             sc.update(text=p["script"].get("text"), source=p["script"].get("source") or "user")
     _finish_analysis(job_id, prog, plan, p, bar)
+
+
+def _media_off(plan, montage):
+    """Los recursos que el usuario QUITO en el ensamble (insert "enabled": false) llegan a plan.fx.media
+    ocultos (no se ven en el video; el Studio los muestra apagados para volver a ponerlos)."""
+    try:
+        off = {str(x.get("id")) for x in (montage or {}).get("inserts") or []
+               if isinstance(x, dict) and x.get("enabled") is False}
+        fx = plan.get("fx") if isinstance(plan, dict) else None
+        for it in (fx or {}).get("media") or []:
+            if isinstance(it, dict) and str(it.get("id")) in off:
+                it["enabled"] = False
+    except Exception:  # noqa: un recurso visible de mas nunca tumba la composicion
+        traceback.print_exc()
 
 
 def _join_times(shots):
@@ -2161,6 +2281,7 @@ def _montage(job_id, job):
     clips = _montage_clips(sids)
     if not clips:
         raise RuntimeError("Ningún clip de la sesión se pudo leer.")
+    assets = [a for a in (_asset_item(x) for x in p.get("assets") or [] if isinstance(x, str)) if a]
     lo, hi = PHASE_MONTAGE_BUILD
     bar.set(lo, "Eligiendo las mejores tomas…", "montage", force=True)
 
@@ -2174,11 +2295,12 @@ def _montage(job_id, job):
     try:
         res = _montage_build(clips, script=(sc or {}).get("text") or None,
                              glossary=p.get("glossary") or "", intercut=p.get("intercut", True) is not False,
-                             on_step=step, cancel=prog.cancel.canceled, llm=p.get("llm", True) is not False)
+                             on_step=step, cancel=prog.cancel.canceled, llm=p.get("llm", True) is not False,
+                             **({"assets": assets} if _accepts(_montage_build, "assets") else {}))
     finally:
         bar.stop_creep()
     prog.cancel.check()
-    m = _montage_result(res, clips, p, time.time() - t1)
+    m = _montage_result(res, clips, p, time.time() - t1, assets=assets)
     m.setdefault("stats", {})
     if isinstance(m["stats"], dict):
         m["stats"].setdefault("words_wait_s", round(t_words, 1))
@@ -2268,7 +2390,7 @@ def _montage_clips(sids):
 
 
 def _montage_build(clips, script=None, glossary="", intercut=True, on_step=None, cancel=None,
-                   llm=True):
+                   llm=True, assets=None):
     """montage.build (scripts/montage.py, importado al usarlo) -> dict del contrato plan.montage.
     Solo pasa los argumentos que build acepta (el motor puede crecer sin romper el servidor).
     `llm`: el LLM local como juez de casi-empates y del material extra (montage.local_llm; sin
@@ -2286,15 +2408,271 @@ def _montage_build(clips, script=None, glossary="", intercut=True, on_step=None,
             traceback.print_exc()
     kw = {}
     for k, v in (("script", script), ("glossary", glossary), ("intercut", intercut),
-                 ("on_step", on_step), ("cancel", cancel), ("llm", judge)):
+                 ("on_step", on_step), ("cancel", cancel), ("llm", judge), ("assets", assets or [])):
         if _accepts(fn, k):
             kw[k] = v
+    if script and "script" in kw and not _accepts(fn, "assets"):
+        # un motor sin recursos del guion compara el guion SIN las anotaciones ("- Agregar x")
+        kw["script"] = _strip_refs(script)
     return fn(clips, **kw)
+
+
+# ---- recursos del guion: "texto. - Agregar video_x" / "[agregar x]" / "[x]" / "{x}" al final de una
+# linea piden un recurso (imagen o video) que aparece como tarjeta flotante mientras se dice. El dueno
+# de las reglas es montage.py (split_annotation, match_asset, classify, plan_inserts; fxcore.js es su
+# port para la UI): aqui se usan esas funciones y, si el motor no las trae (version anterior), una
+# version minima con el mismo contrato: el archivo nombrado es RECURSO, nunca toma; los nombres se
+# comparan normalizados (minusculas, sin acentos ni extension, espacios y guiones -> "_"), primero
+# iguales y luego por un prefijo unico.
+
+
+def _mt(name):
+    """Funcion `name` de scripts/montage.py (importado al usarlo) o None."""
+    try:
+        import montage as montage_mod
+    except Exception:  # noqa: motor sin montaje
+        return None
+    return getattr(montage_mod, name, None)
+_ANN_VERB = r"agregar|a[ñn]adir|insertar|mostrar|poner|add|insert"
+_ANN_DASH = re.compile(r"(^|\s|[.!?,;:…)\"'»”])\s*[-–—|]\s*(?:" + _ANN_VERB + r")\s+([^\[\]{}]+?)\s*$",
+                       re.IGNORECASE)
+_ANN_BRACKET = re.compile(r"\s*(\[([^\[\]]+)\]|\{([^{}]+)\})\s*$")
+_ANN_VERB_HEAD = re.compile(r"^\s*(?:" + _ANN_VERB + r")\s+", re.IGNORECASE)
+INSERT_PRE, INSERT_POST, INSERT_MIN, INSERT_SPEED_MAX = 0.15, 0.25, 2.0, 1.4
+
+
+def _asset_norm(s):
+    """Nombre de un recurso normalizado: "Video Horno-Leña.MP4" -> "video_horno_lena"."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(s or "").strip())
+    t = "".join(c for c in t if not unicodedata.combining(c)).lower()
+    t = re.sub(r"\.[a-z0-9]{2,5}$", "", t)
+    return re.sub(r"[\s_\-]+", "_", t).strip("_")
+
+
+def _ann_names(s):
+    out = []
+    for x in re.split(r"\s*,\s*", str(s or "")):
+        x = re.sub(r"[\"'»”.;:]+$", "", re.sub(r"^[\"'«“]+", "", x.strip())).strip()
+        if x:
+            out.append(x)
+    return out
+
+
+_MEDIA_NAME_EXT = re.compile(r"\.(?:jpe?g|png|heic|heif|webp|gif|bmp|tiff?|avif|mp4|mov|m4v|webm|mkv|avi|"
+                             r"mts|m2ts|3gp|hevc)$", re.IGNORECASE)
+
+
+def _ann_name_ok(n):
+    """= montage._name_like sin archivos conocidos: extension de imagen/video o UNA palabra con letras
+    y _ . - o digitos. "valor a cada familia" (el final de una frase con guion largo) no es recurso."""
+    n = str(n or "").strip()
+    ws = n.split()
+    if not ws or len(ws) > 3:
+        return False
+    if _MEDIA_NAME_EXT.search(n):
+        return True
+    return len(ws) == 1 and re.search(r"[_.\-\d]", n) is not None and re.search(r"[^\W\d_]", n) is not None
+
+
+def _line_refs(raw, known=None):
+    """Una linea del guion -> (texto sin la anotacion, [recursos pedidos]). `known`: nombres de los
+    archivos de la sesion (reconocen "[nombre]" sin verbo)."""
+    fn = _mt("split_annotation")
+    if fn is not None:
+        try:
+            keys = [_asset_norm(n) for n in known or [] if n]
+            t, names = fn(str(raw or ""), keys)
+            return str(t), [str(n) for n in names]
+        except Exception:  # noqa: la version minima
+            traceback.print_exc()
+    text = str(raw or "").rstrip()
+    names = []
+    for _ in range(8):
+        b = _ANN_BRACKET.search(text)
+        if b:
+            inner = b.group(2) if b.group(2) is not None else (b.group(3) or "")
+            names[:0] = _ann_names(_ANN_VERB_HEAD.sub("", inner))
+            text = text[:b.start()].rstrip()
+            continue
+        d = _ANN_DASH.search(text)
+        if d and _ann_names(d.group(2)) and all(_ann_name_ok(n) for n in _ann_names(d.group(2))):
+            names[:0] = _ann_names(d.group(2))
+            cut = d.start() + (len(d.group(1)) if d.group(1) and not d.group(1).isspace() else 0)
+            text = text[:cut].rstrip()
+            continue
+        break
+    seen, uniq = set(), []
+    for n in names:
+        k = _asset_norm(n)
+        if k and k not in seen:
+            seen.add(k)
+            uniq.append(n)
+    return text.strip(), uniq
+
+
+def _script_refs(text):
+    """Recursos que pide un guion -> [(indice entre las lineas no vacias, texto limpio, [nombres])]
+    (solo las lineas con recurso)."""
+    out, i = [], 0
+    for raw in str(text or "").splitlines():
+        if not raw.strip():
+            continue
+        t, names = _line_refs(raw)
+        if names:
+            out.append((i, t, names))
+        i += 1
+    return out
+
+
+def _strip_refs(text):
+    """El guion sin anotaciones de recursos (lo que se compara con las tomas y va al glosario)."""
+    return "\n".join(_line_refs(raw)[0] if raw.strip() else "" for raw in str(text or "").splitlines())
+
+
+def _match_asset(name, names):
+    """Indice del archivo (`names`: nombres de archivo) que corresponde al recurso `name` o -1."""
+    fn = _mt("match_asset")
+    if fn is not None:
+        try:
+            files = [{"name": n, "_i": i} for i, n in enumerate(names)]
+            f = fn(name, files)
+            return int(f["_i"]) if f else -1
+        except Exception:  # noqa: la version minima
+            traceback.print_exc()
+    k = _asset_norm(name)
+    if not k:
+        return -1
+    ns = [_asset_norm(n) for n in names]
+    if k in ns:
+        return ns.index(k)
+    if len(k) < 4 or not re.search(r"[a-z]", k):
+        return -1                  # "1", "a": nunca por prefijo (= montage._match_key)
+    pre = [i for i, n in enumerate(ns) if n and n.startswith(k + "_")]
+    if not pre:                    # al reves solo una imagen (una toma de video nunca pasa a recurso)
+        pre = [i for i, n in enumerate(ns) if n and len(n) >= 3 and k.startswith(n + "_")
+               and re.search(r"\.(?:jpe?g|png|heic|heif|webp|gif|bmp|tiff?|avif)$", str(names[i]), re.I)]
+    return pre[0] if len(pre) == 1 else -1
+
+
+INSERT_SLOW_MIN = 0.8
+
+
+def _insert_fit(kind, media_dur, slot, src_in=0.0):
+    """Como entra un medio de `media_dur` s en un hueco de `slot` s (= montage.plan_inserts y
+    fxcore.insertFit): imagen -> hold; video de 0.8x a 1.4x del hueco -> speed (su velocidad se
+    ajusta); mas largo -> trim (desde src_in); mas corto -> trim y dura lo suyo ("len")."""
+    L = float(slot or 0)
+    d = float(media_dur or 0)
+    if kind != "video":
+        return {"fit": "hold", "speed": 1.0, "src_in": 0.0}
+    out = {"fit": "trim", "speed": 1.0, "src_in": round(max(0.0, min(float(src_in or 0), max(0.0, d - L))), 3)}
+    if d > 0 and L > 0:
+        r = d / L
+        if INSERT_SLOW_MIN <= r <= INSERT_SPEED_MAX:
+            return {"fit": "speed", "speed": round(r, 3), "src_in": 0.0}
+        if r < INSERT_SLOW_MIN:
+            out.update(src_in=0.0, len=round(d, 3))
+    return out
+
+
+def _asset_item(sid):
+    """Fuente subida como recurso del guion -> {sid, name, kind, dur, w, h, path} o None."""
+    src = _resolve_source(sid)
+    if src is None:
+        return None
+    meta = _source_meta(sid)
+    return {"sid": sid, "name": meta.get("name") or src.name, "kind": "image" if _is_image(src) else "video",
+            "dur": float(meta.get("dur") or 0), "w": meta.get("w") or 0, "h": meta.get("h") or 0,
+            "path": str(src)}
+
+
+def _inserts_fallback(m, clips, assets):
+    """plan.montage.inserts cuando el motor de montaje no los trae: cada recurso pedido por el guion,
+    desde la primera palabra de su linea - 0.15 s hasta la ultima + 0.25 s (s del ensamble; minimo
+    2 s y sin encimarse con el siguiente). Varias lineas en una parte: su tramo por proporcion de
+    palabras. Sin archivo que corresponda: status "missing". Con montage.plan_inserts (line_times de
+    cada toma) se usa ese."""
+    fn = _mt("plan_inserts")
+    if fn is not None:
+        try:
+            got = fn(m, [{k: a.get(k) for k in ("sid", "name", "kind", "dur")} for a in assets])
+            # sin line_times (un motor que no los trae) no coloca ninguno: la version minima los
+            # coloca por las palabras de cada parte
+            if isinstance(got, list) and (any(isinstance(x, dict) and x.get("start") is not None for x in got)
+                                          or not any((L or {}).get("inserts") for L in
+                                                     ((m.get("script") or {}).get("lines") or []))):
+                return got
+        except Exception:  # noqa: la version minima
+            traceback.print_exc()
+    sc = m.get("script") if isinstance(m.get("script"), dict) else {}
+    lines = [L for L in sc.get("lines") or [] if isinstance(L, dict)]
+    words = {c["sid"]: c.get("words") or [] for c in clips}
+    names = [a.get("name") or "" for a in assets]
+    ntok = {L.get("id"): max(1, len(str(L.get("text") or "").split())) for L in lines}
+    out = []
+    for L in lines:
+        for name in L.get("inserts") or []:
+            slots = [s for s in m.get("slots") or [] if L.get("id") in (s.get("lines") or [])]
+            ids = {s.get("id") for s in slots}
+            items = sorted([t for t in m.get("timeline") or [] if t.get("slot") in ids],
+                           key=lambda t: float(t.get("start") or 0))
+            ws = []
+            for t in items:
+                a0, b0, st = float(t["in"]), float(t["out"]), float(t.get("start") or 0)
+                for w in words.get(t.get("sid")) or []:
+                    if float(w["end"]) > a0 and float(w["start"]) < b0:
+                        ws.append((st + max(float(w["start"]), a0) - a0, st + min(float(w["end"]), b0) - a0))
+            span = None
+            if ws:
+                ws.sort()
+                lids = [x for s in slots for x in s.get("lines") or []]
+                if len(lids) > 1 and L.get("id") in lids:
+                    tot = sum(ntok.get(x, 1) for x in lids)
+                    before = sum(ntok.get(x, 1) for x in lids[:lids.index(L["id"])])
+                    i0 = min(len(ws) - 1, round(before / tot * len(ws)))
+                    i1 = max(i0, min(len(ws) - 1, round((before + ntok.get(L["id"], 1)) / tot * len(ws)) - 1))
+                    span = (ws[i0][0], ws[i1][1])
+                else:
+                    span = (ws[0][0], ws[-1][1])
+            elif items:
+                span = (float(items[0].get("start") or 0),
+                        max(float(t.get("start") or 0) + float(t["out"]) - float(t["in"]) for t in items))
+            k = _match_asset(name, names)
+            a = assets[k] if k >= 0 else None
+            ins = {"id": f"in{len(out) + 1:02d}", "line": L.get("id"), "name": name,
+                   "sid": a["sid"] if a else None, "kind": a["kind"] if a else None,
+                   "start": None, "end": None, "fit": "hold", "speed": 1.0, "src_in": 0.0,
+                   "status": "ok" if a else "missing"}
+            if span:
+                s0 = max(0.0, span[0] - INSERT_PRE)
+                ins["start"], ins["end"] = round(s0, 3), round(max(span[1] + INSERT_POST, s0 + INSERT_MIN), 3)
+            out.append(ins)
+    on = sorted([x for x in out if x["start"] is not None], key=lambda x: x["start"])
+    for x, y in zip(on, on[1:]):
+        if x["end"] > y["start"] - 0.05:
+            x["end"] = round(max(x["start"] + 0.3, y["start"] - 0.05), 3)
+    for x in out:
+        if x["sid"] and x["start"] is not None:
+            a = next((a for a in assets if a["sid"] == x["sid"]), None)
+            f = _insert_fit(x["kind"], a and a.get("dur"), x["end"] - x["start"])
+            if f.pop("len", None) is not None:
+                x["end"] = round(x["start"] + float(a.get("dur") or 0), 3)
+            x.update(f)
+    return out
 
 
 def _script_parse(text):
     """Guion en texto -> (sections, lines) del contrato: una linea por renglon, un renglon en
-    blanco abre otra seccion. ids L01, L02... y secciones 1, 2..."""
+    blanco abre otra seccion. ids L01, L02... y secciones 1, 2... La anotacion de recursos de una
+    linea ("- Agregar x") sale del texto y queda en lines[i]["inserts"] (montage.parse_script)."""
+    fn = _mt("parse_script")
+    if fn is not None:
+        try:
+            ps = fn(text)
+            return ps["sections"], ps["lines"]
+        except Exception:  # noqa: la version minima
+            traceback.print_exc()
     sections, lines, cur = [], [], None
     for raw in str(text or "").splitlines():
         t = raw.strip()
@@ -2305,14 +2683,19 @@ def _script_parse(text):
             cur = {"id": len(sections) + 1, "lines": []}
             sections.append(cur)
         lid = f"L{len(lines) + 1:02d}"
-        lines.append({"id": lid, "text": t})
+        clean, names = _line_refs(t)
+        ln = {"id": lid, "text": clean}
+        if names:
+            ln["inserts"] = names
+        lines.append(ln)
         cur["lines"].append(lid)
     return sections, lines
 
 
-def _montage_result(res, clips, params, build_s):
+def _montage_result(res, clips, params, build_s, assets=None):
     """Resultado de montage.build normalizado al contrato (lo que falte, vacio): la linea de tiempo
-    solo con clips de ESTA sesion (nunca una fuente ajena), el orden de grabacion y el guion."""
+    solo con clips de ESTA sesion (nunca una fuente ajena), el orden de grabacion, el guion y los
+    recursos del guion (assets + inserts)."""
     m = dict(res) if isinstance(res, dict) else {}
     known = {c["sid"] for c in clips}
     m["version"] = m.get("version") or 1
@@ -2326,6 +2709,19 @@ def _montage_result(res, clips, params, build_s):
         sc.setdefault("text", ps["text"])
     if sc.get("text") and not sc.get("lines"):
         sc["sections"], sc["lines"] = _script_parse(sc["text"])
+    elif sc.get("text") and isinstance(sc.get("lines"), list):
+        # lineas del motor: sin la anotacion de recursos en el texto y con sus "inserts" (por indice
+        # solo si el motor no partio lineas: una por renglon no vacio)
+        n_raw = sum(1 for x in str(sc["text"]).splitlines() if x.strip())
+        refs = {i: names for i, _t, names in _script_refs(sc["text"])} if n_raw == len(sc["lines"]) else {}
+        for i, L in enumerate(sc["lines"]):
+            if not isinstance(L, dict):
+                continue
+            clean, names = _line_refs(L.get("text") or "")
+            if names or clean != (L.get("text") or ""):
+                L["text"] = clean
+            if not L.get("inserts") and (names or refs.get(i)):
+                L["inserts"] = names or refs.get(i)
     if sc:
         sc.setdefault("source", "detected")
         sc.setdefault("sections", [])
@@ -2338,11 +2734,52 @@ def _montage_result(res, clips, params, build_s):
     if not isinstance(m.get("stats"), dict):
         m["stats"] = {}
     m["ms"] = int(m.get("ms") or round(build_s * 1000))
+    _montage_inserts(m, clips, assets or [])
     m["intercut"] = params.get("intercut", True) is not False
     # el glosario con el que se armo: el ensamble lo muestra (y lo que el usuario deje ahi manda)
     m["glossary"] = str(params.get("glossary") or "")
     return m
 
+
+def _montage_inserts(m, clips, assets):
+    """plan.montage.assets (los recursos de la sesion) e inserts saneados: los del motor o, si no los
+    trae, los de _inserts_fallback. Un recurso solo apunta a un archivo de ESTA sesion."""
+    by_sid = {a["sid"]: a for a in assets}
+    m["assets"] = [{k: a.get(k) for k in ("sid", "name", "kind", "dur", "w", "h")} for a in assets]
+    raw = m.get("inserts")
+    wants = any(isinstance(L, dict) and L.get("inserts")
+                for L in ((m.get("script") or {}).get("lines") or []))
+    if not isinstance(raw, list) or (not raw and wants):
+        raw = _inserts_fallback(m, clips, assets)
+    out = []
+    for k, x in enumerate(raw):
+        if not isinstance(x, dict):
+            continue
+        sid = x.get("sid") if x.get("sid") in by_sid else None
+        a = by_sid.get(sid) if sid else None
+        ins = {"id": str(x.get("id") or f"in{k + 1:02d}")[:40], "line": x.get("line"),
+               "name": str(x.get("name") or (a or {}).get("name") or "")[:200], "sid": sid,
+               "kind": a["kind"] if a else (x.get("kind") if x.get("kind") in ("image", "video") else None),
+               "start": _fnum(x.get("start")), "end": _fnum(x.get("end")),
+               "fit": x.get("fit") if x.get("fit") in ("hold", "speed", "trim") else "hold",
+               "speed": max(0.25, min(4.0, _fnum(x.get("speed")) or 1.0)),
+               "src_in": max(0.0, _fnum(x.get("src_in")) or 0.0),
+               "status": "ok" if a else "missing"}
+        if a:
+            ins["path"] = a["path"]
+            ins["media_dur"] = a.get("dur") or 0
+        out.append(ins)
+    m["inserts"] = out
+    return out
+
+
+def _fnum(v):
+    """Numero finito o None."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 # ---- glosario de whisper desde el guion: nombres propios y cifras (nunca el guion entero) ----
 GLOSS_MAX_TERMS = 24
@@ -2410,7 +2847,7 @@ def _script_glossary(script_text, user=""):
     """Glosario del video combinado: el del usuario + los nombres propios y cifras del guion
     (_script_terms), sin repetir y acotado (whisper recibe un prompt corto, no el guion)."""
     terms = []
-    for t in re.split(r"[,;\n]+", str(user or "")) + _script_terms(script_text):
+    for t in re.split(r"[,;\n]+", str(user or "")) + _script_terms(_strip_refs(script_text)):
         t = t.strip()
         if t and t.lower() not in {x.lower() for x in terms}:
             terms.append(t)
@@ -3934,15 +4371,17 @@ def _source_meta_full(sid, src=None):
 
 
 def _source_item(sid, src=None, meta=None, thumb=None):
-    """Fuente -> item de /sources: {id, name, type, ext, dur, w, h, thumb, created, created_src,
-    fps, hdr (bool), rotation, audio, words (pending|ready|error; None en imagenes)}."""
+    """Fuente -> item de /sources: {id, name, type, kind (= type: image|video), ext, dur, w, h, thumb,
+    created, created_src, fps, hdr (bool), rotation, audio, words (pending|ready|error; None en
+    imagenes)}."""
     src = Path(src) if src else _resolve_source(sid)
     meta = meta if meta is not None else _source_meta_full(sid, src)
     img = _is_image(src) if src else meta.get("type") == "image"
     if thumb is None:
         thumb = (SOURCES / f"{sid}_t.jpg").exists()
     return {"id": sid, "name": meta.get("name") or (src.name if src else ""),
-            "type": "image" if img else "video", "ext": (src.suffix.lower() if src else ""),
+            "type": "image" if img else "video", "kind": "image" if img else "video",
+            "ext": (src.suffix.lower() if src else ""),
             "dur": meta.get("dur", 0), "w": meta.get("w", 0), "h": meta.get("h", 0),
             "thumb": f"/tlsource/{sid}/thumb" if thumb else None,
             "created": meta.get("created"), "created_src": meta.get("created_src"),
@@ -3993,6 +4432,15 @@ def _words_load(sid, src=None):
     except OSError:
         return None
     return doc
+
+
+def _has_words(sid):
+    """La fuente ya tiene su transcripcion con palabras (es una toma con voz)."""
+    try:
+        doc = _words_load(sid)
+    except Exception:  # noqa: sin transcripcion legible = sin palabras
+        return False
+    return bool(doc and doc.get("words"))
 
 
 def _words_state(sid, src=None):
@@ -4196,6 +4644,10 @@ def compose_timeline(body: dict = Body(...)):
             item["dur"] = float(s.get("dur", 3.0))
         else:
             item["in"] = float(s.get("in", 0)); item["out"] = float(s.get("out", 0) or 5)
+            for k in ("ramp_in", "ramp_out"):
+                r = _ramp_param(s.get(k), path.stem, item["in"], item["out"], k)
+                if r:
+                    item[k] = r
             item["vol"] = _vol_param(s.get("vol", None if mm else 1.0), bool(mm))
             item["mute"] = bool(s.get("mute", False))
             if item["vol"] == "auto":
@@ -4251,6 +4703,16 @@ def compose_timeline(body: dict = Body(...)):
         params["sids"] = list(dict.fromkeys([s for s in mparams.get("sids") or [] if isinstance(s, str)]
                                             + [it["sid"] for it in main]))
         params["montage_job"] = True
+        for k in ("assets", "asset_items"):
+            if mparams.get(k):
+                params[k] = mparams[k]
+        if isinstance(body.get("inserts"), list):
+            # recursos del guion como quedaron en el ensamble (tiempos del ensamble, archivo, quitados):
+            # compose.finish_plan los lleva al video combinado (plan.fx.media)
+            mont = dict(mont, inserts=_inserts_param(body["inserts"], mont))
+            spec["inserts_timeline"] = "main"    # ya en s del ensamble que se compone (no del montaje guardado)
+        if mont.get("inserts"):
+            spec["inserts"] = [dict(x) for x in mont["inserts"] if x.get("sid") and x.get("enabled", True)]
         jobstore.requeue(mjob, kind="compose", params=params, plan={"montage": mont},
                          phase="analyzing", message="En cola…")
         _initial_engine(mjob, body.get("engine"))
@@ -4263,6 +4725,65 @@ def compose_timeline(body: dict = Body(...)):
     return {"job_id": job_id}
 
 
+RAMP_MAX_DUR, RAMP_MAX_SPEED = 1.5, 4.0
+
+
+def _ramp_param(raw, sid, a, b, side):
+    """"ramp_in"/"ramp_out" de un item de /compose -> {dur, speed} o None. Solo si la fuente tiene los
+    cuadros de sobra: ramp_in empieza dur*(speed-1) s antes de `in`; ramp_out sigue ese tanto despues
+    de `out` (el audio siempre es [in, out] a 1x)."""
+    if not isinstance(raw, dict):
+        return None
+    d, v = _fnum(raw.get("dur")), _fnum(raw.get("speed")) if raw.get("speed") is not None else 2.0
+    if d is None or v is None or d <= 0.01 or v <= 1.0001:
+        return None
+    d, v = min(RAMP_MAX_DUR, d), min(RAMP_MAX_SPEED, v)
+    if d > (b - a) - 0.05:
+        return None
+    extra = d * (v - 1.0)
+    if side == "ramp_in" and a - extra < -1e-3:
+        return None
+    if side == "ramp_out":
+        sd = float(_source_meta(sid).get("dur") or 0)
+        if sd > 0 and b + extra > sd + 1e-3:
+            return None
+    return {"dur": round(d, 3), "speed": round(v, 3)}
+
+
+def _inserts_param(raw, mont):
+    """"inserts" de /compose (recursos del guion como quedaron en el ensamble) -> lista saneada con la
+    ruta de cada archivo. Un recurso que el montaje no conoce o con tiempos invalidos se ignora; uno
+    SIN LUGAR (start y end null: su linea no esta en el video) se conserva sin tiempos (no ocupa
+    tiempo ni recorta a otro; al volver al ensamble se coloca si su linea tiene toma); sin archivo
+    queda "missing"."""
+    known = {str(x.get("id")): x for x in (mont or {}).get("inserts") or [] if isinstance(x, dict)}
+    out = []
+    for x in raw[:200]:
+        if not isinstance(x, dict):
+            continue
+        iid = str(x.get("id") or "")[:40]
+        base = known.get(iid)
+        if base is None:
+            continue
+        a, b = _fnum(x.get("start")), _fnum(x.get("end"))
+        unplaced = x.get("start") is None and x.get("end") is None
+        if not unplaced and (a is None or b is None or a < 0 or b - a < 0.1):
+            continue
+        sid = Path(str(x.get("sid") or "")).stem or None
+        src = _resolve_source(sid) if sid else None
+        ins = {"id": iid, "line": base.get("line"), "name": str(x.get("name") or base.get("name") or "")[:200],
+               "sid": sid if src else None, "kind": ("image" if _is_image(src) else "video") if src else None,
+               "start": None if unplaced else round(a, 3), "end": None if unplaced else round(b, 3),
+               "fit": x.get("fit") if x.get("fit") in ("hold", "speed", "trim") else "hold",
+               "speed": max(0.25, min(4.0, _fnum(x.get("speed")) or 1.0)),
+               "src_in": max(0.0, _fnum(x.get("src_in")) or 0.0),
+               "status": "ok" if src else "missing", "enabled": x.get("enabled", True) is not False}
+        if src:
+            ins["path"] = str(src)
+            ins["media_dur"] = float(_source_meta(sid).get("dur") or 0)
+        out.append(ins)
+    return out
+
 def _montage_name(mont, sid):
     """Nombre del clip `sid` en el orden de grabacion de un montaje (None si no esta)."""
     order = mont.get("order") if isinstance(mont, dict) else None
@@ -4273,7 +4794,8 @@ def _montage_name(mont, sid):
 
 
 def _montage_item(raw):
-    """"montage" de un item de /compose saneado -> {slot, cand, join, conf, setup?} o None."""
+    """"montage" de un item de /compose saneado -> {slot, cand, join, conf, setup?, ramp?, ramp_user?}
+    o None."""
     if not isinstance(raw, dict):
         return None
     out = {}
@@ -4282,6 +4804,9 @@ def _montage_item(raw):
             out[k] = str(raw[k])[:40]
     j = raw.get("join")
     out["join"] = j if j in ("section", "line", "splice") else None
+    for k in ("ramp", "ramp_user"):          # cambio de camara con aceleracion (lo que eligio el usuario manda)
+        if isinstance(raw.get(k), bool):
+            out[k] = raw[k]
     for k in ("conf", "setup"):
         v = raw.get(k)
         if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
@@ -4338,23 +4863,23 @@ def montage_start(body: dict = Body(...)):
     _require_engine()
     _require_license()
     raw = body.get("sids")
+    raw_assets = body.get("assets") if isinstance(body.get("assets"), list) else []
     if not isinstance(raw, list) or not raw:
         raise HTTPException(400, "Selecciona los clips de tu sesión de grabación.")
-    sids, bad = [], []
-    for s in raw:
-        sid = Path(str(s or "")).stem
-        src = _resolve_source(sid) if sid else None
-        if src is None or _is_image(src):
-            bad.append(str(s))
-        elif sid not in sids:
-            sids.append(sid)
+    script = _script_param(body.get("script"))
+    sids, assets, bad = _montage_classify(raw + raw_assets, (script or {}).get("text"))
     if bad:
         raise HTTPException(400, f"Estos archivos no existen o no son video: {', '.join(bad[:5])}")
+    if not sids:
+        raise HTTPException(400, "Todos los archivos son recursos del guion (imágenes o videos que el "
+                                 "guion pide agregar): selecciona también los clips de tu grabación.")
     if len(sids) > MONTAGE_MAX_CLIPS:
         raise HTTPException(400, f"Demasiados clips para un montaje (máximo {MONTAGE_MAX_CLIPS}).")
-    script = _script_param(body.get("script"))
     prof = _profile_param(body.get("profile"), body.get("profile_id"))
     params = {"sids": sids, "script": script, "glossary": str(body.get("glossary") or "")[:500],
+              "assets": assets,
+              # {"sid": ...}: la limpieza del disco no borra los recursos mientras el proyecto exista
+              "asset_items": [{"sid": a} for a in assets],
               "intercut": body.get("intercut", True) is not False, "llm": body.get("llm", True) is not False,
               **({"director": _director_params(body["director"])} if body.get("director") is not None
                  else {}),
@@ -4377,6 +4902,43 @@ def montage_start(body: dict = Body(...)):
     _words_kick(sids, front=True, retry=True)
     return {"job_id": job_id}
 
+
+def _montage_classify(raw, script_text):
+    """Archivos elegidos para "Armar con IA" -> (clips, recursos, invalidos). Una imagen siempre es
+    recurso; un video que el guion nombra ("- Agregar x") tambien; los demas videos son las tomas.
+    Sin duplicados y en el orden recibido."""
+    ids, bad = [], []
+    for s in raw:
+        sid = Path(str(s or "")).stem
+        src = _resolve_source(sid) if sid else None
+        if src is None:
+            bad.append(str(s))
+        elif sid not in ids:
+            ids.append(sid)
+    names = [_source_meta(sid).get("name") or (_resolve_source(sid) or Path(sid)).name for sid in ids]
+    fn = _mt("classify")
+    if fn is not None:
+        try:
+            files = [{"sid": sid, "name": n, "kind": "image" if _is_image(_resolve_source(sid)) else "video"}
+                     for sid, n in zip(ids, names)]
+            if script_text:
+                # una toma ya transcrita (con voz) nunca pasa a recurso por un nombre solo parecido
+                for f in files:
+                    f["has_words"] = f["kind"] == "video" and _has_words(f["sid"])
+            res = fn(files, script_text)
+            return [f["sid"] for f in res["clips"]], [f["sid"] for f in res["assets"]], bad
+        except Exception:  # noqa: la version minima
+            traceback.print_exc()
+    ref = set()
+    for _i, _t, wanted in _script_refs(script_text):
+        for n in wanted:
+            k = _match_asset(n, names)
+            if k >= 0:
+                ref.add(ids[k])
+    clips, assets = [], []
+    for sid in ids:
+        (assets if sid in ref or _is_image(_resolve_source(sid)) else clips).append(sid)
+    return clips, assets, bad
 
 @app.post("/montage/{job_id}/sources")
 def montage_add_sources(job_id: str, body: dict = Body(...)):
@@ -4403,6 +4965,47 @@ def montage_add_sources(job_id: str, body: dict = Body(...)):
         jobstore.update(job_id, params=dict(params, sids=sids))
     return {"sids": sids}
 
+
+@app.post("/montage/{job_id}/asset")
+def montage_set_asset(job_id: str, body: dict = Body(...)):
+    """Recurso del guion que faltaba (o que el usuario reemplaza) en el ensamble de un armado con IA:
+    body {sid (ya subido con POST /sources), name? | id?} -> los inserts con ese nombre (o ese id)
+    apuntan a ese archivo (tipo, ajuste al hueco). -> {inserts, assets}. Solo antes de componer (en
+    el Studio el recurso se cambia en su pista Recursos)."""
+    j = jobstore.get(job_id)
+    if not j:
+        raise HTTPException(404, "Proyecto no encontrado")
+    if j.get("state") in ("queued", "running"):
+        raise HTTPException(409, "Este proyecto se está procesando; espera a que termine.")
+    plan = j.get("plan") if isinstance(j.get("plan"), dict) else None
+    m = (plan or {}).get("montage")
+    if not isinstance(m, dict) or not jobstore.montage_only(plan):
+        raise HTTPException(409, "Este proyecto ya se compuso: cambia el recurso en el Studio (pista Recursos).")
+    sid = Path(str(body.get("sid") or "")).stem
+    a = _asset_item(sid) if sid else None
+    if a is None:
+        raise HTTPException(400, "Ese archivo no existe; vuelve a subirlo.")
+    name, iid = _asset_norm(body.get("name")), str(body.get("id") or "")
+    hit = [x for x in m.get("inserts") or [] if isinstance(x, dict) and
+           ((iid and str(x.get("id")) == iid) or (not iid and name and _asset_norm(x.get("name")) == name))]
+    if not hit:
+        raise HTTPException(404, "El guion no pide ese recurso.")
+    for x in hit:
+        x.update(sid=a["sid"], kind=a["kind"], path=a["path"], media_dur=a["dur"], status="ok")
+        if _fnum(x.get("start")) is not None and _fnum(x.get("end")) is not None:
+            f = _insert_fit(a["kind"], a["dur"], x["end"] - x["start"])
+            if f.pop("len", None) is not None:           # un video mas corto dura lo suyo
+                x["end"] = round(float(x["start"]) + float(a["dur"]), 3)
+            x.update(f)
+    assets = [y for y in m.get("assets") or [] if isinstance(y, dict) and y.get("sid") != a["sid"]]
+    m["assets"] = assets + [{k: a.get(k) for k in ("sid", "name", "kind", "dur", "w", "h")}]
+    params = j.get("params") if isinstance(j.get("params"), dict) else {}
+    upd = {"plan": dict(plan, montage=m)}
+    if a["sid"] not in (params.get("assets") or []):
+        upd["params"] = dict(params, assets=list(params.get("assets") or []) + [a["sid"]],
+                             asset_items=list(params.get("asset_items") or []) + [{"sid": a["sid"]}])
+    jobstore.update(job_id, **upd)
+    return {"inserts": m["inserts"], "assets": m["assets"]}
 
 @app.post("/render/{job_id}")
 def render(job_id: str, body: dict = Body(...)):
@@ -4866,7 +5469,7 @@ def caption_groups_for(plan, fmt="9:16"):
     fin = tl.map_words(tagged, drop_spans=word_cut_spans(pr["plan"].get("cuts")))
     bx, by, bw, bh = job["layout"]
     ctx = CX.FrameCtx(W=bw, H=bh, fps=job["fps"], quality="final", seed=job["seed"],
-                      style=job["style"], words=job.get("words") or [],
+                      style=job["style"], accent=job.get("accent"), words=job.get("words") or [],
                       entities=job.get("entities") or {})
     groups = fn(fin, job["captions"], ctx) or []
     flat = sorted((w for ph in fin for w in ph), key=lambda w: float(w["start"]))
@@ -5118,7 +5721,7 @@ def direct(job_id: str, body: dict = Body(...)):
         except Exception:  # noqa
             traceback.print_exc()
     if not (full and not only):
-        out = _sym(out)                         # (con full, _direct_plan ya lo simetrizo)
+        out = _sym(_accent_keep(plan, out))     # (con full, _direct_plan ya lo simetrizo)
     jobstore.update(job_id, plan=out)
     rev = jobstore.get_light(job_id)["plan_rev"]
     if minfo is not None:
@@ -5163,6 +5766,7 @@ def put_plan(job_id: str, body: dict = Body(...)):
     except (TypeError, ValueError):
         raise HTTPException(400, "base_rev inválido")
     plan, prof_applied = _reapply_profile(job_id, plan)
+    _media_paths(plan)
     ok, rev = jobstore.update_plan(job_id, plan, base)
     if ok and prof_applied:
         # el perfil cambio en el autoguardado: rotulo, Seguir, reservas y cierre ya van con los
@@ -5668,7 +6272,7 @@ def _reapply_profile(job_id, plan):
         traceback.print_exc()
         return plan, False
     _keep_src_names(plan, out)
-    return _sym(out), True
+    return _sym(_accent_keep(plan, out)), True
 
 
 # ---- foto y logo de los enlaces del perfil (motion/linkmedia.py) ----
@@ -6196,7 +6800,7 @@ def profile_put(job_id: str, body: dict = Body(...)):
         traceback.print_exc()
         raise HTTPException(500, f"No se pudo aplicar el perfil: {e}")
     _keep_src_names(plan, out)
-    out = _sym(out)
+    out = _sym(_accent_keep(plan, out))
     ok, rev = jobstore.update_plan(job_id, out, base)
     if not ok:
         return JSONResponse({"ok": False, "detail": "El plan cambió en el servidor (re-dirigido u otra "

@@ -27,6 +27,8 @@
     transitions: { label: "Transiciones", icon: "transition", c: "var(--trk-trans)", rgb: "251,146,60" },
     sfx: { label: "SFX", icon: "speaker", c: "var(--trk-sfx)", rgb: "250,204,21" },
     music: { label: "Música", icon: "music", c: "var(--trk-mus)", rgb: "52,211,153" },
+    // recursos del guion (imagen o video como tarjeta flotante): fx.media
+    media: { label: "Recursos", icon: "card", c: "var(--trk-media)", rgb: "129,140,248" },
   };
   FX.TRACK_META = TRACK_META;
   const TOP_TRACKS = ["text", "graphics", "cutaways", "effects", "transitions"];
@@ -493,7 +495,8 @@
     if (!top || !bot) return;
     top.innerHTML = ""; bot.innerHTML = "";
     if (!isPro()) { FX.renderCutShade(); return; }
-    TOP_TRACKS.forEach(tk => { const r = trackRow(tk); top.appendChild(r); renderTrackLane(tk, r.querySelector(".lane")); });
+    const tops = mediaTrackOn() ? ["media"].concat(TOP_TRACKS) : TOP_TRACKS;
+    tops.forEach(tk => { const r = trackRow(tk); top.appendChild(r); renderTrackLane(tk, r.querySelector(".lane")); });
     const rs = trackRow("sfx"); bot.appendChild(rs); renderTrackLane("sfx", rs.querySelector(".lane"));
     const rm = trackRow("music"); bot.appendChild(rm); renderMusicLane2(rm.querySelector(".lane"));
     markSelection();
@@ -582,7 +585,11 @@
     wireLaneEmpty(lane);
   }
 
+  /** La pista Recursos se muestra si el plan trae recursos o el motor la declara. */
+  function mediaTrackOn() { return items("media").length > 0 || !!(SCHEMA && SCHEMA.tracks && SCHEMA.tracks.media); }
+  FX.mediaTrackOn = mediaTrackOn;
   function kindIcon(track, it) {
+    if (track === "media") return it && it.kind === "video" ? "film" : "image";
     if (track === "text") return "type";
     if (track === "graphics") return { doodle: "spark", icon: "star", card: "card", lower_third: "lowerthird", cta: "pointer", progress: "minus", sticker_text: "tag", media: "image" }[it.kind] || "shapes";
     if (track === "cutaways") return it.kind === "photo" ? "image" : "scene";
@@ -651,8 +658,12 @@
         if (mode === "l") V.currentTime = it.start + 0.001; else if (mode === "r") V.currentTime = Math.max(0, it.end - 0.04);
       }, moved => {
         tlSnapShow(null);
-        if (began) { group.forEach(g => autoLock(g.item)); syncLocked(); FX.changed({ noMut: true }); }
-        else if (mode === "m") { const t0 = C.isEvent(track) ? it.at : it.start; if (V.paused && (V.currentTime < C.itemStart(track, it) - 0.01 || V.currentTime > C.itemEnd(track, it))) V.currentTime = Math.max(0, t0 + (C.isEvent(track) ? -0.15 : 0.02)); }
+        if (began) { group.forEach(g => { autoLock(g.item); if (g.track === "media") mediaRefit(g.item); }); syncLocked(); FX.changed({ noMut: true }); }
+        else if (mode === "m") {
+          // un recurso se ve ya entrado (su entrada dura ~0.35 s): el cabezal va un poco adentro
+          const t0 = C.isEvent(track) ? it.at : track === "media" ? Math.min(it.start + 0.6, (it.start + it.end) / 2) : it.start;
+          if (V.paused && (V.currentTime < C.itemStart(track, it) - 0.01 || V.currentTime > C.itemEnd(track, it))) V.currentTime = Math.max(0, t0 + (C.isEvent(track) ? -0.15 : track === "media" ? 0 : 0.02));
+        }
       });
     });
   }
@@ -736,6 +747,7 @@
     wire(m);
   }
   FX.addMenu = function (track, anchor) {
+    if (track === "media") { FX.pickMedia("media", null, f => FX.addMediaCard(f)); return; }
     if (!SCHEMA) { toast("El catálogo de efectos aún no está disponible. Reintentando…", "alert"); loadCatalogs(); return; }
     const ks = C.kinds(SCHEMA, track);
     const rect = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: anchor.x, bottom: anchor.y };
@@ -823,8 +835,8 @@
   }
   FX.addAnyMenu = function (anchor) {
     const r = anchor.getBoundingClientRect();
-    const html = `<div class="mh">Agregar en el playhead</div>` + ["text", "graphics", "cutaways", "effects", "transitions", "sfx"]
-      .map(t => `<button data-t="${t}" style="--c:${TRACK_META[t].rgb}">${ICO(TRACK_META[t].icon)}${TRACK_META[t].label}</button>`).join("");
+    const html = `<div class="mh">Agregar en el playhead</div>` + ["text", "graphics", "cutaways", "effects", "transitions", "sfx", "media"]
+      .map(t => `<button data-t="${t}" style="--c:${TRACK_META[t].rgb}">${ICO(TRACK_META[t].icon)}${t === "media" ? "Recurso (imagen o video)" : TRACK_META[t].label}</button>`).join("");
     openMenu(r.left, r.bottom + 4, html, m => m.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { m.classList.remove("on"); FX.addMenu(b.dataset.t, anchor); }));
   };
   FX.itemMenu = function (x, y) {
@@ -835,7 +847,7 @@
       + `<button data-a="dup">${ICO("copy")}Duplicar<small>⌘D</small></button>`
       + `<button data-a="en">${ICO(allOff ? "eye" : "eyeoff")}${allOff ? "Activar" : "Desactivar"}<small>H</small></button>`
       + `<button data-a="lock">${ICO("lock")}${allLocked ? "Desbloquear" : "Bloquear"}<small>L</small></button>`
-      + `<button data-a="regen">${ICO("spark")}Regenerar con IA</button>`
+      + (sel.every(s => s.track === "media") ? `<button data-a="rfile">${ICO("upload")}Reemplazar archivo</button>` : `<button data-a="regen">${ICO("spark")}Regenerar con IA</button>`)
       + `<button data-a="del">${ICO("trash")}Eliminar<small>Supr</small></button>`;
     openMenu(x, y, html, m => m.querySelectorAll("[data-a]").forEach(b => b.onclick = () => { m.classList.remove("on"); FX.action(b.dataset.a); }));
   };
@@ -865,8 +877,56 @@
       const v = sel.every(s => s.item.enabled === false);
       edit(() => sel.forEach(s => { s.item.enabled = v; }));
     } else if (a === "regen") {
-      FX.regenerate(sel.map(s => s.item.id));
+      const ids = sel.filter(s => s.track !== "media").map(s => s.item.id);
+      if (ids.length) FX.regenerate(ids);
+    } else if (a === "rfile") {
+      const m = sel.find(s => s.track === "media");
+      if (m) FX.replaceMedia(m.item);
     }
+  };
+
+  // ---- recursos (fx.media, style "float_card"): imagen o video como tarjeta flotante sobre el orador
+  // desenfocado. Los del guion llegan bloqueados (src "script"); el usuario los mueve, recorta, quita o
+  // cambia de archivo. El video va SIEMPRE sin audio.
+  const MEDIA_LEN = 3.0;
+  function mediaFitFor(it, mdur) {
+    return C.insertFit(it.kind, mdur, (+it.end || 0) - (+it.start || 0), it.src_in);
+  }
+  FX.addMediaCard = async function (file, t) {
+    if (!isPro() || FX.busy() || !file) return null;
+    if (window.chip) chip("Subiendo el archivo…");
+    try {
+      const m = await uploadMedia(file);
+      const t0 = clamp(t != null ? t : (V.currentTime || 0), 0, Math.max(0, dur() - 0.5));
+      const L = m.type === "video" && +m.dur > 0 ? clamp(+m.dur, 1.5, 8) : MEDIA_LEN;
+      let it;
+      edit(() => {
+        it = { id: C.newId("media", C.allIds(PLAN.fx)), start: r3(t0), end: r3(Math.min(dur(), t0 + L)), sid: m.sid, kind: m.type === "video" ? "video" : "image",
+          name: String(m.name || "").replace(/\.[A-Za-z0-9]{2,5}$/, ""), style: "float_card", enabled: true, locked: true, src: "user", media_dur: +m.dur || 0 };
+        Object.assign(it, mediaFitFor(it, m.dur));
+        PLAN.fx.media = PLAN.fx.media || []; PLAN.fx.media.push(it);
+      }, { rebuild: true });
+      FX.select("media", it.id); FX.focusElem();
+      if (V.paused) V.currentTime = Math.min(it.end - 0.05, it.start + 0.6);
+      return it;
+    } catch (e) { toast(`No se pudo agregar el archivo: ${e.message || e}`, "alert"); return null; }
+    finally { if (window.chip) chip(null); }
+  };
+  FX.replaceMedia = function (it) {
+    if (!it) return;
+    FX.pickMedia("media", null, async f => {
+      if (window.chip) chip("Subiendo el archivo…");
+      try {
+        const m = await uploadMedia(f);
+        edit(() => {
+          it.sid = m.sid; it.kind = m.type === "video" ? "video" : "image"; it.media_dur = +m.dur || 0; delete it.path;
+          if (!it.name || it.src !== "script") it.name = String(m.name || "").replace(/\.[A-Za-z0-9]{2,5}$/, "");
+          Object.assign(it, mediaFitFor(it, m.dur));
+        }, { rebuild: true });
+        toast("Archivo del recurso reemplazado.", "check", true);
+      } catch (e) { toast(`No se pudo reemplazar: ${e.message || e}`, "alert"); }
+      finally { if (window.chip) chip(null); }
+    });
   };
 
   FX.copy = () => { const sel = FX.selectedItems(); if (!sel.length) return false; const t0 = Math.min(...sel.map(s => C.itemStart(s.track, s.item))); CLIP = { t0, items: sel.map(s => ({ track: s.track, item: C.clone(s.item) })) }; toast(`${sel.length} copiado(s). ⌘V pega en el playhead.`, "copy"); return true; };
@@ -1413,7 +1473,9 @@
     if (!isPro() || !SCHEMA) { if (cb) cb.innerHTML = isPro() ? `<div class="hint">Cargando catálogo…</div>` : ""; if (gb) gb.innerHTML = ""; return; }
     PLAN.fx.captions = PLAN.fx.captions || {};
     PLAN.fx.grade = PLAN.fx.grade || {};
-    if (cb) { cb.innerHTML = ""; renderParams(cb, SCHEMA.captions.params, PLAN.fx.captions, { noLock: true, ctx: "captions", onChange: () => { CAPCACHE.key = ""; } }); }
+    const ab = $("#accentBody"); if (ab) renderAccent(ab);
+    // la palabra activa usa el Color de acento del proyecto (un solo control)
+    if (cb) { cb.innerHTML = ""; renderParams(cb, SCHEMA.captions.params.filter(p => p.k !== "accent"), PLAN.fx.captions, { noLock: true, ctx: "captions", onChange: () => { CAPCACHE.key = ""; } }); }
     if (gb) { gb.innerHTML = ""; renderParams(gb, SCHEMA.grade.params, PLAN.fx.grade, { noLock: true, ctx: "grade" }); }
   };
 
@@ -1454,9 +1516,87 @@
     if (SELX.length > 1) { inspectMulti(b); return true; }
     const it = items(sel.track).find(i => i.id === sel.id);
     if (!it) { b.innerHTML = emptyInspector(); return true; }
+    if (sel.track === "media") { inspectMedia(b, it); return true; }
     inspectItem(b, sel.track, it);
     return true;
   };
+  /** Duracion del archivo de un recurso (la del item o la del clip ya cargado). */
+  function mediaDurOf(it) {
+    if (+it.media_dur > 0) return +it.media_dur;
+    const e = MEDIA_EL[`video|${it.sid}`];
+    return e && e.vid && isFinite(e.vid.duration) ? +e.vid.duration : 0;
+  }
+  /** Ajuste de un recurso de video a su tramo (al moverlo, recortarlo o cambiar el ajuste). */
+  function mediaRefit(it, fit) {
+    if (!it) return;
+    if (it.kind !== "video") { it.fit = "hold"; it.speed = 1; it.src_in = 0; return; }
+    const d = mediaDurOf(it), L = Math.max(0.1, (+it.end || 0) - (+it.start || 0));
+    it.fit = fit || it.fit || "hold";
+    // la regla de compose._media_fit: se acelera hasta x4 o se alenta hasta x0.8 para llenar el tramo
+    if (it.fit === "speed") it.speed = r3(d > 0 ? clamp(d / L, C.INS.slowMin, 4) : (+it.speed || 1));
+    else it.speed = 1;
+    it.src_in = it.fit === "trim" ? r3(clamp(+it.src_in || 0, 0, Math.max(0, d - L))) : 0;
+  }
+  FX.mediaRefit = mediaRefit;
+  const MEDIA_FIT_ES = { hold: "Completo (se queda en su último cuadro)", speed: "Ajustar la velocidad para que llene su tramo", trim: "Recortar: se ve lo que cabe" };
+  /** Inspector de un recurso (fx.media): archivo, tiempo y ajuste. Siempre centrado (simetria) y sin audio. */
+  function inspectMedia(b, it) {
+    head(b, "media", it, it.name || "Recurso", `Recursos · ${C.fmtClock(it.start, .1)} a ${C.fmtClock(it.end, .1)} (${(it.end - it.start).toFixed(2)} s)`);
+    const act = document.createElement("div"); act.className = "ins-actions";
+    act.innerHTML = `<button class="btn ghost mini" data-a="en" title="Activar o desactivar (H)">${ICO(it.enabled === false ? "eyeoff" : "eye")}${it.enabled === false ? "Oculto" : "Visible"}</button>`
+      + `<button class="btn ghost mini" data-a="dup" title="Duplicar (⌘D)">${ICO("copy")}Duplicar</button>`
+      + `<button class="btn ghost mini" data-a="del" title="Eliminar (Supr)">${ICO("trash")}Eliminar</button>`;
+    act.querySelectorAll("[data-a]").forEach(x => x.onclick = () => FX.action(x.dataset.a));
+    b.appendChild(act);
+    const fs = section(b, "Archivo");
+    const th = it.sid ? `/tlsource/${encodeURIComponent(it.sid)}/thumb` : "";
+    const fr = document.createElement("div"); fr.className = "md-file";
+    fr.innerHTML = `<span class="md-th">${th ? `<img alt="" src="${th}">` : ICO("alert")}</span><span class="md-nm"><b>${esc(it.name || "Recurso")}</b><span>${it.sid ? (it.kind === "video" ? "Video · sin audio" : "Imagen · acercamiento suave") : "Falta el archivo"}</span></span>`;
+    const rb = document.createElement("button"); rb.className = "btn ghost mini"; rb.innerHTML = `${ICO("upload")}${it.sid ? "Reemplazar" : "Agregar archivo"}`;
+    rb.onclick = () => FX.replaceMedia(it); fr.appendChild(rb); fs.appendChild(fr);
+    fs.insertAdjacentHTML("beforeend", `<div class="hint">${it.src === "script" ? "Lo pidió el guion: aparece mientras se dice su línea. " : ""}Tarjeta flotante centrada (mismo margen a los lados) sobre el orador desenfocado; los subtítulos siguen encima.</div>`);
+    const ts = section(b, "Tiempo");
+    const num = (k, label) => {
+      const inp = document.createElement("input"); inp.type = "number"; inp.className = "fnum"; inp.step = "0.01"; inp.value = it[k]; inp.dataset.k = k;
+      inp.onchange = () => edit(() => {
+        const v = r3(+inp.value || 0);
+        if (k === "start") it.start = clamp(v, 0, it.end - 0.3); else it.end = clamp(v, it.start + 0.3, dur());
+        mediaRefit(it);
+      }, { rebuild: true });
+      ts.appendChild(frow(label, inp));
+    };
+    num("start", "Inicio (s)"); num("end", "Fin (s)");
+    const r = document.createElement("div"); r.className = "btnrow"; r.style.marginTop = "4px";
+    r.innerHTML = `<button class="btn ghost mini" data-m="s">${ICO("tostart")}Inicio al playhead</button><button class="btn ghost mini" data-m="e">${ICO("toend")}Fin al playhead</button>`;
+    r.querySelectorAll("[data-m]").forEach(x => x.onclick = () => edit(() => {
+      const t = r3(V.currentTime || 0);
+      if (x.dataset.m === "s") { const L = it.end - it.start; it.start = clamp(t, 0, dur() - 0.3); if (it.end <= it.start + 0.3) it.end = r3(Math.min(dur(), it.start + L)); }
+      else it.end = r3(clamp(t, it.start + 0.3, dur()));
+      mediaRefit(it);
+    }, { rebuild: true }));
+    ts.appendChild(r);
+    if (it.kind === "video") {
+      const vs = section(b, "Ajuste del video");
+      const sel = document.createElement("select"); sel.className = "fsel";
+      sel.innerHTML = Object.keys(MEDIA_FIT_ES).map(k => `<option value="${k}" ${k === (it.fit || "hold") ? "selected" : ""}>${MEDIA_FIT_ES[k]}</option>`).join("");
+      sel.onchange = () => edit(() => mediaRefit(it, sel.value), { rebuild: true });
+      vs.appendChild(frow("Ajuste", sel));
+      if (it.fit === "trim") {
+        const inp = document.createElement("input"); inp.type = "number"; inp.className = "fnum"; inp.step = "0.1"; inp.min = "0"; inp.value = +it.src_in || 0;
+        inp.onchange = () => edit(() => { it.src_in = r3(Math.max(0, +inp.value || 0)); mediaRefit(it); }, { rebuild: true });
+        vs.appendChild(frow("Empieza en (s del video)", inp));
+      }
+      const d = mediaDurOf(it);
+      vs.insertAdjacentHTML("beforeend", `<div class="hint">${d ? `El video dura ${d.toFixed(1)} s y el tramo ${(it.end - it.start).toFixed(1)} s.` : ""}${it.fit === "speed" ? ` Se reproduce ${(+it.speed || 1) < 1 ? "más lento" : "acelerado"} a ×${(+it.speed || 1).toFixed(2)}.` : ""} Siempre sin audio.</div>`);
+    }
+    // estilo de la tarjeta (esquema del motor: desenfoque, oscurecido, esquinas, sombra, entrada...);
+    // nunca una posicion X: la tarjeta va centrada (simetria)
+    if (SCHEMA) {
+      const skip = new Set(["sid", "path", "name", "kind", "fit", "speed", "src_in", "x"]);
+      const ps = C.kindParams(SCHEMA, "media", it.style || "float_card").filter(p => !p.internal && !skip.has(p.k));
+      if (ps.length) renderParams(section(b, "Estilo de la tarjeta", true), ps, it, { track: "media", item: it });
+    }
+  }
   function emptyInspector() {
     return `<div class="hint" style="margin:6px 0 12px">Selecciona un elemento del timeline o de la vista previa para editarlo.</div>`
       + (isPro() ? `<div class="subgroup" style="margin-top:0;border:0;padding-top:0"><h5>${ICO("plus")}Agregar en el playhead</h5><div class="btnrow">`
@@ -1610,7 +1750,38 @@
     head(b, "text", null, "Subtítulos", "Estilo global de los subtítulos");
     if (!SCHEMA) return;
     PLAN.fx.captions = PLAN.fx.captions || {};
-    renderParams(section(b, "Estilo"), SCHEMA.captions.params, PLAN.fx.captions, { noLock: true, ctx: "captions", onChange: () => { CAPCACHE.key = ""; FX.renderProjectGroupsSoon(); } });
+    const as = section(b, "Color de acento del proyecto"); renderAccent(as);
+    renderParams(section(b, "Estilo"), SCHEMA.captions.params.filter(p => p.k !== "accent"), PLAN.fx.captions, { noLock: true, ctx: "captions", onChange: () => { CAPCACHE.key = ""; FX.renderProjectGroupsSoon(); } });
+  }
+  /* Color de acento del proyecto (plan.fx.accent; fxcore.applyAccent): la palabra activa de los
+     subtitulos y el acento de titulos y tarjetas. Por defecto el amarillo de siempre. */
+  const STYLE_ACCENT = { dinamico: "#FFD23F", elegante: "#E8C27A", minimal: "#FFFFFF", energetico: "#FFE600" };
+  FX.projectAccent = () => C.projectAccent(PLAN);
+  /** Acento para lo que no trae color propio (= la paleta del render con plan.fx.accent). */
+  function ACC() { return C.projectAccent(PLAN); }
+  FX.setAccent = function (v) {
+    const h = C.normHex(v); if (!h || !isPro() || h === C.projectAccent(PLAN) && PLAN.fx.accent) return false;
+    edit(() => { C.applyAccent(PLAN, h, { palette: STYLE_ACCENT[FX.dirStyle()] }); }, { noLanes: false });
+    CAPCACHE.key = ""; FX.renderProjectGroupsSoon();
+    return true;
+  };
+  function renderAccent(box) {
+    const acc = C.projectAccent(PLAN), dark = lum(acc) > 0.6;
+    box.innerHTML = `<div class="acc-row"><input type="color" class="acc-sw" value="${acc.toLowerCase()}" aria-label="Color de acento">`
+      + `<input type="text" class="acc-hex" value="${acc}" maxlength="7" spellcheck="false" aria-label="Color de acento en hexadecimal">`
+      + `<button class="btn ghost mini" data-a="def"${acc === C.DEFAULT_ACCENT ? " disabled" : ""} title="Volver al amarillo de siempre (#FFD23F)">Amarillo</button></div>`
+      + `<div class="acc-demo"><b>Así se ve tu <i style="background:${acc};color:${dark ? "#111" : "#fff"}">acento</i></b></div>`
+      + `<div class="hint">Resalta la palabra que se está diciendo en los subtítulos y el acento de títulos y tarjetas.</div>`;
+    const sw = box.querySelector(".acc-sw"), hx = box.querySelector(".acc-hex"), def = box.querySelector('[data-a="def"]');
+    let open = false;
+    const live = v => { const h = C.normHex(v); if (!h) return; if (!open) { mut(); open = true; }
+      C.applyAccent(PLAN, h, { palette: STYLE_ACCENT[FX.dirStyle()] }); CAPCACHE.key = ""; FX.planDirty();
+      const d = box.querySelector(".acc-demo i"); if (d) { d.style.background = h; d.style.color = lum(h) > 0.6 ? "#111" : "#fff"; } };
+    const end = () => { if (open) { open = false; syncLocked(); FX.renderLanesSoon(); FX.renderProjectGroupsSoon(); } };
+    sw.addEventListener("input", () => { hx.value = sw.value.toUpperCase(); live(sw.value); });
+    sw.addEventListener("change", end);
+    hx.addEventListener("change", () => { const h = C.normHex(hx.value); if (!h) { hx.value = C.projectAccent(PLAN); return; } sw.value = h.toLowerCase(); live(h); end(); });
+    def.onclick = () => { live(C.DEFAULT_ACCENT); end(); toast("Color de acento: amarillo (predeterminado).", "check", true); };
   }
 
   function section(b, title, closed) {
@@ -2129,6 +2300,9 @@
       else if (e.kind === "color_pop") f += ` saturate(${1 - 0.55 * k * (e.bg_desat != null ? +e.bg_desat : 1)}) brightness(${1 - 0.3 * k * (e.bg_dark != null ? +e.bg_dark : 0.25)})`;
       else if (e.kind === "bg_blur") f += ` blur(${(0.6 * k).toFixed(2)}px)`;
     });
+    // recurso flotante activo: el orador se desenfoca y oscurece detras de la tarjeta (FloatCard.bgFilter)
+    const FCm = window.FloatCard, mc = FCm ? activeRange("media", t).find(it => it.sid) : null;
+    if (mc) { const bf = FCm.bgFilter(mc, FCm.cardAnim(t - mc.start, mc.end - mc.start, FCm.param(mc, "in_dur"), FCm.param(mc, "out_dur"), FCm.param(mc, "float")).bg, LB.w); if (bf) f += " " + bf; }
     // el render ancla los zooms en la cara de la toma: se escala alrededor de ese punto
     const fc = faceAt(t);
     return { z: cam.z, dx: cam.dx, dy: cam.dy, ax: fc ? clamp(fc[0], 0.15, 0.85) : 0.5, ay: fc ? clamp(fc[1], 0.15, 0.85) : 0.5, filter: f.trim() || "none" };
@@ -2224,7 +2398,7 @@
     if (!lines.length) return null;
     const acc = new Set((it.accent_words || []).map(normW));
     const serif = it.preset === "serif_elegant";
-    const color = it.color || "#FFFFFF", accent = it.accent || "#FFD23F";
+    const color = it.color || "#FFFFFF", accent = it.accent || ACC();
     const accCol = serif && !it.accent ? color : accent;       // serif_elegant: el acento es la italica
     // x es el CENTRO del bloque con cualquier alineacion (text._place, simetria): `align` solo alinea
     // las lineas dentro del bloque; en cascade la escalera va dentro y el bloque entero se centra
@@ -2369,7 +2543,7 @@
     const v = it.variant || "follow", W = B.w;
     const rng = v === "follow" ? [0.56, SYM_W] : v === "link_below" ? [0.4, 0.74] : [0.45, SYM_W];
     const S = clamp(+(it.size != null ? it.size : (CTA_SIZE[v] || 0.62)), rng[0], rng[1]) * W;
-    const ent = PLAN.entities || {}, acc = it.color && it.color !== "#FFFFFF" ? it.color : "#FFD23F";
+    const ent = PLAN.entities || {}, acc = it.color && it.color !== "#FFFFFF" ? it.color : ACC();
     const bold = "Poppins-ExtraBold";
     c.shadowColor = "rgba(0,0,0,.35)"; c.shadowBlur = 14 * B.s; c.shadowOffsetY = 4 * B.s;
     c.textBaseline = "middle"; c.textAlign = "left";
@@ -2522,7 +2696,7 @@
       const gm = C.iconGeom(size, it.badge);
       let icol = it.color || "#FFFFFF";
       if (gm.badge) {
-        const bcol = it.badge_color || "#FFD23F";
+        const bcol = it.badge_color || ACC();
         c.fillStyle = bcol;
         if (it.badge === "circle") { c.beginPath(); c.arc(0, 0, gm.badge / 2, 0, Math.PI * 2); c.fill(); } else { rrect(c, -gm.badge / 2, -gm.badge / 2, gm.badge, gm.badge, gm.badge * 0.3); c.fill(); }
         icol = it.color || (lum(bcol) > 0.55 ? "#15151A" : "#FFFFFF");
@@ -2535,7 +2709,7 @@
     } else if (k === "card") {
       const w = clamp(+it.size || 0.74, 0.5, SYM_W) * W, h = w * (it.variant === "checklist" ? 0.62 : 0.4);
       const th = it.theme || "light";
-      const bg = th === "dark" ? "#141414" : th === "brand" ? (it.color && it.color !== "#FFFFFF" ? it.color : "#FFD23F") : "#FFFFFF";
+      const bg = th === "dark" ? "#141414" : th === "brand" ? (it.color && it.color !== "#FFFFFF" ? it.color : ACC()) : "#FFFFFF";
       const fg = lum(bg) > 0.55 ? "#111111" : "#FFFFFF";
       c.fillStyle = bg; rrect(c, -w / 2, -h / 2, w, h, w * 0.06); c.fill(); c.shadowBlur = 0; c.shadowOffsetY = 0;   // texto sin sombra (como el render)
       const pad = w * 0.07; let ty = -h / 2 + pad;
@@ -2564,7 +2738,7 @@
       // la derecha. El nombre va en negritas y el rol en VERSALITAS con tracking
       c.restore(); c.save(); c.globalAlpha *= st.a;        // pivote propio (centro o borde izquierdo)
       const fs0 = clamp(+it.size || 0.056, 0.03, 0.09) * W, light = it.theme === "light";
-      let acc2 = it.color || it.accent || "#FFD23F"; if (light && lum(acc2) > 0.8) acc2 = "#FF3B5C";
+      let acc2 = it.color || it.accent || ACC(); if (light && lum(acc2) > 0.8) acc2 = "#FF3B5C";
       const padx = 28 * s, pady = 20 * s, barw = 10 * s;
       const title = String(it.title || (PLAN.entities || {}).name || ""), sub = String(it.subtitle || (PLAN.entities || {}).role || "").toUpperCase();
       const avail = C.lowerThirdX(it, W, 0, barw, padx, 120 * s).avail;
@@ -2622,7 +2796,7 @@
       const txt = it.text || "";
       const fs = (+it.size || 0.06) * W;
       c.font = fontCss("Poppins-ExtraBold", fs); const w = c.measureText(txt).width + fs * 1.4, h = fs * 1.7;
-      const bg = k === "cta" ? (col === "#FFFFFF" ? "#FF3B5C" : col) : (it.bg || "#FFD23F");
+      const bg = k === "cta" ? (col === "#FFFFFF" ? "#FF3B5C" : col) : (it.bg || ACC());
       c.fillStyle = bg; rrect(c, -w / 2, -h / 2, w, h, h / 2); c.fill(); c.shadowBlur = 0;
       c.fillStyle = k === "cta" ? (lum(bg) > 0.6 ? "#111" : "#fff") : (it.fg || "#111111");
       c.textAlign = "center"; c.textBaseline = "middle"; c.fillText(txt, 0, fs * 0.06);
@@ -2914,6 +3088,47 @@
     else if (bg === "halftone") { c.fillStyle = "rgba(0,0,0,.18)"; const st = W / 30; for (let y = 0; y < H; y += st) for (let x = 0; x < W; x += st) { c.beginPath(); c.arc(x, y, st * 0.3 * (y / H), 0, Math.PI * 2); c.fill(); } }
   }
 
+  /** fx.media "float_card" con la geometria y animacion del render (window.FloatCard = port de
+      motion/media.py): tarjeta centrada (simetrica al pixel) sobre el orador desenfocado y oscurecido
+      (el filtro va en FX.videoLook), entrada con resorte, flotado, Ken Burns en imagenes, salida
+      limpia; deja libre la franja de los subtitulos. El video va silenciado en FloatCard.srcTime. */
+  function drawMediaCard(c, it, t) {
+    const FCm = window.FloatCard; if (!FCm) return null;
+    const B = LB, lt = t - it.start, L = Math.max(0.05, it.end - it.start);
+    const m = { sid: it.sid, type: it.kind === "video" ? "video" : "image", dur: +it.media_dur || 0, name: it.name };
+    const e = mediaEl(m);
+    let f = null;
+    if (e) {
+      e.used = performance.now();
+      if (e.img) f = e.img.complete && e.img.naturalWidth ? { src: e.img, w: e.img.naturalWidth, h: e.img.naturalHeight } : null;
+      else {
+        const v = e.vid, d = +m.dur || (isFinite(v.duration) ? v.duration : 0), tt = FCm.srcTime(it, lt, d), playing = V && !V.paused;
+        const rate = FCm.speedOf(it);
+        if (playing) {
+          if (Math.abs(v.playbackRate - rate) > 1e-3) v.playbackRate = rate;
+          if (v.paused) { try { v.currentTime = tt; } catch (x) { /* nada */ } v.play().catch(() => {}); }
+          else if (Math.abs(v.currentTime - tt) > 0.3) { try { v.currentTime = tt; } catch (x) { /* nada */ } }
+        } else {
+          if (!v.paused) v.pause();
+          if (Math.abs(v.currentTime - tt) > 0.04 && !v.seeking) { try { v.currentTime = tt; } catch (x) { /* nada */ } }
+        }
+        if (v.readyState >= 2 && v.videoWidth) f = { src: v, w: v.videoWidth, h: v.videoHeight };
+        else { const th = e.thumb; f = th && th.complete && th.naturalWidth ? { src: th, w: th.naturalWidth, h: th.naturalHeight } : null; }
+      }
+    }
+    const capOn = !!(PLAN.fx.captions && PLAN.fx.captions.enabled !== false);
+    const card = FCm.cardLayout(f ? f.w : 1080, f ? f.h : 1350, B.w / B.h, FCm.captionTop(PLAN.fx.captions, capOn, it.start, it.end, B.w / B.h), it.width, it.aspect, it.y,
+      FCm.captionBottom(PLAN.fx.captions, capOn, it.start, it.end, B.w / B.h));
+    const st = FCm.cardAnim(lt, L, FCm.param(it, "in_dur"), FCm.param(it, "out_dur"), FCm.param(it, "float"));
+    // el render hornea el clip al tamano de la tarjeta (sin Ken Burns); las imagenes si lo llevan
+    const r = FCm.drawCard(c, f, B, card, st, it.kind === "video" ? Object.assign({}, it, { kenburns: 0 }) : it, lt, L);
+    if (!f && r && e && e.err) mediaPlaceholder(c, r.x, r.y, r.w, r.h, m, true);
+    return r;
+  }
+  FX.drawMediaCard = drawMediaCard;
+  /** Cajas de lo dibujado en el ultimo cuadro y la caja de layout (pruebas: simetria medida). */
+  FX.hits = () => ({ hits: HITS.map(h => ({ track: h.track, id: h.id, bb: Object.assign({}, h.bb) })), box: Object.assign({}, LB) });
+
   let HITS = [];   // cajas de lo dibujado en el ultimo cuadro (para seleccionar en el canvas)
   let DRAG_GUIDE = false;   // guia vertical del centro mientras el arrastre queda imantado al centro
   /** Composicion en vivo sobre el canvas (despues del video base). */
@@ -2956,6 +3171,10 @@
       c.restore();
       HITS.push({ track: "cutaways", id: it.id, bb: { x: 0, y: 0, w: CW, h: CH }, scene: true });
     });
+    // recursos (tarjeta flotante): centrados y fijos (simetria); se seleccionan pero no se arrastran.
+    // Mismo orden que el render (Compositor.frame 4b): despues de las escenas y ANTES de graficos,
+    // textos y subtitulos (esos quedan encima de la tarjeta)
+    activeRange("media", t).filter(it => it.sid).forEach(it => { const bb = drawMediaCard(c, it, t); if (bb) HITS.push({ track: "media", id: it.id, bb, fixed: true }); });
     // graficos (por z)
     activeRange("graphics", t).sort((a, b) => (+a.z || 0) - (+b.z || 0)).forEach(it => { const bb = drawGraphic(c, it, t - it.start, it.end - it.start, null, t); if (bb) HITS.push({ track: "graphics", id: it.id, bb }); });
     // texto normal
@@ -3100,7 +3319,7 @@
     const L = capLayoutOf(gr, cfg, B, g.srv);
     if (!L) return;
     const D = L.D, fs = L.fs;
-    const color = cfg.color || "#FFFFFF", accent = cfg.accent || "#FFD23F", hi = cfg.highlight || accent;
+    const color = cfg.color || "#FFFFFF", accent = cfg.accent || ACC(), hi = cfg.highlight || accent;
     const accentSet = g.srv && D.kw_accent !== false && cfg.kw_accent !== false ? new Set((gr.accent || []).map(C.normWord)) : null;
     // altura: la del export (y_ranges, foto con pie) respecto a la base del preset
     const dyY = (C.captionYAt(PLAN.fx, t, B.w / B.h) - D.y) * B.h;
@@ -3214,7 +3433,7 @@
       if (!on || h.scene) return;
       c.save(); c.strokeStyle = "#fff"; c.lineWidth = 1.5; c.setLineDash([6, 4]);
       c.strokeRect(h.bb.x - 4, h.bb.y - 4, h.bb.w + 8, h.bb.h + 8); c.setLineDash([]);
-      if (h.track !== "captions") { c.fillStyle = "#fff"; c.strokeStyle = "rgba(0,0,0,.6)"; c.lineWidth = 1; const hs = 9; c.fillRect(h.bb.x + h.bb.w + 4 - hs / 2, h.bb.y + h.bb.h + 4 - hs / 2, hs, hs); c.strokeRect(h.bb.x + h.bb.w + 4 - hs / 2, h.bb.y + h.bb.h + 4 - hs / 2, hs, hs); }
+      if (h.track !== "captions" && !h.fixed) { c.fillStyle = "#fff"; c.strokeStyle = "rgba(0,0,0,.6)"; c.lineWidth = 1; const hs = 9; c.fillRect(h.bb.x + h.bb.w + 4 - hs / 2, h.bb.y + h.bb.h + 4 - hs / 2, hs, hs); c.strokeRect(h.bb.x + h.bb.w + 4 - hs / 2, h.bb.y + h.bb.h + 4 - hs / 2, hs, hs); }
       c.restore();
     });
   };
@@ -3226,7 +3445,7 @@
     const r = CV.getBoundingClientRect();
     const x = (e.clientX - r.left) / r.width * CW, y = (e.clientY - r.top) / r.height * CH;
     // tirador de escala del seleccionado
-    const selH = HITS.find(h => SEL && SEL.type === "fx" && isSel(h.track, h.id) && !h.scene);
+    const selH = HITS.find(h => SEL && SEL.type === "fx" && isSel(h.track, h.id) && !h.scene && !h.fixed);
     let mode = null, hit = null;
     if (selH && Math.abs(x - (selH.bb.x + selH.bb.w + 4)) < 12 && Math.abs(y - (selH.bb.y + selH.bb.h + 4)) < 12) { mode = "scale"; hit = selH; }
     if (!hit) {
@@ -3239,7 +3458,7 @@
     if (hit.track === "captions") { SELX = []; SEL = { type: "captions" }; markSelection(); FX.inspect(SEL); }
     else if (!isSel(hit.track, hit.id)) FX.select(hit.track, hit.id);
     FX.focusElem();
-    if (hit.scene) return true;
+    if (hit.scene || hit.fixed) return true;
     const obj = hit.track === "captions" ? PLAN.fx.captions : items(hit.track).find(i => i.id === hit.id);
     if (!obj) return true;
     const xy0 = hit.track === "captions" ? [0.5, obj.y != null ? +obj.y : 0.72] : itemXY(obj, V.currentTime || 0);

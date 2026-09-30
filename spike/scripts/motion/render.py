@@ -61,6 +61,7 @@ import math
 import multiprocessing as mp
 import os
 import pickle
+import re
 import shutil
 import subprocess
 import sys
@@ -76,6 +77,7 @@ import skia
 
 import paths
 from . import ctx as C
+from . import media as MF
 from . import schema
 from . import timeline as T
 from . import video_io as V
@@ -580,6 +582,27 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
         skip("captions:draw_captions")
         captions_on = False
 
+    # ---- recursos flotantes del guion (fx.media, float_card): archivo por sid y tarjeta que
+    # termina arriba de la franja de subtitulos (motion/media.py)
+    float_media = []
+    lb = layout_box(W, H)
+    for it in mapped("media"):
+        if (it.get("style") or "float_card") not in MF.STYLES:
+            skip(f"media:{it.get('style')}")
+            continue
+        spec = float_spec(it, opts)
+        if spec is None:
+            skip(f"media:{it.get('id')}:no_encontrado")
+            continue
+        it["_media"], it["_float"] = spec, True
+        wh = _media_src_wh(it)
+        span = (cap, captions_on, _num_or(it.get("start"), 0.0), _num_or(it.get("end"), 0.0), lb[2] / lb[3])
+        it["_card"] = MF.card_layout(wh[0] if wh else None, wh[1] if wh else None, lb[2] / lb[3],
+                                     MF.caption_top(*span), it.get("width"), it.get("aspect"), it.get("y"),
+                                     MF.caption_bottom(*span))
+        spec["card"] = [it["_card"]["w"], it["_card"]["aspect"]]
+        float_media.append(it)
+
     # ---- matte: rangos (cuadros finales) que necesitan al sujeto
     need = []
     for it in effects:
@@ -608,11 +631,12 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
     job = {
         "W": W, "H": H, "fps": fps, "quality": opts["quality"], "n_frames": n_frames,
         "final_duration": fdur, "seed": int(director.get("seed", 7)),
-        "style": director.get("style", "dinamico"), "timeline": tl.to_dict(),
+        "style": director.get("style", "dinamico"), "accent": project_accent(plan),
+        "timeline": tl.to_dict(),
         "entities": dict(plan.get("entities") or {}), "shots": shots, "words": words,
         "phrases": phrases, "captions": cap, "captions_on": captions_on,
         "text": text, "graphics": graphics, "cutaways": cutaways, "effects": effects,
-        "transitions": transitions, "grade_cfg": grade_cfg,
+        "transitions": transitions, "media": float_media, "grade_cfg": grade_cfg,
         "grade_on": bool(grade_cfg.get("enabled", True)) and mods.get("grade") is not None,
         "matte_ranges": matte_ranges, "logo": logo, "cut_frames": cuts_frames,
         "layout": list(layout_box(W, H)), "warnings": warnings,
@@ -711,7 +735,14 @@ def set_anchors(job: dict, face: np.ndarray | None, mods: dict) -> None:
 #   item["_media_image"]  skia.Image del medio en el tiempo local (sin ajustar al hueco; los
 #                         renderers lo ajustan con graphics.fit_src o render.fit_media)
 #   self_broll:           item["_src_image"] el medio ya ajustado a la caja de layout
-MEDIA_KINDS = {"graphics": ("media", "cta"), "cutaways": ("photo", "self_broll")}
+#
+# Recursos flotantes del guion (pista fx.media, estilo float_card; motion/media.py): el archivo
+# va en el item ({sid, path, kind, fit, speed, src_in}) y se resuelve con float_spec (por sid como
+# todo medio; `path` solo si cae dentro de un media_root). Imagen -> el mismo PNG normalizado
+# (Ken Burns por cuadro sobre la tarjeta); clip -> media_<clave>.mp4 AL TAMANO DE LA TARJETA con
+# el recorte cover y la VELOCIDAD horneados (cuadro k = src_in + k * speed / fps; sin loop: el
+# ultimo cuadro se congela). El audio del clip nunca se mezcla (-an).
+MEDIA_KINDS = {"graphics": ("media", "cta"), "cutaways": ("photo", "self_broll"), "media": MF.STYLES}
 # kinds cuyo medio es OPCIONAL (foto de perfil del CTA Seguir, doc 3.2): solo imagen; sin medio,
 # con el archivo ausente o ilegible el item se dibuja igual (iniciales) y nunca se omite
 OPTIONAL_MEDIA = {"graphics": ("cta",)}
@@ -818,6 +849,50 @@ def media_spec(it: dict, opts: dict) -> dict | None:
             "focus": list(foc) if foc else None,
             "zoom": 1.0 if kind == "self_broll" else min(4.0, max(1.0, _num_or(it.get("zoom"), 1.0))),
             "hint_wh": [mw, mh] if mw > 0 and mh > 0 else None}
+
+
+def _inside(p: Path, roots: list[Path]) -> bool:
+    try:
+        rp = p.resolve()
+    except OSError:
+        return False
+    for r in roots:
+        try:
+            rp.relative_to(r.resolve())
+            return True
+        except (ValueError, OSError):
+            continue
+    return False
+
+
+def project_accent(plan: dict) -> str | None:
+    """Acento del proyecto (plan.fx.accent, "#RRGGBB") o None: el "accent" de la paleta del render
+    (lo que no trae color propio sale con el; sin acento propio, el del estilo como siempre)."""
+    fx = plan.get("fx") if isinstance(plan, dict) and isinstance(plan.get("fx"), dict) else {}
+    v = str(fx.get("accent") or "").strip()
+    m = re.fullmatch(r"#?([0-9a-fA-F]{6})", v)
+    return "#" + m.group(1).upper() if m else None
+
+
+def float_spec(it: dict, opts: dict) -> dict | None:
+    """`_media` de un recurso flotante (fx.media) o None si el archivo no esta. Por `sid` (como
+    todo medio propio); `path` del plan solo se usa si esta DENTRO de un media_root (nunca una
+    ruta arbitraria). Imagenes nunca se tratan como clip."""
+    sid = it.get("sid")
+    p = media_path({"sid": sid, "type": it.get("kind")}, opts) if isinstance(sid, str) and sid else None
+    if p is None and isinstance(it.get("path"), str) and it["path"].strip() \
+            and not callable(opts.get("media_resolver")):
+        cand = Path(it["path"].strip())
+        if cand.is_file() and cand.suffix.lower() in MEDIA_IMAGE_EXT + MEDIA_VIDEO_EXT \
+                and _inside(cand, _media_roots(opts)):
+            p = cand
+    if p is None:
+        return None
+    typ = "image" if p.suffix.lower() in MEDIA_IMAGE_EXT else "video"
+    return {"src": str(p), "type": typ, "kind": "float_card", "crop": None,
+            "media_in": max(0.0, _num_or(it.get("src_in"), 0.0)) if typ == "video" else 0.0,
+            "loop": False, "fit": "cover", "focus": None, "zoom": 1.0, "hint_wh": None,
+            "speed": MF.speed_of(it) if typ == "video" else 1.0}
 
 
 def _media_box(job: dict) -> tuple[int, int]:
@@ -1080,6 +1155,14 @@ def _clip_target(it: dict, m: dict, sw: int, sh: int, box: tuple[int, int]):
     cw, ch = max(2.0, sw * (x1 - x0)), max(2.0, sh * (y1 - y0))
     fit, zoom = m.get("fit", "cover"), float(m.get("zoom") or 1.0)
     kind = m.get("kind")
+    if kind == "float_card":
+        # recurso flotante: la tarjeta completa con el recorte cover centrado ya aplicado (baked)
+        card = m.get("card") or [MF.CARD_W, MF.ASPECT]
+        x0_, _y0, tw, th = MF.card_px({"w": card[0], "aspect": card[1], "cy": 0.5}, bw, bh)
+        sx, sy, sw_, sh_ = MF.cover_rect(cw, ch, tw, th)
+        eff = [x0 + sx / sw, y0 + sy / sh, x0 + (sx + sw_) / sw, y0 + (sy + sh_) / sh]
+        eff = [round(min(1.0, max(0.0, v)), 5) for v in eff]
+        return max(16, _even(tw)), max(16, _even(th)), (None if eff == [0.0, 0.0, 1.0, 1.0] else eff), True
     if kind == "self_broll":
         if fit == "cover":
             r = _fit_rect(cw, ch, bw, bh, "cover", m.get("focus"))
@@ -1101,14 +1184,16 @@ def _clip_target(it: dict, m: dict, sw: int, sh: int, box: tuple[int, int]):
 
 
 def _clip_window(m: dict, info: dict, fps: float, n: int) -> tuple[float, int]:
-    """(inicio efectivo en la fuente, cuadros utiles del clip desde ahi, <= n)."""
+    """(inicio efectivo en la fuente, cuadros utiles del clip desde ahi, <= n). Con `speed`
+    (recurso flotante con fit 'speed') cada cuadro de salida avanza speed/fps en la fuente."""
     dur = float(info.get("duration") or 0.0)
     t0 = float(m.get("media_in") or 0.0)
+    sp = float(m.get("speed") or 1.0)
     if dur > 0.2 and t0 >= dur - 0.5 / fps:
         t0 = (t0 % dur) if m.get("loop", True) else max(0.0, dur - 1.0 / fps)
     if dur <= 0:
         return t0, n
-    return t0, max(1, min(n, int(math.floor((dur - t0) * fps + 0.5))))
+    return t0, max(1, min(n, int(math.floor((dur - t0) * fps / sp + 0.5))))
 
 
 def _media_video_cmd(m: dict, info: dict, w: int, h: int, fps: float, n: int, t0: float,
@@ -1116,7 +1201,10 @@ def _media_video_cmd(m: dict, info: dict, w: int, h: int, fps: float, n: int, t0
     """ffmpeg: clip del usuario desde t0 -> hasta n cuadros a fps (los que tenga), recortado,
     escalado a (w, h) y normalizado a SDR bt709 (tonemap si es HDR). El loop y el congelado
     del ultimo cuadro los resuelve la lectura (_MediaFrames), no el archivo."""
-    chain = [f"fps=fps={fps}:round=near"] + _crop_filter(m.get("crop_eff", m.get("crop"))) \
+    sp = float(m.get("speed") or 1.0)
+    # velocidad horneada (recurso flotante 'speed'): la fuente corre sp veces mas rapido
+    pre = [f"setpts=(PTS-STARTPTS)/{sp:.6f}"] if abs(sp - 1.0) > 1e-6 and not single else []
+    chain = pre + [f"fps=fps={fps}:round=near"] + _crop_filter(m.get("crop_eff", m.get("crop"))) \
         + [f"scale={w}:{h}:flags=bicubic+accurate_rnd+full_chroma_int"] + V.tonemap_filters(info)
     if single:
         # misma conversion a RGBA que FrameReader sobre el clip (bt709, rango tv): el cuadro
@@ -1272,7 +1360,9 @@ def prepare_media(job: dict, opts: dict, cancel=None, only_images: bool = False)
             m.update(nw=nw, nh=nh, w=max(2, _even(nw * scale)), h=max(2, _even(nh * scale)),
                      crop_eff=crop, baked=baked, n=n, n_seg=n_seg, t0=round(t0, 4), fps=fps,
                      info_dur=float(info.get("duration") or 0.0))
-            out = cache / f"media_{_media_key(m, [nw, nh, fps, n_seg, round(t0, 3), crop])}.mp4"
+            sp = float(m.get("speed") or 1.0)          # velocidad horneada (recurso flotante)
+            extra = [nw, nh, fps, n_seg, round(t0, 3), crop] + ([round(sp, 4)] if abs(sp - 1.0) > 1e-6 else [])
+            out = cache / f"media_{_media_key(m, extra)}.mp4"
             got = _clip_meta(out, nw, nh)
             if not got and not only_images:
                 got = _normalize_clip(m, info, out, cancel)
@@ -1328,7 +1418,8 @@ def media_signature(job: dict) -> str | None:
         rows.append([str(it.get("id")), it.get("kind"), V._file_sig(m["src"]), m["type"], m.get("crop"),
                      round(m.get("media_in", 0.0), 3), m.get("loop"), m.get("fit"), m.get("focus"),
                      m.get("zoom"), it.get("_size0", it.get("size")), it.get("aspect"),
-                     round(it["_fe"] - it["_fs"], 3)])
+                     round(it["_fe"] - it["_fs"], 3)]
+                    + ([m.get("speed"), m.get("card")] if it.get("_float") else []))
     return hashlib.sha1(json.dumps([MEDIA_VERSION, job["fps"], list(_export_box(job)), rows],
                                    default=str).encode()).hexdigest()[:16]
 
@@ -1473,8 +1564,9 @@ class _MediaFrames:
         try:
             info = V.probe(m["src"])
             w, h = int(m["w"]), int(m["h"])
-            r = subprocess.run(_media_video_cmd(m, info, w, h, fps, 1, m.get("t0", 0.0) + k / fps,
-                                                None, single=True), capture_output=True)
+            t_src = m.get("t0", 0.0) + k * float(m.get("speed") or 1.0) / fps
+            r = subprocess.run(_media_video_cmd(m, info, w, h, fps, 1, t_src, None, single=True),
+                               capture_output=True)
             if len(r.stdout) < w * h * 4:
                 return None
             img = C.image_from_rgba(np.frombuffer(r.stdout[:w * h * 4], np.uint8).reshape(h, w, 4).copy())
@@ -1875,6 +1967,49 @@ class Compositor:
         self.transitions = sorted(job["transitions"], key=lambda t: t["_F0"])
         self.media = _MediaFrames()
         self.media_items = _media_items(job)
+        self.float_media = sorted(job.get("media") or [], key=z)
+
+    def _float_media(self, items: list, t: float) -> None:
+        """Recursos flotantes del guion (fx.media, float_card): el cuadro compuesto hasta aqui se
+        desenfoca y oscurece (lo que marque el recurso mas visible) y encima va cada tarjeta, en
+        la caja de layout. Van ANTES de graficos, textos y subtitulos (estos quedan encima)."""
+        ta = time.perf_counter()
+        bw, bh = self.box[2], self.box[3]
+        states = []
+        for it in items:
+            if it.get("_media_image") is None and not it.get("_media_placeholder"):
+                continue                          # sin cuadro que mostrar: ni tarjeta ni fondo
+            lt, dur = t - it["_fs"], it["_fe"] - it["_fs"]
+            st = MF.card_anim(lt, dur, MF.param(it, "in_dur"), MF.param(it, "out_dur"),
+                              MF.param(it, "float"))
+            k = _num_or(it.get("intensity"), 1.0)
+            st["alpha"] *= min(1.0, max(0.0, k))
+            states.append((it, st, lt, dur))
+        if not states:
+            return
+        top = max(states, key=lambda s: s[1]["bg"])
+        amt = top[1]["bg"] * min(1.0, max(0.0, _num_or(top[0].get("intensity"), 1.0)))
+        cv = self.canvas
+        try:
+            if amt > 0.003:
+                snap = self.surf.makeImageSnapshot()
+                MF.draw_background(cv, snap, self.W, self.H, amt, MF.param(top[0], "blur"),
+                                   MF.param(top[0], "dim"))
+            for it, st, lt, dur in states:
+                m = it.get("_media") or {}
+                img = it.get("_media_image")
+                baked = bool(it.get("_media_baked")) or (m.get("type") == "video" and m.get("baked"))
+                cv.save()
+                if self.boxed:
+                    cv.translate(self.box[0], self.box[1])
+                try:
+                    MF.draw_card(cv, img, bw, bh, it["_card"], st, it, lt, dur, baked=baked)
+                finally:
+                    cv.restoreToCount(1)
+        except Exception as e:  # noqa
+            self._err("media:float_card", e)
+        finally:
+            self._prof("media:float_card", ta)
 
     def _inject_media(self, t: float) -> None:
         """Medios propios activos en t: item['_media_image'] (el cuadro del medio en su tiempo
@@ -1897,6 +2032,10 @@ class Compositor:
                         it["_media_image"] = self.media.placeholder(round(bw * 0.52), round(bw * 0.63))
                     elif it.get("_media_placeholder") and kind == "self_broll":
                         it["_src_image"] = self.media.placeholder(bw, bh)
+                    elif it.get("_media_placeholder") and it.get("_float"):
+                        _x, _y, cw_, ch_ = MF.card_px(it["_card"], bw, bh)
+                        it["_media_image"] = self.media.placeholder(cw_, ch_)
+                        it["_media_baked"] = True
                     continue
                 img = self.media.image(it, t - it["_fs"], self.fps)
                 it["_media_image"] = img
@@ -1966,7 +2105,7 @@ class Compositor:
         si = self.shot_idx(t)
         return C.FrameCtx(W=self.W, H=self.H, fps=self.fps, n=n, t=t, t_orig=self.tl.inverse(t),
                           quality=self.job["quality"], seed=self.job["seed"],
-                          style=self.job["style"],
+                          style=self.job["style"], accent=self.job.get("accent"),
                           shot=self.job["shots"][si] if si is not None else None,
                           face=self.face_at(n), words=self.job["words"],
                           entities=self.job["entities"])
@@ -1982,7 +2121,7 @@ class Compositor:
             face = ((cx * self.W - bx) / bw, (cy * self.H - by) / bh, fw * self.W / bw,
                     fh * self.H / bh)
         lc = C.FrameCtx(W=bw, H=bh, fps=ctx.fps, n=ctx.n, t=ctx.t, t_orig=ctx.t_orig,
-                        quality=ctx.quality, seed=ctx.seed, style=ctx.style, shot=ctx.shot,
+                        quality=ctx.quality, seed=ctx.seed, style=ctx.style, accent=ctx.accent, shot=ctx.shot,
                         face=face, words=ctx.words, entities=ctx.entities)
         ir = skia.IRect.MakeXYWH(bx, by, bw, bh)
 
@@ -2364,6 +2503,11 @@ class Compositor:
                 a_gfx = [it for it in a_gfx if not it.get("_behind")]
         # 4) escenas a pantalla completa
         self._cutaways(self._active(self.cutaways, t), t, lctx)
+        # 4b) recursos flotantes del guion: fondo desenfocado + tarjeta (subtitulos encima)
+        if self.float_media:
+            a_fm = self._active(self.float_media, t)
+            if a_fm:
+                self._float_media(a_fm, t)
         # 5) graficos, texto, subtitulos
         self._draw("graphics", a_gfx, t, lctx, "kind", boxed=True)
         self._draw("text", a_text, t, lctx, "preset", boxed=True)
@@ -3340,6 +3484,8 @@ def render_pro(plan: dict, out_path, opts: dict | None = None) -> dict:
                              "modules": {k: v is not None for k, v in mods.items()},
                              "items": {k: len(job[k]) for k in ("text", "graphics", "cutaways",
                                                                "effects", "transitions")}}
+    if job.get("media"):                   # recursos flotantes del guion (solo si hay)
+        stats["items"]["media"] = len(job["media"])
     for s in pr["skipped"]:
         _log(f"se omite {s}")
     prog.pct("timeline", 100)
@@ -3370,6 +3516,8 @@ def render_pro(plan: dict, out_path, opts: dict | None = None) -> dict:
                           "dropped": dropped}
         stats["items"] = {k: len(job[k]) for k in ("text", "graphics", "cutaways", "effects",
                                                   "transitions")}
+        if job.get("media"):
+            stats["items"]["media"] = len(job["media"])
 
     # 4) audio EN PARALELO con el compositor (solo el mux necesita los dos). Escribe en su
     # propia subcarpeta; si el render se cancela no se le espera (es daemon) y el hilo borra lo

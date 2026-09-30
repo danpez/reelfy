@@ -14,7 +14,7 @@
   const MIN_FRAG = 0.15;   // s: keeps mas cortos se absorben en el corte
   const SNAP_S = 0.12;     // s: union tan cerca de un cambio de toma -> se pega
   const EPS = 1e-9, Q_EPS = 1e-6, SHOT_EPS = 0.1;
-  const TRACKS = ["text", "graphics", "cutaways", "effects", "transitions", "sfx"];
+  const TRACKS = ["text", "graphics", "cutaways", "effects", "transitions", "sfx", "media"];
   const EVENT_TRACKS = { transitions: 1, sfx: 1 };
   const RULER_STEPS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
 
@@ -195,7 +195,7 @@
   }
 
   function newId(track, existing) {
-    const pre = { text: "tx", graphics: "gr", cutaways: "cw", effects: "fx", transitions: "tr", sfx: "sf" }[track] || "it";
+    const pre = { text: "tx", graphics: "gr", cutaways: "cw", effects: "fx", transitions: "tr", sfx: "sf", media: "md" }[track] || "it";
     const ids = existing instanceof Set ? existing : new Set(existing || []);
     let id;
     do { id = `${pre}_u${Math.floor(Math.random() * 1e8).toString(36)}`; } while (ids.has(id));
@@ -222,6 +222,10 @@
     }
     fillDefaults(schema, track, it);
     symDefaults(track, it);
+    // con acento propio del proyecto (fx.accent), los colores de acento del catalogo (el amarillo de
+    // siempre) nacen con el del proyecto: un titulo o tarjeta nuevos combinan con los subtitulos
+    const acc = normHex(fx && fx.accent);
+    if (acc && acc !== DEFAULT_ACCENT) ACCENT_KEYS.forEach(k => { if (typeof it[k] === "string" && normHex(it[k]) === DEFAULT_ACCENT) it[k] = acc; });
     if (track === "text" && !it.text && !(it.lines && it.lines.length)) it.text = "Tu texto";
     if (track === "graphics" && it.kind === "sticker_text" && !it.text) it.text = "NUEVO";
     if (track === "graphics" && it.kind === "cta" && !it.label) it.label = "Sigueme";
@@ -342,6 +346,7 @@
     }
     if (track === "cutaways") { const tx = getPath(it, "text.text"); return tx ? `${kindLabel(schema, track, it.kind)}: ${String(tx).replace(/\s+/g, " ")}` : kindLabel(schema, track, it.kind); }
     if (track === "sfx") return String(it.name || "").replace(/_/g, " ");
+    if (track === "media") return it.name ? String(it.name) : "Recurso";
     return kindLabel(schema, track, itemKind(schema, track, it));
   }
 
@@ -1966,7 +1971,19 @@
       vol: known ? +it.vol : 1, mute: false, fadeIn: 0, fadeOut: 0, layer: 0,
       start: +it.start || 0, in: +it.in || 0, out: +it.out || 0 };
     if (!known) c.volAuto = true;        // sin nivel medido: el servidor lo mide (vol "auto")
+    ["ramp_in", "ramp_out"].forEach(k => { const r = rampOf(it[k]); if (r) c[k] = r; });
     return c;
+  }
+  /** Camara real de un tramo y si es del intercalado (como montage.plan_ramps): order[].setup de su
+      clip si el montaje la trae (null = desconocida), si no la del candidato (del mismo clip) o la
+      del tramo. -> {cam, ic}. */
+  function camInfo(montage, sid, slotId, candId, itemSetup) {
+    const o = ((montage && montage.order) || []).find(x => x && x.sid === sid && "setup" in x);
+    let c = slotId != null ? findCand(montage, slotId, candId) : null;
+    if (c && c.sid != null && c.sid !== sid) c = null;
+    const cam = o ? o.setup : (c && c.setup != null ? c.setup : (itemSetup != null ? itemSetup : null));
+    const fl = (c && c.flags) || [];
+    return { cam: cam == null || cam === "" ? null : cam, ic: fl.includes("intercalado") || fl.includes("parcial") };
   }
   /** Clips del ensamblado (ASM.clips) desde plan.montage.timeline: en su lugar (start del
       montaje; sin start, uno tras otro) y cada uno con montage {slot, cand, join, conf}. */
@@ -1982,7 +1999,14 @@
           conf: itemConf(montage, it) };
         const cd = findCand(montage, it.slot, it.cand);
         if (cd && isFinite(+cd.setup) && cd.setup !== null) c.montage.setup = +cd.setup;   // camara/encuadre (el director describe una toma por setup)
-      } else c.extra = true;           // material fuera del guion que el montaje ya puso (plan.montage.extra)
+        Object.assign(c.montage, camInfo(montage, it.sid, it.slot, it.cand, it.setup));   // cambios de camara (aceleraciones)
+      } else {
+        c.extra = true;                // material fuera del guion que el montaje ya puso (plan.montage.extra)
+        c.cam = camInfo(montage, it.sid, null, null, it.setup).cam;   // su camara (aceleraciones)
+      }
+      // lo que el usuario eligio en la union de entrada (compose.montage_plan lo guarda al componer):
+      // manda sobre lo automatico al volver al ensamble
+      if (it.ramp_user === true || it.ramp_user === false) c.rampUser = it.ramp_user;
       return c;
     });
   }
@@ -1993,7 +2017,8 @@
     if (!slot) return [];
     if (candId === slot.chosen) {
       const tl = ((montage && montage.timeline) || []).filter(it => it && it.slot === slotId && +it.out > +it.in);
-      if (tl.length) return tl.map(it => ({ sid: it.sid, in: +it.in, out: +it.out, vol: isFinite(+it.vol) && it.vol !== null && it.vol !== "auto" ? +it.vol : candVolKnown(montage, findCand(montage, slotId, it.cand)), cand: it.cand, join: it.join || null, conf: itemConf(montage, it) }));
+      if (tl.length) return tl.map(it => Object.assign({ sid: it.sid, in: +it.in, out: +it.out, vol: isFinite(+it.vol) && it.vol !== null && it.vol !== "auto" ? +it.vol : candVolKnown(montage, findCand(montage, slotId, it.cand)), cand: it.cand, join: it.join || null, conf: itemConf(montage, it) },
+        rampOf(it.ramp_in) ? { ramp_in: rampOf(it.ramp_in) } : {}, rampOf(it.ramp_out) ? { ramp_out: rampOf(it.ramp_out) } : {}));
     }
     const c = findCand(montage, slotId, candId);
     if (!c || !(+c.out > +c.in)) return [];
@@ -2060,6 +2085,7 @@
       c.montage = { slot: slotId, cand: it.cand, join: k === 0 ? (JOIN_KINDS.includes(j0) ? j0 : null) : (JOIN_KINDS.includes(it.join) ? it.join : "splice"),
         conf: it.conf != null ? it.conf : candConf(cand) };
       if (cand && isFinite(+cand.setup) && cand.setup !== null) c.montage.setup = +cand.setup;
+      Object.assign(c.montage, camInfo(montage, it.sid, slotId, it.cand, it.setup));
       t += mClipLen(c);
       return c;
     });
@@ -2102,7 +2128,7 @@
     c.extra = true;
     // su union de entrada es una linea nueva (corte seco: el director no pone transicion ni whoosh
     // a media seccion y la limpieza de tomas no cruza su inicio); sin parte (slot null)
-    c.montage = { slot: null, cand: null, join: "line" };
+    c.montage = Object.assign({ slot: null, cand: null, join: "line" }, camInfo(montage, x.sid, null, null, null));
     // si ahi hay un hueco, lo usa; lo de despues solo se corre lo que no cabe
     const len = mClipLen(c), d = Math.max(0, len - gapAfter(cs, start)), end = start + (len - d);
     const rest = shiftAfter(cs, end, d);
@@ -2213,7 +2239,9 @@
   function scriptText(script) {
     const sc = script || {}, lines = sc.lines || [], secs = sc.sections || [];
     if (!lines.length) return String(sc.text || "").trim();
-    const txt = {}; lines.forEach(L => { if (L) txt[L.id] = String(L.text || "").trim(); });
+    // una linea con recursos (plan.montage.script.lines[i].inserts) vuelve con su anotacion: rearmar
+    // con el guion editado no los pierde
+    const txt = {}; lines.forEach(L => { if (L) txt[L.id] = withInserts(String(L.text || "").trim(), L.inserts); });
     if (secs.length) {
       const used = new Set(), out = [];
       secs.forEach(s => { const ls = (s.lines || []).filter(l => l in txt && !used.has(l)); ls.forEach(l => used.add(l)); if (ls.length) out.push(ls.map(l => txt[l]).join("\n")); });
@@ -2230,12 +2258,20 @@
       const base = c.type === "image"
         ? { sid: c.sid, type: "image", dur: c.dur, start: c.start || 0, layer: c.layer || 0, fadeIn: c.fadeIn || 0, fadeOut: c.fadeOut || 0, trans: c.trans }
         : { sid: c.sid, type: "video", in: c.in, out: c.out, vol: c.volAuto && (c.montage || c.extra) ? "auto" : c.vol, mute: c.mute, start: c.start || 0, layer: c.layer || 0, fadeIn: c.fadeIn || 0, fadeOut: c.fadeOut || 0, trans: c.trans };
+      if (c.type !== "image") ["ramp_in", "ramp_out"].forEach(k => { const r = rampOf(c[k]); if (r) base[k] = r; });
       const mm = c.montage || null;
       if (mm && mm.slot != null)
         base.montage = Object.assign({ slot: mm.slot, cand: mm.cand != null ? mm.cand : null, join: mm.join || null, conf: mm.conf != null ? +mm.conf : null },
           mm.setup != null ? { setup: mm.setup } : {});
       else if (c.extra || mm)
         base.montage = { slot: null, cand: null, join: mm && JOIN_KINDS.includes(mm.join) ? mm.join : "line", conf: null };
+      // cambio de camara con aceleracion en la union de ENTRADA de este clip: el estado (lo que se ve
+      // en el timeline) y si lo decidio el usuario (su eleccion manda al componer)
+      if (base.montage && c.rampJoin != null) {
+        base.montage.ramp = !!c.rampJoin;
+        // = montage.plan_ramps: ramp_user es LO QUE ELIGIO (true = con aceleracion, false = corte seco)
+        if (c.rampUser === true || c.rampUser === false) base.montage.ramp_user = c.rampUser;
+      }
       return base;
     });
   }
@@ -2257,6 +2293,8 @@
       b.montage_job = o.montageJob;
       const s = o.script == null ? "" : String(o.script).trim();
       b.script = s || null;
+      // recursos del guion (imagen o video flotante mientras se dice su linea), en segundos del ensamble
+      if (Array.isArray(o.inserts)) b.inserts = o.inserts.map(insertForCompose).filter(Boolean);
     }
     return b;
   }
@@ -2316,10 +2354,469 @@
     return `${m}:${sec.toFixed(1).padStart(4, "0")}`;
   }
 
+  // ------------------------------------------------------------------ recursos del guion
+  /* El guion puede pedir un recurso al final de una linea: "texto. - Agregar video_marcas" (separador
+     - – — | y verbo agregar/anadir/insertar/mostrar/poner/add/insert o su imperativo, sin importar
+     mayusculas ni acentos) o "[agregar nombre]" / "[nombre]" / "{nombre}". Varios nombres van
+     separados por coma. El archivo nombrado es un RECURSO (nunca una toma): mientras se dice esa
+     linea aparece como tarjeta flotante. Port PASO A PASO de montage.split_annotation / asset_key /
+     match_asset / classify (tests/test_studio_ui.py::test_port_de_montage_en_fxcore_igual_al_motor compara ambos): un "[texto]" sin verbo que
+     no parece archivo ni coincide con uno elegido es una acotacion ("[pausa]") y no es recurso. */
+  const ANN_VERBS = new Set(["agregar", "anadir", "insertar", "mostrar", "poner", "add", "insert", "agrega", "anade", "inserta", "muestra", "pon"]);
+  const ANN_SEPS = "-–—|";
+  const ANN_SEP_RE = /[-–—|]\s*(\p{L}+)\s+(\S.*)$/uy;
+  const ANN_BRACKET_RE = /(\[([^\[\]{}]*)\]|\{([^\[\]{}]*)\})[\s.,;:!?…]*$/u;
+  const ANN_ARTICLES = new Set(["el", "la", "los", "las", "un", "una", "the", "a", "an"]);
+  const ANN_QUOTES = "\"'«»“”‘’`";
+  const IMG_EXT = new Set(["jpg", "jpeg", "png", "heic", "heif", "webp", "gif", "bmp", "tif", "tiff", "avif"]);
+  const VID_EXT = new Set(["mp4", "mov", "m4v", "webm", "mkv", "avi", "mts", "m2ts", "3gp", "hevc"]);
+  const stripAcc = s => String(s).normalize("NFKD").replace(/[̀-ͯ᪰-᫿᷀-᷿⃐-⃿︠-︯]/g, "");
+  const stripChars = (s, cs) => { let a = 0, b = s.length; while (a < b && cs.includes(s[a])) a++; while (b > a && cs.includes(s[b - 1])) b--; return s.slice(a, b); };
+  const rstripChars = (s, cs) => { let b = s.length; while (b > 0 && cs.includes(s[b - 1])) b--; return s.slice(0, b); };
+  /** montage.asset_key: "Video Horno.MP4" -> "video_horno". */
+  function assetNorm(name) {
+    let s = stripAcc(stripChars(String(name == null ? "" : name).trim(), ANN_QUOTES).toLowerCase());
+    s = s.split("/").pop().replace(/\.[a-z0-9]{2,5}$/, "");
+    return s.replace(/[\s_\-]+/g, "_").replace(/^_+|_+$/g, "");
+  }
+  const fileLike = n => /[_.\-\d]/.test(String(n).trim());
+  const isVerb = w => ANN_VERBS.has(stripAcc(String(w).toLowerCase()));
+  const PREFIX_MIN = 4;
+  /** montage._match_key: igual primero; luego prefijo unico por palabras completas ("foto_local" ->
+      "foto_local_final"; `k` de 4+ caracteres y con letras: "1", "a" nunca toman un archivo por
+      prefijo); `rev` ([bool] por clave): tambien al reves solo en esas claves (imagenes). prefix =
+      false: solo igual (ids). -> indice o -1. */
+  function matchKey(k, keys, rev, prefix) {
+    if (!k) return -1;
+    const ex = keys.indexOf(k);
+    if (ex >= 0) return ex;
+    if (prefix === false || k.length < PREFIX_MIN || !/[a-z]/.test(k)) return -1;
+    let pre = []; keys.forEach((x, i) => { if (x && x.startsWith(k + "_")) pre.push(i); });
+    if (pre.length === 1) return pre[0];
+    if (pre.length || !rev) return -1;
+    pre = []; keys.forEach((x, i) => { if (x && rev[i] && x.length >= 3 && /[a-z]/.test(x) && k.startsWith(x + "_")) pre.push(i); });
+    return pre.length === 1 ? pre[0] : -1;
+  }
+  const MEDIA_EXT_RE = new RegExp("\\.(?:" + [...IMG_EXT, ...VID_EXT].sort().join("|") + ")$", "i");
+  /** montage._name_like: un nombre de la marca parece ARCHIVO (no el final de una frase): coincide con
+      uno elegido, termina en extension de imagen/video, o es UNA palabra con letras y _ . - o digitos. */
+  function nameLike(name, keys) {
+    const n = stripChars(stripChars(String(name == null ? "" : name).trim(), ANN_QUOTES).trim(), " ");
+    if (!n) return false;
+    if (keys && keys.length && matchKey(assetNorm(n), keys) >= 0) return true;
+    const ws = n.split(/\s+/).filter(Boolean);
+    if (ws.length > 3) return false;
+    if (MEDIA_EXT_RE.test(n)) return true;
+    return ws.length === 1 && fileLike(n) && /[^\P{L}]/u.test(n);
+  }
+  const knownKeys = files => {
+    const out = [];
+    (files || []).forEach(f => [f && typeof f === "object" ? f.name : f, f && typeof f === "object" ? (f.sid || f.id) : null].forEach(v => {
+      const k = v ? assetNorm(v) : ""; if (k && !out.includes(k)) out.push(k); }));
+    return out;
+  };
+  function splitNames(s, keys) {
+    const out = [];
+    String(s).split(/\s*[,;]\s*/).forEach(p0 => {
+      let p = stripChars(stripChars(rstripChars(stripChars(p0.trim(), ANN_QUOTES), ".,;:!?…").trim(), ANN_QUOTES).trim(), " ");
+      const ws = p.split(/\s+/).filter(Boolean);
+      if (ws.length > 1 && ANN_ARTICLES.has(ws[0].toLowerCase())) p = ws.slice(1).join(" ");
+      if (!p) return;
+      const sub = p.split(/\s+(?:y|e|and|\+|&)\s+/).map(x => x.trim()).filter(Boolean);
+      if (sub.length > 1 && sub.every(x => fileLike(x) || matchKey(assetNorm(x), keys || []) >= 0)) out.push(...sub);
+      else out.push(p);
+    });
+    return out;
+  }
+  /** montage.split_annotation: una linea -> {text (sin las marcas del final), names}. `known` =
+      archivos elegidos ([{name}] o nombres) para reconocer "[nombre]" sin verbo. */
+  function lineRefs(raw, known) {
+    let s = String(raw == null ? "" : raw).replace(/\s+$/, "");
+    const keys = Array.isArray(known) ? knownKeys(known) : [];
+    let names = [];
+    for (let guard = 0; s && guard < 50; guard++) {
+      const m = ANN_BRACKET_RE.exec(s);
+      if (m) {
+        const inner = (m[2] != null ? m[2] : (m[3] || "")).trim(), curly = m[3] != null;
+        const ws = inner.split(/\s+/);
+        let got;
+        if (ws.length >= 2 && isVerb(ws[0])) got = splitNames(inner.slice(inner.indexOf(ws[0]) + ws[0].length).trim(), keys);
+        else got = splitNames(inner, keys).filter(n => curly || nameLike(n, keys));
+        names = got.concat(names);
+        s = s.slice(0, m.index).replace(/\s+$/, "");
+        continue;
+      }
+      let hit = null;
+      for (let i = 0; i < s.length; i++) {
+        if (ANN_SEPS.includes(s[i]) && (i === 0 || !/[\p{L}\p{N}]/u.test(s[i - 1]))) {
+          ANN_SEP_RE.lastIndex = i;
+          const r = ANN_SEP_RE.exec(s);
+          if (r && isVerb(r[1])) hit = { index: i, names: r[2] };
+        }
+      }
+      if (!hit) break;
+      const got = splitNames(hit.names, keys);
+      if (!got.length || !got.every(n => nameLike(n, keys))) break;   // una frase ("— agrega tu negocio hoy"): se dice
+      names = got.concat(names);
+      s = s.slice(0, hit.index).replace(/\s+$/, "");
+    }
+    return { text: s.trim(), names };
+  }
+  /** Recursos que pide un guion (montage.parse_script: una linea que solo trae la marca se suma a la
+      anterior): {lines: [{i (linea no vacia), text, names}] (solo las con recurso), names: [cada uno
+      una vez, en orden]}. */
+  function scriptRefs(text, known) {
+    const rows = [];
+    let pending = [], last = null, i = 0;
+    String(text == null ? "" : text).replace(/\r\n?/g, "\n").split("\n").forEach(raw => {
+      const s = raw.split(/\s+/).filter(Boolean).join(" ");
+      if (!s) return;
+      const r = lineRefs(s, known);
+      if (!r.text) { if (last) last.names.push(...r.names); else pending.push(...r.names); return; }
+      last = { i: i++, text: r.text, names: pending.concat(r.names) }; pending = [];
+      rows.push(last);
+    });
+    const names = [];
+    rows.forEach(L => L.names.forEach(n => { if (!names.includes(n)) names.push(n); }));
+    return { lines: rows.filter(L => L.names.length), names };
+  }
+  /** El guion sin marcas de recursos (lo que se compara con las tomas). */
+  function stripRefs(text, known) {
+    return String(text == null ? "" : text).split(/\r?\n/).map(raw => (raw.trim() ? lineRefs(raw, known).text : "")).join("\n");
+  }
+  /** Linea del guion con sus recursos: si su texto ya no trae la marca, se le agrega ("- Agregar x";
+      entre corchetes si algun nombre no parece archivo, asi se vuelve a leer igual sin los archivos). */
+  function withInserts(text, names) {
+    const ns = (names || []).map(n => String(n || "").trim()).filter(Boolean);
+    if (!ns.length || lineRefs(text).names.length) return text;
+    return ns.every(n => nameLike(n, [])) ? `${text} - Agregar ${ns.join(", ")}` : `${text} [Agregar ${ns.join(", ")}]`;
+  }
+  /** montage._match_asset_ex: {idx, exact} (exacto = mismo nombre normalizado o mismo id). */
+  function matchAssetEx(name, files) {
+    const k = assetNorm(name), fs = files || [];
+    const nk = fs.map(f => { const v = f && typeof f === "object" ? f.name : f; return v ? assetNorm(v) : ""; });
+    let i = matchKey(k, nk, fs.map(f => fileKind(f) === "image"));
+    if (i >= 0) return { idx: i, exact: nk[i] === k };
+    i = matchKey(k, fs.map(f => { const v = f && typeof f === "object" ? (f.sid || f.id) : null; return v ? assetNorm(v) : ""; }), null, false);
+    return { idx: i, exact: i >= 0 };
+  }
+  /** montage.match_asset: indice del archivo ([{name, sid|id}] o nombres) que corresponde al recurso
+      `name`: por su nombre (igual, luego prefijo unico por palabras; al reves solo una imagen) y, si
+      no, por su id (solo igual). -1 si ninguno. */
+  function matchAsset(name, files) { return matchAssetEx(name, files).idx; }
+  /** montage.asset_kind: "image" | "video" | null de un archivo ({name, type|kind (mime o image/video)}). */
+  function fileKind(f) {
+    const o = f && typeof f === "object" ? f : { name: f };
+    const k = String(o.kind || o.type || o.mime || "").toLowerCase();
+    if (k.startsWith("image")) return "image";
+    if (k.startsWith("video")) return "video";
+    const m = /\.([A-Za-z0-9]{2,5})$/.exec(String(o.name || o.path || ""));
+    const e = m ? m[1].toLowerCase() : "";
+    if (IMG_EXT.has(e)) return "image";
+    if (VID_EXT.has(e)) return "video";
+    return +o.dur > 0 ? "video" : null;
+  }
+  /** montage.classify: archivos elegidos + guion -> {refs: [{name, idx (-1: falta)}], assets: [idx],
+      clips: [idx]}. Toda imagen y todo archivo que el guion pide es recurso; los demas videos, tomas. */
+  function classifyFiles(files, script) {
+    const fs = files || [];
+    // montage._ref_asset: un parecido solo por prefijo nunca se lleva una toma con voz transcrita
+    const spoken = f => !!(f && typeof f === "object" && ((Array.isArray(f.words) && f.words.length) || f.has_words === true));
+    const refAsset = name => { const r = matchAssetEx(name, fs); return r.idx >= 0 && !r.exact && fileKind(fs[r.idx]) !== "image" && spoken(fs[r.idx]) ? -1 : r.idx; };
+    const refs = scriptRefs(script, fs).names.map(name => ({ name, idx: refAsset(name) }));
+    const asset = new Set(refs.filter(r => r.idx >= 0).map(r => r.idx));
+    fs.forEach((f, i) => { if (fileKind(f) === "image") asset.add(i); });
+    const clips = [];
+    fs.forEach((f, i) => { if (!asset.has(i) && fileKind(f) === "video") clips.push(i); });
+    return { refs, assets: [...asset].sort((a, b) => a - b), clips };
+  }
+
+  /* Colocacion de un recurso en el ensamble (port de montage.plan_inserts): desde la primera palabra
+     de su linea - 0.15 s hasta la ultima + 0.25 s (s del ensamble; minimo 2 s; varios en una linea
+     se reparten; nunca encima del siguiente). Las palabras de cada linea salen de "line_times" del
+     candidato en uso de cada parte, asi que un recurso sigue a su linea si el usuario cambia tomas. */
+  const INS = { pre: 0.15, post: 0.25, min: 2.0, speedMax: 1.4, slowMin: 0.8 };
+  /** Como entra un medio de `mediaDur` s en un hueco de `slot` s (montage.plan_inserts): imagen ->
+      "hold"; video de 0.8x a 1.4x del hueco -> "speed" (su velocidad se ajusta); mas largo -> "trim"
+      (desde src_in); mas corto -> "trim" y el recurso dura lo suyo (`len`). -> {fit, speed, src_in, len?}. */
+  function insertFit(kind, mediaDur, slot, srcIn) {
+    const L = +slot || 0, d = +mediaDur || 0;
+    if (kind !== "video") return { fit: "hold", speed: 1, src_in: 0 };
+    const out = { fit: "trim", speed: 1, src_in: round3(Math.max(0, Math.min(+srcIn || 0, Math.max(0, d - L)))) };
+    if (d > 0 && L > 0) {
+      const r = d / L;
+      if (r >= INS.slowMin && r <= INS.speedMax) return { fit: "speed", speed: round3(r), src_in: 0 };
+      if (r < INS.slowMin) { out.src_in = 0; out.len = d; }
+    }
+    return out;
+  }
+  /** {linea: [t0, t1]} en segundos del ensamble para los clips actuales (line_times de su toma). */
+  function lineSpans(montage, clips) {
+    const span = {};
+    (clips || []).filter(c => c && (c.layer || 0) === 0 && c.type !== "image" && c.montage && c.montage.slot != null).forEach(c => {
+      const cd = findCand(montage, c.montage.slot, c.montage.cand);
+      const lt = cd && (cd.sid == null || cd.sid === c.sid) ? cd.line_times : null;
+      Object.keys(lt || {}).forEach(lid => {
+        const v = lt[lid]; if (!Array.isArray(v) || v.length < 2) return;
+        const a = +c.in, b = +c.out;
+        let s0 = +v[0], s1 = +v[1]; if (!isFinite(s0) || !isFinite(s1)) return;
+        s0 = Math.min(Math.max(s0, a), b); s1 = Math.min(Math.max(s1, a), b);
+        if (s1 - s0 <= 1e-6 && (+v[1] < a || +v[0] > b)) return;     // la linea no esta en este tramo
+        const t0 = (+c.start || 0) + s0 - a, t1 = (+c.start || 0) + s1 - a, cur = span[lid];
+        span[lid] = cur ? [Math.min(cur[0], t0), Math.max(cur[1], t1)] : [t0, t1];
+      });
+    });
+    return span;
+  }
+  /** Tramo de una linea sin line_times: el del montaje corrido con su parte (o en proporcion si la
+      toma cambio) o, si nada, el de su parte completa. */
+  function lineSpanFallback(montage, clips, ins0) {
+    const m = montage || {}, cs = clips || [];
+    const slotIds = (m.slots || []).filter(s => s && (s.lines || []).includes(ins0.line)).map(s => s.id);
+    const cur = [].concat(...slotIds.map(id => slotClipIdx(cs, id))).map(i => cs[i]);
+    if (!cur.length) return null;
+    const orig = (m.timeline || []).filter(it => it && slotIds.includes(it.slot));
+    const cs0 = Math.min(...cur.map(c => +c.start || 0)), ce0 = Math.max(...cur.map(mClipEnd));
+    if (!orig.length || !isFinite(+ins0.start) || ins0.start === null) return [cs0 + INS.pre, ce0 - INS.post];
+    const os = Math.min(...orig.map(it => +it.start || 0)), oe = Math.max(...orig.map(it => (+it.start || 0) + (+it.out - +it.in)));
+    const k = oe > os ? (ce0 - cs0) / (oe - os) : 1;
+    return [cs0 + (+ins0.start + INS.pre - os) * k, cs0 + (+ins0.end - INS.post - os) * k];
+  }
+  /** Los recursos del montaje colocados sobre los clips ACTUALES del ensamble. o = {sources: [{id,
+      type, dur}], edits: {id: {enabled, sid, kind, status}}}. -> [{...insert, start, end, fit, speed,
+      src_in, placed, enabled}] (mismos ids que plan.montage.inserts). */
+  function placeInserts(montage, clips, o) {
+    const opt = o || {}, m = montage || {}, cs = clips || [];
+    const srcOf = sid => (opt.sources || []).find(s => s && s.id === sid) || null;
+    const span = lineSpans(m, cs);
+    const total = cs.filter(c => c && (c.layer || 0) === 0).reduce((a, c) => Math.max(a, mClipEnd(c)), 0);
+    const base = (m.inserts || []).filter(x => x && x.id != null);
+    const merged = base.map(ins0 => Object.assign({}, ins0, (opt.edits && opt.edits[ins0.id]) || {}));
+    // por linea: sus recursos VISIBLES, en el orden del montaje (varios en una linea se reparten su
+    // tramo); uno quitado (enabled false) no le quita lugar a los demas: se coloca en toda su linea
+    const byLine = {};
+    merged.forEach((x, k) => { if (x.enabled !== false) (byLine[x.line] = byLine[x.line] || []).push(k); });
+    const out = merged.map((ins, k) => {
+      const ins0 = base[k];
+      let sp = span[ins.line] || null;
+      if (!sp) { const f = lineSpanFallback(m, cs, ins0); sp = f; }
+      if (!sp) return Object.assign(ins, { placed: false });
+      const s = Math.max(0, sp[0] - INS.pre), e = Math.min(total || Infinity, sp[1] + INS.post);
+      const sib = ins.enabled === false ? [k] : (byLine[ins.line] || [k]), j = Math.max(0, sib.indexOf(k)), n = sib.length || 1;
+      let a = s + (e - s) * j / n, b = s + (e - s) * (j + 1) / n;
+      if (b - a < INS.min) { b = Math.min(total || Infinity, a + INS.min); a = Math.max(0, Math.min(a, b - INS.min)); }
+      return Object.assign(ins, { start: a, end: b, placed: true });
+    });
+    // sin encimarse: solo entre los visibles (uno quitado no recorta a nadie)
+    const on = out.filter(x => x.placed && x.enabled !== false).sort((x, y) => x.start - y.start || String(x.id).localeCompare(String(y.id)));
+    for (let k = 0; k + 1 < on.length; k++) if (on[k].end > on[k + 1].start) on[k].end = Math.max(on[k].start, on[k + 1].start);
+    out.forEach(ins => {
+      const src = ins.sid ? srcOf(ins.sid) : null;
+      const kind = src ? (src.type === "image" ? "image" : "video") : (ins.sid ? ins.kind : null);
+      if (ins.sid && kind && ins.placed) {
+        const f = insertFit(kind, src ? +src.dur : +ins.media_dur, ins.end - ins.start, ins.src_in);
+        Object.assign(ins, { kind, fit: f.fit, speed: f.speed, src_in: f.src_in, status: "ok" });
+        if (f.len != null) ins.end = ins.start + f.len;
+      } else if (!ins.sid) ins.status = "missing";
+      if (ins.placed) { ins.start = round3(ins.start); ins.end = round3(ins.end); }
+    });
+    return out;
+  }
+  /** Un recurso tal como va en POST /compose (lo que el servidor sanea). Uno sin lugar (su linea no
+      esta en el video) va con start/end null: no ocupa tiempo ni recorta a otro. */
+  function insertForCompose(x) {
+    if (!x || x.id == null) return null;
+    const on = x.placed !== false;
+    return { id: String(x.id), line: x.line || null, name: x.name || "", sid: x.sid || null, kind: x.kind || null,
+      start: on && x.start != null && isFinite(+x.start) ? round3(+x.start) : null, end: on && x.end != null && isFinite(+x.end) ? round3(+x.end) : null,
+      fit: x.fit || "hold", speed: isFinite(+x.speed) && +x.speed > 0 ? +x.speed : 1, src_in: isFinite(+x.src_in) ? +x.src_in : 0,
+      status: x.sid ? "ok" : "missing", enabled: x.enabled !== false && x.placed !== false };
+  }
+
+  // ------------------------------------------------------------------ cambio de camara con aceleracion
+  /* Port PASO A PASO de montage.plan_ramps (_ramp_side, _ramp_pick, _ramp_force): en un cambio de
+     camara de material intercalado (A/B/A, las dos partes del intercalado) o partido a media linea,
+     el VIDEO de un lado acelera (x2) mientras el audio sigue a 1x. ramp_out = el video sigue
+     d*(v-1) s despues de "out", comprimido en los ultimos d s; ramp_in = empieza d*(v-1) s antes de
+     "in" y alcanza a su audio en los primeros d s. Solo donde lo acelerado no tiene palabras y la
+     fuente tiene esos cuadros; la mas larga (0.30 s, luego hasta 0.15 s); con la misma, el lado donde
+     el orador sigue a media actuacion y luego el de salida. El usuario manda (clip.rampUser en el
+     clip que ENTRA): apagada, o prendida aunque no haya pausa limpia (el lado con mas aire). */
+  const RAMP = { dur: 0.30, min: 0.15, step: 0.05, speed: 2.0, tol: 0.04, room: 0.30, guard: 0.05, ctx: 1.5 };
+  function rampOf(r) {
+    if (!r || typeof r !== "object") return null;
+    const d = +r.dur, v = r.speed == null ? RAMP.speed : +r.speed;
+    if (!(d > 0.01) || !(v > 1.0001) || !isFinite(d) || !isFinite(v)) return null;
+    return { dur: round3(Math.min(1.5, d)), speed: round3(Math.min(4, v)) };
+  }
+  function rampDurs() { const out = []; for (let d = RAMP.dur; d >= RAMP.min - 1e-9; d -= RAMP.step) out.push(round3(d)); return out; }
+  /** {sid: [[inicio, fin] de TODAS las palabras, duracion]} (montage._ramp_spans); sin palabras
+      conocidas de un clip no hay entrada (no se decide a ciegas). */
+  function rampSpans(clips, o) {
+    const opt = o || {}, W = opt.words || {}, out = {};
+    (clips || []).forEach(c => {
+      if (!c || !c.sid || out[c.sid] || !Array.isArray(W[c.sid])) return;
+      const ws = W[c.sid].map(w => [+w.start, +w.end]).filter(([a, b]) => isFinite(a) && isFinite(b) && b >= a).sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+      const d0 = +((opt.srcdur && opt.srcdur[c.sid]) || c.srcdur || 0);
+      out[c.sid] = [ws, Math.max(d0 > 0 ? d0 : 0, ws.reduce((a, w) => Math.max(a, w[1]), 0))];
+    });
+    return out;
+  }
+  function rampSide(x, side, d, spans, strict) {
+    const sp = spans[x.sid]; if (!sp) return null;
+    const [ws, dur] = sp, aIn = +x.in, aOut = +x.out, h = d * (RAMP.speed - 1);
+    const other = (side === "out" ? x.ramp_in : x.ramp_out) || {};
+    if (aOut - aIn < d + (+other.dur || 0) + RAMP.room - 1e-6) return null;
+    let lo, hi;
+    if (side === "out") { lo = aOut - d; hi = aOut + h; if (hi > dur - RAMP.guard + 1e-6) return null; }
+    else { lo = aIn - h; hi = aIn + d; if (lo < RAMP.guard - 1e-6) return null; }
+    const tol = RAMP.tol;
+    if (strict !== false && ws.some(([a, b]) => b > lo + tol && a < hi - tol)) return null;
+    if (side === "out") return ws.some(([a]) => hi - tol <= a && a <= hi + RAMP.ctx);
+    return ws.some(([, b]) => lo - RAMP.ctx <= b && b <= lo + tol);
+  }
+  function rampPick(p, x, spans) {
+    for (const d of rampDurs()) {
+      const opts = [];
+      const o = rampSide(p, "out", d, spans); if (o !== null) opts.push([o ? 0 : 1, 0, "out"]);
+      const i = rampSide(x, "in", d, spans); if (i !== null) opts.push([i ? 0 : 1, 1, "in"]);
+      if (opts.length) { opts.sort((a, b) => a[0] - b[0] || a[1] - b[1]); return [opts[0][2], d]; }
+    }
+    return null;
+  }
+  function rampForce(p, x, spans) {
+    let best = null;
+    [["out", p], ["in", x]].forEach(([side, y]) => {
+      const sp = spans[y.sid]; if (!sp) return;
+      const ws = sp[0], aIn = +y.in, aOut = +y.out;
+      const free = side === "out" ? aOut - Math.max(aIn, ...ws.filter(w => w[1] <= aOut + RAMP.tol).map(w => w[1]))
+        : Math.min(aOut, ...ws.filter(w => w[0] >= aIn - RAMP.tol).map(w => w[0])) - aIn;
+      const d = round3(Math.min(RAMP.dur, Math.max(RAMP.min, free)));
+      if (rampSide(y, side, d, spans, false) === null) return;
+      if (!best || free > best[0] + 1e-9) best = [free, side, d];
+    });
+    return best ? [best[1], best[2]] : null;
+  }
+  const camOf = c => { const m = c && c.montage; const v = m ? (m.cam !== undefined ? m.cam : m.setup) : (c && c.cam); return v == null || v === "" ? null : v; };
+  /** Uniones de la pista base: clips de video contiguos, en orden. -> [{prev, next, at, k, base}]. */
+  function mainJoins(clips) {
+    const base = (clips || []).filter(c => c && (c.layer || 0) === 0).sort((a, b) => (+a.start || 0) - (+b.start || 0));
+    const out = [];
+    for (let k = 1; k < base.length; k++) {
+      const p = base[k - 1], n = base[k];
+      if (p.type === "image" || n.type === "image") continue;
+      if (Math.abs(mClipEnd(p) - (+n.start || 0)) > 0.02) continue;
+      if (n.trans && n.trans.type === "crossfade" && +n.trans.dur > 0.05) continue;   // compose: sin rampa en un crossfade
+      out.push({ prev: p, next: n, at: round3(+n.start || 0), k, base });
+    }
+    return out;
+  }
+  const sameIO = (c, it) => it && c.sid === it.sid && Math.abs(+c.in - +it.in) < 1e-3 && Math.abs(+c.out - +it.out) < 1e-3;
+  /** Recalcula las aceleraciones de TODAS las uniones (en sitio) como montage.plan_ramps. Una union
+      cuyas palabras aun no llegaron (o. words) conserva lo que traia. o = {words: {sid: [...]},
+      srcdur: {sid: s}}. -> marcas por union con cambio de camara: [{at, prevId, nextId, switch: true,
+      eligible, on, side, dur, user, possible}]. */
+  function syncRamps(clips, o) {
+    const opt = o || {}, js = mainJoins(clips), spans = rampSpans(clips, opt), marks = [];
+    const known = c => !!spans[c.sid];
+    const keep = new Map();
+    // lo que ya traen las uniones sin palabras conocidas se queda (el montaje lo decidio con ellas)
+    js.forEach(j => { if (!(known(j.prev) && known(j.next))) keep.set(j, { out: rampOf(j.prev.ramp_out), in: rampOf(j.next.ramp_in) }); });
+    const joinedOut = new Set(js.map(j => j.prev)), joinedIn = new Set(js.map(j => j.next));
+    (clips || []).forEach(c => { if (!c) return; if (!joinedOut.has(c) || known(c)) delete c.ramp_out; if (!joinedIn.has(c) || known(c)) delete c.ramp_in; delete c.rampJoin; });
+    js.forEach(j => {
+      const p = j.prev, x = j.next, b = j.base, k = j.k;
+      const sp = camOf(p), sx = camOf(x);
+      const change = sp != null && sx != null && String(sp) !== String(sx);
+      const pp = b[k - 2], aba = !!pp && camOf(pp) != null && String(camOf(pp)) === String(sx);
+      const icp = !!(p.montage && p.montage.ic), icx = !!(x.montage && x.montage.ic);
+      const eligible = change && ((x.montage && x.montage.join === "splice") || aba || (icp && icx));
+      const user = x.rampUser === true || x.rampUser === false ? x.rampUser : null;
+      let pick = null;
+      if (keep.has(j)) {
+        const kp = keep.get(j);
+        if (user !== false && (kp.out || kp.in)) {
+          if (kp.out) { p.ramp_out = kp.out; pick = ["out", kp.out.dur]; } else { x.ramp_in = kp.in; pick = ["in", kp.in.dur]; }
+        }
+      } else {
+        pick = eligible ? rampPick(p, x, spans) : null;
+        if (user === false) pick = null;
+        else if (user === true && !pick) pick = rampPick(p, x, spans) || rampForce(p, x, spans);
+        if (pick) (pick[0] === "out" ? p : x)["ramp_" + pick[0]] = { dur: pick[1], speed: RAMP.speed };
+      }
+      if (change || pick) {
+        x.rampJoin = !!pick;
+        const possible = !!pick || (known(p) && known(x) ? !!(rampPick(p, x, spans) || rampForce(p, x, spans)) : true);
+        marks.push({ at: j.at, prevId: p._id, nextId: x._id, switch: change, eligible, on: !!pick, side: pick ? pick[0] : null,
+          dur: pick ? pick[1] : 0, user: user != null, possible });
+      }
+    });
+    return marks;
+  }
+  /** El usuario prende o apaga la aceleracion de la union que ENTRA al clip `nextId`. -> {marks, ok}
+      (ok false: la pidio y no cabe: sin cuadros de sobra en ningun lado). */
+  function toggleRamp(clips, nextId, on, o) {
+    const c = (clips || []).find(x => x && x._id === nextId);
+    if (!c) return { marks: syncRamps(clips, o), ok: false };
+    c.rampUser = !!on;
+    const marks = syncRamps(clips, o), mk = marks.find(x => x.nextId === nextId);
+    return { marks, ok: !on || !!(mk && mk.on) };
+  }
+
+  // ------------------------------------------------------------------ color de acento del proyecto
+  /* UN color de acento por proyecto (plan.fx.accent): la palabra activa de los subtitulos y el acento
+     de titulos y tarjetas. Por defecto el amarillo de siempre; nunca un color de marca fijo. Cambiarlo
+     reemplaza el acento anterior en lo que ya existe (y lo que la IA agregue despues lo recibe en el
+     servidor: _accent_carry). Un acento blanco/negro/gris (estilo Minimal) no se busca en los items:
+     solo se cambian los campos de acento. */
+  const DEFAULT_ACCENT = "#FFD23F";
+  function normHex(v) {
+    const s = String(v == null ? "" : v).trim();
+    let m = /^#?([0-9a-f]{6})$/i.exec(s);
+    if (m) return "#" + m[1].toUpperCase();
+    m = /^#?([0-9a-f]{3})$/i.exec(s);
+    return m ? "#" + m[1].split("").map(x => x + x).join("").toUpperCase() : null;
+  }
+  function chromatic(hex) {
+    const h = normHex(hex); if (!h) return false;
+    const n = parseInt(h.slice(1), 16), r = n >> 16 & 255, g = n >> 8 & 255, b = n & 255;
+    return Math.max(r, g, b) - Math.min(r, g, b) >= 40;
+  }
+  function projectAccent(plan) {
+    const fx = (plan && plan.fx) || {};
+    return normHex(fx.accent) || normHex(fx.captions && fx.captions.accent) || DEFAULT_ACCENT;
+  }
+  const ACCENT_KEYS = ["accent", "color", "badge_color", "bg", "box", "highlight", "button_color", "border_color", "arrow_color"];
+  /** Pone `acc` como acento del proyecto (en sitio). `o.palette` = acento del estilo del director (lo
+      que la IA uso). -> numero de colores cambiados en los items. */
+  function applyAccent(plan, acc, o) {
+    const a = normHex(acc); if (!plan || !a) return 0;
+    const fx = plan.fx = plan.fx || {};
+    const olds = new Set([projectAccent(plan), normHex(o && o.palette)].filter(x => x && chromatic(x) && x !== a));
+    let n = 0;
+    const walk = (x, depth) => {
+      if (!x || typeof x !== "object" || depth > 4) return;
+      if (Array.isArray(x)) { x.forEach(y => walk(y, depth + 1)); return; }
+      ACCENT_KEYS.forEach(k => { if (typeof x[k] === "string" && olds.has(normHex(x[k]))) { x[k] = a; n++; } });
+      ["lines", "text", "card", "graphics", "items"].forEach(k => { if (x[k] && typeof x[k] === "object") walk(x[k], depth + 1); });
+    };
+    ["text", "graphics", "cutaways"].forEach(tk => (fx[tk] || []).forEach(it => walk(it, 0)));
+    // los titulos con palabras de acento sin color propio lo toman del proyecto
+    (fx.text || []).forEach(it => { if (it && (it.accent_words || []).length && !it.accent) { it.accent = a; n++; } });
+    fx.captions = fx.captions || {};
+    if (fx.captions.highlight && olds.has(normHex(fx.captions.highlight))) fx.captions.highlight = a;
+    fx.captions.accent = a;
+    fx.accent = a;
+    return n;
+  }
+
   return {
     CONF_LABEL, DISCARD_LABEL, JOIN_KINDS, createdMs, recordedMs, natCmp, recordingOrder, montageConf, findCand, slotNumbers, candVol, candVolKnown, montageClips,
     slotItems, shiftAfter, slotClipIdx, currentCand, swapTake, extraInVideo, addExtra, removeClip, removeSlot, isExtraSlot, itemConf, candConf, usedReason, montageRows, montageSummary, scriptText, composeMain, composeBody,
     montageStatus, wordsProgress, uploadPct, projectState, fmtSrc,
+    assetNorm, lineRefs, scriptRefs, stripRefs, withInserts, matchAsset, fileKind, classifyFiles, INS, insertFit, lineSpans, placeInserts, insertForCompose,
+    RAMP, rampOf, rampSpans, rampSide, rampPick, rampForce, mainJoins, syncRamps, toggleRamp,
+    DEFAULT_ACCENT, normHex, projectAccent, applyAccent,
     MIN_KEEP, MIN_FRAG, SNAP_S, TRACKS, EVENT_TRACKS, RULER_STEPS, SAFE, XC, SYM_W, SNAP_X, PRO_LANGS, MIXERS,
     symDefaults, ltCentered, setLowerThirdAlign, snapCenterX, lowerThirdReveal, lowerThirdX,
     keepsFromCuts, Timeline, timelineFromPlan,

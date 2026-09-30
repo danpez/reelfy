@@ -332,15 +332,19 @@ def sids_by_job():
 
 def params_sids(params):
     """Fuentes que los PARAMETROS de un trabajo nombran como lista `sids` (el montaje "Armar con
-    IA" y la composicion que lo sigue): la limpieza del disco no las borra mientras el trabajo
-    exista, aunque todavia no haya plan."""
+    IA" y la composicion que lo sigue) y los RECURSOS del guion (`assets`: [sid], `asset_items`:
+    [{sid}]): la limpieza del disco no las borra mientras el trabajo exista, aunque todavia no haya
+    plan (un armado que fallo y se reintenta dias despues conserva sus imagenes y videos)."""
     if isinstance(params, str):
         try:
             params = json.loads(params) if params else {}
         except Exception:  # noqa
             return set()
-    sids = (params or {}).get("sids") if isinstance(params, dict) else None
-    return {s for s in sids or [] if isinstance(s, str) and _SID_OK.match(s)}
+    if not isinstance(params, dict):
+        return set()
+    lst = [v if isinstance(v, list) else [] for v in (params.get(k) for k in ("sids", "assets", "asset_items"))]
+    raw = lst[0] + lst[1] + [a.get("sid") for a in lst[2] if isinstance(a, dict)]
+    return {s for s in raw if isinstance(s, str) and _SID_OK.match(s)}
 
 
 def all_params():

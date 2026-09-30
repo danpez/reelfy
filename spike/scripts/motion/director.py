@@ -1363,7 +1363,82 @@ def shot_groups(out: list[dict]) -> list[list[int]]:
 # (section|line|splice), el setup de camara (mismo lugar/encuadre) y su slot/candidato del guion.
 # 'section' admite transicion; 'line' y 'splice' son corte seco (sin transicion ni whoosh)
 HARD_JOINS = ("line", "splice")
-SHOT_CARRY = ("join", "setup", "slot", "cand", "sid")
+# recursos del guion (fx.media): ninguna transicion a menos de esto (s, tiempo final) de su tarjeta
+MEDIA_TRANS_PAD = 0.45
+MEDIA_SFX = "swoosh_up"          # entrada de la tarjeta flotante: aire suave (la tarjeta sube)
+SHOT_CARRY = ("join", "setup", "slot", "cand", "sid", "ramp", "ramp_in", "ramp_out")
+
+
+def _ramp_on(v: Any) -> bool:
+    """Rampa activa: True o un dict ({dur, speed, side...}) que no la apaga (enabled/on False o
+    dur <= 0). False / None / ausente = sin rampa (el interruptor del usuario manda)."""
+    if isinstance(v, dict):
+        if v.get("enabled") is False or v.get("on") is False or v.get("ramp") is False:
+            return False
+        try:
+            return float(v.get("dur", 0.3) or 0.0) > 0.0
+        except (TypeError, ValueError):
+            return True
+    return v is True
+
+
+def ramp_join(shots: list[dict], k: int) -> bool:
+    """La union que ENTRA a shots[k] es un cambio de camara con RAMPA de velocidad (solo video,
+    audio a 1x): shots[k].ramp o .ramp_in, o shots[k-1].ramp_out. La rampa ES la transicion: ahi
+    no va otra transicion ni whoosh. Un `ramp: false` explicito en shots[k] la apaga."""
+    if not (0 <= k < len(shots)) or not isinstance(shots[k], dict):
+        return False
+    s = shots[k]
+    if s.get("ramp") is False:
+        return False
+    if _ramp_on(s.get("ramp")) or _ramp_on(s.get("ramp_in")):
+        return True
+    return k > 0 and isinstance(shots[k - 1], dict) and _ramp_on(shots[k - 1].get("ramp_out"))
+
+
+def media_items(plan: dict) -> list[dict]:
+    """Recursos del guion activos (plan.fx.media, tiempo ORIGINAL): contenido BLOQUEADO del
+    usuario. El director no pone titulos, tarjetas, escenas, garabatos ni transiciones encima
+    (los subtitulos se quedan)."""
+    fx = plan.get("fx") if isinstance(plan.get("fx"), dict) else {}
+    out = []
+    for it in fx.get("media") or []:
+        if not isinstance(it, dict) or it.get("enabled", True) is False:
+            continue
+        try:
+            a, b = float(it["start"]), float(it["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if b > a:
+            out.append(it)
+    return out
+
+
+def _keep_media(fx: dict, old: dict) -> dict:
+    """fx.media del plan anterior pasa tal cual al plan nuevo (el director nunca lo toca)."""
+    if isinstance(old, dict) and isinstance(old.get("media"), list):
+        fx["media"] = copy.deepcopy(old["media"])
+    return fx
+
+
+def _keep_accent(fx: dict, old: dict, style: str | None = None) -> dict:
+    """El color de acento del PROYECTO (fx.accent, lo elige el usuario; sin el, el amarillo de siempre)
+    pasa al plan nuevo al dirigir, re-dirigir o aplicar el perfil: los subtitulos nuevos lo usan
+    (accent y el resaltado que venia del estilo). El render lo usa como acento de la paleta y el
+    servidor (_accent_apply) pasa a el lo que la IA pinto con el acento de su estilo."""
+    m = re.fullmatch(r"#?([0-9a-fA-F]{6})", str((old or {}).get("accent") or "").strip()) \
+        if isinstance(old, dict) else None
+    if not m:
+        return fx
+    acc = "#" + m.group(1).upper()
+    fx["accent"] = acc
+    cap = fx.get("captions")
+    if isinstance(cap, dict):
+        pal = str(assets.palette(style).get("accent") or "").upper()
+        if str(cap.get("highlight") or "").upper() in {pal, "#FFD23F"} - {""}:
+            cap["highlight"] = acc
+        cap["accent"] = acc
+    return fx
 
 
 def _carry_montage(out: list[dict], shots_in: list[dict]) -> list[dict]:
@@ -3288,6 +3363,23 @@ class _Choreo:
             ws_ = self.words[s_["w0"]:s_["w1"] + 1]
             if ws_ and sum(1 for w in ws_ if w["i"] in self.titled_words) >= 0.6 * len(ws_):
                 s_["info"]["_done"] = True
+        # recursos del guion (fx.media): contenido BLOQUEADO que ocupa la pantalla (tarjeta flotante
+        # sobre el video desenfocado). Ocupan todas las franjas (nada de titulos, tarjetas, escenas
+        # ni garabatos encima; los subtitulos se quedan) y cuentan como eventos para el ritmo
+        self.media_win: list[tuple[float, float, str]] = []
+        for it in media_items(plan):
+            a, b = self.f(float(it["start"])), self.f(float(it["end"]))
+            if b - a <= 0.05:
+                continue
+            iid = "media:" + str(it.get("id"))
+            self.media_win.append((a, b, iid))
+            for z in ("top", "center", "low", "full", "accent"):
+                self.occ[z].append((a, b, iid))
+            t = a
+            while t < b:
+                self.events.append((t, iid))
+                t += 1.0
+            self.events.append((b, iid))
 
     # ---------------------------------------------------------- tiempo
     def f(self, t: float) -> float:
@@ -3375,6 +3467,7 @@ class _Choreo:
         for k, s in enumerate(shots):
             d = dict(s)
             d["k"] = k
+            d["ramp_join"] = ramp_join(shots, k)
             d["f0"], d["f1"] = self.f(s["start"]), self.f(s["end"])
             talk = s.get("use", "a_camara") == "a_camara"
             if self.crop_w < 0.999:
@@ -3644,6 +3737,16 @@ class _Choreo:
         return self.pal["accent"]
 
     # ---------------------------------------------------------- ocupacion
+    def on_media(self, fa: float, fb: float, pad: float = 0.0) -> bool:
+        """[fa, fb] (tiempo final) toca un recurso del guion (fx.media)."""
+        return any(fa < b + pad - 1e-6 and a < fb + pad - 1e-6 for a, b, _ in self.media_win)
+
+    def near_ramp(self, ft: float, before: float, after: float | None = None) -> bool:
+        """ft (tiempo final) cae a menos de `before` antes / `after` despues de una union con
+        rampa de velocidad (cambio de camara del montaje)."""
+        after = before if after is None else after
+        return any(sh.get("ramp_join") and -before <= ft - sh["f0"] <= after for sh in self.shots)
+
     def free(self, zone: str, fa: float, fb: float, pad: float = 0.0, cta: bool = False) -> bool:
         """`cta`: para un CTA (Seguir, enlace) las franjas que un titulo bloqueado reserva de mas
         ('lockzone:') no cuentan; su propia franja si."""
@@ -3835,6 +3938,9 @@ class _Choreo:
                     it["border_color"] = "#161616"
             if zone is None:
                 zone = zone_of(track, it)
+            if track in ("text", "graphics", "cutaways") and zone != "edge" and self.on_media(fa, fb):
+                self.ids.discard(it["id"])           # un recurso del guion ocupa la pantalla
+                return None
             if zone == "accent":
                 ok = self.free_accent(float(it.get("x", 0.5)), float(it.get("y", 0.5)), fa, fb)
             else:
@@ -4148,6 +4254,10 @@ class _Choreo:
             return False
         if any(abs(r["f"] - fa) < 0.3 for r in self.trans_req):
             return False
+        if self.on_media(fa - MEDIA_TRANS_PAD, fa + MEDIA_TRANS_PAD):
+            return False                         # la tarjeta del recurso no se lava con una transicion
+        if self.near_ramp(fa, 0.3):
+            return False                         # la rampa de velocidad ES la transicion
         if self.windows is not None and not any(wa - 0.3 <= fa <= wb + 0.3 for wa, wb in self.windows):
             return False
         self.trans_req.append({"at": at, "f": fa, "ctx": ctx, "prefer": prefer, "dir": dirn})
@@ -4157,9 +4267,11 @@ class _Choreo:
     @staticmethod
     def hard_join(shot: dict) -> bool:
         """La toma entra con una union de montaje de corte seco (misma seccion del guion: 'line'
-        entre lineas, 'splice' a mitad de frase): sin transicion ni whoosh. 'section' (o sin
-        montaje) admite transicion."""
-        return shot.get("join") in HARD_JOINS
+        entre lineas, 'splice' a mitad de frase) o con una RAMPA de velocidad en el cambio de
+        camara (la rampa ES la transicion): sin transicion ni whoosh. 'section' (o sin montaje)
+        admite transicion."""
+        return shot.get("join") in HARD_JOINS or bool(shot.get("ramp_join")) \
+            or (shot.get("ramp") is not False and (_ramp_on(shot.get("ramp")) or _ramp_on(shot.get("ramp_in"))))
 
     def transitions(self) -> None:
         for ch in self.shot_changes():
@@ -8213,6 +8325,8 @@ class _Choreo:
             if self.windows is not None and not any(wa - 0.3 <= ft <= wb + 0.6 for wa, wb in self.windows):
                 continue
             cat = SFX_CAT.get(r["name"], "x")
+            if cat == "air" and self.near_ramp(ft, 0.15, 0.4):
+                continue                          # la rampa de velocidad es la transicion: sin whoosh
             if any(c == cat and abs(t - ft) < same_gap for t, c in acc):   # capas de distinta familia: si
                 continue
             # densidad: no mas de 4 SFX en una ventana de 1.2 s (3 si son de baja prioridad)
@@ -8817,8 +8931,37 @@ class _Choreo:
         self._sym_old = {}
         return rep
 
+    # ---------------------------------------------------------- recursos del guion (fx.media)
+    def media_sfx(self) -> None:
+        """Aire suave cuando entra la tarjeta de un recurso del guion (una vez por recurso)."""
+        for a, _b, iid in self.media_win:
+            if a < 0.05 or a > self.D - 0.2:
+                continue
+            self.sfx(self.o(a + 0.03), MEDIA_SFX, prio=6, gain=SFX_GAIN.get(MEDIA_SFX, -5) - 2.0, src_id=iid)
+
+    def media_guard(self) -> None:
+        """Red de seguridad: lo de la IA que termino encima de un recurso del guion (un CTA o un
+        rotulo que se alargo despues de colocarse, una transicion pegada) se quita con sus SFX, y
+        ninguna transicion queda en una union con rampa. La barra de progreso y la marca de agua
+        (franja 'edge') se quedan."""
+        if not self.media_win and not any(sh.get("ramp_join") for sh in self.shots):
+            return
+        for tr in ("text", "graphics", "cutaways"):
+            for it in list(self.fx[tr]):
+                if tr == "graphics" and zone_of(tr, it) == "edge":
+                    continue
+                if not any(x is it for x in self.fx[tr]):
+                    continue                      # se fue con su gemelo espejo
+                if self.on_media(self.f(float(it["start"])), self.f(float(it["end"]))):
+                    self._unplace(it)
+        for it in list(self.fx["transitions"]):
+            fa = self.f(float(it["at"]))
+            if self.on_media(fa - MEDIA_TRANS_PAD, fa + MEDIA_TRANS_PAD) or self.near_ramp(fa, 0.3):
+                self._unplace(it)
+
     # ---------------------------------------------------------- orquestacion
     def run(self) -> dict:
+        self.media_sfx()
         self.camera()
         self.transitions()
         self.reserve_final_cta()
@@ -8845,6 +8988,7 @@ class _Choreo:
         # red de seguridad: todo lo que coloco esta coreografia queda simetrico (lo del usuario y
         # lo bloqueado viven en self.fixed y no se tocan)
         self.symmetry()
+        self.media_guard()
         if self.S["progress"] and self.windows is None:
             self.add("graphics", "progress", {"start": 0.0, "end": self.tl.duration, "kind": "progress",
                                               "x": 0.5, "y": 0.0, "size": 1.0, "color": self.pal["accent"],
@@ -9744,6 +9888,8 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
     fx["captions"] = _captions_cfg(style, pal, ch)
     fx["music"] = mcfg
     fx["grade"] = _grade_cfg(style)
+    _keep_media(fx, old)                 # recursos del guion: contenido bloqueado, tal cual
+    _keep_accent(fx, old, style)         # el color de acento que eligio el usuario
     p["fx"] = fx
     p["shots"] = [{k: v for k, v in s.items() if k != "vlm"} for s in shots]
     p["entities"] = _entities_public(script["entities"])
@@ -10654,6 +10800,8 @@ def redirect(plan: dict, style: str | None = None, intensity: float | None = Non
         keep = key_ in locked_ids or (only and key_ not in only)
         fx[key_] = copy.deepcopy(old[key_]) if keep and isinstance(old.get(key_), dict) else fn()
     fx["music"] = mcfg
+    _keep_media(fx, old)                 # recursos del guion: contenido bloqueado, tal cual
+    _keep_accent(fx, old, style)         # el color de acento que eligio el usuario
     p["fx"] = fx
     p["shots"] = shots
     prev_notes = [n for n in d.get("notes") or [] if isinstance(n, str) and n.startswith(_KEEP_NOTES)

@@ -192,6 +192,7 @@ class FrameCtx:
     quality: str = "final"            # "final" | "draft"
     seed: int = 7
     style: str = "dinamico"
+    accent: str | None = None         # acento del PROYECTO (plan.fx.accent): gana al del estilo
     shot: dict | None = None
     face: tuple | None = None         # (cx, cy, w, h) normalizado en el cuadro de salida
     words: list = field(default_factory=list)   # palabras con tiempos FINALES [{text,start,end,kw}]
@@ -231,7 +232,16 @@ class FrameCtx:
     # -------------------------------------------------- recursos
     @property
     def palette(self) -> dict:
-        return assets.palette(self.style)
+        """Paleta del estilo; con acento del proyecto (plan.fx.accent) su "accent" es ese: lo que no
+        trae color propio (una tarjeta del director, el titulo que el usuario agrego) sale con el
+        acento elegido, igual que en la vista del Studio."""
+        pal = assets.palette(self.style)
+        if not self.accent:
+            return pal
+        got = self._cache.get("_palette")
+        if got is None:
+            got = self._cache["_palette"] = dict(pal, accent=self.accent)
+        return got
 
     def font(self, name: str | None, size_px: float) -> skia.Font:
         return assets.font(name, size_px)

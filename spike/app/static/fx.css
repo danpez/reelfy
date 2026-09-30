@@ -4,7 +4,7 @@
   /* colores por pista (tripletas RGB para usarlas con rgba()) */
   --trk-text:167,139,250; --trk-gfx:244,114,182; --trk-scene:45,212,191; --trk-fx:96,165,250;
   --trk-trans:251,146,60; --trk-sfx:250,204,21; --trk-mus:52,211,153; --trk-cap:126,166,216;
-  --trk-cut:214,84,79; --trk-short:255,90,60;
+  --trk-cut:214,84,79; --trk-short:255,90,60; --trk-media:129,140,248;
   --lab-w:134px;
 }
 /* modo: .pro (plan v2) oculta lo clasico y viceversa */
@@ -838,3 +838,107 @@ body.mclean .toast.on{transform:translateX(-50%) translateY(0)}
   background:rgba(10,12,16,.82);border:1px solid var(--line2);border-radius:20px;padding:5px 6px;font-size:12px;color:var(--text);backdrop-filter:blur(6px)}
 .asm-pvb span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;padding-left:8px}
 .asm-pvb .mt-btn{padding:4px 10px;border-radius:14px}
+
+/* ---------- recursos del guion (tarjeta flotante) y cambios de camara con aceleracion ---------- */
+/* pantalla de inicio: lo que pide el guion y si ya esta entre los archivos */
+.grefs{margin-top:10px;border:1px solid var(--line);border-radius:10px;background:var(--sunken);padding:10px 12px}
+.grefs[hidden]{display:none!important}
+.grefs-h{display:flex;align-items:center;gap:8px;font-size:12.5px;margin-bottom:6px}
+.grefs-h .ic{width:14px;height:14px;color:rgb(var(--trk-media))}
+.grefs-h .cnt{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.grefs-h .gr-miss{margin-left:auto;color:#ff9a8a;font-size:11.5px;font-weight:700}
+.grefs-row{display:grid;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:10px;padding:7px 0;border-top:1px solid var(--line)}
+.grefs-row .gr-ic{width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;background:var(--panel2);border:1px solid var(--line2)}
+.grefs-row .gr-ic .ic{width:13px;height:13px}
+.grefs-row.ok .gr-ic{color:rgb(var(--trk-media))}
+.grefs-row.miss .gr-ic{color:#ff9a8a;border-color:rgba(255,138,138,.5)}
+.gr-main{min-width:0;display:flex;flex-direction:column;gap:1px}
+.gr-main b{font-size:12.5px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gr-main span{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.grefs-row.miss .gr-main span{color:#ff9a8a}
+.gr-ok{color:var(--ok);display:flex}.gr-ok .ic{width:14px;height:14px}
+.grefs-row .mt-btn{padding:6px 10px}
+.filelist .f.asset .ic{color:rgb(var(--trk-media))}
+.filelist .ftag{font-size:10.5px;font-weight:700;color:rgb(var(--trk-media));border:1px solid rgba(var(--trk-media),.5);border-radius:8px;padding:0 7px;white-space:nowrap}
+/* ensamble: pista Recursos */
+.asm-trk[hidden]{display:none!important}
+.asm-lane.md{height:34px}
+.mdb{position:absolute;top:4px;height:calc(100% - 8px);display:flex;align-items:center;gap:5px;padding:0 7px;min-width:14px;overflow:hidden;
+  border:1px solid rgba(var(--trk-media),.75);background:rgba(var(--trk-media),.22);color:#e0e4ff;border-radius:6px;font:inherit;font-size:10.5px;font-weight:650;
+  cursor:pointer;white-space:nowrap}
+.mdb .th{position:absolute;inset:0;background-size:cover;background-position:center;opacity:.25;pointer-events:none}
+.mdb .ic{width:11px;height:11px;flex:none;position:relative}
+.mdb span{position:relative;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.mdb.sel{box-shadow:0 0 0 1px #fff;border-color:#fff}
+.mdb.off{opacity:.45;border-style:dashed}
+.mdb.miss{border-color:rgba(255,138,138,.8);color:#ffd0c8;
+  background:repeating-linear-gradient(-45deg,rgba(255,90,60,.2) 0 5px,rgba(255,90,60,.08) 5px 10px)}
+.mdb:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+/* ensamble: marcador del cambio de camara (centrado en la union: simetrico) */
+/* marcador de la aceleracion: una insignia chica en el BORDE DE ARRIBA de la pista (sobre la union),
+   nunca encima del agarre de los bordes de recorte (.hnd2, centrados en la altura del clip) */
+.rampmk{position:absolute;top:0;width:16px;height:16px;margin:0 0 0 -8px;border-radius:50%;z-index:5;display:flex;align-items:center;justify-content:center;
+  border:1px solid var(--line2);background:#10141b;color:var(--muted);cursor:pointer;padding:0;box-shadow:0 1px 4px rgba(0,0,0,.6);transition:transform .12s,border-color .12s}
+.rampmk .ic{width:9px;height:9px}
+.rampmk:hover{transform:scale(1.12);border-color:var(--brand2)}
+.rampmk.on{background:var(--brand2);border-color:#fff;color:#1a1206}
+.rampmk.na{opacity:.55;border-style:dashed}
+.rampmk:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.ramprow{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.ramprow .swlabel .ic{width:13px;height:13px;color:var(--brand2)}
+/* visor del ensamble: tarjeta flotante (vista aproximada) */
+.asm-fcard{position:absolute;z-index:5;overflow:hidden;pointer-events:none;box-shadow:0 18px 44px rgba(0,0,0,.5),0 4px 12px rgba(0,0,0,.35);
+  outline:1px solid rgba(255,255,255,.14);outline-offset:-1px;transform-origin:50% 50%;background:#111}
+.asm-fcard[hidden]{display:none}
+.asm-fcard img,.asm-fcard video{width:100%;height:100%;object-fit:cover;display:block;transform-origin:50% 50%}
+/* panel "Tomas": recursos del guion */
+.mt-ramps{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;color:var(--muted);line-height:1.45;border:1px solid rgba(255,176,32,.3);
+  background:rgba(255,176,32,.06);border-radius:9px;padding:7px 9px}
+.mt-ramps>.ic{width:13px;height:13px;color:var(--brand2);flex:none;margin-top:2px}
+.mt-ramps span .ic{width:11px;height:11px;vertical-align:-1px;color:var(--brand2)}
+.mt-ramps b{color:var(--text)}
+.mt-resh{display:flex;align-items:center;gap:8px;font-size:12px;margin:4px 0 8px}
+.mt-resh .ic{width:13px;height:13px;color:rgb(var(--trk-media))}
+.mt-resh .cnt{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.mt-resh .mt-warn{margin-left:auto;font-size:11.5px}
+.mt-res{border:1px solid rgba(var(--trk-media),.4);border-radius:10px;background:var(--sunken);padding:10px;margin-bottom:8px}
+.mt-res.sel{border-color:rgb(var(--trk-media));box-shadow:0 0 0 1px rgb(var(--trk-media))}
+.mt-res.miss{border-style:dashed;border-color:rgba(255,138,138,.6);background:rgba(255,90,60,.06)}
+.mt-res.off{opacity:.7}
+.mt-rtop{display:grid;grid-template-columns:44px minmax(0,1fr);gap:10px;align-items:start;width:100%;border:0;background:none;color:inherit;font:inherit;text-align:left;padding:0;cursor:pointer}
+.mt-rtop:focus-visible{outline:2px solid var(--brand);outline-offset:3px;border-radius:6px}
+.mt-rth{width:44px;height:55px;border-radius:7px;overflow:hidden;background:var(--panel2);border:1px solid var(--line2);display:flex;align-items:center;justify-content:center}
+.mt-rth img{width:100%;height:100%;object-fit:cover;display:block}
+.mt-rth .ic{width:16px;height:16px;color:var(--muted)}
+.mt-res.miss .mt-rth .ic{color:#ff9a8a}
+.mt-rmain{min-width:0;display:flex;flex-direction:column}
+.mt-rline{font-size:11.5px;line-height:1.45;color:var(--text);opacity:.86;font-style:italic;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.mt-rmiss{display:flex;gap:6px;align-items:flex-start;color:#ff9a8a;font-size:11.5px;line-height:1.45;margin-top:4px}
+.mt-rmiss .ic{width:12px;height:12px;flex:none;margin-top:2px}
+.mt-res .mt-acts{grid-template-columns:repeat(2,minmax(0,1fr))}
+.mt-res .mt-radd{grid-column:1 / -1}
+.mt-rchips{display:flex;flex-wrap:wrap;gap:6px;margin:7px 0 0 31px}
+.mt-rchip{display:inline-flex;align-items:center;gap:5px;max-width:100%;border:1px solid rgba(var(--trk-media),.55);background:rgba(var(--trk-media),.1);color:#dfe3ff;
+  border-radius:12px;padding:2px 9px;font:inherit;font-size:11px;font-weight:650;cursor:pointer}
+.mt-rchip span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.mt-rchip .ic{width:11px;height:11px;flex:none}
+.mt-rchip.miss{border-color:rgba(255,138,138,.6);background:rgba(255,90,60,.08);color:#ffb4a8}
+.mt-rchip.off{opacity:.55;text-decoration:line-through}
+.mt-rchip:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+/* Studio: color de acento del proyecto */
+.acc-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center}
+.acc-sw{width:36px;height:30px;border-radius:8px;border:1px solid var(--line2);padding:0;background:none;cursor:pointer}
+.acc-hex{width:100%;min-width:0;background:var(--sunken);border:1px solid var(--line);border-radius:8px;padding:6px 9px;color:var(--text);font:inherit;font-size:12.5px;
+  font-variant-numeric:tabular-nums;text-transform:uppercase}
+.acc-hex:focus{outline:none;border-color:var(--brand)}
+.acc-demo{display:flex;gap:6px;align-items:center;margin-top:8px;font-size:11.5px;color:var(--muted)}
+.acc-demo b{font-weight:800;color:#fff;text-shadow:0 1px 2px #000}
+.acc-demo i{font-style:normal;font-weight:800;padding:1px 8px;border-radius:8px}
+/* Studio: inspector de un recurso */
+.md-file{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:10px;align-items:center;margin-bottom:8px}
+.md-th{width:40px;height:50px;border-radius:7px;overflow:hidden;background:var(--sunken);border:1px solid var(--line2);display:flex;align-items:center;justify-content:center}
+.md-th img{width:100%;height:100%;object-fit:cover;display:block}
+.md-th .ic{width:15px;height:15px;color:#ff9a8a}
+.md-nm{min-width:0;display:flex;flex-direction:column;gap:2px}
+.md-nm b{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.md-nm span{font-size:11.5px;color:var(--muted)}

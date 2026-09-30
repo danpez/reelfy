@@ -173,11 +173,13 @@ def test_con_guion_toma_limpia_mas_reciente_orden_y_contrato(tmp_path):
     r = M.build(clips, GUION)
     # contrato
     assert set(r) == {"version", "order", "script", "slots", "timeline", "discarded", "uncovered", "extra",
-                      "stats", "ms"}
+                      "inserts", "stats", "ms"}
+    assert r["inserts"] == [] and all(L["inserts"] == [] for L in r["script"]["lines"])
     assert r["version"] == 1 and isinstance(r["ms"], int)
     assert [o["sid"] for o in r["order"]] == ["c1", "c2", "c3", "c4", "c5", "c6"]
     assert [o["rec"] for o in r["order"]] == list(range(6))
-    assert set(r["order"][0]) == {"sid", "name", "rec", "created"}
+    assert set(r["order"][0]) == {"sid", "name", "rec", "created", "setup"}
+    assert [o["setup"] for o in r["order"]] == [0, 0, 0, 1, 1, 2]
     assert r["script"]["source"] == "user" and r["script"]["text"] == GUION
     assert [x["id"] for x in r["script"]["lines"]] == ["L01", "L02", "L03", "L04", "L05"]
     ids = set()
@@ -187,14 +189,16 @@ def test_con_guion_toma_limpia_mas_reciente_orden_y_contrato(tmp_path):
         for c in s["cands"]:
             # vol/level_db: nivel de voz medido (con audio); conf: la confianza si fuera la elegida
             assert set(c) == {"id", "sid", "in", "out", "w0", "w1", "text", "score", "fidelity", "coverage",
-                              "flags", "reason", "setup", "vol", "level_db", "conf"}
+                              "flags", "reason", "setup", "vol", "level_db", "conf", "line_times"}
+            assert set(c["line_times"]) <= set(s["lines"])
             assert c["id"] not in ids and c["in"] < c["out"] and 0 <= c["score"] <= 1
             assert c["vol"] > 0 and 0 <= c["conf"] <= 1
             assert isinstance(c["reason"], str) and c["reason"] and isinstance(c["setup"], int)
             ids.add(c["id"])
     t = 0.0
     for k, x in enumerate(r["timeline"]):
-        assert set(x) == {"slot", "cand", "sid", "in", "out", "start", "vol", "join", "conf"}
+        keys = {"slot", "cand", "sid", "in", "out", "start", "vol", "join", "conf", "setup"}
+        assert set(x) - {"ramp_in", "ramp_out"} == (keys if k == 0 else keys | {"ramp", "ramp_auto"})
         assert x["start"] == pytest.approx(t, abs=2e-3) and x["vol"] > 0
         assert (x["join"] is None) == (k == 0) and x["join"] in (None, "section", "line", "splice")
         t += x["out"] - x["in"]

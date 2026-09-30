@@ -36,6 +36,32 @@ setup?}); sin ningun item de montaje todo queda EXACTAMENTE como antes:
     setup y sid; finish_plan() los pasa a plan.shots, arma plan.montage con el indice de toma de
     cada segmento, quita los cortes de tomas que cruzarian una union y siembra las secciones de
     plan.takes con las del guion.
+
+RAMPAS DE VELOCIDAD en los cambios de camara (un item de video con "ramp_in"/"ramp_out", en el
+item o en su "montage"; las decide montage.py): SOLO el VIDEO de un lado de la union corre a
+`speed` x durante `dur` s de salida usando cuadros de mas de su fuente (la "manija"); el AUDIO es
+exactamente [in, out] a 1x (con sus micro-fundidos) y la duracion no cambia, asi que la sincronia
+sigue intacta fuera de la rampa (la rampa cae en la pausa entre frases).
+  - "ramp_in"  {"dur": d, "speed": s}: el video empieza d*(s-1) s ANTES de "in" y corre a s x los
+    primeros d s; luego 1x (ya alcanzo a su audio).
+  - "ramp_out" {"dur": d, "speed": s}: el video sigue d*(s-1) s DESPUES de "out", comprimido en los
+    ultimos d s del segmento.
+  - Solo en una union entre dos clips sin crossfade y sin apagar ("ramp": false en el item que
+    entra); una rampa por union (si llegan los dos lados gana la de salida). Sin manija suficiente
+    se acorta a lo que hay (misma velocidad) y si queda < RAMP_MIN no se hace. info.shots[i] (el
+    que ENTRA por la union) lleva "ramp": {"side": "in"|"out", "dur", "speed"} con lo que de
+    verdad se hizo; finish_plan() lo pasa a plan.shots.
+  - La rampa cae en la pausa de la union y el analisis corta esa pausa (silencio): finish_plan()
+    recorta esos cortes de silencio para que no se coman la rampa (keep_ramps); lo demas de la pausa
+    se sigue quitando.
+
+RECURSOS DEL GUION (plan.montage.inserts, en s de la linea de tiempo del ensamble): finish_plan()
+los lleva al video combinado por su ancla en la FUENTE (clip + segundo), asi un cambio de toma en
+otra linea no los mueve, y escribe plan.fx.media (style "float_card", locked, src "script"); cada
+insert gana t0/t1 (s del video combinado) y su start/end queda en la linea de tiempo compuesta.
+Con spec["inserts_timeline"] == "main" los inserts YA estan en la linea de tiempo del ensamble que se
+compone (los recoloco la UI sobre los clips actuales: FXCore.placeInserts) y se anclan en ella, no en
+la linea de tiempo guardada del montaje (que puede ser la de antes de cambiar tomas).
 """
 import copy
 import math
@@ -66,10 +92,23 @@ MICRO_FADE = min(0.02, max(0.01, float(os.environ.get("REELFY_MICRO_FADE_MS", "1
 LEVEL_UP_DB = 15.0      # lo mas que se sube una toma (sin microfono: ~15 dB bajo las demas)
 LEVEL_DOWN_DB = 12.0    # lo mas que se baja
 LIMIT = 0.89            # techo (-1 dBFS: margen para el sobretiro del AAC) cuando una toma se sube
-SHOT_KEYS = ("join", "slot", "cand", "conf", "setup", "sid")   # de info.shots a plan.shots
+SHOT_KEYS = ("join", "slot", "cand", "conf", "setup", "sid", "ramp")   # de info.shots a plan.shots
 # uniones exactas (segmentos de cuadros enteros + audio re-codificado al unir, ver compose()):
 # "montage" (default: solo "Armar con IA"), "all" (tambien el ensamble manual) u "off"
 EXACT_JOINS = os.environ.get("REELFY_COMPOSE_EXACT_JOINS", "montage").strip().lower()
+# rampas de velocidad (solo video) en los cambios de camara: ver el docstring del modulo
+RAMP_MIN = 0.10          # s de salida: una rampa mas corta (3 cuadros a 30 fps) no se nota
+RAMP_MAX = 1.0           # s de salida
+RAMP_SPEED_MAX = 4.0
+RAMP_SHARE = 0.4         # cada rampa <= 40 % del segmento: las dos de un segmento nunca se enciman
+# Sin desenfoque de movimiento en la rampa: medido con una barra en movimiento (obturador de 180
+# grados, 30 y 60 fps), mezclar los cuadros que cubre cada cuadro de salida (tmix) deja la barra
+# DOBLE (dos bordes, un fantasma) en vez de un barrido suave; el corte manual de referencia tampoco
+# lo usa. Los cuadros de la rampa salen nitidos, como a 1x.
+# recursos del guion en plan.fx.media
+MEDIA_MIN = 0.5          # s: un recurso mas corto en el video combinado no se pone
+IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".heic")
+VIDEO_EXT = (".mp4", ".mov", ".m4v", ".mkv", ".webm")
 
 
 def canvas_size(w, h):
@@ -264,39 +303,143 @@ def _seg_dur(dur, fps, exact=False):
     return d, f"{d:.6f}"
 
 
+@lru_cache(maxsize=64)
+def _video_end_cached(path, size, mtime_ns):
+    r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "stream=duration:format=duration", "-of", "default=nw=1", path],
+                       capture_output=True, text=True, timeout=30)
+    vals = []
+    for ln in (r.stdout or "").splitlines():
+        try:
+            v = float(ln.partition("=")[2])
+        except ValueError:
+            continue
+        if math.isfinite(v) and v > 0:
+            vals.append(v)
+    # el del stream de video (el contenedor puede durar mas por la cola del audio)
+    return min(vals) if vals else None
+
+
+def video_end(path):
+    """Segundo en que termina el VIDEO de la fuente (el menor entre el stream y el contenedor), o
+    None si no se puede saber: el limite de la manija de una rampa de salida."""
+    try:
+        st = Path(path).stat()
+        return _video_end_cached(str(path), st.st_size, st.st_mtime_ns)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def ramp_fit(t_in, dur, fps, src_end=None, ramp_in=None, ramp_out=None):
+    """Rampas EFECTIVAS de un segmento que toma [t_in, t_in + dur] de su fuente (`dur` s de salida)
+    a partir de las pedidas ({"dur", "speed"} o None). La manija de entrada es lo que hay antes de
+    t_in; la de salida, lo que hay entre t_in + dur y `src_end` (fin del video; None = no se sabe:
+    sin rampa de salida). Sin manija suficiente se acorta la rampa (misma velocidad); cada una se
+    limita a RAMP_SHARE del segmento, se redondea a cuadros de salida enteros y si queda < RAMP_MIN
+    no se hace. -> {"in": {"dur", "speed", "pre", "req"} | None, "out": {"dur", "speed", "post",
+    "req"} | None} (pre/post: s de fuente de mas antes de "in" / despues de "out")."""
+    fps = float(fps)
+    dur = float(dur)
+
+    def fit(req, handle):
+        if not req:
+            return None
+        sp = float(req["speed"])
+        d = min(float(req["dur"]), RAMP_SHARE * dur, max(0.0, float(handle)) / (sp - 1.0))
+        d = math.floor(d * fps + 1e-6) / fps
+        if d < RAMP_MIN - 1e-9:
+            return None
+        return {"dur": d, "speed": sp, "req": float(req["dur"])}
+
+    rin = fit(ramp_in, max(0.0, float(t_in)))
+    if rin:
+        rin["pre"] = rin["dur"] * (rin["speed"] - 1.0)
+    rout = fit(ramp_out, (float(src_end) - (float(t_in) + dur)) if src_end else 0.0)
+    if rout:
+        rout["post"] = rout["dur"] * (rout["speed"] - 1.0)
+    return {"in": rin, "out": rout}
+
+
+def _ramp_expr(dur, rin=None, rout=None):
+    """Expresion de setpts del remapeo de tiempo del VIDEO (T = s desde el inicio de la lectura, que
+    arranca `pre` s antes de "in"): a `speed` x en las rampas, 1x en medio. El resultado se redondea
+    al tick (+0.5: setpts trunca) para que un cuadro que cae justo a la mitad entre dos de salida
+    siempre se resuelva igual."""
+    pre = float(rin["pre"]) if rin else 0.0
+    body = f"T-{pre:.9f}" if pre > 0 else "T"
+    if rout:
+        t1 = float(dur) - float(rout["dur"])            # s de salida donde empieza la rampa
+        u1 = pre + t1                                   # ... y su s de lectura
+        body = f"if(lt(T,{u1:.9f}),{body},{t1:.9f}+(T-{u1:.9f})/{float(rout['speed']):.9f})"
+    if rin:
+        a = float(rin["dur"]) * float(rin["speed"])     # s de lectura que cubre la rampa
+        body = f"if(lt(T,{a:.9f}),T/{float(rin['speed']):.9f},{body})"
+    return f"setpts='({body})/TB+0.5'"
+
+
 def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0, fin=0.0, fout=0.0, br=None,
-                afin=0.0, afout=0.0, limit=False, exact=False):
+                afin=0.0, afout=0.0, limit=False, exact=False, ramp_in=None, ramp_out=None):
     """Recorta [in,out] y normaliza a WxH/fps con audio 48k estéreo (silencio si
     no tiene). cover-crop para llenar el lienzo. `vol` volumen (0=mudo); `fin`/`fout`
     desvanecen VIDEO (a/desde negro) y AUDIO al inicio/fin del clip. `br` bitrate del
     montaje (spec_bitrate); sin el, el tope de esta fuente. `afin`/`afout`: micro-fundido
     SOLO de audio (uniones del montaje); `limit`: limitador tras el volumen (vol > 1);
-    `exact`: duracion de cuadros enteros (_seg_dur)."""
+    `exact`: duracion de cuadros enteros (_seg_dur). `ramp_in`/`ramp_out` ({"dur", "speed"}):
+    rampas de velocidad SOLO del video (ver ramp_fit); el audio sale identico al de sin rampa.
+    Devuelve las rampas efectivas (ramp_fit) o None si no se hizo ninguna."""
     dur, tdur = _seg_dur(max(0.1, t_out - t_in), fps, exact)
     fin = max(0.0, min(float(fin), dur / 2)); fout = max(0.0, min(float(fout), dur / 2))
     afin = max(0.0, min(float(afin), dur / 4)); afout = max(0.0, min(float(afout), dur / 4))
     info = video_io.probe(src)
+    ramps = None
+    if ramp_in or ramp_out:
+        t0 = float(f"{float(t_in):.3f}")                # el mismo "in" que lee el audio
+        ramps = ramp_fit(t0, dur, fps, video_end(src) if ramp_out else None, ramp_in, ramp_out)
+        if not (ramps["in"] or ramps["out"]):
+            ramps = None
     # ffmpeg autorrota al decodificar (los cuadros ya llegan en orientación de display);
     # la escala conserva 10 bits y el tonemap HLG/PQ -> SDR bt709 va ANTES de bajar a 8 bits.
+    # Uniones exactas (montaje) y rampas: fps arranca en 0 (start_time=0). Con un "in" fuera de la
+    # rejilla de cuadros el primer cuadro tras el -ss cae a mas de medio cuadro y fps empezaba en el
+    # cuadro 1: el video del segmento empezaba un cuadro tarde y en el video combinado ese corte se
+    # veia 33 ms despues que su audio (en ~la mitad de las uniones de un montaje real).
+    fps_f = f"fps={fps}:start_time=0" if (exact or ramps) else f"fps={fps}"
     vf = [f"scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos",
-          f"crop={w}:{h}", f"fps={fps}", "setsar=1"] + video_io.tonemap_filters(info)
+          f"crop={w}:{h}", fps_f, "setsar=1"] + video_io.tonemap_filters(info)
     af = _audio_filters(dur, vol, fin, fout, afin, afout, limit)
     if fin > 0.01:
         vf.append(f"fade=t=in:st=0:d={fin:.3f}")
     if fout > 0.01:
         vf.append(f"fade=t=out:st={dur - fout:.3f}:d={fout:.3f}")
-    cmd = [FFMPEG, "-y"] + video_io.hwaccel_args() + ["-ss", f"{t_in:.3f}", "-i", str(src),
-                                                    "-t", tdur]
-    if not info.get("has_audio"):
-        cmd += ["-f", "lavfi", "-t", tdur, "-i", "anullsrc=r=48000:cl=stereo",
-                "-map", "0:v:0", "-map", "1:a:0"]
+    if ramps:
+        # el video se lee desde `pre` s antes (otra entrada del MISMO archivo) y se remapea antes de
+        # escalar; fps= luego toma el cuadro mas cercano a cada tiempo de salida. El audio es la
+        # entrada 1 con el mismo -ss de siempre.
+        pre = ramps["in"]["pre"] if ramps["in"] else 0.0
+        v0 = max(0.0, t0 - pre)
+        vf = [_ramp_expr(dur, ramps["in"], ramps["out"])] + vf
+        cmd = [FFMPEG, "-y"] + video_io.hwaccel_args() + ["-ss", f"{v0:.6f}", "-i", str(src)]
+        if not info.get("has_audio"):
+            cmd += ["-f", "lavfi", "-t", tdur, "-i", "anullsrc=r=48000:cl=stereo"]
+        else:
+            cmd += ["-ss", f"{t_in:.3f}", "-i", str(src)]
+        cmd += ["-map", "0:v:0", "-map", "1:a:0", "-t", tdur]
     else:
-        # 1a pista de audio explícita (los iPhone traen una 2a pista APAC espacial)
-        cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+        cmd = [FFMPEG, "-y"] + video_io.hwaccel_args() + ["-ss", f"{t_in:.3f}", "-i", str(src)]
+        if not info.get("has_audio"):
+            cmd += ["-f", "lavfi", "-t", tdur, "-i", "anullsrc=r=48000:cl=stereo",
+                    "-map", "0:v:0", "-map", "1:a:0"]
+        else:
+            # 1a pista de audio explícita (los iPhone traen una 2a pista APAC espacial)
+            cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+        # -t de SALIDA (despues de las entradas): antes quedaba como opcion de la entrada de
+        # silencio y un video sin audio salia desde "in" hasta el final de su fuente
+        cmd += ["-t", tdur]
     cmd += ["-vf", ",".join(vf), "-af", ",".join(af), "-c:v", "h264_videotoolbox",
             "-b:v", br or _vbitrate(w, h, fps, src_bitrate(src))] + _color_tags() + [
             "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)]
     _run(cmd)
+    return ramps
 
 
 def _norm_image(src, dur, out, w, h, fps, fin=0.0, fout=0.0, br=None, exact=False):
@@ -661,6 +804,203 @@ def _annotate_shots(shots, seq, montage=None):
                 sh["setup"] = c["setup"]
 
 
+def seg_rows(shots, seq, at, seg_len):
+    """Lo que el mapeo de recursos del guion necesita de cada segmento del video combinado (va en
+    info["segs"], aparte de info.shots): start/end (s del video combinado), kind, at/len (donde
+    estaba en la linea de tiempo del ensamble), sid, in (s de su fuente; solo videos), slot, cand."""
+    out = []
+    for sh in shots or []:
+        i = int(sh.get("index", -1))
+        if not (0 <= i < len(seq)) or i >= len(at):
+            continue
+        kind, data, _tr = seq[i]
+        r = {"index": i, "start": sh["start"], "end": sh["end"], "kind": kind,
+             "at": round(float(at[i]), 6), "sid": None, "in": None, "slot": None, "cand": None}
+        if kind == "black":
+            r["len"] = round(float(data), 6)
+        else:
+            r["len"] = round(float(seg_len(data)), 6)
+            r["sid"] = data.get("sid")
+            if data.get("type", "video") != "image":
+                r["in"] = float(data.get("in", 0) or 0)
+            m = data.get("montage")
+            if isinstance(m, dict):
+                r["slot"], r["cand"] = m.get("slot"), m.get("cand")
+        out.append(r)
+    return out
+
+
+# ---------------------------------------------------------------- rampas de velocidad
+def _ramp_req(s, side):
+    """Rampa pedida de un item ("ramp_in"/"ramp_out" en el item o en su "montage") -> {"dur",
+    "speed"} saneada o None (sin rampa, dur <= 0 o speed <= 1)."""
+    key = f"ramp_{side}"
+    raw = s.get(key)
+    m = s.get("montage")
+    if raw is None and isinstance(m, dict):
+        raw = m.get(key)
+    if not isinstance(raw, dict):
+        return None
+    try:
+        d = float(raw.get("dur"))
+        sp = float(raw["speed"]) if raw.get("speed") is not None else 2.0
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(d) and math.isfinite(sp)) or d <= 0 or sp <= 1.0 + 1e-3:
+        return None
+    return {"dur": min(d, RAMP_MAX), "speed": min(sp, RAMP_SPEED_MAX)}
+
+
+def _ramp_off(s):
+    """La union de este item (con el ANTERIOR) tiene la rampa apagada por el usuario."""
+    m = s.get("montage") if isinstance(s.get("montage"), dict) else {}
+    return s.get("ramp") is False or m.get("ramp") is False
+
+
+def seq_ramps(seq):
+    """Rampas pedidas por elemento de `seq` -> [{"in": {dur, speed} | None, "out": ...}]. Solo en
+    una union entre dos clips seguidos (sin negro en medio), sin crossfade y sin apagar; la rampa
+    va en un VIDEO. Una sola por union: si llegan los dos lados gana la de salida."""
+    n = len(seq)
+    out = [{"in": None, "out": None} for _ in range(n)]
+
+    def clip(k):
+        return 0 <= k < n and seq[k][0] == "clip"
+
+    def join_ok(k):                     # union entre k-1 y k
+        if not (clip(k - 1) and clip(k)):
+            return False
+        tr = seq[k][2]
+        if isinstance(tr, dict) and tr.get("type") == "crossfade" and \
+                float(tr.get("dur", 0) or 0) > 0.05:
+            return False
+        return not _ramp_off(seq[k][1])
+
+    for k in range(n):
+        if not clip(k) or seq[k][1].get("type", "video") == "image":
+            continue
+        s = seq[k][1]
+        ro = _ramp_req(s, "out")
+        if ro and join_ok(k + 1):
+            out[k]["out"] = ro
+        ri = _ramp_req(s, "in")
+        if ri and join_ok(k):
+            out[k]["in"] = ri
+    for k in range(1, n):
+        if out[k]["in"] and out[k - 1]["out"]:
+            out[k]["in"] = None
+    return out
+
+
+RAMP_CUT_MIN = 0.05      # s: lo que queda de un silencio recortado por una rampa (menos no se corta)
+# s: ninguna parte del video (keep) empieza tan cerca de un cambio de camara con rampa: el render
+# mostraria 1-2 cuadros sueltos de la OTRA camara (limite del keep en la reticula + el desfase de
+# ~21 ms del video combinado); medido en un montaje real: un cuadro de la toma que sale tras el salto
+RAMP_LEAK = 0.10
+RAMP_IN_EAT = 0.08       # s: un silencio que llega al cambio sigue esto dentro de la rampa de entrada
+
+
+def _ramp_joins(shots):
+    """[(t, side, dur)] de las rampas hechas (plan.shots[i].ramp del que entra por la union; t = el
+    cambio de camara en s del video combinado)."""
+    out = []
+    for sh in shots or []:
+        r = sh.get("ramp") if isinstance(sh, dict) else None
+        if not isinstance(r, dict):
+            continue
+        try:
+            t, d = float(sh["start"]), float(r.get("dur") or 0.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if d > 0 and math.isfinite(t):
+            out.append((t, "out" if r.get("side") == "out" else "in", d))
+    return out
+
+
+def ramp_windows(shots):
+    """[(a, b)] (s del video combinado) donde se VE una rampa de velocidad hecha: los ultimos `dur` s
+    de la toma que sale (side "out") o los primeros de la que entra (side "in")."""
+    return [(t - d, t) if side == "out" else (t, t + d) for t, side, d in _ramp_joins(shots)]
+
+
+def _ramp_trim(pieces, t, side, d):
+    """Tramos de un corte de silencio [(x, y)] respetando la rampa del cambio de camara en `t`."""
+    out = []
+    for x, y in pieces:
+        if side == "out":
+            # rampa [t - d, t] en la que sale: lo de antes se corta igual; lo de despues empieza justo
+            # en el cambio (sin cuadros sueltos de la que entra) y solo si reanuda >= RAMP_LEAK adentro
+            if y <= t - d or x >= t + RAMP_LEAK:
+                out.append((x, y))
+                continue
+            if x < t - d:
+                out.append((x, t - d))
+            if y - t >= RAMP_LEAK:
+                out.append((t, y))
+        else:
+            # rampa [t, t + d] en la que entra: un silencio que llega al cambio (termina a menos de
+            # RAMP_LEAK antes o adentro de la rampa) sigue RAMP_IN_EAT dentro de ella; el resto de la
+            # rampa no se corta
+            w0, w1 = t + RAMP_IN_EAT, t + d
+            if y <= t - RAMP_LEAK or x >= w1:
+                out.append((x, y))
+                continue
+            if x < t:
+                out.append((x, w0))
+            if y > w1:
+                out.append((w1, y))
+    return [(x, y) for x, y in out if y - x >= RAMP_CUT_MIN - 1e-9]
+
+
+def keep_ramps(cuts, shots):
+    """Cortes de SILENCIO (los del analisis: sin src ni marca de usuario/manual) recortados para no
+    comerse una rampa de velocidad: la rampa cae en la pausa entre frases de una union y el corte
+    de esa pausa se la llevaba (quedaba ~0.1 s de ella en el video final). Lo que el corte quitaba
+    fuera de la rampa se sigue quitando (piezas >= RAMP_CUT_MIN) y ningun corte deja cuadros sueltos
+    de la otra camara junto al cambio (RAMP_LEAK, RAMP_IN_EAT). Tomas, cortes manuales y los del
+    usuario no se tocan. Copia; sin rampas devuelve los mismos cortes."""
+    joins = _ramp_joins(shots)
+    if not joins or not cuts:
+        return cuts
+    out = []
+    for c in cuts:
+        silence = isinstance(c, dict) and not c.get("src") and not c.get("manual") and not c.get("user")
+        try:
+            a, b = float(c["start"]), float(c["end"])
+        except (KeyError, TypeError, ValueError):
+            silence = False
+        near = silence and any((t - d - RAMP_LEAK < b and a < t + RAMP_LEAK) if side == "out" else
+                               (t - RAMP_LEAK < b and a < t + d) for t, side, d in joins)
+        if not near:
+            out.append(c)
+            continue
+        pieces = [(a, b)]
+        for t, side, d in joins:
+            pieces = _ramp_trim(pieces, t, side, d)
+        out += [dict(c, start=round(x, 3), end=round(y, 3)) for x, y in pieces]
+    return out
+
+
+def _annotate_ramps(shots, req, eff):
+    """info.shots[i] (el que ENTRA por la union) gana "ramp": {"side", "dur", "speed"} con la rampa
+    que de verdad se hizo en esa union. Devuelve el resumen [{index, side, dur, speed, req}]
+    (tambien las pedidas que no se pudieron hacer, con dur 0)."""
+    by_index = {int(sh.get("index", -1)): sh for sh in shots or []}
+    summary = []
+    for i in range(len(req)):
+        for side, j in (("in", i), ("out", i + 1)):
+            r = req[i][side]
+            if not r:
+                continue
+            e = (eff[i] or {}).get(side) if i < len(eff) else None
+            summary.append({"index": j, "side": side, "dur": e["dur"] if e else 0.0,
+                            "speed": r["speed"], "req": r["dur"]})
+            if e and j in by_index:
+                by_index[j]["ramp"] = {"side": side, "dur": round(e["dur"], 3),
+                                       "speed": round(e["speed"], 3)}
+    return summary
+
+
 def plan_shots(info_shots, dur=None):
     """plan.shots a partir de info["shots"] del montaje: limites acotados a la duracion analizada
     (sin tomas < 0.05 s), la ultima hasta el final, y los campos del montaje (SHOT_KEYS) cuando
@@ -716,6 +1056,15 @@ def montage_plan(montage, main, shots):
                 e["t0"], e["t1"] = shots[k]["start"], shots[k]["end"]
             if s.get("_lufs") is not None:
                 e["lufs"] = s["_lufs"]
+            # rampas pedidas y el interruptor de la union (el ensamble los conserva al volver)
+            for rk in ("ramp_in", "ramp_out"):
+                rv = s.get(rk) if s.get(rk) is not None else m.get(rk)
+                if isinstance(rv, dict):
+                    e[rk] = copy.deepcopy(rv)
+            for rk in ("ramp", "ramp_auto", "ramp_user"):
+                rv = s.get(rk) if s.get(rk) is not None else m.get(rk)
+                if isinstance(rv, (bool, dict)):
+                    e[rk] = copy.deepcopy(rv)
             tl.append(e)
         if tl:
             tl[0]["join"] = None
@@ -731,12 +1080,294 @@ def montage_plan(montage, main, shots):
     return out
 
 
-def finish_plan(plan, info, spec=None, montage=None):
+# ---------------------------------------------------------------- recursos del guion -> fx.media
+def _tl_entries(timeline):
+    """Items de una linea de tiempo del montaje -> [{a, b, in, sid, slot, cand}] (a/b: s de la
+    linea de tiempo; in: s de su fuente), en orden."""
+    out = []
+    for e in timeline or []:
+        if not isinstance(e, dict):
+            continue
+        try:
+            a = float(e.get("start") or 0.0)
+            i0, i1 = float(e.get("in") or 0.0), float(e.get("out") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if i1 - i0 <= 0 or not math.isfinite(a):
+            continue
+        out.append({"a": a, "b": a + (i1 - i0), "in": i0, "sid": e.get("sid"),
+                    "slot": e.get("slot"), "cand": e.get("cand")})
+    return sorted(out, key=lambda x: x["a"])
+
+
+def _anchor(t, entries, end=False):
+    """s de la linea de tiempo -> (item que lo contiene, s de SU fuente). Un inicio pertenece al
+    item que empieza ahi y un final al que termina ahi; fuera de todos, el mas cercano (acotado).
+    None sin items."""
+    if not entries:
+        return None
+    t = float(t)
+    hit = next((e for e in entries if ((e["a"] < t <= e["b"]) if end else (e["a"] <= t < e["b"]))),
+               None)
+    if hit is None:
+        hit = min(entries, key=lambda e: 0.0 if e["a"] <= t <= e["b"]
+                  else min(abs(t - e["a"]), abs(t - e["b"])))
+    tt = min(max(t, hit["a"]), hit["b"])
+    return hit, hit["in"] + (tt - hit["a"])
+
+
+def _segs(info):
+    """Segmentos del video combinado (info["segs"], ver seg_rows) listos para mapear."""
+    out = []
+    for r in (info or {}).get("segs") or []:
+        try:
+            out.append({"start": float(r["start"]), "end": float(r["end"]), "kind": r.get("kind"),
+                        "sid": r.get("sid"), "in": r.get("in"), "at": r.get("at"),
+                        "len": r.get("len"), "slot": r.get("slot"), "cand": r.get("cand")})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _src_to_composed(entry, src_t, segs):
+    """(item de la linea de tiempo, s de su fuente) -> s del video combinado: el segmento del MISMO
+    clip cuyo tramo contiene ese segundo (mismo slot/cand primero, luego el mas cercano en la linea
+    de tiempo). None si ese tramo ya no esta en el video."""
+    best = None
+    for s in segs:
+        if s["kind"] != "clip" or not s["sid"] or s["sid"] != entry["sid"] or s["in"] is None:
+            continue
+        span = s["end"] - s["start"]
+        if not (s["in"] - 0.02 <= src_t <= s["in"] + span + 0.02):
+            continue
+        same = entry.get("slot") is not None and (s["slot"], s["cand"]) == (entry["slot"], entry["cand"])
+        key = (0 if same else 1, abs(float(s["at"] or 0.0) - entry["a"]))
+        if best is None or key < best[0]:
+            best = (key, s)
+    if best is None:
+        return None
+    s = best[1]
+    return min(max(s["start"] + (src_t - s["in"]), s["start"]), s["end"])
+
+
+def _tl_to_composed(t, segs):
+    """s de la linea de tiempo del ensamble -> s del video combinado por posicion (respaldo cuando
+    el ancla en la fuente ya no esta): el segmento que ocupaba ese lugar."""
+    rows = sorted((s for s in segs if s["at"] is not None and s["len"] is not None),
+                  key=lambda s: s["at"])
+    if not rows:
+        return None
+    t = float(t)
+    if t <= rows[0]["at"]:
+        return rows[0]["start"]
+    for k, s in enumerate(rows):
+        nxt = rows[k + 1]["at"] if k + 1 < len(rows) else None
+        if nxt is None or t < nxt:
+            return min(s["start"] + (t - s["at"]), s["end"])
+    return rows[-1]["end"]
+
+
+MEDIA_SPEED_MAX = 1.4    # = montage P["ins_speed_max"], server.INSERT_SPEED_MAX, fxcore INS.speedMax
+MEDIA_SLOW_MIN = 0.8     # = montage P["ins_slow_min"], server.INSERT_SLOW_MIN, fxcore INS.slowMin
+
+
+def _media_fit(kind, src_len, slot, ins):
+    """(fit, speed, src_in) de un recurso para un hueco de `slot` s (la MISMA regla que
+    montage.plan_inserts / fxcore.insertFit): imagen -> hold; video mas largo que el hueco ->
+    "speed" (hasta 1.4x) o "trim" (desde src_in); un poco mas corto (desde 0.8x) -> "speed" < 1 (se
+    alenta para llenar el hueco); mas corto -> "hold" (dura lo suyo y se queda en su ultimo cuadro)."""
+    fit = ins.get("fit") if ins.get("fit") in ("hold", "speed", "trim") else "hold"
+    try:
+        sp = float(ins.get("speed") or 1.0)
+        src_in = max(0.0, float(ins.get("src_in") or 0.0))
+    except (TypeError, ValueError):
+        sp, src_in = 1.0, 0.0
+    if kind != "video":
+        return "hold", 1.0, 0.0
+    if not src_len or slot <= 0:
+        return fit, round(sp, 4), round(src_in, 3)
+    avail = float(src_len)
+    if avail > slot + 1e-3:
+        if avail <= MEDIA_SPEED_MAX * slot:
+            return "speed", round(avail / slot, 4), 0.0
+        return "trim", 1.0, round(src_in if src_in + slot <= avail else 0.0, 3)
+    if MEDIA_SLOW_MIN * slot - 1e-3 <= avail < slot - 1e-3:
+        return "speed", round(avail / slot, 4), 0.0
+    return ("hold" if fit in ("speed", "trim") else fit), 1.0, 0.0
+
+
+def _asset_resolver(spec, resolve=None):
+    """sid de un recurso -> ruta: `resolve(sid)` (el servidor), spec["assets"] ([{sid, path}]), la
+    ruta que traiga el insert o, al final, input/sources/<sid>.* como el servidor."""
+    table = {}
+    for a in (spec or {}).get("assets") or []:
+        if isinstance(a, dict) and a.get("sid") and a.get("path"):
+            table[str(a["sid"])] = str(a["path"])
+
+    def res(sid, ins):
+        if not sid:
+            return None
+        if callable(resolve):
+            try:
+                p = resolve(sid)
+            except Exception:  # noqa: sin ruta el recurso se marca como faltante
+                p = None
+            if p:
+                return str(p)
+        if str(sid) in table:
+            return table[str(sid)]
+        if ins.get("path") and Path(str(ins["path"])).exists():
+            return str(ins["path"])
+        stem = Path(str(sid)).stem
+        try:
+            for p in sorted((paths.INPUT / "sources").glob(f"{stem}.*")):
+                if p.suffix.lower() in IMAGE_EXT + VIDEO_EXT:
+                    return str(p)
+        except OSError:
+            pass
+        return None
+    return res
+
+
+def _media_kind(ins, path):
+    k = ins.get("kind")
+    if k in ("image", "video"):
+        return k
+    ext = Path(str(path or "")).suffix.lower()
+    if ext in IMAGE_EXT:
+        return "image"
+    if ext in VIDEO_EXT:
+        return "video"
+    try:
+        return "image" if probe(path).get("type") == "image" else "video"
+    except Exception:  # noqa
+        return None
+
+
+def script_media(montage, info, dur=None, spec=None, resolve=None, timeline=None):
+    """plan.montage.inserts (s de la linea de tiempo del montaje `montage`) + info de compose()
+    (info["segs"]) -> (items de plan.fx.media, {id: {"t0", "t1", "anchors", "status"}}). Cada
+    extremo se ancla en la FUENTE (clip + segundo) del item de la linea de tiempo que lo contiene y
+    se busca ese segundo en el video combinado; si ese tramo ya no esta, por su posicion en la
+    linea de tiempo. Sin solaparse (cada uno termina donde empieza el siguiente que se queda),
+    dentro del video y de al menos MEDIA_MIN s; los faltantes ("missing", sin sid o sin archivo)
+    entran sin sid (el render los omite con aviso; el Studio pide subirlos) y los quitados en el
+    ensamble ("enabled": false) entran ocultos sin recortar a los demas. `timeline`: la linea de
+    tiempo en que se calcularon los inserts (default: la del montaje)."""
+    ins = (montage or {}).get("inserts") if isinstance(montage, dict) else None
+    if not isinstance(ins, list):
+        return [], {}
+    entries = _tl_entries(timeline if timeline is not None else (montage or {}).get("timeline"))
+    segs = _segs(info)
+    res = _asset_resolver(spec, resolve)
+    total = float(dur) if dur else (max((s["end"] for s in segs), default=0.0) or None)
+    rows, meta = [], {}
+    for k, it in enumerate(ins):
+        if not isinstance(it, dict):
+            continue
+        iid = str(it.get("id") or f"ins{k + 1}")
+        try:
+            a, b = float(it["start"]), float(it["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (math.isfinite(a) and math.isfinite(b)) or b <= a:
+            continue
+        anchors, ts = [], []
+        for t, end in ((a, False), (b, True)):
+            an = _anchor(t, entries, end=end)
+            c = _src_to_composed(an[0], an[1], segs) if an else None
+            if c is None:
+                c = _tl_to_composed(t, segs)
+            anchors.append({"sid": an[0]["sid"], "src": round(an[1], 3), "slot": an[0]["slot"],
+                            "cand": an[0]["cand"]} if an else None)
+            ts.append(c)
+        if ts[0] is None:
+            continue
+        t0 = ts[0]
+        t1 = ts[1] if ts[1] is not None and ts[1] > t0 + 1e-3 else t0 + (b - a)
+        if total:
+            t0, t1 = max(0.0, min(t0, total)), max(0.0, min(t1, total))
+        path = res(it.get("sid"), it) if it.get("status", "ok") != "missing" else None
+        status = "ok" if path else "missing"
+        meta[iid] = {"t0": round(t0, 3), "t1": round(t1, 3), "anchors": anchors, "status": status}
+        rows.append((t0, t1, iid, it, path))
+    rows.sort(key=lambda r: (r[0], r[2]))
+    # de atras hacia adelante: cada uno termina donde empieza el siguiente QUE SE QUEDA (uno
+    # diminuto que se descarta no recorta al anterior). Uno QUITADO en el ensamble (enabled false)
+    # no ocupa lugar: no recorta ni descarta a nadie (llega oculto con su propio tramo)
+    kept, nxt = [], None
+    for t0, t1, iid, it, path in reversed(rows):
+        off = it.get("enabled", True) is False
+        if nxt is not None and not off:
+            t1 = min(t1, nxt)
+        if t1 - t0 < MEDIA_MIN:
+            meta[iid]["status"] = "too_short"
+            continue
+        kept.append((t0, t1, iid, it, path))
+        if not off:
+            nxt = t0
+    items = []
+    for t0, t1, iid, it, path in reversed(kept):
+        meta[iid]["t1"] = round(t1, 3)
+        kind = _media_kind(it, path) if path else (it.get("kind") if it.get("kind") in ("image", "video") else None)
+        src_len = None
+        if kind == "video" and path:
+            try:
+                src_len = float(probe(path).get("dur") or 0.0) or None
+            except Exception:  # noqa
+                src_len = None
+        fit, sp, src_in = _media_fit(kind, src_len, t1 - t0, it)
+        # sin archivo (falta): se queda en su lugar sin sid (el render lo omite con aviso y el Studio
+        # pide subirlo en la pista Recursos)
+        items.append({"id": iid, "start": round(t0, 3), "end": round(t1, 3),
+                      "sid": it.get("sid") if path else None, "path": path, "kind": kind, "fit": fit,
+                      "speed": sp, "src_in": src_in, "style": "float_card",
+                      "enabled": it.get("enabled", True) is not False, "locked": True,
+                      "src": "script", "name": it.get("name")})
+    return items, meta
+
+
+def _rebase_inserts(inserts, meta, timeline):
+    """Los inserts de plan.montage quedan en la linea de tiempo COMPUESTA (la que el ensamble
+    muestra al volver): start/end desde su ancla en la fuente; t0/t1 = s del video combinado y el
+    status que se vio al componer. Sin las dos anclas en la nueva linea de tiempo, t0/t1."""
+    entries = _tl_entries(timeline)
+    for k, it in enumerate(inserts or []):
+        if not isinstance(it, dict):
+            continue
+        mt = meta.get(str(it.get("id") or f"ins{k + 1}"))
+        if not mt:
+            continue
+        it["t0"], it["t1"] = mt["t0"], mt["t1"]
+        if mt["status"] == "missing" and it.get("status") != "missing":
+            it["status"] = "missing"
+        new = []
+        for an in mt["anchors"]:
+            hit = None
+            if an:
+                for e in entries:
+                    if e["sid"] == an["sid"] and e["in"] - 1e-3 <= an["src"] <= e["in"] + (e["b"] - e["a"]) + 1e-3:
+                        same = an.get("slot") is not None and (e["slot"], e["cand"]) == (an["slot"], an["cand"])
+                        if hit is None or same:
+                            hit = e
+                            if same:
+                                break
+            new.append(round(hit["a"] + (an["src"] - hit["in"]), 3) if hit else None)
+        if new[0] is not None and new[1] is not None and new[1] > new[0]:
+            it["start"], it["end"] = new[0], new[1]
+        elif mt["t1"] > mt["t0"]:
+            # un extremo perdio su ancla (cambio la toma de su linea): donde quedo en el video
+            # combinado (= la linea de tiempo compuesta); asi recomponer no lo mueve
+            it["start"], it["end"] = mt["t0"], mt["t1"]
+
+
+def finish_plan(plan, info, spec=None, montage=None, resolve=None):
     """Tras pipeline.analyze del video compuesto: plan.shots desde los limites reales (con join/
-    setup del montaje) y, en un montaje, plan.montage mapeado a plan.shots, sin cortes de tomas que
-    crucen una union y con las secciones de plan.takes sembradas desde el guion. `montage`: el plan
-    del montaje (job de /montage); sin el se usa spec["montage"]. Sin montaje solo pone plan.shots
-    (como siempre). Modifica y devuelve `plan`."""
+    setup/rampa del montaje) y, en un montaje, plan.montage mapeado a plan.shots, sin cortes de
+    tomas que crucen una union y con las secciones de plan.takes sembradas desde el guion. Los
+    recursos del guion (plan.montage.inserts) quedan en plan.fx.media (script_media; `resolve(sid)`
+    -> ruta del archivo, opcional). `montage`: el plan del montaje (job de /montage); sin el se usa
+    spec["montage"]. Sin montaje solo pone plan.shots (como siempre). Modifica y devuelve `plan`."""
     spec = spec or {}
     try:
         dur = float(plan.get("duration") or 0) or None
@@ -759,10 +1390,29 @@ def finish_plan(plan, info, spec=None, montage=None):
     m = montage_plan(mont, main, shots)
     if m is not None:
         plan["montage"] = m
+    if isinstance(mont, dict) and isinstance(mont.get("inserts"), list):
+        # recursos del guion: del ensamble (timeline del montaje) al video combinado
+        try:
+            # inserts recolocados por el ensamble (spec["inserts_timeline"] == "main"): sus tiempos son
+            # los de la linea de tiempo que se compuso (m), no los de la guardada del montaje
+            tl_ins = m.get("timeline") if (m is not None and spec.get("inserts_timeline") == "main") else None
+            items, meta = script_media(mont, info, dur, spec=spec, resolve=resolve, timeline=tl_ins)
+        except Exception as e:  # noqa: los recursos son un extra, nunca tumban el montaje
+            print(f"   compose: recursos del guion no mapeados ({e})")
+            items, meta = None, {}
+        if items is not None and (items or isinstance(plan.get("fx"), dict)):
+            fx = plan.get("fx") if isinstance(plan.get("fx"), dict) else {}
+            keep = [it for it in fx.get("media") or []
+                    if isinstance(it, dict) and it.get("src") != "script"]
+            fx["media"] = sorted(keep + items, key=lambda it: float(it.get("start") or 0.0))
+            plan["fx"] = fx
+        if items is not None and m is not None:
+            _rebase_inserts(m.get("inserts"), meta, m.get("timeline"))
     import takes
     joins = takes.plan_joins(shots)
     if joins and plan.get("cuts"):
-        plan["cuts"] = takes.respect_joins(plan["cuts"], joins)
+        # ... y ningun silencio se come una rampa de velocidad de un cambio de camara
+        plan["cuts"] = keep_ramps(takes.respect_joins(plan["cuts"], joins), shots)
         if isinstance(plan.get("takes"), dict):
             plan["takes"]["stats"] = takes.stats(plan["cuts"])
     if m is not None:
@@ -832,12 +1482,15 @@ def compose(spec, out, work, on_step=None, info=None):
     # POSICIÓN LIBRE: ordenar por start, rellenar HUECOS con negro, colapsar solapes.
     ordered = sorted(base, key=lambda s: float(s.get("start", 0) or 0))
     seq = []            # lista de (tipo, dato, trans) en orden de reproducción
+    at = []             # s de la LINEA DE TIEMPO del ensamble donde empieza cada elemento de seq
     cursor = 0.0
     for s in ordered:
         st = float(s.get("start", 0) or 0)
         if st > cursor + 0.05:                       # hueco -> negro
             seq.append(("black", st - cursor, None))
+            at.append(cursor)
         seq.append(("clip", s, s.get("trans")))
+        at.append(st)
         cursor = max(cursor, st) + _len(s)
 
     # 0) un solo video completo que ya es un intermedio valido: se copia (sin re-codificar)
@@ -856,6 +1509,7 @@ def compose(spec, out, work, on_step=None, info=None):
                 info["shots"] = [{"start": 0.0, "end": d, "index": 0, "kind": "clip",
                                   "src": Path(str(s0.get("name") or s0.get("path") or "")).name}]
                 _annotate_shots(info["shots"], seq, spec.get("montage"))
+                info["segs"] = seg_rows(info["shots"], seq, at, _len)
             return str(out)
 
     # bitrate UNICO del montaje: <= 1.2x la fuente de mas bitrate (y <= MAX_BPS)
@@ -876,6 +1530,9 @@ def compose(spec, out, work, on_step=None, info=None):
     # silencio digital) y el audio de cada segmento se atrasa ~21-28 ms mas que el anterior: en un
     # montaje de 15 uniones la voz terminaba ~0.4 s detras de la boca
     exact = bool((EXACT_JOINS == "all" or (montage and EXACT_JOINS != "off")) and not has_trans)
+    # rampas de velocidad pedidas (solo en uniones validas) y las que de verdad se hicieron
+    ramp_req = seq_ramps(seq)
+    ramp_eff = [None] * len(seq)
 
     def norm(i):
         kind, data, _tr = seq[i]
@@ -891,10 +1548,11 @@ def compose(spec, out, work, on_step=None, info=None):
             t_in = float(s.get("in", 0)); t_out = float(s.get("out", t_in + 5))
             vol = 0.0 if s.get("mute") else float(s.get("vol", 1.0))
             mf = mfade if isinstance(s.get("montage"), dict) else 0.0
-            _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout, br,
-                        afin=mf if i > 0 else 0.0, afout=mf if i < len(seq) - 1 else 0.0,
-                        limit=bool(isinstance(s.get("montage"), dict) and vol > 1.0 + 1e-3),
-                        exact=exact)
+            ramp_eff[i] = _norm_video(
+                s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout, br,
+                afin=mf if i > 0 else 0.0, afout=mf if i < len(seq) - 1 else 0.0,
+                limit=bool(isinstance(s.get("montage"), dict) and vol > 1.0 + 1e-3),
+                exact=exact, ramp_in=ramp_req[i]["in"], ramp_out=ramp_req[i]["out"])
 
     n = len(seq)
     step(f"Preparando 0/{n}…")
@@ -923,6 +1581,15 @@ def compose(spec, out, work, on_step=None, info=None):
             print(f"   compose: limites de tomas no disponibles ({e})")
             info["shots"] = []
         _annotate_shots(info["shots"], seq, spec.get("montage"))
+        info["segs"] = seg_rows(info["shots"], seq, at, _len)
+        info["ramps"] = _annotate_ramps(info["shots"], ramp_req, ramp_eff)
+    nreq = sum(1 for r in ramp_req if r["in"] or r["out"])
+    if nreq:
+        done = sum(1 for r in ramp_eff if r)
+        short = sum(1 for r in ramp_eff if r for side in ("in", "out")
+                    if r[side] and r[side]["dur"] < r[side]["req"] - 0.5 / fps)
+        print(f"   compose: {done}/{nreq} rampas de velocidad"
+              f"{f' ({short} acortadas por falta de manija)' if short else ''}")
 
     # 2) unir: si hay TRANSICIONES (crossfade) usa xfade; si no, concat demuxer (rápido)
     step("Uniendo la línea de tiempo…")

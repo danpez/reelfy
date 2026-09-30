@@ -418,7 +418,7 @@
   .rdlg .rbtns .rdel{background:#d33c3c;box-shadow:none}
   @media (max-width:480px){ #recent .rrow .ro{display:none} }   /* telefono: la fila entera abre; mas lugar para el nombre */
 </style>
-<link rel="stylesheet" href="/static/fx.css?v=eefeaa32">
+<link rel="stylesheet" href="/static/fx.css?v=fffd0439">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute">
@@ -501,7 +501,7 @@
     <div class="drop" id="drop">
       <svg class="ic dico" viewBox="0 0 24 24"><use href="#i-film"/></svg>
       <div class="big">Arrastra tu video (o varios)</div>
-      <div class="sub">o haz clic para elegirlos · MP4 o MOV · todos los clips de una grabación: Reelfy arma el video</div>
+      <div class="sub">o haz clic para elegirlos · MP4 o MOV · todos los clips de una grabación: Reelfy arma el video · imágenes y videos que pida el guion, también</div>
     </div>
     <div class="prevWrap" id="prevWrap">
       <video id="prevVid" muted playsinline controls></video>
@@ -514,7 +514,8 @@
     <div class="opts">
       <div class="guionwrap" id="guionWrap" hidden><label for="guion">Guion (opcional)</label>
         <textarea id="guion" class="guion" rows="6" spellcheck="true" placeholder="Pega el guion: una frase por línea y una línea en blanco entre secciones. Si no hay guion, Reelfy lo deduce de las tomas."></textarea>
-        <div class="mnote" id="guionNote">Con guion, Reelfy elige la toma más fiel de cada línea. Sin guion, lo deduce de lo que repites y te lo deja corregir.</div></div>
+        <div class="mnote" id="guionNote">Con guion, Reelfy elige la toma más fiel de cada línea. Sin guion, lo deduce de lo que repites y te lo deja corregir. Para mostrar una imagen o un video mientras dices una línea, termínala con «- Agregar nombre_del_archivo».</div>
+        <div class="grefs" id="guionRefs" hidden></div></div>
       <div><label>Nombres propios / marcas — mejora los subtítulos (opcional)</label>
         <input type="text" id="glossary" placeholder="Ej: Keruvin Store, Al Haramain, Oud"></div>
       <div class="row"><div><label>Shorts por video</label>
@@ -594,6 +595,7 @@
         <div class="asm-ph" id="asmPH"></div>
         <div class="asm-snapg" id="asmSnapG"></div>
         <div class="asm-ruler" id="asmRuler"></div>
+        <div class="asm-trk" id="asmMediaTrk" hidden><div class="asm-tlab" title="Recursos del guion: aparecen como tarjeta flotante mientras se dice su línea"><svg class="ic" viewBox="0 0 24 24"><use href="#i-card"/></svg>Recursos</div><div class="asm-lane md" id="asmMedia"></div></div>
         <div id="asmLayers"></div>
         <div class="asm-trk"><div class="asm-tlab"><svg class="ic" viewBox="0 0 24 24"><use href="#i-image"/></svg>Stickers</div><div class="asm-lane ov" id="asmOverlay"></div></div>
       </div></div>
@@ -706,6 +708,7 @@
           <div class="subgroup v2only"><h5><svg class="ic" viewBox="0 0 24 24"><use href="#i-music"/></svg>Música</h5><div id="musBody"></div></div>
         </div>
         <div class="pgroup v2only" id="profGroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-user"/></svg>Perfil <span class="info" data-tip="Quién sale en el video y sus enlaces. Cambiarlo actualiza al instante el rótulo, el botón Seguir, la invitación a reservar y la tarjeta final.">i</span></h4><div id="profBody"></div></div>
+        <div class="pgroup v2only" id="accentGroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-drop"/></svg>Color de acento <span class="info" data-tip="Un solo color para todo el proyecto: la palabra que se está diciendo en los subtítulos y el acento de títulos y tarjetas.">i</span></h4><div id="accentBody"></div></div>
         <div class="pgroup v2only"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-type"/></svg>Subtítulos</h4><div id="capProBody"></div></div>
         <div class="pgroup v2only"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-contrast"/></svg>Color</h4><div id="gradeBody"></div></div>
         <div class="pgroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>Formato</h4>
@@ -918,9 +921,10 @@
 
 <video id="srcVid" style="display:none" playsinline></video>
 
-<script src="/static/fxcore.js?v=eefeaa32"></script>
-<script src="/static/fx.js?v=eefeaa32"></script>
-<script src="/static/profile.js?v=eefeaa32"></script>
+<script src="/static/floatcard.js?v=fe2b0932"></script>
+<script src="/static/fxcore.js?v=fffd0439"></script>
+<script src="/static/fx.js?v=fffd0439"></script>
+<script src="/static/profile.js?v=fffd0439"></script>
 <script>
 const $=s=>document.querySelector(s);
 /* tooltips flotantes (position:fixed) para que NO se corten dentro de paneles con overflow */
@@ -962,7 +966,7 @@ function chip(txt){ const c=$("#chip");
   if(txt){ $("#chipTxt").textContent=txt; c.classList.add("on"); } else c.classList.remove("on"); }
 
 /* ============ setup ============ */
-const drop=$("#drop"), inp=Object.assign(document.createElement("input"),{type:"file",accept:"video/*",multiple:true});
+const drop=$("#drop"), inp=Object.assign(document.createElement("input"),{type:"file",accept:"video/*,image/*",multiple:true});
 drop.onclick=()=>inp.click();
 inp.onchange=()=>inp.files.length&&pick([...inp.files]);
 ["dragover","dragenter"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add("hot")}));
@@ -970,7 +974,7 @@ inp.onchange=()=>inp.files.length&&pick([...inp.files]);
 drop.addEventListener("drop",ev=>ev.dataTransfer.files.length&&pick([...ev.dataTransfer.files]));
 function pick(files){
   FILES=files;
-  if(files.length===1){
+  if(files.length===1&&FXCore.fileKind(files[0])!=="image"){
     const f=files[0];
     $("#filelist").style.display="none";
     $("#prevVid").src=URL.createObjectURL(f); $("#pv-name").textContent=f.name;
@@ -981,24 +985,54 @@ function pick(files){
     $("#go").innerHTML=ICO("scissors")+"Continuar al editor →";
   }else{
     $("#prevWrap").style.display="none";
-    const fl=$("#filelist"); fl.style.display="block";
-    fl.innerHTML=files.map(f=>`<div class="f">${ICO("film")} ${mtEsc(f.name)}<span class="sz">${(f.size/1048576).toFixed(1)} MB</span></div>`).join("");
     $("#go").innerHTML=ICO("scissors")+`Armar a mano (${files.length})`;
   }
+  setupFiles();
   setupMulti();
+}
+/* Clasificacion de lo elegido con el guion: una imagen o un video que el guion nombra ("- Agregar x")
+   es un RECURSO (tarjeta flotante mientras se dice su linea), nunca una toma. */
+const setupClass=()=>FXCore.classifyFiles(FILES.map(f=>({name:f.name,type:f.type})),$("#guion").value||"");
+function setupFiles(){
+  const fl=$("#filelist"); if(!FILES.length||(FILES.length===1&&FXCore.fileKind(FILES[0])!=="image")){ fl.style.display="none"; return; }
+  const cls=setupClass(), as=new Set(cls.assets);
+  fl.style.display="block";
+  fl.innerHTML=FILES.map((f,i)=>`<div class="f${as.has(i)?" asset":""}">${ICO(as.has(i)?(FXCore.fileKind(f)==="image"?"image":"card"):"film")} ${mtEsc(f.name)}${as.has(i)?`<span class="ftag" title="No es una toma: aparece como tarjeta flotante mientras dices su línea">Recurso</span>`:""}<span class="sz">${(f.size/1048576).toFixed(1)} MB</span></div>`).join("");
+}
+/** "Recursos del guion": cada recurso que pide el guion y si ya esta entre los archivos elegidos. */
+function setupRefs(){
+  const box=$("#guionRefs"); if(!box) return;
+  const cls=setupClass();
+  if(!cls.refs.length||$("#guionWrap").hidden){ box.hidden=true; box.innerHTML=""; return; }
+  const miss=cls.refs.filter(r=>r.idx<0).length;
+  box.hidden=false;
+  box.innerHTML=`<div class="grefs-h">${ICO("card")}<b>Recursos del guion</b><span class="cnt">${cls.refs.length}</span>${miss?`<span class="gr-miss">${miss} ${miss===1?"falta":"faltan"}</span>`:""}</div>`
+    +cls.refs.map((r,k)=>{ const f=r.idx>=0?FILES[r.idx]:null, img=f&&FXCore.fileKind(f)==="image";
+      return `<div class="grefs-row ${f?"ok":"miss"}"><span class="gr-ic">${ICO(f?(img?"image":"film"):"alert")}</span>`
+        +`<div class="gr-main"><b>${mtEsc(r.name)}</b><span>${f?`Encontrado entre tus archivos: ${mtEsc(f.name)}`:"Falta: no está entre tus archivos"}</span></div>`
+        +(f?`<span class="gr-ok">${ICO("check")}</span>`:`<button class="mt-btn pri" data-ref="${k}">${ICO("upload")}<span>Agregar archivo</span></button>`)+`</div>`; }).join("")
+    +`<div class="mnote">Aparecen como tarjeta flotante mientras dices su línea. Lo que falte lo puedes agregar después, en las tomas.</div>`;
+  box.querySelectorAll("[data-ref]").forEach(b=>b.onclick=()=>{ const r=cls.refs[+b.dataset.ref]; if(!r) return;
+    const fi=Object.assign(document.createElement("input"),{type:"file",accept:"video/*,image/*"});
+    fi.onchange=()=>{ const f=fi.files&&fi.files[0]; if(!f) return;
+      // el archivo queda con el nombre del recurso: el servidor lo reconoce igual que el guion
+      const ext=(/\.[A-Za-z0-9]{2,5}$/.exec(f.name)||[""])[0], f2=new File([f],r.name+ext,{type:f.type,lastModified:f.lastModified});
+      pick(FILES.filter(x=>FXCore.assetNorm(x.name)!==FXCore.assetNorm(f2.name)).concat([f2])); };
+    fi.click(); });
 }
 /* Varios clips de UNA grabacion: "Armar con IA" (principal) junto a "Armar a mano" (el ensamblado
    de siempre) y el guion opcional. Con un solo archivo, solo "Continuar al editor". */
 function setupMulti(){
   const multi=FILES.length>1;
   $("#guionWrap").hidden=!multi; $("#goAI").hidden=!multi;
+  setupRefs();
   $("#goRow").classList.toggle("two",multi); $("#go").classList.toggle("ghost",multi);
   $("#setupHint").textContent=multi
     ?"Armar con IA: Reelfy escucha cada clip, los ordena por hora de grabación y elige la mejor toma de cada parte del guion; antes de aplicar la IA revisas y cambias cualquier toma. Armar a mano: los clips entran en orden de grabación y tú recortas."
     :"Primero montas tu video en el editor de línea de tiempo (recorta, reordena, encima capas). Cuando quede listo, aplicas la IA — subtítulos, cortes y shorts — sobre tu composición.";
   // Entrar al editor NO requiere el motor de IA (Whisper corre después, al aplicar
   // la IA). Basta con tener archivo(s) y licencia válida.
-  $("#go").disabled=!(FILES.length&&LICENSED); $("#goAI").disabled=!(multi&&LICENSED);
+  $("#go").disabled=!(FILES.length&&LICENSED); $("#goAI").disabled=!(multi&&LICENSED&&setupClass().clips.length>0);
 }
 // El editor de línea de tiempo es el PRIMER paso SIEMPRE (para cualquier edición).
 $("#go").onclick=()=>enterAssembly(FILES);
@@ -1006,8 +1040,10 @@ $("#goAI").onclick=()=>runMontage(FILES);
 /* borrador del guion: solo en este navegador (localStorage puede no existir o fallar) */
 const GUION_KEY="reelfy.guion.draft";
 function guionDraft(v){ try{ if(v===undefined) return localStorage.getItem(GUION_KEY)||""; if(v) localStorage.setItem(GUION_KEY,v); else localStorage.removeItem(GUION_KEY); }catch(e){} return ""; }
-(function(){ const g=$("#guion"); let t=null; g.value=guionDraft();
-  g.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>guionDraft(g.value.trim()?g.value:""),300); }); })();
+(function(){ const g=$("#guion"); let t=null, r=null; g.value=guionDraft();
+  g.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>guionDraft(g.value.trim()?g.value:""),300);
+    // los recursos que pide el guion se revisan mientras se escribe
+    clearTimeout(r); r=setTimeout(()=>{ if(FILES.length>1){ setupFiles(); setupMulti(); } },250); }); })();
 const mtEsc=x=>String(x==null?"":x).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
 /* ============ EDITOR DE VIDEO PROFESIONAL (timeline) ============ */
@@ -1055,7 +1091,10 @@ function asmLayerAtY(y){ const box=$("#asmLayers").getBoundingClientRect();
 const asmP=()=>$("#asmPlayer"), asmI=()=>$("#asmImg");
 
 const asmFresh=()=>({sources:[],clips:[],overlays:[],sel:null,t:0,playing:false,px:120,basePx:0,zoom:1,ci:-1,snap:true,
-  montage:null,montageJob:null,script:"",mtOpen:new Set(),preview:null,stopAt:null,listen:null});
+  montage:null,montageJob:null,script:"",mtOpen:new Set(),preview:null,stopAt:null,listen:null,
+  // recursos del guion (ediciones del usuario por id), palabras por clip (aceleraciones y recursos que
+  // se mueven con su linea) y marcas de cambio de camara del timeline
+  insEdits:{},inserts:[],insSel:null,words:{},wordsPend:new Set(),rampMarks:[]});
 function asmCopyGloss(){
   // Arrastra al editor lo que el usuario escribió en la pantalla de subida:
   // nombres propios/marcas y cuántos shorts quiere. Así SÍ se respetan.
@@ -1096,14 +1135,16 @@ function uploadOne(file,onProg,hold,words){
   });
 }
 /** Sube los archivos de a uno, en orden: con `words`, cada clip empieza a transcribirse en el servidor
-    en cuanto llega. onRow(fila, filas) en cada cambio. -> filas [{name,size,loaded,total,state:"wait|up|ok|err",src,error}]. */
+    en cuanto llega (`words` = bool o fn(indice) -> bool). onRow(fila, filas) en cada cambio. -> filas [{name,size,loaded,total,state:"wait|up|ok|err",src,error}]. */
 async function uploadEach(files,onRow,hold,words){
   const rows=[...files].map((f,i)=>({i,name:f.name,size:f.size,loaded:0,total:f.size||1,state:"wait",src:null,error:null}));
   for(const r of rows){
     if(hold&&hold.canceled) break;
     r.state="up"; onRow&&onRow(r,rows);
     try{
-      const d=await uploadOne(files[r.i],(l,t)=>{ r.loaded=l; r.total=t; onRow&&onRow(r,rows); },x=>{ if(hold) hold.xhr=x; },words);
+      // `words` puede decidir por archivo (un recurso del guion no se transcribe)
+      const w=typeof words==="function"?words(r.i):words;
+      const d=await uploadOne(files[r.i],(l,t)=>{ r.loaded=l; r.total=t; onRow&&onRow(r,rows); },x=>{ if(hold) hold.xhr=x; },w);
       const s=(d.sources||[])[0]; if(!s) throw new Error("Formato no compatible");
       s._idx=r.i; r.src=s; r.state="ok"; r.loaded=r.total;
     }catch(e){ r.state="err"; r.error=e.message||String(e); }
@@ -1173,6 +1214,7 @@ function asmRenderTL(){
   if((ASM.zoom||1)<=1.01) ASM.basePx=asmFitPx();   // zoom mínimo SIEMPRE muestra todo
   ASM.px=(ASM.basePx||asmFitPx())*(ASM.zoom||1);
   const px=ASM.px;
+  if(ASM.montage) asmSyncMontage();     // aceleraciones en los cambios de camara y recursos con su linea
   const inner=$("#asmInner"); inner.style.minWidth=(66+total*px+20)+"px";
   // regla con paso "bonito" (~72px entre marcas) y decimales al acercar
   const ruler=$("#asmRuler"); [...ruler.querySelectorAll(".rt,.tk")].forEach(e=>e.remove());
@@ -1211,6 +1253,15 @@ function asmRenderTL(){
       el.onclick=e=>{ if(!c._moved) asmSelect("clip",c._id); };
       asmWireClipDrag(el,c);
     });
+    // cambios de camara: marcador de la aceleracion (se prende/apaga con un clic, con deshacer)
+    if(L===0&&ASM.montage) (ASM.rampMarks||[]).forEach(mk=>{
+      const b=document.createElement("button"); b.type="button";
+      b.className="rampmk"+(mk.on?" on":"")+(!mk.on&&!mk.possible?" na":"");
+      b.style.left=(mk.at*px)+"px"; b.dataset.next=mk.nextId; b.innerHTML=ICO("bolt");
+      b.setAttribute("aria-pressed",String(mk.on)); b.title=asmRampTip(mk); b.setAttribute("aria-label",b.title);
+      b.onpointerdown=e=>e.stopPropagation();
+      b.onclick=e=>{ e.stopPropagation(); asmToggleRamp(mk.nextId,!mk.on); };
+      lane.appendChild(b); });
   }
   // stickers/overlays
   const ov=$("#asmOverlay"); ov.innerHTML="";
@@ -1223,9 +1274,80 @@ function asmRenderTL(){
     el.onclick=()=>{ if(!o._moved) asmSelect("overlay",o._id); };
     asmWireOverlayDrag(el,o);
   });
+  asmRenderMedia(px);
   $("#asmDur").textContent=fmtT(total);
   asmUpdatePH();
   if(ASM.montage) asmSaveLater();
+}
+/* ---- armado con IA: recursos del guion y cambios de camara con aceleracion ---- */
+function asmSyncMontage(){
+  if(!ASM.montage) return;
+  const srcdur={}; ASM.sources.forEach(s=>{ if(s&&s.id&&+s.dur>0) srcdur[s.id]=+s.dur; });
+  ASM.rampMarks=FXCore.syncRamps(ASM.clips,{words:ASM.words,srcdur});
+  ASM.inserts=FXCore.placeInserts(ASM.montage,ASM.clips,{words:ASM.words,sources:ASM.sources,edits:ASM.insEdits||{}});
+  asmWantWords();
+}
+/** Recursos del guion como quedan en el ensamble (lo que va a /compose). */
+function asmInserts(){ if(ASM.montage) asmSyncMontage(); return ASM.inserts||[]; }
+/** Palabras de cada clip del ensamble (GET /sources/{sid}/words), de a cuatro: con ellas un recurso
+    sigue a su linea si cambia la toma y una aceleracion nueva cae en una pausa. */
+function asmWantWords(){
+  const need=[...new Set(ASM.clips.filter(c=>c&&c.type!=="image"&&(c.montage||c.extra)).map(c=>c.sid))]
+    .filter(sid=>sid&&!(sid in ASM.words)&&!ASM.wordsPend.has(sid));
+  if(!need.length) return;
+  need.forEach(sid=>ASM.wordsPend.add(sid));
+  const job=ASM.montageJob, W=ASM.words, P=ASM.wordsPend; let i=0;
+  const next=async()=>{ while(i<need.length){ const sid=need[i++];
+    try{ const r=await fetch("/sources/"+encodeURIComponent(sid)+"/words"), d=r.ok?await r.json():null;
+      W[sid]=d&&Array.isArray(d.words)?d.words.map(w=>({start:+w.start,end:+w.end})):null; }
+    catch(e){ W[sid]=null; }
+    P.delete(sid); } };
+  Promise.all([next(),next(),next(),next()]).then(()=>{
+    if(ASM.montageJob!==job||ASM.words!==W||!$("#s-assembly").classList.contains("on")) return;
+    asmRenderTL(); mtRender(); });
+}
+function asmRampTip(mk){
+  if(mk.on) return `Cambio de cámara con aceleración: el video de la toma que ${mk.side==="out"?"sale":"entra"} acelera ×2 durante ${(+mk.dur).toFixed(2)} s mientras el audio sigue normal. Clic para dejar un corte seco.`;
+  return mk.possible?"Cambio de cámara con corte seco. Clic para suavizarlo con aceleración (el audio no cambia).":"Cambio de cámara con corte seco: aquí no cabe una aceleración (no hay cuadros de sobra o hay voz en los dos lados).";
+}
+/** Prende o apaga la aceleracion del cambio de camara que ENTRA al clip `nextId` (con deshacer). */
+function asmToggleRamp(nextId,on){
+  asmStopPreview(true); asmPush();
+  const srcdur={}; ASM.sources.forEach(s=>{ if(s&&s.id&&+s.dur>0) srcdur[s.id]=+s.dur; });
+  const r=FXCore.toggleRamp(ASM.clips,nextId,on,{words:ASM.words,srcdur});
+  ASM.rampMarks=r.marks; asmRenderTL(); asmInspector();
+  if(on&&!r.ok) FX.toast("Aquí no cabe la aceleración: no hay cuadros de sobra o hay voz en los dos lados del corte. Queda como corte seco.","alert",false,[["Deshacer",()=>asmUndo()]]);
+  else FX.toast(on?"Cambio de cámara con aceleración: activado.":"Cambio de cámara con corte seco (sin aceleración).","bolt",false,[["Deshacer",()=>asmUndo()]]);
+}
+const INS_FIT={hold:"Imagen fija con acercamiento suave",speed:"Video acelerado",slow:"Video más lento",trim:"Video recortado",vhold:"Video completo (se queda en su último cuadro)"};
+function insFitLabel(x){
+  if(!x||!x.sid) return "";
+  if(x.kind==="image") return INS_FIT.hold;
+  if(x.fit==="speed") return (+x.speed||1)<1?`${INS_FIT.slow} ×${(+x.speed||1).toFixed(2)} para llenar su tramo`:`${INS_FIT.speed} ×${(+x.speed||1).toFixed(2)} para que entre completo`;
+  if(x.fit==="trim") return `${INS_FIT.trim}: se ve lo que cabe${+x.src_in>0?` desde ${FXCore.fmtSrc(x.src_in)}`:""}`;
+  return INS_FIT.vhold;
+}
+/** Pista "Recursos" del ensamble: donde aparece cada recurso del guion (sigue a su linea). */
+function asmRenderMedia(px){
+  const trk=$("#asmMediaTrk"), lane=$("#asmMedia"); if(!trk||!lane) return;
+  const ins=ASM.montage?(ASM.inserts||[]):[];
+  trk.hidden=!ins.length; lane.innerHTML="";
+  ins.forEach(x=>{ if(!x.placed) return;
+    const el=document.createElement("button"); el.type="button";
+    el.className="mdb"+(x.sid?"":" miss")+(x.enabled===false?" off":"")+(ASM.insSel===x.id?" sel":"");
+    el.style.left=(x.start*px)+"px"; el.style.width=Math.max(14,(x.end-x.start)*px)+"px"; el.dataset.ins=x.id;
+    const src=x.sid?ASM.sources.find(s=>s.id===x.sid):null;
+    el.innerHTML=(src&&src.thumb?`<i class="th" style="background-image:url('${src.thumb}')"></i>`:"")+`${ICO(x.sid?(x.kind==="image"?"image":"film"):"alert")}<span>${mtEsc(x.name)}</span>`;
+    el.title=`Recurso «${x.name}» · ${FXCore.fmtSrc(x.start)}–${FXCore.fmtSrc(x.end)}${x.sid?" · "+insFitLabel(x):" · falta el archivo"}${x.enabled===false?" · quitado":""}`;
+    el.onclick=()=>asmSelectInsert(x.id,true);
+    lane.appendChild(el); });
+}
+function asmSelectInsert(id,go){
+  // un recurso seleccionado deja de lado el clip que estaba seleccionado: Supr actua sobre el recurso
+  ASM.insSel=id; if(ASM.sel){ ASM.sel=null; asmInspector(); } const x=(ASM.inserts||[]).find(i=>i.id===id);
+  asmSideMode("takes"); if(go&&x&&x.placed) asmGoto(x.start+0.05,true);
+  asmRenderTL(); mtRender();
+  const el=document.querySelector(`#asmTakes [data-ins="${CSS.escape(id)}"]`); if(el) el.scrollIntoView({block:"nearest"});
 }
 function asmFadeOpacity(t){ const at=asmClipAt(t); if(!at) return 1;
   const c=at.clip,s=c.start||0,e=clipEnd(c),fi=c.fadeIn||0,fo=c.fadeOut||0;
@@ -1246,9 +1368,9 @@ function asmDrag(e,onMove,onEnd){
 }
 /* ---- deshacer / rehacer del editor ---- */
 let ASM_UNDO=[], ASM_REDO=[];
-function asmSnapshot(){ return JSON.stringify({clips:ASM.clips,overlays:ASM.overlays}); }
+function asmSnapshot(){ return JSON.stringify({clips:ASM.clips,overlays:ASM.overlays,insEdits:ASM.insEdits||{}}); }
 function asmPush(){ ASM_UNDO.push(asmSnapshot()); if(ASM_UNDO.length>80)ASM_UNDO.shift(); ASM_REDO=[]; ASM.dirty=true; }
-function asmRestore(snap){ const d=JSON.parse(snap); ASM.clips=d.clips; ASM.overlays=d.overlays;
+function asmRestore(snap){ const d=JSON.parse(snap); ASM.clips=d.clips; ASM.overlays=d.overlays; ASM.insEdits=d.insEdits||{};
   ASM.sel=null; ASM.ci=-1; asmFit(); asmInspector(); asmGoto(Math.min(ASM.t,asmMainDur()),true); mtRender(); }
 function asmUndo(){ if(!ASM_UNDO.length)return; ASM_REDO.push(asmSnapshot()); asmRestore(ASM_UNDO.pop()); }
 function asmRedo(){ if(!ASM_REDO.length)return; ASM_UNDO.push(asmSnapshot()); asmRestore(ASM_REDO.pop()); }
@@ -1263,7 +1385,10 @@ document.addEventListener("keydown",e=>{
   if(e.code==="Space"){ e.preventDefault(); ASM.playing?asmPause():asmPlay(); }
   else if(meta&&(e.key==="z"||e.key==="Z")){ e.preventDefault(); e.shiftKey?asmRedo():asmUndo(); }
   else if(meta&&e.key==="y"){ e.preventDefault(); asmRedo(); }
-  else if(e.key==="Delete"||e.key==="Backspace"){ if(ASM.sel){ e.preventDefault(); asmDelSel(); } }
+  else if(e.key==="Delete"||e.key==="Backspace"){
+    // un recurso del guion seleccionado se QUITA del video (con deshacer), nunca borra un clip
+    if(ASM.insSel&&!ASM.sel){ const x=(ASM.inserts||[]).find(i=>i.id===ASM.insSel); if(x){ e.preventDefault(); if(x.enabled!==false) mtInsertToggle(x.id); } }
+    else if(ASM.sel){ e.preventDefault(); asmDelSel(); } }
   else if(e.key==="s"||e.key==="S"){ e.preventDefault(); asmSplit(); }
   else if(e.key==="ArrowLeft"){ e.preventDefault(); asmPause(); asmGoto(ASM.t-(e.shiftKey?1:1/30),true); }
   else if(e.key==="ArrowRight"){ e.preventDefault(); asmPause(); asmGoto(ASM.t+(e.shiftKey?1:1/30),true); }
@@ -1346,7 +1471,41 @@ function ovXY(o){   // centro como fracción 0..1 (usa x/y libres o deriva del p
   return {x:p==="center"?0.5:(p.includes("l")?m+o.size/2:1-m-o.size/2),
           y:p==="center"?0.5:(p.includes("t")?m+o.size*0.28:1-m-o.size*0.28)};
 }
+/** Recurso del guion activo en `t`: tarjeta flotante sobre el orador desenfocado y oscurecido, con la
+    geometria y la animacion del render (window.FloatCard = port de motion/media.py; aproximada: sin la
+    inclinacion 3D). Se deja libre la franja de los subtitulos que tendra el video. */
+const ASM_CAPS={preset:"clean_bold",y:0.72,size:0.052,enabled:true};
+function asmRenderCard(t){
+  const pb=$("#asmPlayerBox"), FC=window.FloatCard; if(!pb||!FC) return;
+  const x=ASM.montage&&!ASM.preview?(ASM.inserts||[]).find(i=>i.placed&&i.enabled!==false&&i.sid&&t>=i.start&&t<i.end):null;
+  let el=$("#asmFcard");
+  const media=[asmP(),asmI()];
+  if(!x){ if(el){ el.hidden=true; const v=el.querySelector("video"); if(v&&!v.paused) v.pause(); } media.forEach(m=>{ m.style.filter=""; }); return; }
+  if(!el){ el=document.createElement("div"); el.id="asmFcard"; el.className="asm-fcard"; pb.appendChild(el); }
+  const src=ASM.sources.find(s=>s.id===x.sid)||{}, img=x.kind==="image";
+  if(el.dataset.sid!==x.sid){ el.dataset.sid=x.sid; el.innerHTML=img?`<img alt="" src="/tlsource/${encodeURIComponent(x.sid)}">`:`<video muted playsinline preload="auto" src="/tlsource/${encodeURIComponent(x.sid)}"></video>`; }
+  el.hidden=false;
+  // el cuadro del video (lo que sale en el export) dentro del visor
+  const on=media.find(m=>m.style.display!=="none")||media[0], pr=pb.getBoundingClientRect(), vr=on.getBoundingClientRect();
+  // (la tarjeta se posiciona dentro del borde del visor: clientLeft/Top)
+  const W=vr.width||pr.width, H=vr.height||pr.height, ox=(vr.width?vr.left:pr.left)-pr.left-pb.clientLeft, oy=(vr.height?vr.top:pr.top)-pr.top-pb.clientTop;
+  const m=el.firstElementChild, mw=+src.w||(m&&(m.naturalWidth||m.videoWidth))||1080, mh=+src.h||(m&&(m.naturalHeight||m.videoHeight))||1350;
+  const lt=t-x.start, L=Math.max(0.05,x.end-x.start);
+  const card=FC.cardLayout(mw,mh,W/H,FC.captionTop(ASM_CAPS,true,null,null,W/H));
+  const [x0,y0,w,h]=FC.cardPx(card,W,H), st=FC.cardAnim(lt,L,FC.param(x,"in_dur"),FC.param(x,"out_dur"),FC.param(x,"float"));
+  const sy=st.scale*Math.cos(st.tilt*Math.PI/180);
+  Object.assign(el.style,{left:(ox+x0)+"px",top:(oy+y0)+"px",width:w+"px",height:h+"px",borderRadius:(FC.RADIUS*w)+"px",
+    opacity:Math.max(0,Math.min(1,st.alpha)).toFixed(3),transform:`translateY(${(st.dy*H).toFixed(2)}px) scale(${st.scale.toFixed(4)},${sy.toFixed(4)})`});
+  if(m) m.style.transform=img?`scale(${FC.kenburnsZoom(lt,L,FC.param(x,"kenburns")).toFixed(4)})`:"";
+  const bf=FC.bgFilter(x,st.bg,W); media.forEach(mm=>{ mm.style.filter=bf; });
+  if(!img&&m&&m.tagName==="VIDEO"){
+    const tt=FC.srcTime(x,lt,+src.dur||m.duration||0), rate=FC.speedOf(x);
+    if(ASM.playing){ if(m.playbackRate!==rate) m.playbackRate=rate; if(m.paused) m.play().catch(()=>{}); if(Math.abs(m.currentTime-tt)>0.3) try{ m.currentTime=tt; }catch(e){} }
+    else { if(!m.paused) m.pause(); if(Math.abs(m.currentTime-tt)>0.04&&!m.seeking) try{ m.currentTime=tt; }catch(e){} }
+  }
+}
 function asmRenderOverlays(t){
+  asmRenderCard(t);
   const box=$("#asmOvLayer"); box.innerHTML="";
   ASM.overlays.forEach(o=>{ if(t<o.start||t>=o.start+o.dur) return;
     const sel=ASM.sel&&ASM.sel.track==="overlay"&&ASM.sel.id===o._id;
@@ -1404,7 +1563,7 @@ function asmPause(){ ASM.playing=false; ASM.stopAt=null; $("#asmPlayIco").innerH
   if(ASM.listen&&!ASM.preview){ ASM.listen=null; mtSyncListen(); } }
 /* ---- inspector: volumen/mute (video), duración (imagen), capa (pos/tamaño) ---- */
 function asmSel(){ if(!ASM.sel) return null; return (ASM.sel.track==="clip"?ASM.clips:ASM.overlays).find(x=>x._id===ASM.sel.id); }
-function asmSelect(track,id){ ASM.sel={track,id}; asmRenderTL();
+function asmSelect(track,id){ ASM.sel={track,id}; ASM.insSel=null; asmRenderTL();
   const it=asmSel(); if(it){ const st=track==="clip"?clipStart(ASM.clips.indexOf(it)):it.start; asmGoto(st+0.01,true); }
   asmInspector(); if(ASM.montage) mtRender(); }
 function asmInspector(){
@@ -1441,7 +1600,12 @@ function asmInspector(){
   // clip de un armado con IA: a que parte del guion pertenece y atajo al panel "Tomas"
   if(ASM.sel.track==="clip"&&it.montage&&it.montage.slot!=null&&ASM.montage){ const n=FXCore.slotNumbers(ASM.montage)[it.montage.slot];
     h=`<div class="mnote mt-insp">${n?`Parte ${n} del guion · confianza ${FXCore.CONF_LABEL[FXCore.montageConf(it.montage.conf)].toLowerCase()}`:"Extra fuera del guion"} · <button class="rlnk" id="ai-takes">Ver tomas</button></div>`+h; }
+  // cambio de camara al entrar a este clip: aceleracion del video (el audio no cambia)
+  const rmk=ASM.sel.track==="clip"&&ASM.montage?(ASM.rampMarks||[]).find(x=>x.nextId===it._id):null;
+  if(rmk) h+=`<div class="asm-insp-row ramprow"><label class="swlabel"><input type="checkbox" class="toggle" id="ai-ramp" ${rmk.on?"checked":""}> ${ICO("bolt")}Cambio de cámara con aceleración</label>`
+    +`<div class="hint">${rmk.on?`El video de la toma que ${rmk.side==="out"?"sale":"entra"} acelera ×2 durante ${(+rmk.dur).toFixed(2)} s en la pausa; el audio sigue normal.`:rmk.possible?"Corte seco. Actívalo para que el cambio de cámara se vea fluido.":"Aquí no cabe: no hay cuadros de sobra o hay voz en los dos lados del corte."}</div></div>`;
   box.innerHTML=h;
+  const rr=$("#ai-ramp"); if(rr) rr.onchange=ev=>asmToggleRamp(it._id,ev.target.checked);
   const tk=$("#ai-takes"); if(tk) tk.onclick=()=>{ asmSideMode("takes"); mtRender(); const el=document.querySelector("#asmTakes .mt-slot.sel"); if(el) el.scrollIntoView({block:"nearest"}); };
   const lbl=(el,txt)=>{const s=el.parentElement.querySelector("label span"); if(s)s.textContent=txt;};
   if(ASM.sel.track==="clip"){
@@ -1490,7 +1654,7 @@ async function asmApply(){
   // plan.montage y usa el guion (el editado en el panel, si se corrigio) para glosario y secciones
   const body=FXCore.composeBody({clips:ASM.clips,overlays:ASM.overlays,glossary:$("#asmGloss").value||"",
     highlights:$("#highlights").value,director:($("#asmStyle").value==="none"?false:{style:$("#asmStyle").value,intensity:0.75}),
-    montageJob:ASM.montage?ASM.montageJob:null,script:ASM.montage?mtScriptNow():null});
+    montageJob:ASM.montage?ASM.montageJob:null,script:ASM.montage?mtScriptNow():null,inserts:ASM.montage?asmInserts():null});
   // un solo video horizontal de mas de 3 min (un video de YouTube): el proyecto nace en 16:9 y el
   // primer analisis prepara el video base en ese formato (el Studio abre con el mismo por defecto)
   if(body.director&&ASM.clips.length===1&&ASM.clips[0].type!=="image"){
@@ -1558,22 +1722,33 @@ window.addEventListener("resize",()=>{ if($("#s-assembly").classList.contains("o
       cada toma ("Usar esta toma", con deshacer). "Aplicar IA" manda montage_job + guion a /compose. */
 let MT={};
 function mtFresh(){ return {job:null,rows:[],sources:[],words:{},st:null,phase:"up",canceled:false,timer:null,wtimer:null,
-  err:null,noList:false,hold:{canceled:false,xhr:null},script:null,rearm:false,back:false,manual:false,failed:[]}; }
-const mtVideos=()=>(MT.sources||[]).filter(s=>s&&s.type!=="image");
+  err:null,noList:false,hold:{canceled:false,xhr:null},script:null,rearm:false,back:false,manual:false,failed:[],assetIdx:new Set(),assetIds:new Set()}; }
+// recursos del guion (imagenes y videos que el guion nombra): nunca son tomas
+const mtIsAsset=s=>!!s&&(s.type==="image"||(MT.assetIds&&MT.assetIds.has(s.id)));
+const mtVideos=()=>(MT.sources||[]).filter(s=>s&&!mtIsAsset(s));
+const mtAssets=()=>(MT.sources||[]).filter(s=>s&&mtIsAsset(s));
+/** Que fuentes ya subidas son recursos segun el guion `script` (por nombre, como el servidor). */
+function mtClassifySources(sources,script){
+  const list=(sources||[]).filter(Boolean), cls=FXCore.classifyFiles(list,script||"");
+  return new Set(cls.assets.map(i=>list[i].id));
+}
+const mtRowsAssets=rows=>new Set(rows.filter(r=>r.src&&MT.assetIdx.has(r.i)).map(r=>r.src.id));
 async function runMontage(files){
   asmStopPreview(true); toastOff();
   const my=MT=mtFresh(); MT.script=($("#guion").value||"").trim()||null;
+  // lo que el guion nombra (y las imagenes) sube como recurso: sin transcribir, nunca como toma
+  MT.assetIdx=new Set(FXCore.classifyFiles([...files].map(f=>({name:f.name,type:f.type})),MT.script||"").assets);
   show("#s-montage"); mtRenderProg();
   const rows=await uploadEach(files,(r,rows)=>{ if(my!==MT) return; MT.rows=rows; MT.sources=rows.filter(x=>x.src).map(x=>x.src);
-    if(r&&r.state==="ok") mtWordsLater(); mtRenderProg(); },my.hold,true);
+    MT.assetIds=mtRowsAssets(rows); if(r&&r.state==="ok") mtWordsLater(); mtRenderProg(); },my.hold,i=>!my.assetIdx.has(i));
   if(my!==MT||MT.canceled) return;      // cancelado (o ya empezo otro armado)
-  MT.rows=rows; MT.sources=FXCore.recordingOrder(rows.filter(x=>x.src).map(x=>x.src));
+  MT.rows=rows; MT.sources=FXCore.recordingOrder(rows.filter(x=>x.src).map(x=>x.src)); MT.assetIds=mtRowsAssets(rows);
   if(!mtVideos().length){ const e=rows.find(r=>r.error); return mtError(e?`No se pudo subir ningún video: ${e.error}`:"No hay videos para armar."); }
   // archivos que no se subieron: se decide ANTES de armar (reintentar o seguir sin ellos) y, si se sigue,
   // el ensamble lo recuerda (las partes que solo se dicen ahi quedan sin toma)
   await mtRetryFailed(rows,files,my);
   if(my!==MT||MT.canceled) return;
-  MT.rows=rows; MT.sources=FXCore.recordingOrder(rows.filter(x=>x.src).map(x=>x.src));
+  MT.rows=rows; MT.sources=FXCore.recordingOrder(rows.filter(x=>x.src).map(x=>x.src)); MT.assetIds=mtRowsAssets(rows);
   MT.failed=rows.filter(r=>r.state==="err").map(r=>r.name);
   MT.phase="words"; mtRenderProg();
   await mtStart();
@@ -1592,10 +1767,10 @@ async function mtRetryFailed(rows,files,my){
     if(my!==MT||MT.canceled||!d||d.pick!=="alt") return;
     MT.phase="up"; mtRenderProg();
     const again=await uploadEach(bad.map(r=>files[r.i]),r2=>{ if(my!==MT) return; const r=bad[r2.i];
-      Object.assign(r,{state:r2.state,loaded:r2.loaded,total:r2.total,error:r2.error}); mtRenderProg(); },my.hold,true);
+      Object.assign(r,{state:r2.state,loaded:r2.loaded,total:r2.total,error:r2.error}); mtRenderProg(); },my.hold,k=>!my.assetIdx.has(bad[k].i));
     if(my!==MT||MT.canceled) return;
     again.forEach((r2,k)=>{ const r=bad[k]; Object.assign(r,{state:r2.state,src:r2.src,error:r2.error,loaded:r2.loaded,total:r2.total}); if(r.src) r.src._idx=r.i; });
-    MT.sources=rows.filter(x=>x.src).map(x=>x.src); MT.phase="words"; mtRenderProg();
+    MT.sources=rows.filter(x=>x.src).map(x=>x.src); MT.assetIds=mtRowsAssets(rows); MT.phase="words"; mtRenderProg();
   }
 }
 /** Dialogo del armado (modal, teclado atrapado): o = {icon, title, body (HTML ya escapado), ok, alt}.
@@ -1624,7 +1799,8 @@ function mtDialog(o){
 /** POST /montage con los clips ya subidos (en orden de grabacion) y el guion. */
 async function mtStart(){
   const my=MT; MT.err=null; clearTimeout(MT.timer); mtRenderProg();
-  const body={sids:mtVideos().map(s=>s.id),script:MT.script||null,
+  // sids = las tomas; assets = los recursos del guion (el servidor vuelve a clasificar por nombre)
+  const body={sids:mtVideos().map(s=>s.id),assets:mtAssets().map(s=>s.id),script:MT.script||null,
     // desde el ensamble manda el campo del ensamble (el que se ve); desde el inicio, el del inicio
     glossary:(MT.back?(($("#asmGloss").value||"").trim()||($("#glossary").value||"").trim()):(($("#glossary").value||"").trim()||($("#asmGloss").value||"").trim()))||null,intercut:true,
     profile:(window.PF&&PF.forCompose())||null,
@@ -1675,7 +1851,7 @@ async function mtPoll(){
 function mtHeard(){
   const v=mtVideos(), wp=FXCore.wordsProgress(v.map(s=>({type:"video",words:MT.words[s.id]||s.words})));
   // mientras se sube, el total son TODOS los archivos elegidos (no solo los que ya llegaron)
-  let heard=wp.ready+wp.error, N=Math.max(v.length,(MT.rows||[]).filter(r=>r.state!=="err").length);
+  let heard=wp.ready+wp.error, N=Math.max(v.length,(MT.rows||[]).filter(r=>r.state!=="err"&&!MT.assetIdx.has(r.i)).length);
   const st=MT.st||{};
   if(st.N){ N=Math.max(N,st.N); heard=Math.max(heard,st.n||0); }
   if(MT.phase==="match") heard=N;
@@ -1704,10 +1880,12 @@ function mtRenderProg(){
   $("#mtFiles").hidden=!list.length;
   $("#mtFiles").innerHTML=list.map(r=>{
     const w=r.src?(MT.words[r.src.id]||r.src.words):null;
+    const asset=r.i!=null?MT.assetIdx.has(r.i):mtIsAsset(r.src);
     let t,c="";
     if(r.state==="wait"){ t="En espera"; }
     else if(r.state==="up"){ t=`Subiendo ${Math.round(r.total?r.loaded/r.total*100:0)}%`; c="act"; }
     else if(r.state==="err"){ t="No se subió"; c="err"; }
+    else if(asset){ t="Recurso del guion"; c="ok"; }
     else if(w==="ready"||ph==="match"){ t="Escuchado"; c="ok"; }
     else if(w==="error"){ t="Sin audio legible"; c="err"; }
     else { t="Escuchando…"; c="act"; }
@@ -1752,9 +1930,11 @@ async function mtOpenJob(job,note){
     fecha de plan.montage.order con su miniatura de siempre. */
 async function mtSources(m,known){
   const by={}; (known||[]).forEach(s=>{ if(s&&s.id) by[s.id]=s; });
-  const miss=(m.order||[]).map(o=>o.sid).filter(id=>id&&!by[id]);
+  // tambien los recursos del guion (miniatura y duracion para el panel y la vista previa)
+  const miss=[...new Set((m.order||[]).map(o=>o.sid).concat((m.assets||[]).map(a=>a&&a.sid),(m.inserts||[]).map(x=>x&&x.sid)))].filter(id=>id&&!by[id]);
   if(miss.length){ try{ const r=await fetch("/sources?ids="+miss.map(encodeURIComponent).join(","));
     if(r.ok){ const d=await r.json(); (Array.isArray(d)?d:(d&&d.sources)||[]).forEach(s=>{ if(s&&s.id) by[s.id]=s; }); } }catch(e){} }
+  (m.assets||[]).forEach(a=>{ if(a&&a.sid&&!by[a.sid]) by[a.sid]={id:a.sid,name:a.name||a.sid,type:a.kind==="image"?"image":"video",thumb:`/tlsource/${a.sid}/thumb`,dur:+a.dur||0,w:a.w,h:a.h}; });
   (m.order||[]).forEach(o=>{ if(!o||!o.sid) return;
     if(!by[o.sid]) by[o.sid]={id:o.sid,name:o.name||o.sid,type:"video",created:o.created,thumb:`/tlsource/${o.sid}/thumb`,dur:0};
     else if(by[o.sid].created==null&&o.created) by[o.sid]=Object.assign({},by[o.sid],{created:o.created}); });
@@ -1783,7 +1963,7 @@ function asmSaveLater(){
 function asmSaveNow(){
   clearTimeout(ASM_SAVE_T);
   if(!ASM.montageJob||!ASM.dirty) return;
-  asmSaved(ASM.montageJob,{sig:mtSig(ASM.montage),clips:ASM.clips,overlays:ASM.overlays,script:ASM.scriptEdit==null?null:ASM.scriptEdit,at:Date.now()});
+  asmSaved(ASM.montageJob,{sig:mtSig(ASM.montage),clips:ASM.clips,overlays:ASM.overlays,script:ASM.scriptEdit==null?null:ASM.scriptEdit,insEdits:ASM.insEdits||{},at:Date.now()});
 }
 /** Abre el ensamblado con el resultado del montaje. */
 function openMontage(job,m,sources){
@@ -1798,7 +1978,7 @@ function openMontage(job,m,sources){
   ASM.sources=FXCore.recordingOrder(sources);
   ASM.clips=FXCore.montageClips(m,ASM.sources,uid);
   const sv=asmSaved(job); let restored=false;
-  if(sv&&sv.sig===mtSig(m)&&Array.isArray(sv.clips)&&sv.clips.length){ ASM.clips=sv.clips; ASM.overlays=sv.overlays||[]; ASM.scriptEdit=sv.script; ASM.dirty=true; restored=true; }
+  if(sv&&sv.sig===mtSig(m)&&Array.isArray(sv.clips)&&sv.clips.length){ ASM.clips=sv.clips; ASM.overlays=sv.overlays||[]; ASM.scriptEdit=sv.script; ASM.insEdits=sv.insEdits||{}; ASM.dirty=true; restored=true; }
   else if(sv) asmSaved(job,null);      // cambios de un montaje anterior (se rearmo): ya no aplican
   JOB=job; if(new URLSearchParams(location.search).get("job")!==job) history.replaceState(null,"","?job="+encodeURIComponent(job));
   asmCopyGloss();
@@ -1833,7 +2013,7 @@ async function mtFromAssembly(){
     ok:"Armar con IA",alt:"Cancelar"});
   if(!d||d.pick!=="ok") return;
   MT=mtFresh(); MT.back=true; MT.manual=true; MT.script=(d.text||"").trim()||null; MT.phase="words";
-  MT.sources=FXCore.recordingOrder(ASM.sources);
+  MT.sources=FXCore.recordingOrder(ASM.sources); MT.assetIds=mtClassifySources(MT.sources,MT.script);
   show("#s-montage"); mtRenderProg(); await mtStart();
 }
 $("#asmAI").onclick=mtFromAssembly;
@@ -1842,7 +2022,7 @@ async function mtRearm(){
   asmPause(); asmStopPreview(true); toastOff();
   const txt=(mtScriptNow()||"").trim();
   MT=mtFresh(); MT.rearm=true; MT.back=true; MT.script=txt||null; MT.phase="match";
-  MT.sources=ASM.sources.slice(); mtVideos().forEach(s=>{ MT.words[s.id]="ready"; });
+  MT.sources=ASM.sources.slice(); MT.assetIds=mtClassifySources(MT.sources,MT.script); mtVideos().forEach(s=>{ MT.words[s.id]="ready"; });
   show("#s-montage"); mtRenderProg(); await mtStart();
 }
 
@@ -1878,7 +2058,10 @@ function mtRender(){
     +(sum.edited?` · ${sum.edited} ${sum.edited===1?"cambiada":"cambiadas"} por ti`:"")
     +(sum.removed?` · ${sum.removed} ${sum.removed===1?"quitada":"quitadas"}`:"")+`</div>`
     +`<div class="mt-legend" title="Qué tan segura está la IA de cada toma (color de cada clip en el timeline)"><span><i class="alta"></i>Alta</span><span><i class="media"></i>Media</span><span><i class="baja"></i>Baja</span>${rows.some(r=>r.type==="slot"&&r.extra)?`<span><i class="extra"></i>Extra</span>`:""}</div>`
-    +(detected?`<div class="mnote">No había guion: Reelfy lo dedujo de lo que repites. Revísalo abajo y rearma si algo no cuadra.</div>`:"")+`</div>`;
+    +(detected?`<div class="mnote">No había guion: Reelfy lo dedujo de lo que repites. Revísalo abajo y rearma si algo no cuadra.</div>`:"")
+    +mtRampSummary()+`</div>`;
+  h+=mtResHtml(m);
+  const insOf={}; (ASM.inserts||[]).forEach(x=>{ (insOf[x.line]=insOf[x.line]||[]).push(x); });
   rows.forEach(r=>{
     if(r.type==="section"){ h+=`<div class="mt-sec">Sección ${r.n}</div>`; return; }
     if(r.type==="uncovered"){ h+=`<div class="mt-unc"><div class="mt-uh">${ICO("alert")}Sin toma</div><div class="mt-line">${mtEsc(r.line.text)}</div>`
@@ -1910,6 +2093,8 @@ function mtRender(){
       +`<button class="mt-top" data-act="sel" title="${r.inVideo?"Ver esta parte en el timeline":"Esta parte no está en el video"}"><span class="mt-n">${r.n}</span><span class="mt-line">`
       +(r.part?`<span class="mt-part" title="Pedazo ${r.part.i} de ${r.part.n} de la misma línea del guion (dos tomas empalmadas)">${r.part.i}/${r.part.n}</span>`:"")
       +`${mtEsc(r.text||"(sin texto)")}</span></button>`;
+    const rins=[].concat(...(r.lines||[]).map(L=>insOf[L.id]||[]));
+    if(rins.length) h+=`<div class="mt-rchips">`+rins.map(x=>`<button class="mt-rchip${x.sid?"":" miss"}${x.enabled===false?" off":""}" data-act="rsel" data-ins="${mtEsc(x.id)}" title="${x.sid?"Recurso que aparece mientras se dice esta línea":"Falta el archivo de este recurso"}">${ICO(x.sid?(x.kind==="image"?"image":"film"):"alert")}<span>${mtEsc(x.name)}</span></button>`).join("")+`</div>`;
     if(r.inVideo){
       // confianza (calidad y ventaja sobre las demas) junto al puntaje de la toma: la misma medida que
       // se ve en las otras tomas; si baja por un empate, lo dice
@@ -1952,16 +2137,91 @@ function mtRender(){
   else if(fk) mtRefocus(box,fk);
   if(selSlot!==ASM._mtSel){ ASM._mtSel=selSlot; const el=box.querySelector(".mt-slot.sel"); if(el&&!$("#asmTakesWrap").hidden) el.scrollIntoView({block:"nearest"}); }
 }
+/** Resumen de los cambios de camara con aceleracion (cabecera del panel "Tomas"). */
+function mtRampSummary(){
+  const mk=ASM.rampMarks||[]; if(!mk.length) return "";
+  const on=mk.filter(x=>x.on).length;
+  return `<div class="mt-ramps">${ICO("bolt")}<span><b>${on} de ${mk.length}</b> cambios de cámara con aceleración: el video acelera en la pausa y el audio sigue normal. Actívalos o quítalos en los marcadores ${ICO("bolt")} del timeline.</span></div>`;
+}
+/** Seccion "Recursos del guion" del panel "Tomas": cada imagen o video que pide el guion. */
+function mtResHtml(m){
+  const ins=ASM.inserts||[]; if(!ins.length) return "";
+  const lt={}; (((m&&m.script)||{}).lines||[]).forEach(L=>{ if(L) lt[L.id]=FXCore.lineRefs(L.text||"").text; });
+  const miss=ins.filter(x=>!x.sid).length;
+  let h=`<div class="mt-resh">${ICO("card")}<b>Recursos del guion</b><span class="cnt">${ins.length}</span>${miss?`<span class="mt-warn">${miss} ${miss===1?"falta":"faltan"}</span>`:""}</div>`;
+  ins.forEach(x=>{
+    const src=x.sid?ASM.sources.find(s=>s.id===x.sid):null, off=x.enabled===false, sel=ASM.insSel===x.id;
+    const tm=x.placed?`${FXCore.fmtSrc(x.start)}–${FXCore.fmtSrc(x.end)} · ${(x.end-x.start).toFixed(1)} s`:"";
+    h+=`<div class="mt-res${x.sid?"":" miss"}${off?" off":""}${sel?" sel":""}" data-ins="${mtEsc(x.id)}">`
+      +`<button class="mt-rtop" data-act="rsee" title="${x.placed?"Ver dónde aparece":"Su línea no está en el video"}"><span class="mt-rth">${src&&src.thumb?`<img alt="" src="${src.thumb}">`:ICO(x.sid?"image":"alert")}</span>`
+      +`<span class="mt-rmain"><span class="mt-tk"><b>${mtEsc(x.name)}</b>${tm?`<span class="mt-tm">${tm}</span>`:""}</span>`
+      +(lt[x.line]?`<span class="mt-rline">«${mtEsc(lt[x.line])}»</span>`:"")
+      +(x.sid?`<span class="mt-why">${off?"Lo quitaste del video.":!x.placed?"Su línea no está en el video: no aparece.":mtEsc(insFitLabel(x))}</span>`
+        :`<span class="mt-rmiss">${ICO("alert")}Falta el archivo «${mtEsc(x.name)}». Súbelo para que aparezca mientras dices esta línea.</span>`)
+      +`</span></button><div class="mt-acts">`
+      +(x.sid?(`<button class="mt-btn" data-act="rfile">${ICO("upload")}<span>Cambiar archivo</span></button>`
+        +(off?`<button class="mt-btn pri" data-act="roff">${ICO("restore")}<span>Volver a ponerlo</span></button>`:`<button class="mt-btn" data-act="roff">${ICO("minus")}<span>Quitar</span></button>`))
+        :`<button class="mt-btn pri mt-radd" data-act="rfile">${ICO("upload")}<span>Agregar archivo</span></button>`)
+      +`</div></div>`;
+  });
+  return h;
+}
+/** Sube el archivo de un recurso (falta o se cambia) y lo asigna en el proyecto. */
+function mtInsertFile(id){
+  const x=(ASM.inserts||[]).find(i=>i.id===id); if(!x) return;
+  const fi=Object.assign(document.createElement("input"),{type:"file",accept:"video/*,image/*"});
+  fi.onchange=async()=>{ const f=fi.files&&fi.files[0]; if(!f) return;
+    const job=ASM.montageJob; FX.toast(`Subiendo ${f.name}…`,"upload");
+    let src=null;
+    try{ const d=await uploadOne(f,null,null,false); src=(d.sources||[])[0]; if(!src) throw new Error("Formato no compatible"); }
+    catch(e){ FX.toast(`No se pudo subir el archivo: ${e.message||e}`,"alert",false,[],true); return; }
+    if(ASM.montageJob!==job) return;
+    if(!ASM.sources.some(s=>s.id===src.id)) ASM.sources.push(src);
+    // deshacer: el archivo de ANTES queda fijo en insEdits (lo que guarda el deshacer y el guardado
+    // local); el servidor cambia su copia del montaje, pero lo que manda en el ensamble y al componer
+    // es insEdits
+    const cur=(ASM.inserts||[]).find(i=>i.id===id)||x;
+    ASM.insEdits[id]=Object.assign({},ASM.insEdits[id]||{},{sid:cur.sid||null,kind:cur.sid?(cur.kind||null):null,status:cur.sid?"ok":"missing"});
+    asmPush();
+    try{
+      const r=await fetch("/montage/"+encodeURIComponent(job)+"/asset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sid:src.id,id})});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.detail||`Error ${r.status}`);
+      if(ASM.montageJob!==job) return;
+      if(Array.isArray(d.inserts)) ASM.montage.inserts=d.inserts;
+      if(Array.isArray(d.assets)) ASM.montage.assets=d.assets;
+    }catch(e){ /* sin el servidor (o ya compuesto): el recurso queda en este ensamble y viaja al componer */ }
+    if(ASM.montageJob!==job) return;
+    ASM.insEdits[id]=Object.assign({},ASM.insEdits[id]||{},{sid:src.id,kind:src.type==="image"?"image":"video",status:"ok"});
+    ASM.dirty=true; asmSaveLater(); asmRenderTL(); mtRender(); asmRenderSources();
+    FX.toast(`Recurso «${x.name}»: ahora usa ${src.name||f.name}.`,"check",false,[["Deshacer",()=>asmUndo()]]); };
+  fi.click();
+}
+function mtInsertToggle(id){
+  const x=(ASM.inserts||[]).find(i=>i.id===id); if(!x) return;
+  asmPush(); const on=x.enabled===false;
+  ASM.insEdits[id]=Object.assign({},ASM.insEdits[id]||{},{enabled:on});
+  asmRenderTL(); mtRender();
+  FX.toast(on?`El recurso «${x.name}» volvió al video.`:`Quitaste el recurso «${x.name}» del video.`,"check",false,[["Deshacer",()=>asmUndo()]]);
+}
+function mtInsertSee(id){
+  const x=(ASM.inserts||[]).find(i=>i.id===id); if(!x) return;
+  ASM.insSel=id; if(ASM.sel){ ASM.sel=null; asmInspector(); }
+  if(!x.placed){ mtRender(); return; }
+  asmStopPreview(true); asmPause(); asmGoto(x.start+0.01,true); asmPlay(); ASM.stopAt=x.end; asmRenderTL(); mtRender();
+}
 /** Clave de un control del panel "Tomas" para volver a enfocarlo tras re-dibujar. */
 function mtFocusKey(el){
   const c=el&&el.closest&&el.closest("[data-act],summary,#asmRearm"); if(!c) return null;
-  const card=c.closest("[data-slot]"), alt=c.closest("[data-cand]");
+  const card=c.closest("[data-slot]")||c.closest("[data-ins]"), alt=c.closest("[data-cand]");
+  if(card&&card.dataset.ins&&!card.dataset.slot) return {act:c.dataset.act||null,ins:card.dataset.ins};
   return {act:c.dataset?c.dataset.act||null:null,slot:card?card.dataset.slot:null,cand:c.dataset&&c.dataset.cand?c.dataset.cand:(alt?alt.dataset.cand:null),
     key:c.dataset?c.dataset.key||null:null,k:c.dataset?c.dataset.k||null:null,fold:c.tagName==="SUMMARY"?((c.parentElement||{}).dataset||{}).fold||null:null,rearm:c.id==="asmRearm"};
 }
 function mtRefocus(box,fk){
   const esc=v=>(window.CSS&&CSS.escape)?CSS.escape(v):String(v).replace(/["\\]/g,"\\$&");
   let el=null;
+  if(fk.ins){ const sc=box.querySelector(`.mt-res[data-ins="${esc(fk.ins)}"]`); el=sc&&(sc.querySelector(`[data-act="${esc(fk.act||"rsee")}"]`)||sc.querySelector('[data-act="rsee"]')); if(el) try{ el.focus({preventScroll:true}); }catch(e){ el.focus(); } return; }
   if(fk.fold) el=box.querySelector(`details[data-fold="${esc(fk.fold)}"]>summary`);
   else if(fk.rearm) el=box.querySelector("#asmRearm");
   else if(fk.act){
@@ -2056,6 +2316,11 @@ function mtExtra(k){
   box.addEventListener("click",e=>{
     const b=e.target.closest("[data-act]"); if(!b||b.disabled) return;
     const card=b.closest("[data-slot]"), slot=card&&card.dataset.slot, act=b.dataset.act;
+    const rc=b.closest("[data-ins]"), iid=rc&&rc.dataset.ins;
+    if(act==="rsee"){ mtInsertSee(iid); return; }
+    if(act==="rfile"){ mtInsertFile(iid); return; }
+    if(act==="roff"){ mtInsertToggle(iid); return; }
+    if(act==="rsel"){ asmSelectInsert(iid,true); return; }
     if(act==="sel"){ const ix=FXCore.slotClipIdx(ASM.clips,slot); if(ix.length) asmSelect("clip",ASM.clips[ix[0]]._id); }
     else if(act==="alts"){ ASM.mtOpen.has(slot)?ASM.mtOpen.delete(slot):ASM.mtOpen.add(slot); mtRender(); }
     else if(act==="use") mtUse(slot,b.dataset.cand);

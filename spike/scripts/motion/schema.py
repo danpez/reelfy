@@ -67,9 +67,9 @@ DEFAULTS = {
     },
 }
 
-LIST_TRACKS = ("text", "graphics", "cutaways", "effects", "transitions", "sfx")
+LIST_TRACKS = ("text", "graphics", "cutaways", "effects", "transitions", "sfx", "media")
 ID_PREFIX = {"text": "tx", "graphics": "gr", "cutaways": "cw", "effects": "fx",
-             "transitions": "tr", "sfx": "sf"}
+             "transitions": "tr", "sfx": "sf", "media": "md"}
 EVENT_TRACKS = ("transitions", "sfx")          # usan `at` en vez de start/end
 MIN_ITEM = 0.05                                # s: duracion minima de un item
 
@@ -111,6 +111,11 @@ PLATFORM_IDS = list(_profile.PLATFORMS)
 TRANSITION_MIXERS = ["film_burn", "torn_paper", "circle", "slide"]
 FACE_ANCHORS = ["face", "face_left", "face_right", "face_top"]
 BW_TONES = ["neutral", "warm", "cool", "sepia"]
+# recursos del guion (pista fx.media): estilo de presentacion, ajuste del clip al hueco y origen
+MEDIA_STYLES = ["float_card"]
+MEDIA_FITS = ["hold", "speed", "trim"]
+MEDIA_FILE_KINDS = ["image", "video"]
+ITEM_SRCS = ("ai", "user", "script")          # script = lo puso el guion (montaje con recursos)
 EASINGS = ["linear", "in_quad", "out_quad", "in_out_quad", "in_cubic", "out_cubic",
            "in_out_cubic", "out_quart", "in_expo", "out_expo", "in_out_expo", "out_back",
            "in_back", "out_elastic", "out_bounce", "smoothstep"]
@@ -671,6 +676,44 @@ DIRECTOR_PARAMS = [
     num("seed", "Semilla", 7, 0, 999999, 1),
 ]
 
+# ---------------------------------------------------------------- recursos del guion (fx.media)
+# Imagen o clip que el guion pide al final de una linea ("- Agregar video_x"): el montaje lo
+# coloca mientras se dice esa linea y compose lo deja aqui (tiempo ORIGINAL del video compuesto).
+# Lo dibuja motion/media.py (render) y app/static/floatcard.js (vista en vivo). `internal`: dato
+# del motor que el inspector no muestra como control (archivo, ruta, tipo, nombre en el guion).
+# El director lo trata como contenido BLOQUEADO del usuario (nada de titulos/escenas encima).
+MEDIA_COMMON = [
+    P("sid", "text", "Archivo (fuente)", None, nullable=True, internal=True,
+      hint="Id de la fuente subida (POST /sources); el motor resuelve el archivo por aqui"),
+    P("path", "text", "Ruta del archivo", None, nullable=True, internal=True),
+    P("name", "text", "Recurso del guion", "", internal=True),
+    sel("kind", "Tipo de archivo", MEDIA_FILE_KINDS, None, nullable=True, internal=True),
+    sel("fit", "Ajuste al tiempo", MEDIA_FITS, "hold", seg=True,
+        hint="hold = imagen fija o clip a velocidad normal; speed = clip acelerado para caber; "
+             "trim = clip recortado"),
+    num("speed", "Velocidad del clip", 1.0, 0.25, 4.0, 0.05, unit="x", hint="Solo con ajuste speed"),
+    num("src_in", "Inicio en el clip", 0.0, 0.0, 36000.0, 0.05, unit="s"),
+]
+# defaults espejo de motion/media.DEFAULTS (tests/test_media_float.py los compara)
+FLOAT_CARD_PARAMS = [
+    num("width", "Ancho de la tarjeta", None, 0.4, SYM_W, 0.01, nullable=True,
+        hint="Vacío = automático (banda segura, centrada)"),
+    num("aspect", "Proporción (ancho/alto)", None, 0.5625, 1.78, 0.01, nullable=True,
+        hint="Vacío = 4:5 (o más vertical si el archivo lo es y cabe)"),
+    num("y", "Posición Y", None, 0.1, 0.9, 0.005, nullable=True,
+        hint="Vacío = automático: arriba de los subtítulos"),
+    num("blur", "Desenfoque del fondo", 0.55, 0.0, 1.0, 0.05),
+    num("dim", "Oscurecer el fondo", 0.28, 0.0, 0.8, 0.02),
+    num("radius", "Esquinas redondeadas", 0.055, 0.0, 0.2, 0.005, hint="Fracción del ancho de la tarjeta"),
+    num("shadow", "Sombra", 0.6, 0.0, 1.0, 0.05),
+    P("border", "bool", "Borde claro", True),
+    num("kenburns", "Acercamiento lento (imágenes)", 0.08, 0.0, 0.3, 0.01),
+    num("float", "Flotación", 1.0, 0.0, 2.0, 0.05),
+    num("in_dur", "Duración de la entrada", 0.35, 0.1, 1.5, 0.05, unit="s"),
+    num("out_dur", "Duración de la salida", 0.25, 0.1, 1.5, 0.05, unit="s"),
+]
+MEDIA_STYLE_PARAMS = {"float_card": {"label": "Tarjeta flotante", "params": FLOAT_CARD_PARAMS}}
+
 
 def _with_defaults(params: list[dict], overrides: dict, hints: dict | None = None) -> list[dict]:
     out = []
@@ -722,6 +765,9 @@ def _build_kinds() -> dict:
                     "items": {k: {"label": SFX_LABELS.get(k, k.replace("_", " ")),
                                   "params": SFX_PARAMS[1:]}
                               for k in SFX_NAMES}},
+            "media": {"label": "Recursos", "key": "style", "common": "range",
+                      "items": {k: {"label": v["label"], "params": MEDIA_COMMON + v["params"]}
+                                for k, v in MEDIA_STYLE_PARAMS.items()}},
         },
         "captions": {"label": "Subtítulos", "params": CAPTIONS_PARAMS},
         "music": {"label": "Música", "params": MUSIC_PARAMS},
@@ -1146,6 +1192,22 @@ def norm_media(v: Any) -> dict | None:
     return d
 
 
+def _norm_media_item(it: dict) -> None:
+    """Recurso del guion (fx.media): `sid` valido o None (nunca una ruta), `path`/`name` texto
+    acotado, `kind` image|video|None. Un item sin archivo se conserva (el render lo omite con
+    aviso 'media:<id>:no_encontrado' y el Studio pide subirlo)."""
+    sid = it.get("sid")
+    it["sid"] = sid.strip() if isinstance(sid, str) and _SID.match(sid.strip()) else None
+    for k, n in (("path", 1024), ("name", 200)):
+        v = it.get(k)
+        if v is None and k == "path":
+            it[k] = None
+        else:
+            it[k] = str(v)[:n] if v is not None else ""
+    if it.get("kind") not in MEDIA_FILE_KINDS:
+        it["kind"] = None
+
+
 def _norm_y_ranges(cap: dict, duration: float | None) -> None:
     """captions.y_ranges: filas {start < end, y en [0.1, 0.9]} en tiempo ORIGINAL, ordenadas.
     Las invalidas se descartan (un dato malo nunca tumba el render)."""
@@ -1362,7 +1424,7 @@ def _norm_event(it: dict, duration: float | None) -> bool:
 def _norm_common(it: dict, event: bool) -> None:
     it["enabled"] = bool(it.get("enabled", True))
     it["locked"] = bool(it.get("locked", False))
-    it["src"] = it.get("src") if it.get("src") in ("ai", "user") else "ai"
+    it["src"] = it.get("src") if it.get("src") in ITEM_SRCS else "ai"
     if not event:
         f = _num(it.get("intensity"))
         it["intensity"] = 1.0 if f is None else min(1.0, max(0.0, f))
@@ -1423,6 +1485,10 @@ def normalize(plan: dict, fill: bool = False) -> dict:
             it = copy.deepcopy(it)
             if track == "text" and not it.get("preset"):
                 it["preset"] = "title_pop"
+            if track == "media":
+                if not it.get("style"):
+                    it["style"] = "float_card"
+                _norm_media_item(it)
             kind = it.get(key)
             if track == "sfx" and kind not in KINDS["tracks"][track]["items"] and \
                     kind not in _sfx_extra():

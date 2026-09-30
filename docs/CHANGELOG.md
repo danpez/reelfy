@@ -2,6 +2,31 @@
 
 Formato: cada versión = un tag `reelfy-v*` que dispara el build de los 3 instaladores.
 
+## v0.5.4 — 2026-09-30
+
+**Cambios de cámara con aceleración y recursos flotantes desde el guion.**
+
+### Cambios de cámara
+- Cuando el montaje alterna dos cámaras o parte una frase entre dos tomas, la imagen se acelera a 2x
+  unos 0.3 s alrededor del cambio (la toma que sale o la que entra, del lado donde hay pausa y cuadros
+  de sobra) mientras el audio sigue a velocidad normal: un cambio fluido, como una edición a mano.
+- Cada cambio de cámara muestra un marcador en el montaje para quitar o poner la aceleración.
+
+### Recursos desde el guion
+- Al final de una línea del guion puedes escribir "- Agregar nombre_del_archivo" (o "[Agregar ...]"):
+  Reelfy busca ese archivo entre los que subiste y lo muestra mientras se dice esa línea, como una
+  tarjeta flotante (esquinas redondeadas, sombra, la persona de fondo desenfocada, entrada con resorte,
+  flotación suave; los videos van sin audio y las imágenes con un acercamiento lento), centrada y sin
+  tapar los subtítulos. Si el video es más largo que la frase se recorta o se acelera un poco.
+- En el montaje: "Recursos del guion" con lo encontrado y lo que falta ("Agregar archivo"); en el
+  Studio, la pista Recursos para moverlos, recortarlos o cambiar el archivo.
+- El director no pone títulos, tarjetas ni transiciones encima de un recurso.
+
+### Color de acento
+- Un solo ajuste "Color de acento" por proyecto (subtítulos, títulos y tarjetas), amarillo por defecto.
+
+---
+
 ## v0.5.3 — 2026-09-30
 
 **Armar con IA: de todos los clips de una grabación al video, con o sin guion.**

@@ -44,15 +44,39 @@ ni la red (el LLM es opcional, solo desempata y nunca da tiempos) y decide:
   6. Todo lo que no entra queda en "discarded" con su motivo; las lineas sin toma en
      "uncovered"; el material fuera de guion que podria aportar, en "extra" (solo entra a la
      linea de tiempo si el juez LLM lo aprueba dos veces).
+  7. Recursos del guion: una linea puede pedir una imagen o video al final ("... nos paso esto.
+     - Agregar video_marcas", "[Agregar foto_local]", "[foto_local]", "{foto_local}"). Con separador
+     vale solo si cada nombre parece archivo o coincide con uno elegido ("— agrega tu negocio hoy"
+     se dice). La marca no se busca en las tomas; el archivo (nombre normalizado: igual, luego
+     prefijo unico por palabras; un id solo igual) es un RECURSO y nunca una toma (tampoco ninguna
+     imagen; un parecido solo por prefijo nunca se lleva una toma con voz). Se ubica mientras se
+     dice la linea (plan_inserts): de su primera palabra - 0.15 s a la ultima + 0.25 s, >= 2 s; si
+     su linea no tiene toma queda listado sin lugar (start/end None).
+  8. Rampas de velocidad SOLO de video en los cambios de camara del material intercalado o partido
+     (plan_ramps): la parte que sale acelera sus ultimos 0.30 s (mostrando cuadros de despues de
+     su "out") o la que entra empieza 0.30 s antes en su fuente a 2x; el audio sigue a 1x y la
+     duracion no cambia. El lado es el que cae en una pausa y tiene esos cuadros extra.
 
 API
-  build(clips, script=None, *, intercut=True, glossary=None, llm=None) -> plan["montage"]
+  build(clips, script=None, *, intercut=True, glossary=None, llm=None, assets=None, ramps=None)
+      -> plan["montage"]
       clips = [{"sid", "name", "created", "dur", "words": [{text,start,end}], "audio": ruta wav
                 16 kHz | None, "setup": int | None, "takes": [cortes de takes.detect] | None}]
       (sin "takes" se corre takes.detect aqui). llm: None (sin juez), callable(prompt) -> str | None
       o True (= local_llm()). Con "frames"/"thumb" y sin "setup" se agrupan las camaras aqui.
-  parse_script(text) -> {"sections": [{"id", "lines": [ids]}], "lines": [{"id", "text"}]}
+      assets = [{"sid", "name", "kind": "image"|"video"|None, "dur"}] (recursos para las marcas del
+      guion; un clip que el guion pide o que es imagen pasa aqui solo). ramps = {slot de la parte
+      que entra | indice: bool | None}: lo que el usuario eligio por union (gana).
+  parse_script(text, assets=None) -> {"sections": [{"id", "lines": [ids]}],
+      "lines": [{"id", "text" (sin marcas), "inserts": [nombres]}]}
       (una linea de texto = una linea del guion; linea en blanco = seccion nueva).
+  split_annotation(line, known) -> (texto, [nombres])   marcas de recursos al final de una linea
+  asset_key(name) / match_asset(name, files) / asset_kind(file)   nombres y tipos de recursos
+  classify(files, script) -> {"clips", "assets", "refs": {nombre: sid | None}}   (para el servidor)
+  plan_ramps(montage, clips, overrides=None) -> timeline   rampas por union (recalcula; tras
+      cambiar tomas o un interruptor del usuario)
+  plan_inserts(montage, assets=None) -> inserts   recursos en la linea de tiempo (recalcula; tras
+      cambiar tomas o subir un archivo que faltaba)
   recording_order(clips) -> [indices]           orden de grabacion
   setups(clips, threshold) -> [int | None]      grupos de camara con 1-3 cuadros chicos por clip
   frames_of(path, dur) -> [arreglos]            (ayuda con ffmpeg para quien llama; build no lo usa)
@@ -60,16 +84,20 @@ API
   local_llm(timeout) -> callable | None         el LLM local (ollama) como juez si/no
 
 Contrato de salida (plan["montage"]):
-  {"version": 1, "order": [{"sid", "name", "rec", "created"}],
-   "script": {"source": "user"|"detected", "text", "sections": [{"id", "lines"}],
-              "lines": [{"id", "text"}]},
+  {"version": 1, "order": [{"sid", "name", "rec", "created", "setup" (None: camara desconocida)}],
+   "script": {"source": "user"|"detected", "text" (tal cual, con marcas), "sections": [{"id", "lines"}],
+              "lines": [{"id", "text", "inserts": [nombres]}]},
    "slots": [{"id", "lines": [ids], "text", "chosen": cand_id,
               "cands": [{"id", "sid", "in", "out", "w0", "w1", "text", "score", "fidelity",
-                         "coverage", "flags": [], "reason", "setup", "conf",
+                         "coverage", "flags": [], "reason", "setup", "conf", "line_times",
                          "vol", "level_db" (estos dos solo con audio)}]}],
-   "timeline": [{"slot", "cand", "sid", "in", "out", "start", "vol", "join"}],
+   "timeline": [{"slot", "cand", "sid", "in", "out", "start", "vol", "join", "conf", "setup",
+                 "ramp", "ramp_auto", "ramp_user"? (desde la 2a), "ramp_in"?, "ramp_out"?}],
    "discarded": [{"sid", "in", "out", "text", "why", "reason"}],
    "uncovered": [line ids], "extra": [{"sid", "in", "out", "after", "why", "text", "kept", "vol"?}],
+   "inserts": [{"id", "line", "name", "sid" | None, "kind": "image"|"video"|None, "start", "end"
+                (None: su linea no esta en la linea de tiempo), "fit": "hold"|"speed"|"trim", "speed",
+                "src_in", "status": "ok"|"missing"}],
    "stats": {...}, "ms": int}
   join: None en el primero; "section" (empieza seccion: se permite transicion), "line" (empieza
   linea: corte seco) o "splice" (corte a media linea: corte seco, a lo mas un salto de zoom).
@@ -77,6 +105,9 @@ Contrato de salida (plan["montage"]):
   se conoce, un id propio por clip). w0/w1: indices en la lista "words" del clip. conf: la
   confianza si esa toma fuera la elegida (misma escala que timeline.conf). vol: ganancia con la
   MISMA referencia que la linea de tiempo (una toma cambiada suena como sus vecinas).
+  line_times: {linea: [inicio, fin]} de las palabras de esa toma alineadas a cada linea (s de la
+  fuente). ramp_in / ramp_out: {"dur", "speed"} (ver plan_ramps; el audio siempre es [in, out] a
+  1x). inserts: start/end en segundos de la LINEA DE TIEMPO del ensamble (ver plan_inserts).
 """
 from __future__ import annotations
 
@@ -137,6 +168,16 @@ P = {
     "ex_words": 6, "ex_content": 3, "ex_mic_db": 6.0,
     # alternativas por slot
     "max_alts": 6,
+    # rampas de velocidad (solo video) en cambios de camara del material intercalado
+    "ramp_dur": 0.30, "ramp_min": 0.15, "ramp_step": 0.05, "ramp_speed": 2.0,
+    "ramp_tol": 0.04,          # s: una palabra puede rozar la rampa (bordes de Whisper +-40 ms)
+    "ramp_room": 0.30,         # s: lo que queda de la parte a 1x ademas de sus rampas
+    "ramp_guard": 0.05,        # s: margen con el principio/fin del archivo para los cuadros extra
+    "ramp_ctx": 1.5,           # s: el orador sigue en la toma si habla a lo mas esto mas alla
+    # recursos del guion (imagen/video flotante mientras se dice la linea)
+    "ins_pre": 0.15, "ins_post": 0.25, "ins_min": 2.0,
+    "ins_speed_max": 1.4,      # un video hasta 1.4x el hueco se acelera; mas largo se recorta
+    "ins_slow_min": 0.8,       # un video un poco mas corto se alenta hasta 0.8x; mas corto dura lo suyo
 }
 
 # sin guion (alineacion multiple): parametros del prototipo B validados en una sesion real
@@ -403,30 +444,285 @@ def _split_long(line: str) -> list[str]:
     return parts or [line]
 
 
-def parse_script(text: str | None) -> dict:
-    """Guion -> {"sections": [{"id": 1, "lines": ["L01", ...]}], "lines": [{"id", "text"}]}.
-    Cada linea de texto es una linea del guion; una linea en blanco empieza seccion."""
-    raw_secs: list[list[str]] = [[]]
+def parse_script(text: str | None, assets=None, annotations: bool = True) -> dict:
+    """Guion -> {"sections": [{"id": 1, "lines": ["L01", ...]}], "lines": [{"id", "text", "inserts"}]}.
+    Cada linea de texto es una linea del guion; una linea en blanco empieza seccion. Las marcas de
+    recursos al final de una linea ("... nos paso esto. - Agregar video_marcas", "[foto_local]") se
+    quitan del texto (el que se busca en las tomas) y quedan en "inserts" (nombres tal cual). Una
+    linea que solo trae la marca se suma a la linea anterior. `assets`: archivos de la sesion
+    ([{"name"|"sid"}] o nombres) para reconocer "[nombre]" sin verbo aunque no parezca archivo.
+    annotations=False: el texto tal cual (guion detectado de lo dicho: no trae marcas)."""
+    known = _asset_keys(assets)
+    raw_secs: list[list[tuple[str, list]]] = [[]]
+    pending: list[str] = []
+    last = None
     for raw in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         s = " ".join(raw.split())
         if not s:
             if raw_secs[-1]:
                 raw_secs.append([])
             continue
-        raw_secs[-1].extend(_split_long(s))
+        clean, names = split_annotation(s, known) if annotations else (s, [])
+        if not clean:
+            if last is not None:
+                last[1].extend(names)
+            else:
+                pending.extend(names)
+            continue
+        parts = [(p, []) for p in _split_long(clean)]
+        parts[0][1].extend(pending)
+        pending = []
+        parts[-1][1].extend(names)
+        raw_secs[-1].extend(parts)
+        last = parts[-1]
     raw_secs = [s for s in raw_secs if s]
     total = sum(len(s) for s in raw_secs)
     width = 2 if total <= 99 else len(str(total))
     lines, sections, k = [], [], 0
     for si, sec in enumerate(raw_secs, 1):
         ids = []
-        for s in sec:
+        for s, ins in sec:
             k += 1
             lid = f"L{k:0{width}d}"
-            lines.append({"id": lid, "text": s})
+            lines.append({"id": lid, "text": s, "inserts": list(ins)})
             ids.append(lid)
         sections.append({"id": si, "lines": ids})
     return {"sections": sections, "lines": lines}
+
+
+# ----------------------------------------------------------------------------- recursos del guion
+# Marca al final de una linea: "<sep> <verbo> <nombre>[, <nombre>...]" (sep - – — |) o entre
+# corchetes "[<verbo> <nombre>]", "[<nombre>]", "{<nombre>}". Verbos sin mayusculas ni acentos
+# (infinitivo o imperativo). Un "[texto]" sin verbo que no parece archivo (ver _name_like) ni
+# coincide con uno de la sesion es una acotacion ("[pausa]"): se quita del texto y no es recurso.
+# Con separador (" — agrega tu negocio hoy" tambien es una frase normal) la marca vale solo si CADA
+# nombre parece archivo o coincide con uno elegido; si no, la linea queda tal cual (se dice).
+ANNOT_VERBS = frozenset({"agregar", "anadir", "insertar", "mostrar", "poner", "add", "insert",
+                         "agrega", "anade", "inserta", "muestra", "pon"})
+IMAGE_EXT = frozenset({"jpg", "jpeg", "png", "heic", "heif", "webp", "gif", "bmp", "tif", "tiff", "avif"})
+VIDEO_EXT = frozenset({"mp4", "mov", "m4v", "webm", "mkv", "avi", "mts", "m2ts", "3gp", "hevc"})
+_ANN_SEPS = "-–—|"
+_ANN_SEP_RE = re.compile(r"[-–—|]\s*([^\W\d_]+)\s+(\S.*)$")
+_ANN_BRACKET_RE = re.compile(r"(\[([^\[\]{}]*)\]|\{([^\[\]{}]*)\})[\s.,;:!?…]*$")
+_ANN_ARTICLES = frozenset({"el", "la", "los", "las", "un", "una", "the", "a", "an"})
+_QUOTES = "\"'«»“”‘’`"
+
+
+def asset_key(name) -> str:
+    """Nombre de un recurso normalizado para emparejar: minusculas, sin acentos ni extension y
+    espacios/guiones/guiones bajos seguidos como un "_" ("Video Horno-Leña.MP4" -> "video_horno_lena")."""
+    s = TK.strip_accents(str(name or "").strip().strip(_QUOTES).lower())
+    s = re.sub(r"\.[a-z0-9]{2,5}$", "", s.split("/")[-1])
+    return re.sub(r"[\s_\-]+", "_", s).strip("_")
+
+
+def _file_like(name: str) -> bool:
+    return bool(re.search(r"[_.\-\d]", str(name).strip()))
+
+
+_MEDIA_EXT_RE = re.compile(r"\.(?:" + "|".join(sorted(IMAGE_EXT | VIDEO_EXT)) + r")$", re.IGNORECASE)
+
+
+def _name_like(name: str, known=None) -> bool:
+    """Un nombre de la marca parece un ARCHIVO (no el final de una frase): coincide con uno elegido
+    (`known`: claves asset_key), termina en una extension de imagen o video ("Foto Pan.jpg"), o es
+    UNA palabra con letras y _ . - o digitos ("video_marcas", "foto1"). "valor a cada familia",
+    "tu negocio hoy", "3 negocios", "[1]" no lo son."""
+    n = str(name or "").strip().strip(_QUOTES).strip()
+    if not n:
+        return False
+    if known and _match_key(asset_key(n), list(known)) is not None:
+        return True
+    ws = n.split()
+    if len(ws) > 3:
+        return False
+    if _MEDIA_EXT_RE.search(n):
+        return True
+    return len(ws) == 1 and _file_like(n) and re.search(r"[^\W\d_]", n) is not None
+
+
+def _asset_keys(files) -> list[str]:
+    out = []
+    for f in files or []:
+        for v in ((f.get("name"), f.get("sid")) if isinstance(f, dict) else (f,)):
+            k = asset_key(v) if v else ""
+            if k and k not in out:
+                out.append(k)
+    return out
+
+
+PREFIX_MIN = 4                  # letras minimas de un nombre del guion para buscarlo por prefijo
+
+
+def _match_key(k: str, keys: list[str], rev=None, prefix: bool = True) -> int | None:
+    """Indice de `keys` que corresponde a `k`: igual primero; luego prefijo unico por palabras
+    completas ("foto_local" -> "foto_local_final", pero "img_03" no toma "img_0375"; `k` de
+    PREFIX_MIN+ caracteres y con letras: "1" o "a" nunca por prefijo). `rev` ([bool] por clave): al reves
+    (el archivo es el principio del nombre del guion: "logo" <- "logo_nuevo"), solo en esas claves
+    (imagenes: una toma de video nunca pasa a recurso asi). prefix=False: solo igual (ids)."""
+    if not k:
+        return None
+    for i, x in enumerate(keys):
+        if x == k:
+            return i
+    if not prefix or len(k) < PREFIX_MIN or not re.search(r"[a-z]", k):
+        return None
+    pre = [i for i, x in enumerate(keys) if x and x.startswith(k + "_")]
+    if len(pre) == 1:
+        return pre[0]
+    if pre or not rev:
+        return None
+    pre = [i for i, x in enumerate(keys) if i < len(rev) and rev[i] and len(x) >= 3
+           and re.search(r"[a-z]", x) and k.startswith(x + "_")]
+    return pre[0] if len(pre) == 1 else None
+
+
+def _is_verb(w: str) -> bool:
+    return TK.strip_accents(str(w).lower()) in ANNOT_VERBS
+
+
+def _split_names(s: str, known) -> list[str]:
+    """"video_a, imagen_b" -> nombres (sin comillas, articulos ni puntuacion final); "foto1 y
+    foto2" se parte solo si las dos partes parecen archivos o existen."""
+    out = []
+    for p in re.split(r"\s*[,;]\s*", str(s)):
+        p = p.strip().strip(_QUOTES).rstrip(".,;:!?…").strip().strip(_QUOTES).strip()
+        ws = p.split()
+        if len(ws) > 1 and ws[0].lower() in _ANN_ARTICLES:
+            p = " ".join(ws[1:])
+        if not p:
+            continue
+        sub = [x.strip() for x in re.split(r"\s+(?:y|e|and|\+|&)\s+", p) if x.strip()]
+        if len(sub) > 1 and all(_file_like(x) or _match_key(asset_key(x), known or []) is not None
+                                for x in sub):
+            out += sub
+        else:
+            out.append(p)
+    return out
+
+
+def split_annotation(line: str, known=None) -> tuple[str, list[str]]:
+    """Linea del guion -> (texto sin las marcas de recursos del final, [nombres]). `known`: claves
+    (asset_key) de los archivos de la sesion."""
+    s = str(line or "").rstrip()
+    keys = list(known or [])
+    names: list[str] = []
+    while s:
+        m = _ANN_BRACKET_RE.search(s)
+        if m:
+            inner = (m.group(2) if m.group(2) is not None else m.group(3) or "").strip()
+            curly = m.group(3) is not None
+            ws = inner.split(None, 1)
+            if len(ws) == 2 and _is_verb(ws[0]):
+                got = _split_names(ws[1], keys)
+            else:
+                got = [n for n in _split_names(inner, keys) if curly or _name_like(n, keys)]
+            names = got + names
+            s = s[:m.start()].rstrip()
+            continue
+        hit = None
+        for i, ch in enumerate(s):
+            # separador al inicio, tras espacio o tras puntuacion ("esto.- Agregar x"); nunca
+            # dentro de una palabra ("e-mail")
+            if ch in _ANN_SEPS and (i == 0 or not s[i - 1].isalnum()):
+                m = _ANN_SEP_RE.match(s, i)
+                if m and _is_verb(m.group(1)):
+                    hit = m                      # la ultima: "... - Agregar a - Mostrar b"
+        if hit is None:
+            break
+        got = _split_names(hit.group(2), keys)
+        if not got or not all(_name_like(n, keys) for n in got):
+            break                                # una frase ("— agrega tu negocio hoy"): se dice
+        names = got + names
+        s = s[:hit.start()].rstrip()
+    return s.strip(), names
+
+
+def _ext(f) -> str:
+    for v in ((f.get("name"), f.get("path"), f.get("sid")) if isinstance(f, dict) else (f,)):
+        m = re.search(r"\.([A-Za-z0-9]{2,5})$", str(v or ""))
+        if m:
+            return m.group(1).lower()
+    return ""
+
+
+def asset_kind(f) -> str | None:
+    """"image" | "video" | None de un archivo de la sesion ({name, path?, kind?, type?, mime?, dur?})."""
+    if not isinstance(f, dict):
+        f = {"name": f}
+    k = str(f.get("kind") or f.get("type") or f.get("mime") or "").lower()
+    if k.startswith("image"):
+        return "image"
+    if k.startswith("video"):
+        return "video"
+    e = _ext(f)
+    if e in IMAGE_EXT:
+        return "image"
+    if e in VIDEO_EXT:
+        return "video"
+    try:
+        return "video" if float(f.get("dur") or 0) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _match_asset_ex(name: str, files: list[dict]) -> tuple[dict | None, bool]:
+    """(archivo, exacto) de match_asset: exacto = mismo nombre normalizado o mismo sid."""
+    k = asset_key(name)
+    fs = [f for f in files or [] if isinstance(f, dict)]
+    keys = [asset_key(f.get("name")) if f.get("name") else "" for f in fs]
+    i = _match_key(k, keys, rev=[asset_kind(f) == "image" for f in fs])
+    if i is not None:
+        return fs[i], keys[i] == k
+    i = _match_key(k, [asset_key(f.get("sid")) if f.get("sid") else "" for f in fs], prefix=False)
+    return (fs[i], True) if i is not None else (None, False)
+
+
+def match_asset(name: str, files: list[dict]) -> dict | None:
+    """El archivo de la sesion ([{"sid", "name"}]) que corresponde a un nombre del guion: por su
+    nombre (igual, luego prefijo unico por palabras; al reves solo una imagen) y, si no, por su sid
+    (solo igual: un id nunca se busca por prefijo)."""
+    return _match_asset_ex(name, files)[0]
+
+
+def _spoken(f: dict) -> bool:
+    """Video con voz transcrita (una TOMA): trae palabras (build) o has_words (el servidor)."""
+    return bool(f.get("words")) or f.get("has_words") is True
+
+
+def _ref_asset(name: str, files: list[dict]) -> dict | None:
+    """match_asset para decidir que archivo es RECURSO: un parecido solo por prefijo nunca se lleva
+    una toma con voz transcrita (el recurso queda como faltante: el usuario lo sube o lo corrige)."""
+    f, exact = _match_asset_ex(name, files)
+    if f is not None and not exact and asset_kind(f) != "image" and _spoken(f):
+        return None
+    return f
+
+
+def script_refs(script: str | None, files=None) -> list[str]:
+    """Nombres de recursos que pide el guion, en orden y sin repetir."""
+    out = []
+    for L in parse_script(script, files)["lines"]:
+        for n in L["inserts"]:
+            if n not in out:
+                out.append(n)
+    return out
+
+
+def classify(files: list[dict], script: str | None = None) -> dict:
+    """Archivos seleccionados -> {"clips": [...], "assets": [...], "refs": {nombre: sid | None}}.
+    Recurso (nunca toma): toda imagen y todo archivo que el guion pide; los demas videos son clips."""
+    fs = [f for f in files or [] if isinstance(f, dict)]
+    refs, ref_sids = {}, set()
+    for n in script_refs(script, fs):
+        f = _ref_asset(n, fs)
+        refs[n] = f.get("sid") if f else None
+        if f:
+            ref_sids.add(id(f))
+    clips, assets = [], []
+    for f in fs:
+        (assets if (asset_kind(f) == "image" or id(f) in ref_sids) else clips).append(f)
+    return {"clips": clips, "assets": assets, "refs": refs}
 
 
 class _Script:
@@ -2654,8 +2950,11 @@ def _session_stats(clips: list[_Clip], hits: list[_Hit]) -> dict:
 
 
 def build(clips: list[dict], script: str | None = None, *, intercut: bool = True, glossary=None,
-          llm=None) -> dict:
-    """Auto-montaje de la sesion -> plan["montage"] (contrato en el docstring del modulo)."""
+          llm=None, assets=None, ramps=None) -> dict:
+    """Auto-montaje de la sesion -> plan["montage"] (contrato en el docstring del modulo).
+    `assets`: recursos de la sesion ([{sid, name, kind?, dur?}]) para las marcas del guion; un clip
+    que el guion pide o que es imagen tambien pasa a recurso (nunca es toma). `ramps`: lo que el
+    usuario decidio por union ({sid de la parte que entra | indice: bool}), gana a lo automatico."""
     t_start = time.time()
     tm: dict[str, float] = {}
     if llm is True:
@@ -2663,13 +2962,28 @@ def build(clips: list[dict], script: str | None = None, *, intercut: bool = True
     judge = _Judge(llm)
     gloss = _gloss_map(glossary)
     user_text = str(script or "").strip()
-    script_norms = {t.n for t in _text_toks(user_text)} if user_text else None
+    files = [d for d in (clips or []) if isinstance(d, dict)]
+    res_assets = [a for a in (assets or []) if isinstance(a, dict)]
+    parsed = parse_script(user_text, files + res_assets) if user_text else None
+    clean = " ".join(L["text"] for L in parsed["lines"]) if parsed else ""
+    script_norms = {t.n for t in _text_toks(clean)} if clean else None
     if not script_norms:
-        user_text, script_norms = "", None      # un guion sin palabras = sin guion
+        user_text, script_norms, parsed = "", None, None      # un guion sin palabras = sin guion
+    # lo que el guion pide y toda imagen son recursos, nunca tomas
+    pool = res_assets + [d for d in files if all(d is not a for a in res_assets)]
+    wanted = {id(f) for L in (parsed or {}).get("lines", []) for n in L["inserts"]
+              for f in [_ref_asset(n, pool)] if f is not None}
+    take_clips = []
+    for d in files:
+        if id(d) in wanted or asset_kind(d) == "image":
+            if all(d is not a for a in res_assets):
+                res_assets.append(d)
+        else:
+            take_clips.append(d)
     t = time.time()
-    cl = _prep_clips(list(clips or []), gloss, script_norms)
+    cl = _prep_clips(take_clips, gloss, script_norms)
     tm["prep"] = time.time() - t
-    order = [{"sid": c.sid, "name": c.name, "rec": c.rec, "created": c.created} for c in cl]
+    order = [{"sid": c.sid, "name": c.name, "rec": c.rec, "created": c.created, "setup": c.setup} for c in cl]
     source = "user"
     det_info = None
     text = user_text
@@ -2678,7 +2992,8 @@ def build(clips: list[dict], script: str | None = None, *, intercut: bool = True
         text, det_info = _detect_script(cl, judge)
         source = "detected"
         tm["detect"] = time.time() - t
-    sc = _Script(text)
+        parsed = parse_script(text, annotations=False)
+    sc = _Script(text, parsed)
     res = _assemble(cl, sc, intercut=intercut, judge=judge, enrich=(source == "user"), tm=tm)
     res["script"] = {"source": source, "text": text, "sections": sc.parsed["sections"],
                      "lines": sc.parsed["lines"]}
@@ -2689,10 +3004,18 @@ def build(clips: list[dict], script: str | None = None, *, intercut: bool = True
         res["stats"]["detected"] = {"suspects": det_info.get("suspects", []),
                                     "extras": det_info.get("extras", []),
                                     "status": det_info.get("status", {})}
-    res["ms"] = int(round((time.time() - t_start) * 1000))
     out = {"version": VERSION, "order": res["order"], "script": res["script"], "slots": res["slots"],
            "timeline": res["timeline"], "discarded": res["discarded"], "uncovered": res["uncovered"],
-           "extra": res["extra"], "stats": res["stats"], "ms": res["ms"]}
+           "extra": res["extra"], "stats": res["stats"], "ms": 0}
+    plan_ramps(out, [{"sid": c.sid, "words": c.words, "dur": c.dur} for c in cl], overrides=ramps)
+    out["inserts"] = plan_inserts(out, res_assets)
+    st = out["stats"]
+    st["ramps"] = sum(1 for x in out["timeline"] if x.get("ramp"))
+    st["inserts"] = {"ok": sum(1 for x in out["inserts"] if x["status"] == "ok"),
+                     "missing": sum(1 for x in out["inserts"] if x["status"] != "ok"),
+                     "unplaced": [x["name"] for x in out["inserts"] if x["start"] is None]}
+    st["assets"] = [a.get("sid") for a in res_assets]
+    out["ms"] = int(round((time.time() - t_start) * 1000))
     return out
 
 
@@ -2755,9 +3078,12 @@ def _place_extras(sc, cl, covered, judge) -> tuple[list, list]:
     return out, kept
 
 
-def _cand_json(cid: str, x: _Cand, why: str, sess: dict, cl: list[_Clip], conf: float | None = None) -> dict:
+def _cand_json(cid: str, x: _Cand, why: str, sess: dict, cl: list[_Clip], conf: float | None = None,
+               sc: _Script | None = None) -> dict:
     """Candidato del contrato. `_lvl` (nivel de voz medido) es interno: al final se vuelve su "vol"
-    con la MISMA referencia que la linea de tiempo. `conf`: la confianza si fuera la elegida."""
+    con la MISMA referencia que la linea de tiempo. `conf`: la confianza si fuera la elegida.
+    "line_times": {linea: [inicio de su primera palabra, fin de la ultima]} en segundos de la
+    fuente (los recursos del guion se ubican con esto aunque el usuario cambie de toma)."""
     xc = x.h.clip
     d = {"id": cid, "sid": xc.sid, "in": _cut_in(xc, x.tj0), "out": _cut_out(xc, x.tj1),
          "w0": int(xc.toks[x.tj0].wi0), "w1": int(xc.toks[x.tj1].wi1), "text": xc.text(x.tj0, x.tj1),
@@ -2766,7 +3092,24 @@ def _cand_json(cid: str, x: _Cand, why: str, sess: dict, cl: list[_Clip], conf: 
          "_lvl": xc.speech_level(xc.toks[x.tj0].start, xc.toks[x.tj1].end)}
     if conf is not None:
         d["conf"] = round(conf, 3)
+    if sc is not None:
+        d["line_times"] = _line_times(sc, x)
     return d
+
+
+def _line_times(sc: _Script, o: _Cand) -> dict:
+    """{linea: [inicio, fin]} (s de la fuente) de las palabras de la toma alineadas a cada linea (o
+    pedazo de linea) que cubre."""
+    c = o.h.clip
+    out: dict[str, list[float]] = {}
+    for si, tj, v in o.pairs:
+        if not (o.a <= si < o.b and o.tj0 <= tj <= o.tj1 and v > 0):
+            continue
+        lid = sc.lines[sc.line_of[si]]["id"]
+        t = c.toks[tj]
+        cur = out.get(lid)
+        out[lid] = [min(cur[0], t.start), max(cur[1], t.end)] if cur else [t.start, t.end]
+    return {k: [round(a, 3), round(b, 3)] for k, (a, b) in out.items()}
 
 
 def _gain(ref: float | None, lv: float | None) -> float | None:
@@ -2851,16 +3194,16 @@ def _assemble(cl: list[_Clip], sc: _Script, *, intercut: bool, judge: _Judge, en
             latest = all(x.h.clip.rec <= c.rec for x in uniq)
             pool = [o] + uniq
             cj = [_cand_json(f"{slot_id}c1", o, _reason_chosen(sc, o, len(uniq), latest, sess), sess, cl,
-                             _conf(o, uniq))]
+                             _conf(o, uniq), sc)]
             cj += [_cand_json(f"{slot_id}c{k}", x, _reason_alt(sc, x, o, sess), sess, cl,
-                              _conf(x, [y for y in pool if y is not x]))
+                              _conf(x, [y for y in pool if y is not x]), sc)
                    for k, x in enumerate(uniq, 2)]
             slots.append({"id": slot_id, "lines": sc.lines_in(a, b), "text": sc.raw(a, b),
                           "chosen": cj[0]["id"], "cands": cj})
             join = None if not timeline else ("section" if sc.is_section_start(a) else
                                               "line" if sc.is_line_start(a) else "splice")
             timeline.append({"slot": slot_id, "cand": cj[0]["id"], "sid": c.sid, "in": cj[0]["in"],
-                             "out": cj[0]["out"], "start": 0.0, "vol": 1.0, "join": join,
+                             "out": cj[0]["out"], "start": 0.0, "vol": 1.0, "join": join, "setup": cj[0]["setup"],
                              "_lvl": c.speech_level(c.toks[o.tj0].start, c.toks[o.tj1].end),
                              "_conf": _conf(o, uniq), "_c": c, "_k": (o.tj0, o.tj1)})
         else:
@@ -2876,6 +3219,7 @@ def _assemble(cl: list[_Clip], sc: _Script, *, intercut: bool, judge: _Judge, en
                                      "_lvl": c.speech_level(c.toks[ks[0]].start, c.toks[ks[-1]].end)}]})
             timeline.append({"slot": slot_id, "cand": cid, "sid": c.sid, "in": ex["in"], "out": ex["out"],
                              "start": 0.0, "vol": 1.0, "join": None if not timeline else "line",
+                             "setup": _setup_id(c, cl),
                              "_lvl": c.speech_level(c.toks[ks[0]].start, c.toks[ks[-1]].end), "_conf": 0.5,
                              "_c": c, "_k": (ks[0], ks[-1])})
     # dos segmentos seguidos del mismo clip y contiguos en la fuente: un solo punto de corte en la
@@ -2969,6 +3313,276 @@ def _setup_id(c: _Clip, cl: list[_Clip]) -> int:
         return int(c.setup)
     base = 1 + max([x.setup for x in cl if x.setup is not None], default=-1)
     return base + c.rec
+
+
+# ============================================================================= rampas
+def _ramp_spans(clips) -> dict:
+    """{sid: ([(inicio, fin)] de TODAS las palabras del clip, duracion)} (segundos de la fuente)."""
+    rows = clips.items() if isinstance(clips, dict) else [((d or {}).get("sid"), d) for d in clips or []]
+    out = {}
+    for sid, d in rows:
+        if not isinstance(d, dict):
+            continue
+        ws = []
+        for w in d.get("words") or []:
+            try:
+                a, b = float(w["start"]), float(w["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if b >= a:
+                ws.append((a, b))
+        ws.sort()
+        try:
+            dur = float(d.get("dur") or 0.0)
+        except (TypeError, ValueError):
+            dur = 0.0
+        out[str(d.get("sid") or sid)] = (ws, max(dur, max((b for _, b in ws), default=0.0)))
+    return out
+
+
+def _ramp_side(x: dict, side: str, d: float, spans: dict, strict: bool = True):
+    """Rampa de `d` s en el lado `side` ("out": el final de la parte que sale; "in": el principio
+    de la que entra) posible? -> None si no; si si, True cuando el orador sigue en la toma mas alla
+    de los cuadros extra (esta a media actuacion: no se ve "fuera de personaje"). La parte a 1x
+    dura >= ramp_room ademas de sus rampas; los cuadros extra (d * (speed - 1)) existen en el
+    archivo; con `strict`, ninguna palabra (tolerancia ramp_tol) en lo que se ve acelerado."""
+    sp = spans.get(str(x.get("sid")))
+    if sp is None:
+        return None
+    ws, dur = sp
+    try:
+        a_in, a_out = float(x["in"]), float(x["out"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    h = d * (P["ramp_speed"] - 1.0)
+    other = (x.get("ramp_in") if side == "out" else x.get("ramp_out")) or {}
+    if a_out - a_in < d + float(other.get("dur") or 0.0) + P["ramp_room"] - 1e-6:
+        return None
+    if side == "out":
+        lo, hi = a_out - d, a_out + h
+        if hi > dur - P["ramp_guard"] + 1e-6:
+            return None
+    else:
+        lo, hi = a_in - h, a_in + d
+        if lo < P["ramp_guard"] - 1e-6:
+            return None
+    tol = P["ramp_tol"]
+    if strict and any(b > lo + tol and a < hi - tol for a, b in ws):
+        return None
+    if side == "out":
+        return any(hi - tol <= a <= hi + P["ramp_ctx"] for a, _ in ws)
+    return any(lo - P["ramp_ctx"] <= b <= lo + tol for _, b in ws)
+
+
+def _ramp_durs() -> list[float]:
+    out, d = [], P["ramp_dur"]
+    while d >= P["ramp_min"] - 1e-9:
+        out.append(round(d, 3))
+        d -= P["ramp_step"]
+    return out
+
+
+def _ramp_pick(p: dict, x: dict, spans: dict):
+    """(lado, d) de la rampa en la union p -> x, o None. La mas larga posible; con la misma
+    duracion, el lado donde el orador sigue a media actuacion y luego el de salida (lo que Kevin
+    hace cuando la parte que sale termina en pausa)."""
+    for d in _ramp_durs():
+        opts = []
+        o = _ramp_side(p, "out", d, spans)
+        if o is not None:
+            opts.append((not o, 0, "out"))
+        i = _ramp_side(x, "in", d, spans)
+        if i is not None:
+            opts.append((not i, 1, "in"))
+        if opts:
+            return min(opts)[2], d
+    return None
+
+
+def _ramp_force(p: dict, x: dict, spans: dict):
+    """El usuario pidio rampa donde no hay una pausa limpia: el lado con mas aire y cuadros extra."""
+    best = None
+    for side, y in (("out", p), ("in", x)):
+        sp = spans.get(str(y.get("sid")))
+        if sp is None:
+            continue
+        ws, _ = sp
+        try:
+            a_in, a_out = float(y["in"]), float(y["out"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if side == "out":
+            free = a_out - max([b for _, b in ws if b <= a_out + P["ramp_tol"]] + [a_in])
+        else:
+            free = min([a for a, _ in ws if a >= a_in - P["ramp_tol"]] + [a_out]) - a_in
+        d = round(min(P["ramp_dur"], max(P["ramp_min"], free)), 3)
+        if _ramp_side(y, side, d, spans, strict=False) is None:
+            continue
+        if best is None or free > best[0] + 1e-9:
+            best = (free, side, d)
+    return (best[1], best[2]) if best else None
+
+
+def plan_ramps(montage: dict, clips, overrides=None) -> list[dict]:
+    """Rampas de velocidad SOLO de video en los cambios de camara (el audio sigue a 1x en [in, out]
+    y la duracion no cambia): el cambio se siente fluido, como lo hace un editor. Escribe en la
+    linea de tiempo de `montage` (y la devuelve):
+      "ramp_in": {"dur", "speed"} en la parte que entra: su video empieza dur * (speed - 1) s antes
+        en la fuente y va a `speed` los primeros `dur` s, luego 1x;
+      "ramp_out": {"dur", "speed"} en la parte que sale: su video sigue dur * (speed - 1) s pasado
+        "out", comprimido en sus ultimos `dur` s;
+      "ramp" (bool, cada union), "ramp_auto" (lo que decidio el motor) y "ramp_user" (lo que el
+        usuario eligio, si eligio; gana).
+    Automatica solo donde cambia la camara Y (la union es a media linea, o la camara que entra
+    estuvo en una de las 2 partes anteriores -A/B/A-, o las dos partes son del intercalado). El lado:
+    donde los ultimos/primeros `dur` s no tienen palabra y el archivo tiene los cuadros extra sin
+    palabra (se acelera en la pausa: los labios no se ven fuera de sincronia); primero 0.30 s,
+    luego mas corta hasta 0.15 s. `clips`: [{sid, words, dur}] (o {sid: clip}); `overrides`:
+    {slot de la parte que entra | indice: bool | None}."""
+    m = montage if isinstance(montage, dict) else {}
+    tl = [x for x in m.get("timeline") or [] if isinstance(x, dict)]
+    cands = {(s.get("id"), c.get("id")): c for s in m.get("slots") or [] if isinstance(s, dict)
+             for c in s.get("cands") or [] if isinstance(c, dict)}
+    # camara real por clip (order[].setup; None = desconocida: sin rampa automatica, quiza es la
+    # misma camara); sin ese dato, la del candidato elegido o la de la parte
+    cams = {o.get("sid"): o.get("setup") for o in m.get("order") or [] if isinstance(o, dict) and "setup" in o}
+    spans = _ramp_spans(clips)
+    if isinstance(overrides, dict):
+        for key, v in overrides.items():
+            if isinstance(key, str) and key.isdigit():
+                key = int(key)
+            ks = [key] if isinstance(key, int) else [k for k, x in enumerate(tl) if x.get("slot") == key]
+            for k in ks:
+                if 0 < k < len(tl):
+                    if isinstance(v, bool):
+                        tl[k]["ramp_user"] = v
+                    elif v is None:
+                        tl[k].pop("ramp_user", None)
+    info = []
+    for x in tl:
+        c = cands.get((x.get("slot"), x.get("cand"))) or {}
+        if c.get("sid") not in (None, x.get("sid")):
+            c = {}
+        s = cams[x.get("sid")] if x.get("sid") in cams else c.get("setup", x.get("setup"))
+        fl = c.get("flags") or []
+        info.append((s, "intercalado" in fl or "parcial" in fl))
+    for x in tl:
+        x.pop("ramp_in", None)
+        x.pop("ramp_out", None)
+    if tl:
+        for k in ("ramp", "ramp_auto", "ramp_user"):
+            tl[0].pop(k, None)
+    speed = P["ramp_speed"]
+    for k in range(1, len(tl)):
+        p, x = tl[k - 1], tl[k]
+        (sp, icp), (sx, icx) = info[k - 1], info[k]
+        change = sp is not None and sx is not None and sp != sx
+        aba = k >= 2 and info[k - 2][0] is not None and info[k - 2][0] == sx
+        auto = change and (x.get("join") == "splice" or aba or (icp and icx))
+        pick = _ramp_pick(p, x, spans) if auto else None
+        x["ramp_auto"] = pick is not None
+        user = x.get("ramp_user") if isinstance(x.get("ramp_user"), bool) else None
+        if user is False:
+            pick = None
+        elif user is True and pick is None:
+            pick = _ramp_pick(p, x, spans) or _ramp_force(p, x, spans)
+        if pick:
+            side, d = pick
+            (p if side == "out" else x)["ramp_" + side] = {"dur": d, "speed": speed}
+        x["ramp"] = pick is not None
+    return tl
+
+
+# ============================================================================= recursos
+def plan_inserts(montage: dict, assets=None) -> list[dict]:
+    """Recursos que pide el guion (lines[i].inserts) ubicados en la linea de tiempo del ensamble
+    mientras se dice su linea: de la primera palabra - ins_pre a la ultima + ins_post (segundos de
+    la LINEA DE TIEMPO; >= ins_min; nunca encima del siguiente; varios en una linea se reparten).
+    Las palabras salen de "line_times" del candidato elegido de cada parte, asi que sirve igual tras
+    cambiar tomas o subir un archivo que faltaba. `assets`: [{sid, name, kind?, dur?}].
+    -> [{"id", "line", "name", "sid", "kind", "start", "end", "fit", "speed", "src_in", "status"}]
+    fit: "hold" (imagen), "speed" (video hasta ins_speed_max veces el hueco, o poco mas corto: se
+    ajusta su velocidad) o "trim" (se recorta desde src_in 0; un video corto dura lo suyo).
+    status "missing": no hay archivo con ese nombre (o no es imagen ni video). Un recurso cuya
+    linea no esta en la linea de tiempo (sin toma) va al final con start/end None (sin lugar)."""
+    m = montage if isinstance(montage, dict) else {}
+    lines = [L for L in ((m.get("script") or {}).get("lines") or []) if isinstance(L, dict)]
+    tl = [x for x in m.get("timeline") or [] if isinstance(x, dict)]
+    cands = {(s.get("id"), c.get("id")): c for s in m.get("slots") or [] if isinstance(s, dict)
+             for c in s.get("cands") or [] if isinstance(c, dict)}
+    span: dict[str, list[float]] = {}
+    pos = 0.0
+    for x in tl:
+        try:
+            a, b = float(x["in"]), float(x["out"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        c = cands.get((x.get("slot"), x.get("cand"))) or {}
+        lt = c.get("line_times") if c.get("sid") in (None, x.get("sid")) else None
+        for lid, v in (lt or {}).items():
+            try:
+                v0, v1 = float(v[0]), float(v[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            s0, s1 = min(max(v0, a), b), min(max(v1, a), b)
+            if s1 - s0 <= 1e-6 and (v1 < a or v0 > b):
+                continue                         # la linea no esta en este tramo (= fxcore.lineSpans)
+            t0, t1 = pos + s0 - a, pos + s1 - a
+            cur = span.get(lid)
+            span[lid] = [min(cur[0], t0), max(cur[1], t1)] if cur else [t0, t1]
+        pos += max(0.0, b - a)
+    total = pos
+    files = [f for f in assets or [] if isinstance(f, dict)]
+    out, unplaced = [], []
+    for L in lines:
+        names = [str(n) for n in L.get("inserts") or [] if str(n).strip()]
+        if not names:
+            continue
+        if L.get("id") not in span:
+            # su linea no esta en el video (sin toma): el recurso queda listado sin lugar (start/end
+            # None); el ensamble lo coloca si el usuario le da una toma a esa linea
+            unplaced += [{"line": L.get("id"), "name": n, "sid": None, "kind": None, "start": None,
+                          "end": None, "fit": "hold", "speed": 1.0, "src_in": 0.0, "status": "missing"}
+                         for n in names]
+            continue
+        t0, t1 = span[L["id"]]
+        s, e = max(0.0, t0 - P["ins_pre"]), min(total, t1 + P["ins_post"])
+        for j, name in enumerate(names):
+            a, b = s + (e - s) * j / len(names), s + (e - s) * (j + 1) / len(names)
+            if b - a < P["ins_min"]:
+                b = min(total, a + P["ins_min"])
+                a = max(0.0, min(a, b - P["ins_min"]))
+            out.append({"id": f"i{len(out) + 1:02d}", "line": L["id"], "name": name, "sid": None, "kind": None,
+                        "start": a, "end": b, "fit": "hold", "speed": 1.0, "src_in": 0.0, "status": "missing"})
+    out.sort(key=lambda x: (x["start"], x["id"]))
+    for k in range(len(out) - 1):
+        if out[k]["end"] > out[k + 1]["start"]:
+            out[k]["end"] = max(out[k]["start"], out[k + 1]["start"])
+    for x in unplaced:
+        out.append(dict(x, id=f"i{len(out) + 1:02d}"))
+    for x in out:
+        f = match_asset(x["name"], files)
+        kind = asset_kind(f) if f else None
+        if f is not None and f.get("sid") and kind in ("image", "video"):
+            x.update({"sid": f.get("sid"), "kind": kind, "status": "ok"})
+        if x["start"] is None:
+            continue
+        slot = x["end"] - x["start"]
+        if f is not None and f.get("sid") and kind in ("image", "video"):
+            try:
+                dur = float(f.get("dur") or 0.0)
+            except (TypeError, ValueError):
+                dur = 0.0
+            if kind == "video":
+                x["fit"] = "trim"
+                if dur > 0 and slot > 0:
+                    r = dur / slot
+                    if P["ins_slow_min"] <= r <= P["ins_speed_max"]:
+                        x["fit"], x["speed"] = "speed", round(r, 3)
+                    elif r < P["ins_slow_min"]:
+                        x["end"] = x["start"] + dur
+        x["start"], x["end"] = round(x["start"], 3), round(x["end"], 3)
+    return out
 
 
 # ============================================================================= camaras
@@ -3102,7 +3716,7 @@ def glossary_terms(text: str | None) -> list[str]:
             out.append(term)
     wrap = "¿¡\"'«»“”‘’()[]"
     for line in str(text or "").splitlines():
-        words = line.split()
+        words = split_annotation(" ".join(line.split()))[0].split()     # sin marcas de recursos
         run: list[str] = []
         sent_start = True
         for k, raw in enumerate(words):
@@ -3143,6 +3757,11 @@ if __name__ == "__main__":
     _r = build(_clips, _script)
     for _x in _r["timeline"]:
         _s = next(s for s in _r["slots"] if s["id"] == _x["slot"])
-        print(f"{_x['start']:7.2f}  {_x['sid']:>14} {_x['in']:7.2f}-{_x['out']:7.2f}  {str(_x['join']):7s} "
+        _rp = "<" if _x.get("ramp_in") else " "
+        _rp += ">" if _x.get("ramp_out") else " "
+        print(f"{_x['start']:7.2f}  {_x['sid']:>14} {_x['in']:7.2f}-{_x['out']:7.2f} {_rp} {str(_x['join']):7s} "
               f"{','.join(_s['lines']):9s} {_s['cands'][0]['reason'][:70]}")
+    for _i in _r["inserts"]:
+        _w = f"{_i['start']:.2f}-{_i['end']:.2f}" if _i["start"] is not None else "sin lugar"
+        print(f"recurso {_i['line']} {_i['name']}: {_w} {_i['fit']} {_i['status']}")
     print("sin toma:", _r["uncovered"], "| descartes:", len(_r["discarded"]), "| ms:", _r["ms"])
