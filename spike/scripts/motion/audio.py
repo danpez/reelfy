@@ -327,6 +327,10 @@ def load_audio(path: str | Path, sr: int = SR) -> np.ndarray:
         data = np.frombuffer(raw, dtype=np.float32).reshape(-1, 2).astype(np.float64)
         fsr = sr
     data = as_stereo(data)
+    # NaN/inf de un wav ajeno o de una cache vieja (voz de estudio con NaN en la cola): a 0. Un
+    # solo NaN en la voz contagia la actividad de voz y con ella musica, SFX y el bus: mezcla muda
+    if not np.isfinite(data).all():
+        data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
     if fsr != sr and data.shape[0]:
         g = math.gcd(int(fsr), int(sr))
         data = signal.resample_poly(data, sr // g, int(fsr) // g, axis=0)

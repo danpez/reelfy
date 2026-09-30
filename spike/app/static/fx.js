@@ -773,9 +773,10 @@
     return it;
   };
 
-  // ---- medios propios: subir (POST /sources) y crear el item en el playhead
+  // ---- medios propios: subir (POST /sources) y crear el item en el playhead. transcribe=0: un medio
+  // del Studio (b-roll, logo) no pasa por la transcripcion por clip de "Armar con IA" (no ocupa el whisper)
   async function uploadMedia(file) {
-    const fd = new FormData(); fd.append("files", file);
+    const fd = new FormData(); fd.append("files", file); fd.append("transcribe", "0");
     const r = await fetch("/sources", { method: "POST", body: fd });
     if (!r.ok) throw new Error(`Error ${r.status}`);
     const d = await r.json(); const s = d && d.sources && d.sources[0];

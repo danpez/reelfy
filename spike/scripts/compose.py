@@ -23,7 +23,22 @@ de mas bitrate del montaje (y a un maximo sano, REELFY_COMPOSE_MAX_MBPS): un 4K 
 formato del intermedio (H.264/HEVC SDR bt709 8 bits, sin rotar, al tamano del lienzo, a los fps
 del montaje, con audio, sin recortes ni fundidos ni volumen) no se re-codifica: el video se
 copia tal cual (sin perdida, en segundos) y solo el audio se normaliza a AAC 48 kHz estereo.
+
+MONTAJE CON IA ("Armar con IA": los clips principales traen "montage": {slot, cand, join, conf,
+setup?}); sin ningun item de montaje todo queda EXACTAMENTE como antes:
+  - Lienzo con la orientacion de la MAYORIA de los videos (nunca la del que quedo primero).
+  - "vol" por segmento: numero (como siempre) o "auto"/None = nivel de la VOZ medido
+    (speech_lufs, BS.1770 con compuertas) igualado a la mediana del montaje (level_gains); una
+    ganancia > 1 pasa por un limitador (sin recortes digitales).
+  - Micro-fundido SOLO de audio (MICRO_FADE, 10-20 ms) a cada lado de cada union: sin clic en el
+    cambio de toma. fadeIn/fadeOut conservan su significado (fundido a/desde negro + audio).
+  - info["shots"][i] lleva "join" (section|line|splice; None en la primera), slot, cand, conf,
+    setup y sid; finish_plan() los pasa a plan.shots, arma plan.montage con el indice de toma de
+    cada segmento, quita los cortes de tomas que cruzarian una union y siembra las secciones de
+    plan.takes con las del guion.
 """
+import copy
+import math
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -45,6 +60,16 @@ SRC_FACTOR = 1.2
 MAX_BPS = float(os.environ.get("REELFY_COMPOSE_MAX_MBPS", "60")) * 1e6
 MIN_BPS = 500_000                # minimo tecnico del encoder
 COPY_CODECS = ("h264", "hevc")   # se pueden copiar a mp4 sin re-codificar
+# montaje con IA: tipos de union (contrato de /montage) y audio de las uniones
+JOINS = ("section", "line", "splice")
+MICRO_FADE = min(0.02, max(0.01, float(os.environ.get("REELFY_MICRO_FADE_MS", "15")) / 1000.0))
+LEVEL_UP_DB = 15.0      # lo mas que se sube una toma (sin microfono: ~15 dB bajo las demas)
+LEVEL_DOWN_DB = 12.0    # lo mas que se baja
+LIMIT = 0.89            # techo (-1 dBFS: margen para el sobretiro del AAC) cuando una toma se sube
+SHOT_KEYS = ("join", "slot", "cand", "conf", "setup", "sid")   # de info.shots a plan.shots
+# uniones exactas (segmentos de cuadros enteros + audio re-codificado al unir, ver compose()):
+# "montage" (default: solo "Armar con IA"), "all" (tambien el ensamble manual) u "off"
+EXACT_JOINS = os.environ.get("REELFY_COMPOSE_EXACT_JOINS", "montage").strip().lower()
 
 
 def canvas_size(w, h):
@@ -125,16 +150,79 @@ def _run(cmd):
     paths.run_ff(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
+_DATE_MIN = 366 * 86400      # 1904/1970 = "sin fecha" en algunas camaras y exportadores
+
+
+def _parse_date(raw):
+    """Fecha de un contenedor (ISO 8601: '2026-09-29T14:09:40-0600' de Apple, '...Z' de
+    creation_time) -> datetime con zona, o None (vacia, ilegible o anterior a 1971). Sin zona se
+    toma UTC (la convencion de creation_time en MOV/MP4)."""
+    from datetime import datetime, timezone
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt if dt.timestamp() >= _DATE_MIN else None
+
+
+@lru_cache(maxsize=256)
+def _created_cached(path, size, mtime_ns):
+    """(iso, fuente, epoch) de la fecha de GRABACION en los metadatos, o None. Prioridad:
+    com.apple.quicktime.creationdate (hora local del iPhone con su zona; sobrevive a AirDrop y a la
+    copia), creation_time del contenedor y el del primer stream de video."""
+    try:
+        r = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
+                            "format_tags=com.apple.quicktime.creationdate,creation_time:"
+                            "stream_tags=creation_time", "-select_streams", "v:0", "-of", "json",
+                            path], capture_output=True, text=True, timeout=30)
+        import json
+        d = json.loads(r.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    ft = (d.get("format") or {}).get("tags") or {}
+    st = ((d.get("streams") or [{}])[0] or {}).get("tags") or {}
+    for src, raw in (("apple", ft.get("com.apple.quicktime.creationdate")),
+                     ("creation_time", ft.get("creation_time")),
+                     ("creation_time", st.get("creation_time"))):
+        dt = _parse_date(raw)
+        if dt is not None:
+            return dt.isoformat(timespec="seconds"), src, round(dt.timestamp(), 3)
+    return None
+
+
+def created(path):
+    """Fecha de grabacion de un archivo -> {"created": ISO 8601, "created_src":
+    "apple"|"creation_time"|"mtime", "created_ts": epoch}. Sin metadatos: la fecha de modificacion
+    del archivo (hora local con zona). El orden de grabacion de una sesion sale de aqui."""
+    from datetime import datetime, timezone
+    p = Path(path)
+    try:
+        stt = p.stat()
+    except OSError:
+        return {"created": None, "created_src": None, "created_ts": None}
+    got = _created_cached(str(p), stt.st_size, stt.st_mtime_ns)
+    if got is None:
+        dt = datetime.fromtimestamp(stt.st_mtime, tz=timezone.utc).astimezone()
+        got = (dt.isoformat(timespec="seconds"), "mtime", round(stt.st_mtime, 3))
+    return {"created": got[0], "created_src": got[1], "created_ts": got[2]}
+
+
 def probe(path):
     """dims de DISPLAY (rotación aplicada: un MOV de iPhone 3840x2160 con rotation -90
-    es 2160x3840), duración, si tiene audio y si es HDR (HLG/PQ)."""
+    es 2160x3840), duración, si tiene audio, si es HDR (HLG/PQ: 'hlg'|'pq'|None), rotacion,
+    fps (promedio; ~59.97 en un iPhone VFR) y fecha de grabacion (`created`, ver created())."""
     i = video_io.probe(path)
     if not i.get("w") and not i.get("duration"):
         return {"w": 0, "h": 0, "dur": 0.0, "audio": False, "type": "video",
-                "rotation": 0, "hdr": None}
+                "rotation": 0, "hdr": None, "fps": 0.0, **created(path)}
     return {"w": i["w"], "h": i["h"], "dur": round(i["duration"], 3), "audio": i["has_audio"],
             "type": "video" if i["duration"] > 0 else "image", "rotation": i["rotation"],
-            "hdr": i["hdr"]}
+            "hdr": i["hdr"], "fps": round(float(i.get("fps") or 0.0), 3), **created(path)}
 
 
 def _has_audio(path):
@@ -144,28 +232,63 @@ def _has_audio(path):
     return bool(r.stdout.strip())
 
 
-def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0, fin=0.0, fout=0.0, br=None):
+def _audio_filters(dur, vol=1.0, fin=0.0, fout=0.0, afin=0.0, afout=0.0, limit=False):
+    """Cadena de audio de un segmento de video: volumen, 48 kHz, limitador opcional (una toma
+    que se SUBE no recorta), fundidos del clip (fin/fout, junto con el video) y micro-fundidos
+    SOLO de audio en las uniones del montaje (afin/afout; los tapa un fundido mayor del clip)."""
+    af = [f"volume={max(0.0, float(vol)):.3f}", "aresample=48000"]
+    if limit:
+        # sin auto-nivel (level=0: no cambia la sonoridad) y con la latencia compensada (el audio
+        # no se corre `attack` ms respecto al video)
+        af.append(f"alimiter=limit={LIMIT}:level=0:latency=1")
+    if fin > 0.01:
+        af.append(f"afade=t=in:st=0:d={fin:.3f}")
+    elif afin > 0.001:
+        af.append(f"afade=t=in:st=0:d={afin:.3f}:curve=qsin")
+    if fout > 0.01:
+        af.append(f"afade=t=out:st={dur - fout:.3f}:d={fout:.3f}")
+    elif afout > 0.001:
+        af.append(f"afade=t=out:st={max(0.0, dur - afout):.3f}:d={afout:.3f}:curve=qsin")
+    return af
+
+
+def _seg_dur(dur, fps, exact=False):
+    """(duracion, texto de -t) de un segmento. `exact` (montaje con IA): un numero ENTERO de
+    cuadros y el audio con exactamente esas muestras (48000/30 = 1600 por cuadro), para que el
+    audio se una sin huecos ni deriva (ver compose: el concat re-codifica solo el audio)."""
+    dur = float(dur)
+    if not exact:
+        return dur, f"{dur:.3f}"
+    n = max(1, int(round(dur * float(fps))))
+    d = n / float(fps)
+    return d, f"{d:.6f}"
+
+
+def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0, fin=0.0, fout=0.0, br=None,
+                afin=0.0, afout=0.0, limit=False, exact=False):
     """Recorta [in,out] y normaliza a WxH/fps con audio 48k estéreo (silencio si
     no tiene). cover-crop para llenar el lienzo. `vol` volumen (0=mudo); `fin`/`fout`
     desvanecen VIDEO (a/desde negro) y AUDIO al inicio/fin del clip. `br` bitrate del
-    montaje (spec_bitrate); sin el, el tope de esta fuente."""
-    dur = max(0.1, t_out - t_in)
+    montaje (spec_bitrate); sin el, el tope de esta fuente. `afin`/`afout`: micro-fundido
+    SOLO de audio (uniones del montaje); `limit`: limitador tras el volumen (vol > 1);
+    `exact`: duracion de cuadros enteros (_seg_dur)."""
+    dur, tdur = _seg_dur(max(0.1, t_out - t_in), fps, exact)
     fin = max(0.0, min(float(fin), dur / 2)); fout = max(0.0, min(float(fout), dur / 2))
+    afin = max(0.0, min(float(afin), dur / 4)); afout = max(0.0, min(float(afout), dur / 4))
     info = video_io.probe(src)
     # ffmpeg autorrota al decodificar (los cuadros ya llegan en orientación de display);
     # la escala conserva 10 bits y el tonemap HLG/PQ -> SDR bt709 va ANTES de bajar a 8 bits.
     vf = [f"scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos",
           f"crop={w}:{h}", f"fps={fps}", "setsar=1"] + video_io.tonemap_filters(info)
-    af = [f"volume={max(0.0, float(vol)):.3f}", "aresample=48000"]
+    af = _audio_filters(dur, vol, fin, fout, afin, afout, limit)
     if fin > 0.01:
-        vf.append(f"fade=t=in:st=0:d={fin:.3f}"); af.append(f"afade=t=in:st=0:d={fin:.3f}")
+        vf.append(f"fade=t=in:st=0:d={fin:.3f}")
     if fout > 0.01:
         vf.append(f"fade=t=out:st={dur - fout:.3f}:d={fout:.3f}")
-        af.append(f"afade=t=out:st={dur - fout:.3f}:d={fout:.3f}")
     cmd = [FFMPEG, "-y"] + video_io.hwaccel_args() + ["-ss", f"{t_in:.3f}", "-i", str(src),
-                                                    "-t", f"{dur:.3f}"]
+                                                    "-t", tdur]
     if not info.get("has_audio"):
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
+        cmd += ["-f", "lavfi", "-t", tdur, "-i", "anullsrc=r=48000:cl=stereo",
                 "-map", "0:v:0", "-map", "1:a:0"]
     else:
         # 1a pista de audio explícita (los iPhone traen una 2a pista APAC espacial)
@@ -176,8 +299,9 @@ def _norm_video(src, t_in, t_out, out, w, h, fps, vol=1.0, fin=0.0, fout=0.0, br
     _run(cmd)
 
 
-def _norm_image(src, dur, out, w, h, fps, fin=0.0, fout=0.0, br=None):
+def _norm_image(src, dur, out, w, h, fps, fin=0.0, fout=0.0, br=None, exact=False):
     """Imagen fija -> clip de `dur` s a WxH/fps con audio en silencio (+ fade opcional)."""
+    dur, tdur = _seg_dur(dur, fps, exact)
     fin = max(0.0, min(float(fin), dur / 2)); fout = max(0.0, min(float(fout), dur / 2))
     # RGB -> YUV con matriz bt709 explícita (coincide con la etiqueta de color del intermedio)
     vf = [f"scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos:"
@@ -188,17 +312,18 @@ def _norm_image(src, dur, out, w, h, fps, fin=0.0, fout=0.0, br=None):
     if fout > 0.01:
         vf.append(f"fade=t=out:st={dur - fout:.3f}:d={fout:.3f}")
     vf = ",".join(vf + [SETPARAMS])
-    _run([FFMPEG, "-y", "-loop", "1", "-t", f"{dur:.3f}", "-i", str(src),
-          "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
+    _run([FFMPEG, "-y", "-loop", "1", "-t", tdur, "-i", str(src),
+          "-f", "lavfi", "-t", tdur, "-i", "anullsrc=r=48000:cl=stereo",
           "-vf", vf, "-c:v", "h264_videotoolbox", "-b:v", br or _vbitrate(w, h, fps)] + _color_tags() + [
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", "-shortest", str(out)])
 
 
-def _norm_black(dur, out, w, h, fps, br=None):
+def _norm_black(dur, out, w, h, fps, br=None, exact=False):
     """Segmento NEGRO con silencio (para rellenar huecos de posicionamiento libre)."""
-    _run([FFMPEG, "-y", "-f", "lavfi", "-t", f"{dur:.3f}", "-i",
+    _dur, tdur = _seg_dur(dur, fps, exact)
+    _run([FFMPEG, "-y", "-f", "lavfi", "-t", tdur, "-i",
           f"color=c=black:s={w}x{h}:r={fps}",
-          "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
+          "-f", "lavfi", "-t", tdur, "-i", "anullsrc=r=48000:cl=stereo",
           "-vf", f"format=yuv420p,{SETPARAMS}", "-c:v", "h264_videotoolbox", "-b:v", br or _vbitrate(w, h, fps)] + _color_tags() + [
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", "-shortest", str(out)])
 
@@ -313,6 +438,343 @@ def _copy_video(src, out, info):
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)])
 
 
+# ---------------------------------------------------------------- montaje con IA
+def is_montage(spec):
+    """El montaje viene de "Armar con IA": algun clip principal trae su "montage" (o el spec trae
+    el plan del montaje). Sin esto compose() se comporta exactamente como siempre."""
+    spec = spec or {}
+    if isinstance(spec.get("montage"), dict):
+        return True
+    return any(isinstance(s, dict) and isinstance(s.get("montage"), dict)
+               for s in spec.get("main") or [])
+
+
+def _orientation(w, h):
+    w, h = int(w or 0), int(h or 0)
+    return "vertical" if h > w else ("horizontal" if w > h else "cuadrado")
+
+
+def majority_canvas(items):
+    """Dims de DISPLAY (rotacion aplicada) del lienzo segun la orientacion de la MAYORIA de los
+    videos: gana la orientacion con mas clips (empate: mas segundos; empate: la del primero) y el
+    lienzo toma las dims del primer video con esa orientacion. None sin videos legibles."""
+    vids = []
+    for s in items or []:
+        if not s.get("path") or s.get("type", "video") == "image":
+            continue
+        p = probe(s["path"])
+        if p.get("type") != "video" or not p.get("w") or not p.get("h"):
+            continue
+        ln = float(s.get("out", 0) or 0) - float(s.get("in", 0) or 0)
+        vids.append((_orientation(p["w"], p["h"]), (p["w"], p["h"]), ln if ln > 0 else p["dur"]))
+    if not vids:
+        return None
+    tally = {}
+    for k, (o, _wh, ln) in enumerate(vids):
+        c, secs, first = tally.get(o, (0, 0.0, k))
+        tally[o] = (c + 1, secs + float(ln or 0.0), first)
+    best = max(tally, key=lambda o: (tally[o][0], round(tally[o][1], 3), -tally[o][2]))
+    return next(wh for o, wh, _ln in vids if o == best)
+
+
+def _pcm(src, t_in=0.0, t_out=None, sr=48000, ch=1):
+    """Audio float (mono, o (n, ch)) a `sr` del tramo [t_in, t_out] de `src` (primera pista de
+    audio: los iPhone traen una 2a pista APAC espacial). None si no hay audio o no se lee."""
+    import numpy as np
+    cmd = [FFMPEG, "-v", "error", "-nostdin"]
+    if t_in and float(t_in) > 0:
+        cmd += ["-ss", f"{float(t_in):.3f}"]
+    cmd += ["-i", str(src)]
+    if t_out is not None:
+        cmd += ["-t", f"{max(0.01, float(t_out) - float(t_in or 0.0)):.3f}"]
+    cmd += ["-map", "0:a:0", "-vn", "-ac", str(int(ch)), "-ar", str(sr), "-f", "f32le", "-"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0 or not r.stdout:
+        return None
+    x = np.frombuffer(r.stdout, dtype=np.float32).astype(np.float64)
+    return x if int(ch) == 1 else x[:len(x) - len(x) % int(ch)].reshape(-1, int(ch))
+
+
+def speech_lufs(src, t_in=0.0, t_out=None, words=None, audio=None):
+    """Sonoridad de la VOZ del tramo [t_in, t_out] (s de la fuente) en LUFS: BS.1770 (filtro K,
+    bloques de 400 ms con compuerta absoluta -70 y relativa -10 LU) sobre la primera pista de
+    audio. Con `words` ([{start, end}] en s de la fuente) solo cuentan los sub-bloques de 100 ms
+    que caen en palabras: las pausas y el ruido de fondo no mueven la medida. `audio`: mono 48 kHz
+    (o (n, 2)) ya leido del tramo, sin leer la fuente. None sin audio, sin voz o tramo < 0.1 s."""
+    import math
+    import numpy as np
+    from motion import audio as A
+    # estereo: BS.1770 suma la potencia de cada canal (una mezcla a mono la cambiaria segun la
+    # correlacion entre canales)
+    x = audio if audio is not None else _pcm(src, t_in, t_out, A.SR, ch=2)
+    if x is None:
+        return None
+    x = np.asarray(x, dtype=np.float64)
+    if x.ndim != 2:
+        x = x.reshape(-1)
+    sub = A._kw_sub(x)                              # energia K por sub-bloque de 100 ms
+    if sub.size == 0:
+        return None
+    t0 = float(t_in or 0.0)
+    keep = np.ones(sub.size, dtype=bool)
+    spans = []
+    for w in words or []:
+        try:
+            a, b = float(w["start"]) - t0, float(w["end"]) - t0
+        except (KeyError, TypeError, ValueError):
+            continue
+        if b > 0 and a < sub.size * 0.1:
+            spans.append((max(0.0, a), b))
+    if spans:
+        keep[:] = False
+        for a, b in spans:
+            keep[int(a / 0.1):max(int(a / 0.1) + 1, int(math.ceil(b / 0.1)))] = True
+    if spans and keep.any():
+        # solo los sub-bloques de 100 ms con palabras (un bloque de 400 ms mezclaria la pausa o el
+        # ruido de al lado), con las mismas compuertas
+        v = A._gated(sub[keep] / A._SUB)
+    elif sub.size >= 4:
+        v = A._gated(A._win_power(sub, 4))          # BS.1770: 400 ms, paso 100 ms
+    else:
+        v = A._gated(np.array([sub.sum() / (sub.size * A._SUB)]))
+    return float(v) if math.isfinite(v) else None
+
+
+def level_gains(levels, target=None, up_db=LEVEL_UP_DB, down_db=LEVEL_DOWN_DB):
+    """`vol` lineal por segmento para que TODOS suenen igual de fuerte: cada nivel (LUFS de la voz,
+    None = sin medir) se lleva a `target` (default: la mediana de los medidos, asi el montaje
+    conserva su sonoridad y la toma tipica queda igual). Tope de subida/bajada en dB; sin medida
+    -> 1.0."""
+    import numpy as np
+    vals = [float(v) for v in levels if v is not None]
+    if not vals:
+        return [1.0 for _ in levels]
+    tgt = float(np.median(vals)) if target is None else float(target)
+    out = []
+    for v in levels:
+        if v is None:
+            out.append(1.0)
+            continue
+        g = max(-float(down_db), min(float(up_db), tgt - float(v)))
+        out.append(round(10.0 ** (g / 20.0), 4))
+    return out
+
+
+def _is_auto_vol(s):
+    v = s.get("vol")
+    return v == "auto" or (v is None and isinstance(s.get("montage"), dict))
+
+
+def _item_lufs(s):
+    """LUFS de la voz del tramo de un item (None si no se puede medir)."""
+    t_in = float(s.get("in", 0) or 0)
+    t_out = float(s.get("out", t_in + 5) or t_in + 5)
+    try:
+        return speech_lufs(s["path"], t_in, t_out, words=s.get("words"))
+    except Exception as e:  # noqa: medir es una mejora; sin medida el clip queda a 1.0
+        print(f"   compose: nivel de voz no medido ({e})")
+        return None
+
+
+def _numeric_vol(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v) if math.isfinite(v) and v > 0 else None
+
+
+def auto_levels(items):
+    """Resuelve los `vol` "auto" (o ausentes en un clip del montaje) midiendo la voz de cada tramo.
+    Objetivo: si hay tramos del montaje con `vol` numerico (el montaje ya los nivelo), la mediana de
+    su sonoridad YA con su ganancia (una toma cambiada en el ensamble suena igual que sus vecinas);
+    si no, los "auto" se nivelan entre si (level_gains). Modifica los items y devuelve
+    [(indice, lufs, vol)]."""
+    todo = []
+    for k, s in enumerate(items):
+        if not _is_auto_vol(s):
+            continue
+        if s.get("type", "video") == "image" or s.get("mute") or not s.get("path"):
+            s["vol"] = 1.0
+            continue
+        todo.append((k, _item_lufs(s)))
+    target = None
+    if any(lv is not None for _k, lv in todo):
+        auto_ix = {k for k, _lv in todo}
+        refs = []
+        for k, s in enumerate(items):
+            vol = _numeric_vol(s.get("vol"))
+            if k in auto_ix or vol is None or not isinstance(s.get("montage"), dict) or s.get("mute") or \
+                    s.get("type", "video") == "image" or not s.get("path"):
+                continue
+            lv = _item_lufs(s)
+            if lv is not None:
+                refs.append(lv + 20.0 * math.log10(vol))
+        if refs:
+            import numpy as np
+            target = float(np.median(refs))
+    gains = level_gains([lv for _k, lv in todo], target=target)
+    out = []
+    for (k, lv), g in zip(todo, gains):
+        items[k]["vol"] = g
+        if lv is not None:
+            items[k]["_lufs"] = round(lv, 2)
+        out.append((k, None if lv is None else round(lv, 2), g))
+    return out
+
+
+def _cand_index(montage):
+    """{(slot, cand): candidato} del plan del montaje (para su setup/camara)."""
+    idx = {}
+    for sl in (montage or {}).get("slots") or []:
+        if not isinstance(sl, dict):
+            continue
+        for c in sl.get("cands") or []:
+            if isinstance(c, dict):
+                idx[(sl.get("id"), c.get("id"))] = c
+    return idx
+
+
+def _annotate_shots(shots, seq, montage=None):
+    """Pasa a cada toma de info.shots lo que el montaje sabe de su segmento: join (la union con el
+    segmento ANTERIOR; la primera nunca tiene), slot, cand, conf, setup y sid."""
+    cands = _cand_index(montage)
+    for sh in shots or []:
+        i = int(sh.get("index", -1))
+        if not (0 <= i < len(seq)) or seq[i][0] != "clip":
+            continue
+        data = seq[i][1]
+        m = data.get("montage")
+        if not isinstance(m, dict):
+            continue
+        if data.get("sid"):
+            sh["sid"] = data["sid"]
+        j = m.get("join")
+        sh["join"] = j if (j in JOINS and i > 0) else None
+        for k in ("slot", "cand", "conf", "setup"):
+            if m.get(k) is not None:
+                sh[k] = m[k]
+        if sh.get("setup") is None:
+            c = cands.get((m.get("slot"), m.get("cand")))
+            if c and c.get("setup") is not None:
+                sh["setup"] = c["setup"]
+
+
+def plan_shots(info_shots, dur=None):
+    """plan.shots a partir de info["shots"] del montaje: limites acotados a la duracion analizada
+    (sin tomas < 0.05 s), la ultima hasta el final, y los campos del montaje (SHOT_KEYS) cuando
+    los hay. Sin montaje: exactamente {start, end, src} como siempre."""
+    out = []
+    for s in info_shots or []:
+        a, b = float(s["start"]), float(s["end"])
+        if dur:
+            a, b = min(a, dur), min(b, dur)
+        if b - a >= 0.05:
+            d = {"start": round(a, 3), "end": round(b, 3), "src": s.get("src", "")}
+            for k in SHOT_KEYS:
+                if k in s:
+                    d[k] = s[k]
+            out.append(d)
+    if out:
+        out[-1]["end"] = round(dur or out[-1]["end"], 3)
+        if out[0].get("join") is not None:
+            out[0]["join"] = None
+    return out
+
+
+def montage_plan(montage, main, shots):
+    """plan.montage tras componer: el plan del montaje (guion, candidatos, descartes) con la linea
+    de tiempo que REALMENTE se armo (el usuario pudo cambiar tomas en el ensamble): cada segmento
+    con su indice en plan.shots ("shot") y sus limites en el video compuesto (t0, t1); el
+    "chosen" de cada slot es la toma usada. None si no hay montaje."""
+    items = [s for s in main or [] if isinstance(s, dict) and isinstance(s.get("montage"), dict)
+             and int(s.get("layer", 0) or 0) == 0]
+    if not items and not isinstance(montage, dict):
+        return None
+    out = copy.deepcopy(montage) if isinstance(montage, dict) else {"version": 1}
+    pool = {}
+    for k, sh in enumerate(shots or []):
+        if sh.get("slot") is not None:
+            pool.setdefault((sh.get("slot"), sh.get("cand")), []).append(k)
+        elif sh.get("sid"):
+            # un extra agregado en el ensamble (montage sin parte): por su clip, en orden de tiempo
+            pool.setdefault(("sid", sh.get("sid")), []).append(k)
+    if items:
+        tl = []
+        for s in sorted(items, key=lambda x: float(x.get("start", 0) or 0)):
+            m = s["montage"]
+            key = (m.get("slot"), m.get("cand")) if m.get("slot") is not None else ("sid", s.get("sid"))
+            ks = pool.get(key) or []
+            k = ks.pop(0) if ks else None
+            vol = s.get("vol", 1.0)
+            e = {"slot": m.get("slot"), "cand": m.get("cand"), "sid": s.get("sid"),
+                 "in": s.get("in"), "out": s.get("out"), "start": s.get("start"),
+                 "vol": round(float(vol), 4) if isinstance(vol, (int, float)) else 1.0,
+                 "join": m.get("join") if m.get("join") in JOINS else None, "shot": k}
+            if k is not None:
+                e["t0"], e["t1"] = shots[k]["start"], shots[k]["end"]
+            if s.get("_lufs") is not None:
+                e["lufs"] = s["_lufs"]
+            tl.append(e)
+        if tl:
+            tl[0]["join"] = None
+        out["timeline"] = tl
+        used = {}
+        for e in tl:
+            if e["slot"] is not None and e["cand"] is not None:
+                used.setdefault(e["slot"], e["cand"])
+        for sl in out.get("slots") or []:
+            if isinstance(sl, dict) and sl.get("id") in used:
+                sl["chosen"] = used[sl["id"]]
+    out["composed"] = True
+    return out
+
+
+def finish_plan(plan, info, spec=None, montage=None):
+    """Tras pipeline.analyze del video compuesto: plan.shots desde los limites reales (con join/
+    setup del montaje) y, en un montaje, plan.montage mapeado a plan.shots, sin cortes de tomas que
+    crucen una union y con las secciones de plan.takes sembradas desde el guion. `montage`: el plan
+    del montaje (job de /montage); sin el se usa spec["montage"]. Sin montaje solo pone plan.shots
+    (como siempre). Modifica y devuelve `plan`."""
+    spec = spec or {}
+    try:
+        dur = float(plan.get("duration") or 0) or None
+    except (TypeError, ValueError):
+        dur = None
+    shots = plan_shots((info or {}).get("shots"), dur)
+    if shots:
+        plan["shots"] = shots
+    mont = montage if isinstance(montage, dict) else spec.get("montage")
+    main = (info or {}).get("main") or spec.get("main")
+    if not (isinstance(mont, dict) or is_montage({"main": main})):
+        return plan
+    shots = plan.get("shots") or []
+    cands = _cand_index(mont)
+    for sh in shots:
+        if sh.get("setup") is None and sh.get("slot") is not None:
+            c = cands.get((sh.get("slot"), sh.get("cand")))
+            if c and c.get("setup") is not None:
+                sh["setup"] = c["setup"]
+    m = montage_plan(mont, main, shots)
+    if m is not None:
+        plan["montage"] = m
+    import takes
+    joins = takes.plan_joins(shots)
+    if joins and plan.get("cuts"):
+        plan["cuts"] = takes.respect_joins(plan["cuts"], joins)
+        if isinstance(plan.get("takes"), dict):
+            plan["takes"]["stats"] = takes.stats(plan["cuts"])
+    if m is not None:
+        secs = takes.script_sections(m, shots)
+        if secs:
+            tk = plan.get("takes") if isinstance(plan.get("takes"), dict) else None
+            if tk is not None:
+                tk["sections"] = secs
+                tk["sections_src"] = "guion"
+    return plan
+
+
 def compose(spec, out, work, on_step=None, info=None):
     """spec: ver módulo. Devuelve la ruta del video compuesto (out).
 
@@ -325,17 +787,33 @@ def compose(spec, out, work, on_step=None, info=None):
 
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
-    main = [s for s in spec.get("main", []) if s.get("path")]
+    montage = is_montage(spec)
+    # copias: resolver el volumen "auto" del montaje no toca el spec del llamador (params del job)
+    main = [dict(s) for s in spec.get("main", []) if s.get("path")]
     if not main:
         raise ValueError("La composición no tiene clips en la pista principal.")
     fps = int(spec.get("fps", 30))
+    if montage or any(s.get("vol") == "auto" for s in main):
+        # nivel de la VOZ por segmento: todas las tomas suenan igual de fuerte (una sin microfono
+        # sube, una muy cerca baja); los `vol` numericos se respetan
+        lv = auto_levels(main)
+        if info is not None and lv:
+            info["levels"] = [{"index": k, "lufs": l, "vol": g} for k, l, g in lv]
+    if info is not None:
+        info["main"] = main
 
     # lienzo: dimensiones de DISPLAY del primer VIDEO (o del primer clip); pipeline
-    # reencuadra luego. probe ya aplica la rotación (iPhone vertical = 2160x3840).
+    # reencuadra luego. probe ya aplica la rotación (iPhone vertical = 2160x3840). En un
+    # montaje con IA: la orientacion de la MAYORIA de los clips (el orden lo decide el guion).
     W = H = 0
-    for s in main:
-        if s.get("type") == "video":
-            p = probe(s["path"]); W, H = p["w"], p["h"]; break
+    if montage or spec.get("canvas") == "majority":
+        mc = majority_canvas(main)
+        if mc:
+            W, H = mc
+    if not W:
+        for s in main:
+            if s.get("type") == "video":
+                p = probe(s["path"]); W, H = p["w"], p["h"]; break
     if not W:
         p = probe(main[0]["path"]); W, H = (p["w"] or 1080), (p["h"] or 1920)
     W, H = canvas_size(W, H)
@@ -377,6 +855,7 @@ def compose(spec, out, work, on_step=None, info=None):
                 info["copied"] = True
                 info["shots"] = [{"start": 0.0, "end": d, "index": 0, "kind": "clip",
                                   "src": Path(str(s0.get("name") or s0.get("path") or "")).name}]
+                _annotate_shots(info["shots"], seq, spec.get("montage"))
             return str(out)
 
     # bitrate UNICO del montaje: <= 1.2x la fuente de mas bitrate (y <= MAX_BPS)
@@ -387,21 +866,35 @@ def compose(spec, out, work, on_step=None, info=None):
     # 1) normalizar cada segmento (COMPOSE_JOBS a la vez; el orden de `parts` es el de seq)
     parts = [work / f"seg_{i:03d}.mp4" for i in range(len(seq))]
     trans = [None if kind == "black" else tr for kind, _d, tr in seq]
+    has_trans = any(t and t.get("type") == "crossfade" and float(t.get("dur", 0)) > 0.05
+                    for t in trans[1:])
+    # micro-fundido SOLO de audio a cada lado de las uniones de un montaje con IA (con crossfades
+    # el acrossfade ya mezcla cada union)
+    mfade = MICRO_FADE if (montage and not has_trans) else 0.0
+    # montaje (sin crossfades): segmentos de cuadros ENTEROS y el audio se re-codifica al unir. Con
+    # `-c copy` el concat deja en CADA union el relleno inicial del AAC (1024 muestras = 21 ms de
+    # silencio digital) y el audio de cada segmento se atrasa ~21-28 ms mas que el anterior: en un
+    # montaje de 15 uniones la voz terminaba ~0.4 s detras de la boca
+    exact = bool((EXACT_JOINS == "all" or (montage and EXACT_JOINS != "off")) and not has_trans)
 
     def norm(i):
         kind, data, _tr = seq[i]
         seg = parts[i]
         if kind == "black":
-            _norm_black(float(data), seg, W, H, fps, br)
+            _norm_black(float(data), seg, W, H, fps, br, exact=exact)
             return
         s = data
         fin = float(s.get("fadeIn", 0) or 0); fout = float(s.get("fadeOut", 0) or 0)
         if s.get("type") == "image":
-            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout, br)
+            _norm_image(s["path"], float(s.get("dur", 3.0)), seg, W, H, fps, fin, fout, br, exact=exact)
         else:
             t_in = float(s.get("in", 0)); t_out = float(s.get("out", t_in + 5))
             vol = 0.0 if s.get("mute") else float(s.get("vol", 1.0))
-            _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout, br)
+            mf = mfade if isinstance(s.get("montage"), dict) else 0.0
+            _norm_video(s["path"], t_in, t_out, seg, W, H, fps, vol, fin, fout, br,
+                        afin=mf if i > 0 else 0.0, afout=mf if i < len(seq) - 1 else 0.0,
+                        limit=bool(isinstance(s.get("montage"), dict) and vol > 1.0 + 1e-3),
+                        exact=exact)
 
     n = len(seq)
     step(f"Preparando 0/{n}…")
@@ -429,19 +922,22 @@ def compose(spec, out, work, on_step=None, info=None):
         except Exception as e:  # noqa: los limites son una ayuda, nunca tumban el montaje
             print(f"   compose: limites de tomas no disponibles ({e})")
             info["shots"] = []
+        _annotate_shots(info["shots"], seq, spec.get("montage"))
 
     # 2) unir: si hay TRANSICIONES (crossfade) usa xfade; si no, concat demuxer (rápido)
     step("Uniendo la línea de tiempo…")
     main_mp4 = work / "main.mp4"
-    has_trans = any(t and t.get("type") == "crossfade" and float(t.get("dur", 0)) > 0.05
-                    for t in trans[1:])
     if has_trans and len(parts) > 1:
         _concat_xfade(parts, trans, main_mp4, W, H, fps, br)
     else:
         listf = work / "concat.txt"
         listf.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts))
+        # montaje: el video se copia y el audio se decodifica (sin el relleno de cada AAC) y se
+        # re-codifica una vez: uniones sin hueco y en sincronia (segmentos de cuadros enteros)
+        acodec = ["-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k"] \
+            if exact and len(parts) > 1 else ["-c", "copy"]
         _run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(listf),
-              "-c", "copy", str(main_mp4)])
+              *acodec, str(main_mp4)])
 
     # 3) encimar CAPAS superiores (full-frame, en su posición temporal) + STICKERS (PiP)
     overlays = [o for o in spec.get("overlays", []) if o.get("path")]

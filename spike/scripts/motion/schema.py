@@ -1334,8 +1334,18 @@ def _norm_times(it: dict, duration: float | None) -> bool:
         if duration and e > duration:
             e = duration
             s = max(0.0, e - MIN_ITEM)
-    it["start"], it["end"] = round(s, 4), round(e, 4)
+    it["start"], it["end"] = round(s, 4), _round_in(e, duration)
     return True
+
+
+def _round_in(t: float, duration: float | None) -> float:
+    """t a 4 decimales sin pasarse del final del video: una duracion con mas decimales (la de un
+    video compuesto, p. ej. 81.59069) redondeada HACIA ARRIBA (81.5907) dejaba el item "fuera del
+    video" para validate (aviso falso en el Studio)."""
+    r = round(t, 4)
+    if duration and r > duration:
+        r = int(duration * 1e4) / 1e4
+    return r
 
 
 def _norm_event(it: dict, duration: float | None) -> bool:
@@ -1345,7 +1355,7 @@ def _norm_event(it: dict, duration: float | None) -> bool:
     a = max(0.0, a)
     if duration:
         a = min(a, duration)
-    it["at"] = round(a, 4)
+    it["at"] = _round_in(a, duration)
     return True
 
 

@@ -837,3 +837,133 @@ def test_limpieza_e2e_en_navegador(tmp_path):
         except ProcessLookupError:
             pass
         srv.wait(timeout=30)
+
+
+# ================================================================ armar con IA (montaje por guion)
+@needs_node
+def test_montaje_unitarias_node():
+    """Logica pura de "Armar con IA" (tests/js/montage.test.js): orden de grabacion, linea de tiempo
+    desde plan.montage, "Usar esta toma" + re-empaque, extras, panel "Tomas" y cuerpo de /compose."""
+    r = subprocess.run([NODE, "--test", str(SPIKE / "tests" / "js" / "montage.test.js")],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+
+
+def test_montaje_cableado_de_la_ui():
+    """La UI de "Armar con IA" esta cableada al contrato: guion opcional con borrador, subida de a un
+    archivo, POST /montage, fase assembly al reabrir y en recientes, montage_job en /compose."""
+    html = (STATIC / "index.html").read_text()
+    js = _inline_script()
+    assert 'id="guion"' in html and "Guion (opcional)" in html and "Reelfy lo deduce de las tomas" in html
+    assert 'id="goAI"' in html and "Armar con IA" in html and "Armar a mano" in js
+    assert "modo lote automático" not in html, "texto viejo: varios archivos ya no son un lote"
+    assert 'fetch("/montage"' in js and 'x.open("POST","/sources")' in js
+    assert 'fd.append("files",file)' in js, "un archivo por peticion (progreso y transcripcion tempranos)"
+    assert "localStorage" in js and "reelfy.guion.draft" in js
+    for etapa in ("Subiendo", "Escuchando cada clip", "Eligiendo las mejores tomas"):
+        assert etapa in js, etapa
+    for txt in ("Usar esta toma", "Descartadas", "Sin toma", "Guion detectado", "Rearmar"):
+        assert txt in js, txt
+    assert 'j.phase==="assembly"' in js and "mtReopen" in js, "reabrir un armado (?job=)"
+    assert "FXCore.projectState" in js, "proyectos recientes con armados"
+    assert "montageJob:ASM.montage?ASM.montageJob:null" in js and "FXCore.composeBody(" in js
+    assert "FXCore.recordingOrder" in js, "los clips entran en orden de grabacion"
+
+
+def test_montaje_revision_ui_cableado():
+    """Arreglos de la revision de "Armar con IA" que el E2E del navegador ejercita (este chequeo corre
+    siempre, sin navegador): transcribir solo lo que puede armarse con IA, guardado de las tomas hasta
+    que la composicion termine, perfil explicito, teclado del panel, "Escuchar" que un salto termina,
+    subidas fallidas, guion visible desde el ensamble y limpieza al borrar un proyecto."""
+    js = _inline_script()
+    fx = (STATIC / "fx.js").read_text()
+    css = (STATIC / "fx.css").read_text()
+    # transcripcion por clip: la UI la pide solo cuando se puede armar con IA; el Studio nunca
+    assert 'fd.append("transcribe",words?"1":"0")' in js and "uploadEach(files,prog,null,nv>1)" in js
+    assert "},my.hold,true);" in js, "Armar con IA pide la transcripcion de cada clip"
+    assert 'fd.append("files", file); fd.append("transcribe", "0");' in fx
+    # los cambios de tomas se guardan hasta que la composicion termina (review/done), no al aceptarla
+    assert "if(ASM.montageJob) asmSaved(ASM.montageJob,null);" not in js
+    assert "asmSaved(JOB,null);          // ya compuesto" in js and "if(ASM.montageJob) asmSaveNow();" in js
+    # "Sin perfil" viaja explicito (null)
+    assert "body.profile=prof&&body.director?prof:null;" in js
+    # teclado: Espacio/Enter sobre botones y resumenes los activan; el foco vuelve tras re-dibujar
+    assert "closest('button,summary,a,[role=\"tab\"],[role=\"button\"]')" in js and "mtRefocus(box,fk)" in js
+    # "Escuchar" una parte: un salto del usuario la termina; el hueco tambien respeta su fin
+    assert "function asmGoto(t,seek,internal){" in js and "if(!internal&&ASM.stopAt!=null) asmPause();" in js
+    assert "asmGoto(clipEnd(at.clip)+0.001,true,true)" in js
+    # dividir un clip con volumen automatico: las dos mitades lo conservan
+    assert "if(c.volAuto) nc.volAuto=true;" in js
+    # subidas fallidas: se decide antes de armar; desde el ensamble el guion se ve y se confirma
+    assert "await mtRetryFailed(rows,files,my);" in js and "Reintentar la subida" in js and "Armar sin ellos" in js
+    assert 'const draft=!$("#guionWrap").hidden?' in js and 'MT.back=true; MT.script=($("#guion")' not in js
+    # fuentes agregadas en el ensamble de un montaje: registradas en el proyecto
+    assert '"/montage/"+encodeURIComponent(ASM.montageJob)+"/sources"' in js
+    # borrar un proyecto borra sus cambios guardados; los de proyectos que ya no existen se podan
+    assert "asmSaved(j.id,null);" in js and "asmSavedPrune(" in js
+    # "Rearmar" deshabilitado se ve deshabilitado (la regla va DESPUES de .mt-btn.pri)
+    assert css.index(".mt-btn.pri:disabled") > css.index(".mt-btn.pri{")
+
+
+def _clips_montaje(dst):
+    """Los 8 clips SINTETICOS de tests/js/montage_fixture.js: color de prueba distinto, un tono y su
+    creation_time (UTC) para que el servidor los ordene por fecha de grabacion."""
+    import datetime as dt
+    import paths
+    code = "process.stdout.write(JSON.stringify(require(%s).CLIPS))" % json.dumps(str(SPIKE / "tests" / "js" / "montage_fixture.js"))
+    clips = json.loads(subprocess.run([NODE, "-e", code], capture_output=True, text=True, check=True, timeout=60).stdout)
+    dst.mkdir(parents=True, exist_ok=True)
+    for i, c in enumerate(clips):
+        utc = dt.datetime.fromisoformat(c["created"]).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+        d = c["dur"]
+        subprocess.run([str(paths.FFMPEG), "-y", "-v", "error", "-f", "lavfi", "-i",
+                        f"testsrc2=size=360x640:rate=30:duration={d},hue=h={i * 45}", "-f", "lavfi", "-i",
+                        f"sine=frequency={220 + 40 * i}:sample_rate=48000:duration={d}", "-c:v", "libx264", "-preset",
+                        "ultrafast", "-crf", "34", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "64k", "-shortest",
+                        "-metadata", f"creation_time={utc}", "-f", "mov", str(dst / c["name"])], check=True, timeout=300)
+    return clips
+
+
+def test_montaje_e2e_en_navegador(tmp_path):
+    """E2E opcional de "Armar con IA" en un navegador real (tests/js/montage_e2e.mjs) contra un
+    servidor AISLADO (tests/devserver.sh) con 8 clips sinteticos. Se activa con REELFY_PLAYWRIGHT=ruta
+    a playwright-core (usa Chrome; REELFY_PW_CHANNEL cambia el canal; REELFY_E2E_SHOTS guarda capturas)."""
+    import os
+    import signal
+    import socket
+    import sys
+    import time
+    import urllib.request
+    pw = os.environ.get("REELFY_PLAYWRIGHT")
+    if not (pw and NODE):
+        pytest.skip("E2E del montaje desactivado (define REELFY_PLAYWRIGHT)")
+    sys.path.insert(0, str(SPIKE / "scripts"))
+    data, clipdir = tmp_path / "data", tmp_path / "clips"
+    (data / "input").mkdir(parents=True)
+    _clips_montaje(clipdir)
+    port = None
+    for p in range(8600, 8700):
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", p)) != 0:
+                port = p
+                break
+    assert port, "sin puerto libre en 8600-8699"
+    srv = subprocess.Popen([str(SPIKE / "tests" / "devserver.sh"), str(port), str(data)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        for _ in range(120):
+            try:
+                if urllib.request.urlopen(f"http://127.0.0.1:{port}/setup", timeout=2).status == 200:
+                    break
+            except Exception:  # noqa: aun arrancando
+                time.sleep(0.5)
+        out = os.environ.get("REELFY_E2E_SHOTS") or str(tmp_path / "shots")
+        r = subprocess.run([NODE, str(SPIKE / "tests" / "js" / "montage_e2e.mjs"), f"http://127.0.0.1:{port}", str(clipdir), out],
+                           capture_output=True, text=True, timeout=900, env={**os.environ})
+        assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-3000:]
+    finally:
+        try:
+            os.killpg(srv.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        srv.wait(timeout=30)

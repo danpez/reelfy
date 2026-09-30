@@ -2,6 +2,34 @@
 
 Formato: cada versión = un tag `reelfy-v*` que dispara el build de los 3 instaladores.
 
+## v0.5.3 — 2026-09-30
+
+**Armar con IA: de todos los clips de una grabación al video, con o sin guion.**
+
+### Armar con IA (nuevo)
+- Seleccionas TODOS los clips de una grabación y (opcional) pegas el guion. Reelfy transcribe cada
+  clip al importarlo, los ordena por hora de grabación y elige la mejor toma de cada parte del guion:
+  descarta repeticiones, tomas con trabas, groserías, pláticas fuera de cámara y lo que no va en el
+  guion; puede alternar dos ángulos de la misma frase o completar una frase con dos tomas.
+- Sin guion, lo deduce de las tomas repetidas y te lo muestra ("Guion detectado") para corregirlo y
+  rearmar.
+- En el montaje, el panel **Tomas** explica por qué eligió cada toma, muestra las otras con
+  "Usar esta toma" (con deshacer), las descartadas con su motivo y las partes sin toma.
+- Caso real (39 clips, 7 min de material): mismas tomas que la edición a mano en 15 de 17 frases e
+  igual de buenas en las 17, 100% del guion, sin repeticiones; el montaje se decide en menos de 1 s.
+- Al unir clips: todos suenan al mismo volumen, sin clics en las uniones; cortes secos dentro de una
+  frase y transiciones solo entre secciones; el director describe cada cámara (antes el guion le
+  ganaba el turno al modelo de visión y ninguna toma se describía).
+
+### Correcciones
+- Exports que podían salir mudos: un valor inválido (NaN) al final de la voz procesada apagaba toda
+  la mezcla.
+- Aviso falso "rango fuera del video" por redondeo en videos compuestos.
+- La portada de una plataforma de reservas (paseo.club) ya no se anuncia como "Agenda en ...".
+- Las subidas del Studio (b-roll, fotos) no se transcriben de más.
+
+---
+
 ## v0.5.2 — 2026-09-29
 
 **Limpieza de tomas: Reelfy quita las repeticiones, correcciones y tomas fallidas.**

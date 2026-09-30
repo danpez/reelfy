@@ -737,6 +737,11 @@ def _lerp(a: float, b: float, p: float) -> float:
 # presupuesto crece sub-lineal con la duracion, el guion va por tramos desde el segundo 0 (en
 # paralelo al escaneo) y el VLM describe tomas representativas (agrupa las casi iguales).
 LONG_S = 150.0            # s de video desde los que el director entra en modo largo
+# Montaje de varios clips (Armar con IA): ollama atiende UNA peticion a la vez y el guion (una sola
+# llamada de ~35 s) llegaba antes que las descripciones del VLM, que agotaban su plazo en la cola (0 de
+# 12 camaras descritas en el caso real). En montaje el VLM va primero (una descripcion por camara) y
+# el guion despues, con este tiempo extra de presupuesto.
+MONTAGE_EXTRA_S = 40.0
 BUDGET_MAX_X = 4.5        # tope del presupuesto largo (x el presupuesto base)
 
 
@@ -1354,6 +1359,49 @@ def shot_groups(out: list[dict]) -> list[list[int]]:
     return groups
 
 
+# campos del montaje con IA que viajan con cada toma (plan.shots[i]): la union con la toma anterior
+# (section|line|splice), el setup de camara (mismo lugar/encuadre) y su slot/candidato del guion.
+# 'section' admite transicion; 'line' y 'splice' son corte seco (sin transicion ni whoosh)
+HARD_JOINS = ("line", "splice")
+SHOT_CARRY = ("join", "setup", "slot", "cand", "sid")
+
+
+def _carry_montage(out: list[dict], shots_in: list[dict]) -> list[dict]:
+    """Copia a cada toma analizada los campos del montaje de la toma de entrada (mismo indice) y
+    quita los que ya no trae: una cache de otra direccion nunca deja joins viejos."""
+    if len(out) != len(shots_in):
+        return out
+    for o, s in zip(out, shots_in):
+        for k in SHOT_CARRY:
+            if s.get(k) is not None:
+                o[k] = s[k]
+            else:
+                o.pop(k, None)
+    return out
+
+
+def setup_groups(out: list[dict]) -> list[list[int]]:
+    """Grupos por setup de camara del montaje (una descripcion del VLM por setup, que se reusa en
+    sus tomas). El representante es la toma MAS LARGA del grupo (su cuadro medio es el mas
+    estable); b-roll primero y luego lo mas largo, como shot_groups. Tomas sin setup: solas."""
+    by: dict = {}
+    order: list = []
+    for i, o in enumerate(out):
+        key = ("s", o["setup"]) if o.get("setup") is not None else ("i", i)
+        if key not in by:
+            by[key] = []
+            order.append(key)
+        by[key].append(i)
+
+    def length(i):
+        return float(out[i]["end"]) - float(out[i]["start"])
+    groups = []
+    for key in order:
+        g = sorted(by[key], key=lambda i: (-length(i), i))
+        groups.append(g)
+    return sorted(groups, key=lambda g: (bool(out[g[0]].get("face")), -sum(length(i) for i in g), g[0]))
+
+
 def vlm_max_calls(dur: float) -> int:
     """Tope de descripciones del VLM en un video largo: crece con la raiz de la duracion
     (5 min ~25, 19 min ~38)."""
@@ -1436,6 +1484,8 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
                 pass
 
     shots_in = [dict(s) for s in plan.get("shots") or [] if isinstance(s, dict) and "start" in s]
+    # montaje con IA: tomas del mismo setup de camara = una sola descripcion del VLM
+    by_setup = any(s.get("setup") is not None for s in shots_in)
     complete = shots_in and all(k in s for s in shots_in for k in ("person", "use", "framing"))
     if complete and all("face" in s for s in shots_in):
         basic(shots_in)
@@ -1466,6 +1516,7 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
     if vkey:
         hit = _cache_get("shots", vkey)
         if hit:
+            hit = _carry_montage(hit, shots_in)
             basic(hit)
             return hit
     _step(on_step, "tomas", 0.05, "analizando cortes")
@@ -1496,15 +1547,19 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
                     "face_track": (fa.get("track") or []) if fa["face"] and fa["face_ratio"] >= 0.3 else [],
                     "rows": _shot_rows(sc, s), "cells": _shot_cells(sc, s),
                     "speech": _r(_speech_ratio(plan, s["start"], s["end"]), 2)})
+    if shots_in:
+        _carry_montage(out, shots_in)
     basic([dict(o, framing=_framing_from_face(o["face"]), use="a_camara" if o["face"] else "broll",
                 place="", text_seen=[]) for o in out])
     use_vlm = use_llm and llm_available(_vlm_model())
     vlm: list[dict | None] = [None] * len(shots)
     cause = ""
     long_mode = dur > LONG_S
-    groups = shot_groups(out) if long_mode else [[i] for i in range(len(out))]
+    by_setup = by_setup and len(out) == len(shots_in)
+    groups = setup_groups(out) if by_setup else \
+        (shot_groups(out) if long_mode else [[i] for i in range(len(out))])
     t = _now()
-    if use_vlm and sc["med"] and long_mode:
+    if use_vlm and sc["med"] and (long_mode or by_setup):
         _step(on_step, "tomas", 0.2, "describiendo tomas representativas (VLM)")
         vlm, cause = _vlm_groups(str(video), sc, shots, faces, groups, deadline, turn, on_step, dur, stx)
     elif use_vlm and sc["med"]:
@@ -1543,7 +1598,7 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
         stx["vlm_ms"] = round((_now() - t) * 1000)
     _step(on_step, "tomas", 0.93, "midiendo el recorte del sujeto")
     t = _now()
-    if long_mode:
+    if long_mode or by_setup:
         # una medicion por grupo (tomas casi iguales = mismo recorte) y tope de tiempo: sin medir =
         # None (como sin modelos: se permite)
         mdead = _now() + MATTE_LONG_S
@@ -1579,7 +1634,8 @@ def analyze_shots(plan: dict, use_llm: bool = True, on_step=None, scan: dict | N
                   "vlm": bool(vlm[i])})
     keys = ("start", "end", "src", "person", "framing", "place", "text_seen", "use", "free_space",
             "face", "motion", "rows", "cells", "speech", "vlm", "matte_q", "face_track")
-    out = [{k: o[k] for k in keys} for o in out]
+    out = [{**{k: o[k] for k in keys}, **{k: o[k] for k in SHOT_CARRY if o.get(k) is not None}}
+           for o in out]
     # la cache con clave de VLM solo guarda descripciones REALES: si el VLM no respondio (ollama
     # ocupado) el resultado heuristico no se queda pegado para las siguientes direcciones
     if vkey and ((use_vlm and all(v is not None for v in vlm)) or not use_llm):
@@ -3940,7 +3996,20 @@ class _Choreo:
             self.sfx(t, soft, prio=2, gain=SFX_GAIN[soft] - 5.0, src_id=it["id"] + f"l{k}", vary=True)
 
     # ---------------------------------------------------------- 1. camara base
+    def _jump_start(self, s: dict, prev: dict | None) -> bool | None:
+        """Jump-zoom en una union 'splice' del montaje (a mitad de frase) dentro del MISMO setup de
+        camara (o sin setup conocido): la toma arranca con el encuadre CONTRARIO al que cerro la
+        anterior (cerrado <-> abierto), asi el salto se lee como un punch-in y no como un brinco.
+        None = sin regla (el encuadre de siempre)."""
+        if s.get("join") != "splice" or prev is None or prev["k"] != s["k"] - 1:
+            return None
+        a, b = prev.get("setup"), s.get("setup")
+        if a is not None and b is not None and a != b:
+            return None                  # cambio de angulo: el corte ya es un cambio de plano
+        return not prev["tight"]
+
     def camera(self) -> None:
+        prev_cam: dict | None = None     # ultimo encuadre de la toma a camara anterior (jump-zoom)
         for s in self.shots:
             if s["f1"] - s["f0"] < 0.15:
                 continue
@@ -3976,6 +4045,11 @@ class _Choreo:
                     # la siguiente clausula, como el punch-in de un editor en el primer segundo
                     start_tight = True
                 hook_shot = bool(self.words) and s["start"] - 1e-6 <= self.words[0]["t0"] < s["end"]
+                js = self._jump_start(s, prev_cam)
+                if js is not None:
+                    start_tight = js
+                prev_cam = {"k": s["k"], "setup": s.get("setup"),
+                            "tight": ((len(merged) - 1) % 2 == 1) != start_tight}
                 for k, (a, b) in enumerate(merged):
                     tight = (k % 2 == 1) != start_tight
                     lv = s["z0"] * (jz if tight else 1.0)
@@ -4080,9 +4154,18 @@ class _Choreo:
         self.events.append((fa, "trans"))
         return True
 
+    @staticmethod
+    def hard_join(shot: dict) -> bool:
+        """La toma entra con una union de montaje de corte seco (misma seccion del guion: 'line'
+        entre lineas, 'splice' a mitad de frase): sin transicion ni whoosh. 'section' (o sin
+        montaje) admite transicion."""
+        return shot.get("join") in HARD_JOINS
+
     def transitions(self) -> None:
         for ch in self.shot_changes():
             nxt, prv = ch["next"], ch["prev"]
+            if self.hard_join(nxt):
+                continue
             kinds = [k for k, _ in self.S["transitions"]]
             pref = None
             if not nxt["talk"] and "light_leak" in kinds:
@@ -5605,7 +5688,7 @@ class _Choreo:
         si no hay, la primera escena a pantalla completa."""
         target = None
         for ch in self.shot_changes():
-            if not ch["next"]["talk"] and ch["f"] > 2.0:
+            if not ch["next"]["talk"] and ch["f"] > 2.0 and not self.hard_join(ch["next"]):
                 target = ch["at"]
                 break
         if target is None and self.fx["cutaways"]:
@@ -9520,6 +9603,10 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
     budget = director_budget(p["duration"])
     long_script = _n_words(sents) > LLM_SINGLE_MAX
     turn = _ModelTurn() if (long_script or p["duration"] > LONG_S) else None
+    vlm_first = (can_llm and turn is None and bool((plan.get("montage") or {}).get("timeline"))
+                 and len(plan.get("shots") or []) > 1)
+    if vlm_first:
+        budget += MONTAGE_EXTRA_S
     # tomas que ya describio el VLM en una direccion anterior (vienen completas en el plan): al
     # re-dirigir se conserva la etiqueta del VLM (no se vuelve 'heuristico' por no repetirlo)
     sh_in = [x for x in plan.get("shots") or [] if isinstance(x, dict)]
@@ -9530,8 +9617,8 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
         llm_box["th"] = th
         th.start()
 
-    def on_basic(shots_basic):
-        if not can_llm or "th" in llm_box:
+    def on_basic(shots_basic, final=False):
+        if not can_llm or "th" in llm_box or (vlm_first and not final):
             return
         sb = [dict(x) for x in shots_basic]
 
@@ -9559,7 +9646,7 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
     shots = analyze_shots(p, use_llm=use_llm, on_step=on_step, deadline=t_start + budget - 8.0,
                           on_basic=on_basic, turn=turn, stats=shot_st)
     vlm_cause = _VLM_STATUS.pop(str(p.get("video")), "")
-    on_basic(shots)
+    on_basic(shots, final=True)
     timings["shots_ms"] = round((_now() - t) * 1000)
     _step(on_step, "guion", 0.0, "entendiendo el guion")
     llm_r = None

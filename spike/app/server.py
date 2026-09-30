@@ -48,7 +48,7 @@ SPIKE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SPIKE / "scripts"))
 import paths  # noqa: E402
 
-ENGINE_VERSION = "0.5.2"
+ENGINE_VERSION = "0.5.3"
 
 # ---- LLM embebido: si el binario de ollama viene en el bundle, corre en un
 # puerto propio con modelos en DATA. El pipeline (highlights/translate) y el director
@@ -245,12 +245,21 @@ def _kill_children(wait: float = 1.5) -> list[int]:
     return kids
 
 
+# apagandose: los hilos que esperan turno (proxies de /sources, transcripcion por clip) ya no lanzan
+# procesos nuevos
+_SHUTDOWN = threading.Event()
+
+
 @asynccontextmanager
 async def _lifespan(_app):
     yield
     _stop_ollama()
     if _SERVING:
+        _SHUTDOWN.set()
         _kill_children()
+        # el proceso recien terminado de un hilo (ffmpeg de un proxy, whisper) se reintenta una vez
+        # (libx264 / CPU) al fallar: una segunda pasada tambien barre ese reintento
+        _kill_children(wait=0.5)
 
 
 app.router.lifespan_context = _lifespan
@@ -311,6 +320,7 @@ def _watch_parent(pid: int, on_orphan, every: float = 2.0) -> threading.Thread:
 
 
 def _orphan_exit():
+    _SHUTDOWN.set()
     _stop_ollama()
     _kill_children()
     os._exit(0)
@@ -1360,13 +1370,24 @@ def _job_or_404(job_id):
     return job
 
 
+MONTAGE_PENDING_MSG = "Este proyecto todavía es un montaje: aplícalo para componer el video."
+
+
+def _not_montage(plan):
+    """Un plan que SOLO es un montaje (fase assembly, sin video compuesto ni analisis) no se
+    previsualiza, dirige ni exporta: 409."""
+    if jobstore.montage_only(plan):
+        raise HTTPException(409, MONTAGE_PENDING_MSG)
+    return plan
+
+
 def _plan_from(body, job_id):
     plan = (body or {}).get("plan")
     if not plan:
         plan, _ = jobstore.get_plan(job_id)
     if not plan:
         raise HTTPException(409, "El job no tiene plan; analiza el video primero.")
-    return plan
+    return _not_montage(plan)
 
 
 # ---- opciones del proyecto para el motor pro (marca, aire, audio de estudio) ----
@@ -1876,6 +1897,8 @@ DIRECTOR_LABELS = {"tomas": "analizando las tomas", "guion": "entendiendo el gui
                    "coreografia": "coreografiando la edición", "musica": "componiendo la música"}
 # pasos sin sub-progreso: la barra avanza sola (asintotica) con esta duracion esperada (s)
 DIRECTOR_CREEP = {"guion": 15.0, "musica": 25.0}
+# claves del montaje en plan.shots que sobreviven al director (compose.SHOT_KEYS)
+SHOT_MONTAGE_KEYS = ("join", "slot", "cand", "conf", "setup", "sid")
 
 
 class _PhaseBar:
@@ -1976,15 +1999,20 @@ def _finish_analysis(job_id, prog, plan, params, bar=None):
             except JobCanceled:
                 pass       # el director no se interrumpe a medias; se revisa al terminar
         src_names = [s.get("src") for s in plan.get("shots") or []]
+        # lo que el montaje sabe de cada toma (union, setup de camara, parte del guion)
+        carry = [{k: s[k] for k in SHOT_MONTAGE_KEYS if s.get(k) is not None}
+                 for s in plan.get("shots") or []]
         try:
             plan, warns = _direct_plan(plan, d, on_step=dstep)
         finally:
             bar.stop_creep()
         shots = plan.get("shots") or []
         if src_names and len(src_names) == len(shots):
-            for s, name in zip(shots, src_names):   # nombre del clip original (compose)
+            for s, name, extra in zip(shots, src_names, carry):   # nombre del clip original (compose)
                 if name:
                     s["src"] = name
+                for k, v in extra.items():
+                    s.setdefault(k, v)
         prog.cancel.check()
     if d.get("fmt") in ("9:16", "1:1", "4:5", "16:9", "original") and isinstance(plan, dict) and \
             not (plan.get("studio") or {}).get("fmt"):
@@ -2021,8 +2049,12 @@ def _analyze(job_id, job):
 def _compose(job_id, job):
     """Handler 'compose': arma la composición del timeline (varios clips/imágenes +
     overlays) en UN video y luego lo analiza como cualquier fuente. job['params'] =
-    {spec, glossary, n, director}. La IA se aplica sobre la composición (timeline + IA).
-    Los limites REALES de cada clip quedan en plan.shots (director y render)."""
+    {spec, glossary, n, director, script?, sids?, montage_job?}. La IA se aplica sobre la
+    composición (timeline + IA). Los limites REALES de cada clip quedan en plan.shots (director y
+    render). Montaje de "Armar con IA" (el MISMO trabajo, antes kind "montage"): el plan guardado
+    trae plan.montage; compose.finish_plan lo mapea a plan.shots (join/setup de cada union), las
+    tomas del video combinado no cruzan uniones y las secciones salen del guion. Los nombres
+    propios y cifras del guion van al glosario de whisper (nunca el guion entero)."""
     import re
     import compose as compose_mod
     _refresh_llm()
@@ -2032,6 +2064,9 @@ def _compose(job_id, job):
     spec = p.get("spec") or {}
     video = INPUT / f"{job_id}.mp4"
     lo, hi = PHASE_COMPOSE
+    stored = job.get("plan")
+    montage = stored["montage"] if jobstore.montage_only(stored) else None
+    gloss = _script_glossary(((p.get("script") or {}).get("text") or ""), p.get("glossary", ""))
 
     def cstep(m):
         # "Preparando k/n…": k clips normalizados de n -> tramo 2-32 %
@@ -2055,20 +2090,355 @@ def _compose(job_id, job):
     print(f"   compose: {len(spec.get('main') or [])} clips en {time.time() - t0:.1f}s "
           f"(lienzo {info.get('W')}x{info.get('H')}, {how}"
           f"{', igual a ' + twin.name if twin else ''}, carga {_load()})")
-    plan = pipeline.analyze(video, p.get("glossary", ""), p.get("n", 2),
-                            on_step=_analysis_progress(bar, *PHASE_ANALYZE_AFTER_COMPOSE))
-    dur = float(plan.get("duration") or 0) or None
-    shots = []
-    for s in info.get("shots") or []:
-        a, b = float(s["start"]), float(s["end"])
-        if dur:
-            a, b = min(a, dur), min(b, dur)
-        if b - a >= 0.05:
-            shots.append({"start": round(a, 3), "end": round(b, 3), "src": s.get("src", "")})
-    if shots:
-        shots[-1]["end"] = round(dur or shots[-1]["end"], 3)
-        plan["shots"] = shots
+    kw = {}
+    joins = _join_times(info.get("shots"))
+    if joins and _accepts(pipeline.analyze, "joins"):
+        kw["joins"] = joins                  # la limpieza de tomas no cruza uniones del montaje
+    plan = pipeline.analyze(video, gloss, p.get("n", 2),
+                            on_step=_analysis_progress(bar, *PHASE_ANALYZE_AFTER_COMPOSE), **kw)
+    if hasattr(compose_mod, "finish_plan"):
+        compose_mod.finish_plan(plan, info, spec=spec, montage=montage)
+    else:                                    # compose sin montaje (version anterior)
+        dur = float(plan.get("duration") or 0) or None
+        shots = []
+        for s in info.get("shots") or []:
+            a, b = float(s["start"]), float(s["end"])
+            if dur:
+                a, b = min(a, dur), min(b, dur)
+            if b - a >= 0.05:
+                shots.append({"start": round(a, 3), "end": round(b, 3), "src": s.get("src", "")})
+        if shots:
+            shots[-1]["end"] = round(dur or shots[-1]["end"], 3)
+            plan["shots"] = shots
+        if montage is not None:
+            plan["montage"] = montage
+    if isinstance(plan.get("montage"), dict) and p.get("script"):
+        sc = plan["montage"].setdefault("script", {})
+        if isinstance(sc, dict) and not sc.get("text"):
+            sc.update(text=p["script"].get("text"), source=p["script"].get("source") or "user")
     _finish_analysis(job_id, prog, plan, p, bar)
+
+
+def _join_times(shots):
+    """Uniones del montaje (s del video compuesto) de info.shots -> [t] (takes.plan_joins)."""
+    try:
+        import takes as takes_mod
+        fn = getattr(takes_mod, "plan_joins", None)
+        return fn(shots or []) if fn else []
+    except Exception:  # noqa: sin uniones la limpieza de tomas es la de siempre
+        traceback.print_exc()
+        return []
+
+
+# ================================================================ montaje con IA ("Armar con IA")
+# POST /montage {sids, script?, glossary?, intercut?, profile?, director?} crea un trabajo kind
+# "montage" en fase "assembly" (carril propio: no espera detras de un export). Espera la
+# transcripcion de cada clip (carril de palabras, ver _words_kick), llama a montage.build y guarda
+# el resultado en plan.montage (contrato: version, order, script, slots, timeline, discarded,
+# uncovered, extra, stats, ms). El trabajo queda en review/assembly: la pantalla de ensamble lo
+# muestra, el usuario cambia tomas ("Usar esta toma") y POST /compose {montage_job} re-encola el
+# MISMO id como compose (conserva plan.montage y el guion). Cancelado o fallido con un montaje
+# guardado: vuelve a assembly (jobstore.back_to_assembly).
+PHASE_MONTAGE_WORDS = (2.0, 60.0)
+PHASE_MONTAGE_BUILD = (60.0, 98.0)
+MONTAGE_MAX_CLIPS = int(os.environ.get("REELFY_MONTAGE_MAX_CLIPS", "300"))
+SCRIPT_MAX_CHARS = 20000
+MONTAGE_DONE_MSG = "Montaje listo: revisa las tomas"
+
+
+def _montage(job_id, job):
+    """Handler 'montage' (carril propio). job['params'] = {sids, script, glossary, intercut,
+    director?, profile?}."""
+    prog = Progress(job_id)
+    bar = _PhaseBar(job_id, prog)
+    p = job["params"] or {}
+    sids = [s for s in p.get("sids") or [] if isinstance(s, str)]
+    t0 = time.time()
+    lo, hi = PHASE_MONTAGE_WORDS
+    bar.set(lo, "Transcribiendo tus clips…", "words", force=True)
+    _montage_wait_words(job_id, sids, bar, prog)
+    t_words = time.time() - t0
+    clips = _montage_clips(sids)
+    if not clips:
+        raise RuntimeError("Ningún clip de la sesión se pudo leer.")
+    lo, hi = PHASE_MONTAGE_BUILD
+    bar.set(lo, "Eligiendo las mejores tomas…", "montage", force=True)
+
+    def step(pct=0.0, msg=None):
+        bar.set(lo + (hi - lo) * max(0.0, min(100.0, float(pct or 0))) / 100.0,
+                msg or "Eligiendo las mejores tomas…", "montage", force=True)
+    sc = p.get("script") if isinstance(p.get("script"), dict) else None
+    t1 = time.time()
+    _refresh_llm()
+    bar.creep(lo, hi, 2.0 + 0.4 * len(clips))      # el motor no reporta avance: la barra camina
+    try:
+        res = _montage_build(clips, script=(sc or {}).get("text") or None,
+                             glossary=p.get("glossary") or "", intercut=p.get("intercut", True) is not False,
+                             on_step=step, cancel=prog.cancel.canceled, llm=p.get("llm", True) is not False)
+    finally:
+        bar.stop_creep()
+    prog.cancel.check()
+    m = _montage_result(res, clips, p, time.time() - t1)
+    m.setdefault("stats", {})
+    if isinstance(m["stats"], dict):
+        m["stats"].setdefault("words_wait_s", round(t_words, 1))
+    n_ok = len(m.get("timeline") or [])
+    msg = MONTAGE_DONE_MSG if n_ok else "No encontré tomas utilizables en estos clips"
+    jobstore.update(job_id, state="review", phase="assembly", pct=100, stage="assembly", eta=None,
+                    elapsed=round(time.time() - t0), message=msg, plan={"montage": m}, error=None)
+    print(f"   montaje {job_id}: {len(clips)} clips, {len(m.get('slots') or [])} partes, "
+          f"{n_ok} segmentos en {time.time() - t0:.1f}s (palabras {t_words:.1f}s)")
+
+
+def _montage_wait_words(job_id, sids, bar, prog):
+    """Espera la transcripcion de cada clip (el carril las hace; las que faltan se adelantan en su
+    cola). Progreso real k/n en la barra y en la tarea lateral `words`. Cancelable."""
+    lo, hi = PHASE_MONTAGE_WORDS
+    n = len(sids)
+    last = None
+    lost_since = None
+    states = {}
+    while True:
+        for sid in sids:                 # lo ya listo no se vuelve a leer en cada vuelta
+            if states.get(sid) not in ("ready", "error", None) or sid not in states:
+                states[sid] = _words_state(sid)
+        pending = [s for s in sids if states[s] == "pending"]
+        errors = [s for s in sids if states[s] == "error"]
+        done = n - len(pending)
+        if pending:
+            _words_kick(pending, front=True)
+        if done != last:
+            jobstore.side_update(job_id, "words", state="running" if pending else "done", done=done,
+                                 total=n, errors=len(errors),
+                                 message=f"Transcribiendo tus clips ({done}/{n})…")
+            bar.set(lo + (hi - lo) * done / max(1, n), f"Transcribiendo tus clips ({done}/{n})…",
+                    "words", force=True)
+            last = done
+        if not pending:
+            return states
+        # un clip pendiente que el carril no tiene (motor de voz aun sin descargar): no esperar para
+        # siempre
+        with _WORDS_LOCK:
+            lost = [s for s in pending if s not in _WORDS_Q and s not in _WORDS_RUN]
+        if lost:
+            lost_since = lost_since or time.time()
+            if time.time() - lost_since > 30:
+                raise RuntimeError("La transcripción de los clips no pudo empezar (el motor de voz "
+                                   "aún se está preparando).")
+        else:
+            lost_since = None
+        prog.cancel.check()
+        time.sleep(0.3)
+
+
+def _montage_clips(sids):
+    """Clips de la sesion EN ORDEN DE GRABACION con lo que el motor de montaje (montage.build)
+    necesita: [{sid, name, rec, created, dur, words, takes, audio (ruta del wav 16 kHz de su 1a
+    pista, None sin voz), thumb (miniatura: grupos de camara), setup (None: lo decide el motor)}]
+    + {path, wav, has_audio, created_src, w, h, fps, rotation, hdr, error}. `words`/`takes` en
+    segundos del clip. `created` solo si es la fecha de GRABACION de los metadatos (la del archivo
+    es la de la copia: el motor ordena esos clips por nombre, como rec_order)."""
+    items = []
+    for k, sid in enumerate(sids):
+        src = _resolve_source(sid)
+        if src is None:
+            continue
+        meta = _source_meta_full(sid, src)
+        doc = _words_load(sid, src) or {}
+        _jp, wav = _words_paths(sid)
+        has = bool(doc.get("audio", meta.get("audio")))
+        wav_s = str(wav) if has and wav.exists() else None
+        thumb = SOURCES / f"{sid}_t.jpg"
+        strong = meta.get("created_src") in ("apple", "creation_time")
+        items.append({"sid": sid, "name": meta.get("name") or src.name, "upload": k,
+                      "created": meta.get("created") if strong else None,
+                      "created_src": meta.get("created_src"), "created_ts": meta.get("created_ts"),
+                      "dur": meta.get("dur") or doc.get("dur"), "words": doc.get("words") or [],
+                      "takes": doc.get("takes") or [], "audio": wav_s, "wav": wav_s, "has_audio": has,
+                      "thumb": str(thumb) if thumb.exists() else None, "setup": None,
+                      "path": str(src), "w": meta.get("w"), "h": meta.get("h"), "fps": meta.get("fps"),
+                      "rotation": meta.get("rotation"), "hdr": bool(meta.get("hdr")),
+                      "error": _WORDS_ERR.get(sid)})
+    out = []
+    for r, k in enumerate(rec_order(items)):
+        it = dict(items[k], rec=r)
+        it.pop("upload", None)
+        out.append(it)
+    return out
+
+
+def _montage_build(clips, script=None, glossary="", intercut=True, on_step=None, cancel=None,
+                   llm=True):
+    """montage.build (scripts/montage.py, importado al usarlo) -> dict del contrato plan.montage.
+    Solo pasa los argumentos que build acepta (el motor puede crecer sin romper el servidor).
+    `llm`: el LLM local como juez de casi-empates y del material extra (montage.local_llm; sin
+    ollama queda None y el motor decide solo con reglas)."""
+    try:
+        import montage as montage_mod
+    except ImportError as e:
+        raise RuntimeError("El motor de montaje no está disponible en esta versión.") from e
+    fn = montage_mod.build
+    judge = None
+    if llm and _accepts(fn, "llm") and hasattr(montage_mod, "local_llm"):
+        try:
+            judge = montage_mod.local_llm()
+        except Exception:  # noqa: sin juez el montaje sale igual (reglas)
+            traceback.print_exc()
+    kw = {}
+    for k, v in (("script", script), ("glossary", glossary), ("intercut", intercut),
+                 ("on_step", on_step), ("cancel", cancel), ("llm", judge)):
+        if _accepts(fn, k):
+            kw[k] = v
+    return fn(clips, **kw)
+
+
+def _script_parse(text):
+    """Guion en texto -> (sections, lines) del contrato: una linea por renglon, un renglon en
+    blanco abre otra seccion. ids L01, L02... y secciones 1, 2..."""
+    sections, lines, cur = [], [], None
+    for raw in str(text or "").splitlines():
+        t = raw.strip()
+        if not t:
+            cur = None
+            continue
+        if cur is None:
+            cur = {"id": len(sections) + 1, "lines": []}
+            sections.append(cur)
+        lid = f"L{len(lines) + 1:02d}"
+        lines.append({"id": lid, "text": t})
+        cur["lines"].append(lid)
+    return sections, lines
+
+
+def _montage_result(res, clips, params, build_s):
+    """Resultado de montage.build normalizado al contrato (lo que falte, vacio): la linea de tiempo
+    solo con clips de ESTA sesion (nunca una fuente ajena), el orden de grabacion y el guion."""
+    m = dict(res) if isinstance(res, dict) else {}
+    known = {c["sid"] for c in clips}
+    m["version"] = m.get("version") or 1
+    if not m.get("order"):
+        m["order"] = [{"sid": c["sid"], "name": c["name"], "rec": c["rec"], "created": c["created"]}
+                      for c in clips]
+    sc = m.get("script") if isinstance(m.get("script"), dict) else {}
+    ps = params.get("script") if isinstance(params.get("script"), dict) else None
+    if ps and ps.get("text"):
+        sc.setdefault("source", ps.get("source") or "user")
+        sc.setdefault("text", ps["text"])
+    if sc.get("text") and not sc.get("lines"):
+        sc["sections"], sc["lines"] = _script_parse(sc["text"])
+    if sc:
+        sc.setdefault("source", "detected")
+        sc.setdefault("sections", [])
+        sc.setdefault("lines", [])
+    m["script"] = sc or None
+    for k in ("slots", "timeline", "discarded", "uncovered", "extra"):
+        if not isinstance(m.get(k), list):
+            m[k] = []
+    m["timeline"] = [t for t in m["timeline"] if isinstance(t, dict) and t.get("sid") in known]
+    if not isinstance(m.get("stats"), dict):
+        m["stats"] = {}
+    m["ms"] = int(m.get("ms") or round(build_s * 1000))
+    m["intercut"] = params.get("intercut", True) is not False
+    # el glosario con el que se armo: el ensamble lo muestra (y lo que el usuario deje ahi manda)
+    m["glossary"] = str(params.get("glossary") or "")
+    return m
+
+
+# ---- glosario de whisper desde el guion: nombres propios y cifras (nunca el guion entero) ----
+GLOSS_MAX_TERMS = 24
+GLOSS_MAX_CHARS = 240
+_GLOSS_WORD = re.compile(r"[^\W\d_][\w'’\-]*|\d[\d.,]*", re.UNICODE)
+_GLOSS_QUOTED = re.compile(r"[«\"“]([^«»\"“”\n]{2,40})[»\"”]")
+_GLOSS_MAGNITUDE = ("mil", "millones", "millón", "millon")     # "20 mil" (whisper: 20.000 / 20 mil)
+
+
+def _script_terms(text):
+    """Nombres propios (palabras con mayuscula que NO abren oracion, juntas si van seguidas: "Meta
+    Ads"), palabras con mayusculas internas o siglas ("MetaAds", "IA"), terminos cortos entre
+    comillas y cifras de 2+ digitos con su magnitud ("20 mil", "100", "15%") del guion, en orden de
+    aparicion y sin repetir."""
+    out = []
+
+    def add(t):
+        t = t.strip(" .,;:!?¿¡\"'«»“”")
+        if t and len(t) <= 40 and t.lower() not in {x.lower() for x in out}:
+            out.append(t)
+
+    for line in str(text or "").splitlines():
+        run, prev_end = [], None
+
+        def flush():
+            if run:
+                add(" ".join(run))
+                run.clear()
+        for m in _GLOSS_WORD.finditer(line):
+            w = m.group(0)
+            if w[0].isdigit():
+                flush()
+                num = w.rstrip(".,")
+                rest = line[m.end():].lstrip()
+                nxt = re.match(r"[^\W\d_]+", rest)
+                mag = nxt.group(0) if nxt and nxt.group(0).lower() in _GLOSS_MAGNITUDE else None
+                if mag:
+                    add(f"{num} {mag}")
+                elif rest.startswith("%"):
+                    add(f"{num}%")
+                elif sum(c.isdigit() for c in num) >= 2:
+                    add(num)
+                prev_end = m.end()
+                continue
+            before = line[:m.start()].rstrip(" \t\"'«“¿¡(")
+            initial = not before or before[-1] in ".!?:;…"
+            inner = any(c.isupper() for c in w[1:]) and any(c.islower() for c in w)
+            acro = len(w) >= 2 and w.isupper()
+            contig = prev_end is not None and not line[prev_end:m.start()].strip()
+            if (w[0].isupper() and not initial) or inner or acro:
+                if run and not contig:
+                    flush()
+                run.append(w)
+            else:
+                flush()
+            prev_end = m.end()
+        flush()
+        for q in _GLOSS_QUOTED.findall(line):
+            if len(q.split()) <= 3:
+                add(q)
+    return out
+
+
+def _script_glossary(script_text, user=""):
+    """Glosario del video combinado: el del usuario + los nombres propios y cifras del guion
+    (_script_terms), sin repetir y acotado (whisper recibe un prompt corto, no el guion)."""
+    terms = []
+    for t in re.split(r"[,;\n]+", str(user or "")) + _script_terms(script_text):
+        t = t.strip()
+        if t and t.lower() not in {x.lower() for x in terms}:
+            terms.append(t)
+    out = []
+    for t in terms[:GLOSS_MAX_TERMS]:
+        if len(", ".join(out + [t])) > GLOSS_MAX_CHARS:
+            break
+        out.append(t)
+    return ", ".join(out)
+
+
+def _natkey(s):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(s or ""))]
+
+
+def rec_order(items):
+    """Orden de GRABACION de una sesion -> indices de `items` ([{created_ts, created_src, name}] en
+    orden de subida). Primero los que traen fecha de grabacion en sus metadatos (Apple
+    creationdate o creation_time), por fecha; luego los que solo tienen la fecha del archivo (la de
+    la copia: no dice cuando se grabo), por nombre natural (IMG_2 antes que IMG_10). Empates: nombre
+    natural y despues el orden de subida."""
+    def key(k):
+        it = items[k]
+        ts = it.get("created_ts")
+        if it.get("created_src") in ("apple", "creation_time") and ts is not None:
+            return (0, float(ts), _natkey(it.get("name")), k)
+        return (1, 0.0, _natkey(it.get("name")), k)
+    return sorted(range(len(items)), key=key)
 
 
 CUSTOM_KEYS = ("cap_color", "cap_font", "cap_scale", "cap_pos", "zoom_amt", "air", "logo",
@@ -2316,6 +2686,8 @@ def _gc_sources(now=None):
         for it in (spec.get("main") or []) + (spec.get("overlays") or []):
             if isinstance(it, dict) and it.get("path"):
                 used.add(Path(str(it["path"])).name.split(".")[0].split("_")[0])
+        # los clips de un montaje ("Armar con IA"), aun sin plan: todos, tambien las alternativas
+        used |= jobstore.params_sids(params)
     # medios propios que un plan referencia ({sid, type} en fx): tampoco se borran
     used |= jobstore.referenced_sids()
     # fotos de perfil y foto/logo de los enlaces de los perfiles guardados (el Studio las reutiliza
@@ -2503,10 +2875,15 @@ def _sid_of(name):
     return str(name).split(".")[0].split("_")[0]
 
 
+# derivados de una fuente subida (input/sources/{sid}...): no son el archivo que subio el usuario
+SOURCE_DERIVED = ("_proxy.mp4", "_t.jpg", "_meta.json", "_words.json", "_16k.wav")
+SOURCE_CACHE = ("_proxy.mp4", "_proxy.part.mp4", "_16k.wav", "_16k.part.wav")   # regenerables
+
+
 def _is_source_original(p):
     n = p.name
     return p.is_file() and ".part" not in n and not n.startswith(".") and \
-        not n.endswith(("_proxy.mp4", "_t.jpg", "_meta.json"))
+        not n.endswith(SOURCE_DERIVED)
 
 
 def _source_users():
@@ -2695,7 +3072,7 @@ def _job_units(job_id, ctx):
             if (ctx["users"].get(sid) or set()) - {job_id}:
                 out["shared"].append(p)
             else:
-                out["cache" if p.name.endswith(("_proxy.mp4", "_proxy.part.mp4")) else "project"].append(p)
+                out["cache" if p.name.endswith(SOURCE_CACHE) else "project"].append(p)
     for k in out:
         out[k] = [p for p in out[k] if _in_data(p)]
     return out
@@ -2757,7 +3134,7 @@ def _storage_scan():
         if p == SOURCES:
             for q in _ls(p):
                 if str(q) not in counted:
-                    add("cache" if q.name.endswith(("_proxy.mp4", "_proxy.part.mp4")) else "projects", q)
+                    add("cache" if q.name.endswith(SOURCE_CACHE) else "projects", q)
         else:
             add("projects", p)
     for p in _ls(paths.WORK):
@@ -3218,7 +3595,8 @@ def _claim_cache(job_id, d):
 
 if not _CHILD:
     jobstore.init()
-    jobstore.start_workers({"analyze": _analyze, "render": _render, "compose": _compose})
+    jobstore.start_workers({"analyze": _analyze, "render": _render, "compose": _compose,
+                            "montage": _montage}, lanes=("montage",))
     _gc_later("arranque", delay=5.0)
     if SETUP["state"] == "ready":
         _start_optional()   # modelos opcionales faltantes: en segundo plano, sin bloquear
@@ -3313,6 +3691,8 @@ def _make_proxy(src, sid, info):
     low = ["nice", "-n", "10"] if not paths.IS_WINDOWS and shutil.which("nice") else []
     try:
         with _PROXY_SEM:
+            if _SHUTDOWN.is_set():         # la app se cierra: ningun ffmpeg nuevo
+                return None
             paths.run_ff(
                 [*low, str(paths.FFMPEG), "-y", "-i", str(src), "-vf",
                  "scale='if(gte(iw,ih),min(1600,iw),-2)':'if(gte(iw,ih),-2,min(1600,ih))'",
@@ -3333,12 +3713,15 @@ def _source_meta(sid):
         return {}
 
 
-def _ingest_source(dst, sid, name, is_img, make_proxy=True):
+def _ingest_source(dst, sid, name, is_img, make_proxy=True, transcribe=True):
     """Probe + miniatura de una fuente subida (bloqueante: corre en el threadpool). El proxy
     del editor se genera en SEGUNDO PLANO (no retrasa la respuesta ni el event loop);
-    make_proxy=False cuando ya se reutilizo el de una importacion identica."""
+    make_proxy=False cuando ya se reutilizo el de una importacion identica. Un video entra al
+    carril de transcripcion por clip ("Armar con IA"; transcribe=False lo omite)."""
     import compose as compose_mod
     info = compose_mod.probe(dst)
+    if not is_img and transcribe:
+        _words_kick([sid])
     thumb = SOURCES / f"{sid}_t.jpg"
     try:
         if is_img:
@@ -3403,11 +3786,17 @@ def _kick_source_proxy(sid, p):
 
 
 @app.post("/sources")
-async def add_sources(files: list[UploadFile]):
+async def add_sources(files: list[UploadFile], transcribe: str = Form("1")):
     """Sube uno o varios archivos fuente (video o imagen) para el editor de timeline.
-    Devuelve por cada uno: id, tipo, duración, dimensiones y una miniatura."""
+    Devuelve por cada uno (_source_item): id, nombre, tipo, duración, dimensiones, miniatura,
+    fecha de grabacion (`created` ISO 8601: com.apple.quicktime.creationdate, creation_time o la
+    fecha del archivo; `created_src` dice cual), fps, hdr (bool), rotacion, `audio`, estado de su
+    transcripcion por clip (`words`: pending|ready|error; null en imagenes) y `rec` (lugar en el
+    orden de grabacion de ESTA subida). Cada video se transcribe solo en segundo plano (carril
+    propio); `transcribe=0` lo omite (p. ej. un medio propio del Studio)."""
     SOURCES.mkdir(parents=True, exist_ok=True)
     out = []
+    want_words = str(transcribe).strip().lower() not in ("0", "false", "no")
     for up in files:
         ext = Path(up.filename or "f").suffix.lower()
         is_img = ext in (".jpg", ".jpeg", ".png", ".webp", ".heic")
@@ -3421,17 +3810,66 @@ async def add_sources(files: list[UploadFile]):
                 await run_in_threadpool(f.write, chunk)
         # el mismo archivo ya importado (este u otro proyecto): un enlace a esa copia, no otra
         twin = await run_in_threadpool(dedupe_import, dst)
-        reused = twin is not None and twin.parent == SOURCES and not is_img and \
-            await run_in_threadpool(_reuse_source_proxy, _sid_of(twin.name), sid)
+        twin_src = twin is not None and twin.parent == SOURCES and not is_img
+        reused = twin_src and await run_in_threadpool(_reuse_source_proxy, _sid_of(twin.name), sid)
+        if twin_src:            # su transcripcion por clip tambien (mismo contenido, misma huella)
+            await run_in_threadpool(_reuse_source_words, _sid_of(twin.name), sid)
         info, thumb = await run_in_threadpool(_ingest_source, dst, sid, up.filename or "", is_img,
-                                              not reused)
-        typ = "image" if is_img else "video"
-        out.append({"id": sid, "name": up.filename, "type": typ, "ext": ext,
-                    "dur": info.get("dur", 0), "w": info.get("w", 0), "h": info.get("h", 0),
-                    "thumb": f"/tlsource/{sid}/thumb" if thumb else None,
-                    **({"dedup": True} if twin is not None else {})})
+                                              not reused, want_words)
+        item = await run_in_threadpool(_source_item, sid, dst,
+                                       {"name": up.filename or "", **info}, bool(thumb))
+        if twin is not None:
+            item["dedup"] = True
+        out.append(item)
+    for r, k in enumerate(rec_order(out)):
+        out[k]["rec"] = r
     _storage_invalidate()
     return {"sources": out}
+
+
+@app.get("/sources")
+def list_sources(ids: str = ""):
+    """Fuentes subidas con sus metadatos (mismo formato que POST /sources) y su orden de grabacion
+    (`rec`). `ids` = sids separados por coma (en ese orden; los que no existen se omiten); sin ids,
+    todas. El editor lo sondea para ver `words` (pending -> ready|error) de cada clip; lo pendiente
+    que el carril no tenga (p. ej. tras reiniciar la app) se vuelve a encolar."""
+    if ids.strip():
+        sids = list(dict.fromkeys(Path(s).stem for s in re.split(r"[,\s]+", ids) if s.strip()))
+    else:
+        sids = sorted({_sid_of(p.name) for p in _ls(SOURCES) if _is_source_original(p)})
+    out = []
+    for sid in sids:
+        src = _resolve_source(sid)
+        if src is None:
+            continue
+        out.append(_source_item(sid, src))
+    for r, k in enumerate(rec_order(out)):
+        out[k]["rec"] = r
+    pend = [it["id"] for it in out if it.get("words") == "pending"]
+    if pend and ids.strip():          # solo lo que se pide (listar todo no transcribe fuentes viejas)
+        _words_kick(pend)
+    return {"sources": out}
+
+
+@app.get("/sources/{sid}/words")
+def source_words(sid: str):
+    """Transcripcion por clip: {"key", "sid", "words": [{text, start, end}], "takes": [cortes de
+    tomas dentro del clip], "audio", "dur", ...} (segundos del clip). 404 mientras no este lista
+    (`words`: pending|error en el cuerpo; lo pendiente se encola) o si la fuente no existe."""
+    sid = Path(sid).stem
+    src = _resolve_source(sid)
+    if src is None:
+        raise HTTPException(404, "No existe")
+    if _is_image(src):
+        return JSONResponse({"detail": "Una imagen no tiene voz.", "words": None}, status_code=404)
+    st = _words_state(sid, src)
+    if st != "ready":
+        if st == "pending":
+            _words_kick([sid])
+        return JSONResponse({"detail": "La transcripción de este clip aún no está lista." if
+                             st == "pending" else "La transcripción de este clip falló.",
+                             "words": st, "error": _WORDS_ERR.get(sid)}, status_code=404)
+    return _words_load(sid, src)
 
 
 @app.get("/tlsource/{sid}/thumb")
@@ -3467,34 +3905,319 @@ def source_file(sid: str):
     raise HTTPException(404, "No existe")
 
 
+# ---- metadatos de las fuentes (/sources) ----
+_IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".heic")
+
+
+def _is_image(p):
+    return Path(p).suffix.lower() in _IMG_EXT
+
+
+def _source_meta_full(sid, src=None):
+    """_meta.json de la fuente con fecha de grabacion y fps (una fuente importada antes de que el
+    probe los trajera se completa una vez y se guarda)."""
+    meta = _source_meta(sid)
+    if meta.get("created") and "fps" in meta:
+        return meta
+    src = src or _resolve_source(sid)
+    if src is None:
+        return meta
+    try:
+        import compose as compose_mod
+        info = compose_mod.probe(src)
+        meta = {**info, **{k: v for k, v in meta.items() if k not in info}}
+        meta.setdefault("name", src.name)
+        (SOURCES / f"{sid}_meta.json").write_text(json.dumps(meta))
+    except Exception:  # noqa: sin metadatos la fuente sigue sirviendo
+        traceback.print_exc()
+    return meta
+
+
+def _source_item(sid, src=None, meta=None, thumb=None):
+    """Fuente -> item de /sources: {id, name, type, ext, dur, w, h, thumb, created, created_src,
+    fps, hdr (bool), rotation, audio, words (pending|ready|error; None en imagenes)}."""
+    src = Path(src) if src else _resolve_source(sid)
+    meta = meta if meta is not None else _source_meta_full(sid, src)
+    img = _is_image(src) if src else meta.get("type") == "image"
+    if thumb is None:
+        thumb = (SOURCES / f"{sid}_t.jpg").exists()
+    return {"id": sid, "name": meta.get("name") or (src.name if src else ""),
+            "type": "image" if img else "video", "ext": (src.suffix.lower() if src else ""),
+            "dur": meta.get("dur", 0), "w": meta.get("w", 0), "h": meta.get("h", 0),
+            "thumb": f"/tlsource/{sid}/thumb" if thumb else None,
+            "created": meta.get("created"), "created_src": meta.get("created_src"),
+            "created_ts": meta.get("created_ts"), "fps": meta.get("fps") or 0.0,
+            "hdr": bool(meta.get("hdr")), "rotation": int(meta.get("rotation") or 0),
+            "audio": bool(meta.get("audio")) if not img else False,
+            "words": None if img else _words_state(sid, src)}
+
+
+# ---- transcripcion por clip ("Armar con IA"): carril propio al importar ----
+# Cada video importado (/sources) se transcribe SOLO, en segundo plano (nunca concatenado con
+# otros: una pasada sobre todos juntos perdio una toma entera y corrio palabras entre clips):
+# pipeline.transcribe_clip = 1a pista de audio a 16 kHz -> whisper -> alineador -> tomas dentro del
+# clip. Queda en input/sources/{sid}_words.json ({key, sid, words, takes, audio, dur, ...}) y
+# {sid}_16k.wav (el montaje mide la voz y ajusta los cortes con el). Un whisper a la vez con el del
+# analisis (pipeline.WHISPER_GPU). La limpieza del disco los borra con su fuente (mismo prefijo
+# sid); "Liberar espacio" borra solo el wav (regenerable en segundos: la transcripcion se conserva);
+# una importacion repetida reusa la de su gemela. Tras reiniciar la app lo pendiente se retoma al
+# pedirlo (GET /sources, /sources/{sid}/words o un montaje). Estado: ready (json valido para esta
+# fuente + wav si tiene audio), error (fallo en este proceso; un montaje nuevo lo reintenta) o pending.
+WORDS_VERSION = 1
+_WORDS_LOCK = threading.Lock()
+_WORDS_WAKE = threading.Event()
+_WORDS_Q = []                      # sids en cola (un montaje adelanta los suyos)
+_WORDS_RUN = {}                    # sid -> t0 del que se transcribe
+_WORDS_ERR = {}                    # sid -> mensaje del fallo
+_WORDS_THREAD = [None]
+
+
+def _words_paths(sid):
+    return SOURCES / f"{sid}_words.json", SOURCES / f"{sid}_16k.wav"
+
+
+def _words_load(sid, src=None):
+    """Transcripcion guardada de la fuente si es de ESTA fuente (misma version y huella) o None."""
+    jp, _wav = _words_paths(sid)
+    try:
+        doc = json.loads(jp.read_text())
+    except (OSError, ValueError):
+        return None
+    src = src or _resolve_source(sid)
+    key = doc.get("key") if isinstance(doc, dict) else None
+    if src is None or not isinstance(key, dict) or key.get("v") != WORDS_VERSION:
+        return None
+    try:
+        if key.get("hash") != _quick_hash(src):
+            return None
+    except OSError:
+        return None
+    return doc
+
+
+def _words_state(sid, src=None):
+    """ready | error | pending (None: no existe o es imagen)."""
+    src = src or _resolve_source(sid)
+    if src is None or _is_image(src):
+        return None
+    doc = _words_load(sid, src)
+    if doc is not None and (not doc.get("audio") or _words_paths(sid)[1].exists()):
+        return "ready"
+    with _WORDS_LOCK:
+        if sid in _WORDS_ERR and sid not in _WORDS_Q and sid not in _WORDS_RUN:
+            return "error"
+    return "pending"
+
+
+def _words_kick(sids, front=False, retry=False):
+    """Encola la transcripcion de estos clips (los que no esten listos, en cola o corriendo).
+    `front`: al principio de la cola (un montaje que los espera); `retry`: tambien los que fallaron.
+    Sin el modelo de voz descargado no encola nada (quedan pending). -> cuantos encolo."""
+    if not paths.engine_ready():
+        return 0
+    todo = []
+    for sid in dict.fromkeys(sids):
+        src = _resolve_source(sid)
+        if src is None or _is_image(src):
+            continue
+        st = _words_state(sid, src)
+        if st == "ready" or (st == "error" and not retry):
+            continue
+        todo.append(sid)
+    n = pos = 0
+    with _WORDS_LOCK:
+        for sid in todo:
+            if sid in _WORDS_RUN:
+                continue
+            _WORDS_ERR.pop(sid, None)
+            if sid in _WORDS_Q:
+                if not front:
+                    continue
+                _WORDS_Q.remove(sid)        # adelantarlo (en el orden pedido)
+            else:
+                n += 1
+            if front:
+                _WORDS_Q.insert(pos, sid)
+                pos += 1
+            else:
+                _WORDS_Q.append(sid)
+        th = _WORDS_THREAD[0]
+        if (n or _WORDS_Q) and (th is None or not th.is_alive()):
+            th = threading.Thread(target=_words_loop, daemon=True, name="reelfy-words")
+            _WORDS_THREAD[0] = th
+            th.start()
+        if _WORDS_Q:
+            _WORDS_WAKE.set()
+    return n
+
+
+def _words_loop():
+    """Carril de transcripcion: un clip a la vez (whisper comparte la GPU con el analisis)."""
+    while not _SHUTDOWN.is_set():
+        with _WORDS_LOCK:
+            sid = _WORDS_Q.pop(0) if _WORDS_Q else None
+            if sid is not None:
+                _WORDS_RUN[sid] = time.time()
+        if sid is None:
+            _WORDS_WAKE.wait(timeout=5.0)
+            _WORDS_WAKE.clear()
+            continue
+        try:
+            _words_build(sid)
+        except Exception as e:  # noqa: un clip que falla no frena a los demas
+            traceback.print_exc()
+            with _WORDS_LOCK:
+                _WORDS_ERR[sid] = str(e)[:300] or e.__class__.__name__
+        finally:
+            with _WORDS_LOCK:
+                _WORDS_RUN.pop(sid, None)
+            _storage_invalidate()
+
+
+def _transcribe_clip(src, wav):
+    """pipeline.transcribe_clip (las pruebas lo cambian por uno falso)."""
+    return pipeline.transcribe_clip(src, wav)
+
+
+def _words_build(sid):
+    """Transcribe la fuente `sid` y guarda {sid}_words.json + {sid}_16k.wav (temporal + renombrado:
+    nunca queda a medias). Con la transcripcion valida y sin el wav (lo borro "Liberar espacio")
+    solo re-extrae el audio."""
+    src = _resolve_source(sid)
+    if src is None or _is_image(src):
+        return None
+    jp, wav = _words_paths(sid)
+    tmp_wav = wav.with_name(f"{sid}_16k.part.wav")
+    doc = _words_load(sid, src)
+    if doc is not None:
+        if doc.get("audio") and not wav.exists():
+            pipeline.extract_audio(src, tmp_wav)
+            tmp_wav.replace(wav)
+        return doc
+    t0 = time.time()
+    try:
+        res = _transcribe_clip(src, tmp_wav)
+        if tmp_wav.exists():
+            tmp_wav.replace(wav)
+    finally:
+        tmp_wav.unlink(missing_ok=True)
+    try:
+        model = paths.model_path().name
+    except Exception:  # noqa
+        model = None
+    doc = {"key": {"v": WORDS_VERSION, "hash": _quick_hash(src), "model": model,
+                   "dtw": bool(res.get("dtw")), "glossary": ""},
+           "sid": sid, "audio": bool(res.get("audio")), "dur": res.get("dur"),
+           "words": res.get("words") or [], "takes": res.get("takes") or [],
+           "align": res.get("align"), "ms": res.get("ms") or int((time.time() - t0) * 1000),
+           "at": round(time.time(), 1)}
+    tmp = jp.with_name(f"{sid}_words.part.json")
+    tmp.write_text(json.dumps(doc, ensure_ascii=False))
+    tmp.replace(jp)
+    print(f"   palabras {sid}: {len(doc['words'])} en {time.time() - t0:.1f}s"
+          f"{'' if doc['audio'] else ' (sin audio)'}")
+    return doc
+
+
+def _reuse_source_words(old_sid, sid):
+    """Importacion identica a la fuente `old_sid`: su transcripcion por clip (misma huella) y su
+    audio 16 kHz (enlace duro) se comparten. -> True si quedo lista."""
+    doc = _words_load(old_sid)
+    if doc is None:
+        return False
+    jp, wav = _words_paths(sid)
+    ow = _words_paths(old_sid)[1]
+    try:
+        if doc.get("audio") and ow.is_file():
+            os.link(ow, wav)
+        tmp = jp.with_name(f"{sid}_words.part.json")
+        tmp.write_text(json.dumps(dict(doc, sid=sid), ensure_ascii=False))
+        tmp.replace(jp)
+        return True
+    except OSError:
+        return False
+
+
 @app.post("/compose")
 def compose_timeline(body: dict = Body(...)):
     """Recibe la composición del timeline y arranca compose->analyze->director en un job.
     body: {main:[{sid,type,in,out|dur}], overlays:[{sid,type,start,dur,pos,size}],
            glossary, highlights, director:{style,intensity,seed,music},
-           engine?:{air, enhance_audio, logo}}. `def`: resuelve fuentes en disco y escribe
-    sqlite en el threadpool."""
+           engine?:{air, enhance_audio, logo}, script?, montage_job?}. `def`: resuelve fuentes en
+    disco y escribe sqlite en el threadpool.
+    Montaje de "Armar con IA": `montage_job` = id del trabajo de /montage ya armado (fase
+    assembly): se re-encola ESE MISMO id como compose (la UI sigue el mismo proyecto) conservando
+    plan.montage y su guion; `script` (texto) = el guion editado en el ensamble (si no, el del
+    montaje). Cada item principal puede traer "montage": {slot, cand, join, conf, setup?} y "vol":
+    numero | "auto" (nivel de la voz medido; compose lo iguala entre segmentos). Director, perfil y
+    glosario que no vengan se toman del montaje."""
     _require_engine()
     _require_license()
-    main = []
+    mjob = str(body.get("montage_job") or "").strip() or None
+    mparams, mont, stale_thumbs = {}, None, False
+    if mjob:
+        mj = jobstore.get(mjob)
+        if not mj:
+            raise HTTPException(404, "Montaje no encontrado")
+        if mj.get("state") in ("queued", "running"):
+            raise HTTPException(409, "El montaje todavía se está armando (o componiendo); espera a "
+                                     "que termine.")
+        mont = (mj.get("plan") or {}).get("montage") if isinstance(mj.get("plan"), dict) else None
+        if not isinstance(mont, dict):
+            raise HTTPException(409, "Este proyecto no tiene un montaje para aplicar.")
+        if mjob in _EXPORTING:
+            raise HTTPException(409, "Este proyecto se está exportando; espera a que termine.")
+        mparams = mj.get("params") or {}
+        if not jobstore.montage_only(mj.get("plan")):
+            # ya compuesto (volvio al ensamble y cambio tomas): sus tareas de fondo leen el video
+            # que se va a rehacer y la miniatura ya no es la suya
+            if not _quiet_job(mjob):
+                raise HTTPException(409, "Todavía se está cerrando una tarea de este proyecto; "
+                                         "inténtalo en unos segundos.")
+            stale_thumbs = True
+    main, missing = [], []
     for s in body.get("main", []):
         path = _resolve_source(s.get("sid", ""))
         if not path:
+            # una fuente que ya no esta en el disco (p. ej. la limpieza la borro): no se salta en
+            # silencio (el video saldria sin ese clip)
+            missing.append(str(s.get("sid") or "?"))
             continue
-        item = {"path": str(path), "type": s.get("type", "video"),
+        item = {"path": str(path), "sid": path.stem, "type": s.get("type", "video"),
                 "name": _source_meta(path.stem).get("name") or path.name,
                 "start": float(s.get("start", 0) or 0), "layer": int(s.get("layer", 0) or 0),
                 "fadeIn": float(s.get("fadeIn", 0) or 0), "fadeOut": float(s.get("fadeOut", 0) or 0)}
         if isinstance(s.get("trans"), dict) and s["trans"].get("type") == "crossfade":
             item["trans"] = {"type": "crossfade", "dur": float(s["trans"].get("dur", 0.5))}
+        mm = _montage_item(s.get("montage"))
+        if mm:
+            item["montage"] = mm
         if item["type"] == "image":
             item["dur"] = float(s.get("dur", 3.0))
         else:
             item["in"] = float(s.get("in", 0)); item["out"] = float(s.get("out", 0) or 5)
-            item["vol"] = float(s.get("vol", 1.0)); item["mute"] = bool(s.get("mute", False))
+            item["vol"] = _vol_param(s.get("vol", None if mm else 1.0), bool(mm))
+            item["mute"] = bool(s.get("mute", False))
+            if item["vol"] == "auto":
+                # la voz del tramo (s de la fuente): compose mide su nivel solo en las palabras
+                item["words"] = _words_in(path.stem, item["in"], item["out"])
         main.append(item)
+    if missing:
+        names = [n for n in ((_montage_name(mont, sid) or "") for sid in missing) if n]
+        raise HTTPException(400, f"Faltan {len(missing)} clip{'s' if len(missing) > 1 else ''} de tu línea de "
+                                 f"tiempo en el disco{(': ' + ', '.join(names[:5])) if names else ''}. "
+                                 "Vuelve a añadirlos desde Fuentes o quítalos del timeline.")
     if not main:
         raise HTTPException(400, "Agrega al menos un clip a la pista principal.")
+    if stale_thumbs:                    # ya validado: la miniatura del video que se rehace se va
+        for f in _thumb_paths(mjob):
+            f.unlink(missing_ok=True)
+    if any(it.get("vol") == "auto" for it in main):
+        # una toma con volumen "auto" se nivela contra los tramos del montaje ya nivelados: sus voces
+        # se miden igual (solo en las palabras)
+        for it in main:
+            if it.get("montage") and it.get("vol") != "auto" and it.get("type") == "video" and "words" not in it:
+                it["words"] = _words_in(it["sid"], it["in"], it["out"])
     overlays = []
     for o in body.get("overlays", []):
         path = _resolve_source(o.get("sid", ""))
@@ -3507,16 +4230,178 @@ def compose_timeline(body: dict = Body(...)):
             ov["x"] = float(o["x"]); ov["y"] = float(o["y"])
         overlays.append(ov)
     spec = {"fps": 30, "main": main, "overlays": overlays}
+    # perfil y glosario: lo que el cuerpo DICE manda (profile: null = "Sin perfil", glossary: "" =
+    # borrado a proposito); solo si el cuerpo no los menciona se usan los del montaje
+    if "profile" in body or "profile_id" in body:
+        prof = _profile_param(body.get("profile"), body.get("profile_id"))
+    else:
+        prof = mparams.get("profile") or None
+    script = _script_param(body.get("script")) if body.get("script") is not None else \
+        mparams.get("script")
+    glossary = body.get("glossary") if "glossary" in body else mparams.get("glossary")
+    glossary = "" if glossary is None else glossary
+    director = body.get("director") if body.get("director") is not None else mparams.get("director")
+    params = {"spec": spec, "glossary": str(glossary or ""), "n": int(body.get("highlights", 2)),
+              "director": _director_params(director), **({"profile": prof} if prof else {})}
+    if script:
+        params["script"] = script
+    if mjob:
+        # TODAS las fuentes de la sesion (tambien las alternativas no usadas): la limpieza del disco
+        # no las borra mientras el proyecto exista (el usuario puede volver al ensamble)
+        params["sids"] = list(dict.fromkeys([s for s in mparams.get("sids") or [] if isinstance(s, str)]
+                                            + [it["sid"] for it in main]))
+        params["montage_job"] = True
+        jobstore.requeue(mjob, kind="compose", params=params, plan={"montage": mont},
+                         phase="analyzing", message="En cola…")
+        _initial_engine(mjob, body.get("engine"))
+        _gc_later("nuevo trabajo")
+        return {"job_id": mjob}
     job_id = uuid.uuid4().hex[:12]
-    prof = _profile_param(body.get("profile"), body.get("profile_id"))
-    jobstore.create(job_id, kind="compose", ext=".mp4",
-                    params={"spec": spec, "glossary": body.get("glossary", ""),
-                            "n": int(body.get("highlights", 2)),
-                            "director": _director_params(body.get("director")),
-                            **({"profile": prof} if prof else {})})
+    jobstore.create(job_id, kind="compose", ext=".mp4", params=params)
     _initial_engine(job_id, body.get("engine"))
     _gc_later("nuevo trabajo")
     return {"job_id": job_id}
+
+
+def _montage_name(mont, sid):
+    """Nombre del clip `sid` en el orden de grabacion de un montaje (None si no esta)."""
+    order = mont.get("order") if isinstance(mont, dict) else None
+    for o in order or []:
+        if isinstance(o, dict) and o.get("sid") == sid:
+            return o.get("name")
+    return None
+
+
+def _montage_item(raw):
+    """"montage" de un item de /compose saneado -> {slot, cand, join, conf, setup?} o None."""
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for k in ("slot", "cand"):
+        if raw.get(k) is not None:
+            out[k] = str(raw[k])[:40]
+    j = raw.get("join")
+    out["join"] = j if j in ("section", "line", "splice") else None
+    for k in ("conf", "setup"):
+        v = raw.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+            out[k] = v
+        elif isinstance(v, str) and v:
+            out[k] = v[:20]
+    return out
+
+
+def _vol_param(v, montage=False):
+    """"vol" de un item: numero (0..4) o "auto" (nivel de la voz medido; tambien un item del
+    montaje sin vol); lo demas -> 1.0."""
+    if v == "auto" or (v is None and montage):
+        return "auto"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 1.0
+    return max(0.0, min(4.0, f)) if math.isfinite(f) else 1.0
+
+
+def _words_in(sid, t0, t1):
+    """Palabras de la transcripcion por clip dentro de [t0, t1] (s de la fuente) o None."""
+    doc = _words_load(sid)
+    if not doc:
+        return None
+    return [{"start": w["start"], "end": w["end"]} for w in doc.get("words") or []
+            if float(w.get("end", 0)) > t0 and float(w.get("start", 0)) < t1] or None
+
+
+def _script_param(raw):
+    """Guion del cuerpo (texto o {text, source}) -> {"text", "source"} o None (vacio)."""
+    if isinstance(raw, dict):
+        text, source = raw.get("text"), raw.get("source")
+    else:
+        text, source = raw, None
+    text = str(text or "").replace("\r\n", "\n").strip()
+    if not text:
+        return None
+    if len(text) > SCRIPT_MAX_CHARS:
+        raise HTTPException(400, f"El guion es demasiado largo (máximo {SCRIPT_MAX_CHARS} caracteres).")
+    return {"text": text, "source": source if source in ("user", "detected") else "user"}
+
+
+@app.post("/montage")
+def montage_start(body: dict = Body(...)):
+    """"Armar con IA": body {sids: [...] (TODOS los clips de la sesion), script?: str, glossary?,
+    intercut?: bool (default true), llm?: bool (juez LLM local, default true si esta disponible),
+    profile?, profile_id?, director?, engine?, job_id?} ->
+    {job_id}. Trabajo kind "montage", fase "assembly" (carril propio): espera la transcripcion de
+    cada clip (progreso real en /status: stage words|montage, words_done/words_total), elige la
+    mejor toma de cada parte del guion y deja el resultado en plan.montage (GET /plan, /status?plan=1).
+    Cancelable (POST /cancel). `job_id` = re-armar un montaje existente (otro guion) con el mismo id."""
+    _require_engine()
+    _require_license()
+    raw = body.get("sids")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(400, "Selecciona los clips de tu sesión de grabación.")
+    sids, bad = [], []
+    for s in raw:
+        sid = Path(str(s or "")).stem
+        src = _resolve_source(sid) if sid else None
+        if src is None or _is_image(src):
+            bad.append(str(s))
+        elif sid not in sids:
+            sids.append(sid)
+    if bad:
+        raise HTTPException(400, f"Estos archivos no existen o no son video: {', '.join(bad[:5])}")
+    if len(sids) > MONTAGE_MAX_CLIPS:
+        raise HTTPException(400, f"Demasiados clips para un montaje (máximo {MONTAGE_MAX_CLIPS}).")
+    script = _script_param(body.get("script"))
+    prof = _profile_param(body.get("profile"), body.get("profile_id"))
+    params = {"sids": sids, "script": script, "glossary": str(body.get("glossary") or "")[:500],
+              "intercut": body.get("intercut", True) is not False, "llm": body.get("llm", True) is not False,
+              **({"director": _director_params(body["director"])} if body.get("director") is not None
+                 else {}),
+              **({"profile": prof} if prof else {})}
+    job_id = str(body.get("job_id") or "").strip() or None
+    if job_id:
+        j = jobstore.get(job_id)
+        if not j:
+            raise HTTPException(404, "Proyecto no encontrado")
+        if j.get("state") in ("queued", "running"):
+            raise HTTPException(409, "Este proyecto se está procesando; espera a que termine.")
+        if j.get("kind") not in ("montage", "compose") or \
+                (j.get("kind") == "compose" and not jobstore.montage_only(j.get("plan"))):
+            raise HTTPException(409, "Este proyecto ya no es un montaje.")
+        jobstore.requeue(job_id, kind="montage", params=params, phase="assembly", message="En cola…")
+    else:
+        job_id = uuid.uuid4().hex[:12]
+        jobstore.create(job_id, kind="montage", ext=".mp4", params=params, phase="assembly")
+    _initial_engine(job_id, body.get("engine"))
+    _words_kick(sids, front=True, retry=True)
+    return {"job_id": job_id}
+
+
+@app.post("/montage/{job_id}/sources")
+def montage_add_sources(job_id: str, body: dict = Body(...)):
+    """Fuentes que el usuario agrego ("Añadir") en el ensamble de un montaje: quedan en los `sids`
+    del proyecto para que la limpieza del disco no las borre mientras el proyecto exista (antes de
+    /compose ningun trabajo las nombraba). body {sids: [...]} -> {sids: todas las del proyecto}."""
+    j = jobstore.get(job_id)
+    if not j:
+        raise HTTPException(404, "Proyecto no encontrado")
+    params = j.get("params") or {}
+    if not isinstance(params, dict) or not isinstance(params.get("sids"), list):
+        raise HTTPException(409, "Este proyecto no es un armado con IA.")
+    raw = body.get("sids")
+    if not isinstance(raw, list):
+        raise HTTPException(400, "Faltan los clips (sids).")
+    add = []
+    for s in raw[:MONTAGE_MAX_CLIPS]:
+        sid = Path(str(s or "")).stem
+        if sid and _resolve_source(sid) is not None and sid not in add:
+            add.append(sid)
+    sids = list(dict.fromkeys([x for x in params["sids"] if isinstance(x, str)] + add))
+    if sids != params["sids"]:
+        # solo la lista de fuentes (el resto de los parametros no cambia)
+        jobstore.update(job_id, params=dict(params, sids=sids))
+    return {"sids": sids}
 
 
 @app.post("/render/{job_id}")
@@ -3526,6 +4411,7 @@ def render(job_id: str, body: dict = Body(...)):
     plan = body.get("plan") or _sym_stored(job_id, *jobstore.get_plan(job_id))[0]
     if not plan:
         raise HTTPException(409, "El job no tiene plan; analiza el video primero.")
+    _not_montage(plan)
     if job["state"] in ("queued", "running"):
         raise HTTPException(409, "Este proyecto ya está procesándose; espera o cancela.")
     _require_license()
@@ -3610,7 +4496,27 @@ def jobs_recent(limit: int = 20):
             ok = not (j.get("state") == "error" and not j.get("has_plan")) and \
                 not _thumb_paths(j["id"])[1].exists()
         j["thumb"] = f"/thumb/{j['id']}" if ok else None
+        if not ok and j.get("phase") == "assembly":
+            j["thumb"] = _montage_thumb(j["id"])     # montaje aun sin componer: su primer clip
     return out
+
+
+def _montage_thumb(job_id):
+    """Miniatura de un montaje en fase assembly: la del primer clip de su linea de tiempo (o de la
+    sesion) -> URL o None."""
+    try:
+        plan, _ = jobstore.get_plan(job_id)
+        m = (plan or {}).get("montage") or {}
+        cand = [t.get("sid") for t in m.get("timeline") or [] if isinstance(t, dict)] + \
+            [o.get("sid") for o in m.get("order") or [] if isinstance(o, dict)]
+        if not cand:
+            cand = list(((jobstore.get_light(job_id) or {}).get("params") or {}).get("sids") or [])
+        for sid in cand:
+            if sid and (SOURCES / f"{Path(str(sid)).stem}_t.jpg").exists():
+                return f"/tlsource/{Path(str(sid)).stem}/thumb"
+    except Exception:  # noqa: sin miniatura la lista sigue
+        traceback.print_exc()
+    return None
 
 
 @app.post("/preview/{job_id}")
@@ -3622,6 +4528,7 @@ def preview(job_id: str, body: dict = Body(...)):
     plan = body.get("plan") or jobstore.get_plan(job_id)[0]
     if not plan:
         raise HTTPException(409, "El job no tiene plan; analiza el video primero.")
+    _not_montage(plan)
     if body.get("pro"):
         return _start_preview_pro(job_id, _lm_plan(_synced_plan(job_id, plan)), _fmt_of(body), _engine_opts(body))
     return _preview_legacy(job_id, plan, body)
@@ -4365,6 +5272,7 @@ def takes_run(job_id: str, body: dict = Body(default={})):
     plan, rev = jobstore.get_plan(job_id)
     if not plan:
         raise HTTPException(409, "El job no tiene plan; analiza el video primero.")
+    _not_montage(plan)
 
     def conflict(cur):
         return JSONResponse({"ok": False, "detail": "El plan cambió en el servidor (re-dirigido u otra "
@@ -4381,7 +5289,11 @@ def takes_run(job_id: str, body: dict = Body(default={})):
     wav = plan.get("wav")
     audio = wav if wav and Path(str(wav)).exists() else None     # sin wav: bordes solo por tiempos
     old_cuts = [c for c in plan.get("cuts") or [] if isinstance(c, dict)]
-    res = takes_mod.detect(words, dur, sensitivity=sens, audio=audio, existing_cuts=old_cuts)
+    kw = {}
+    joins = _join_times(plan.get("shots"))          # montaje con IA: ningun corte cruza una union
+    if joins and _accepts(takes_mod.detect, "joins"):
+        kw["joins"] = joins
+    res = takes_mod.detect(words, dur, sensitivity=sens, audio=audio, existing_cuts=old_cuts, **kw)
     cuts = takes_mod.merge(old_cuts, res["cuts"])
     meta = res["meta"]
     prev = plan.get("takes") if isinstance(plan.get("takes"), dict) else {}
@@ -4391,6 +5303,9 @@ def takes_run(job_id: str, body: dict = Body(default={})):
         tp = takes_mod.topic(takes_mod.effective_words(words, cuts))
         if tp:
             meta.update(topic=tp["topic"], summary=tp["summary"], sections=tp["sections"], llm=True)
+    if prev.get("sections_src") and prev.get("sections"):
+        # secciones sembradas desde el guion del montaje: el tema del LLM no las reemplaza
+        meta.update(sections=prev["sections"], sections_src=prev["sections_src"])
     meta["stats"] = takes_mod.stats(cuts)          # con las tomas del usuario que se respetaron
     meta["ms"] = int(round((time.time() - t0) * 1000))
     if cuts == old_cuts and {k: v for k, v in prev.items() if k != "ms"} == \

@@ -455,6 +455,25 @@ def test_stop_fade_cero_sin_nan(tmp_path):
         assert np.max(np.convolve(z, np.ones(24), mode="valid")) < 24     # ningun hueco digital en la voz
 
 
+def test_voz_con_nan_en_la_cola_no_deja_la_mezcla_muda(tmp_path):
+    """La voz de estudio puede traer NaN en la cola (arnndn rellena con ceros y deesser divide
+    0/0): antes un solo NaN contagiaba la actividad de voz, las curvas de musica y SFX y el bus
+    entero -> nan_fixed y un export MUDO. Ahora la mezcla suena y la voz queda al objetivo."""
+    rng = np.random.default_rng(23)
+    dur = 6.0
+    x = _speechlike(dur, rng, on=((0.3, 2.5), (3.0, 5.6)), level=0.5).astype(np.float32)
+    x[-512:] = np.nan
+    v = _write(tmp_path / "v.wav", x)
+    mu = _write(tmp_path / "m.wav", _music(10.0, rng))
+    evs = [{"at": 0.5, "name": "whoosh_fast"}, {"at": 2.8, "name": "pop"}]
+    info = A.mix(v, dur, evs, {"wav": str(mu)}, tmp_path / "o.wav")
+    y, _ = sf.read(str(tmp_path / "o.wav"), always_2d=True)
+    assert np.isfinite(y).all() and "nan_fixed" not in info
+    assert info["lufs"] is not None and abs(info["lufs"] - (-14.0)) <= 0.5
+    assert np.abs(y[int(0.5 * SR):int(2.4 * SR)]).max() > 0.05      # la voz suena
+    assert A.load_audio(v)[-512:].max() == 0.0                       # la lectura ya la limpia
+
+
 def test_ending_de_music_py_sin_doble_fundido(tmp_path):
     """Si music.py ya hizo el final (natural/hit/fade), el golpe final a D-0.5 conserva su nivel
     (antes el fade_out coseno de 1.5 s lo bajaba ~12 dB)."""

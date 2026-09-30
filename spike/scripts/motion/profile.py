@@ -655,6 +655,10 @@ def _from_url(raw: str) -> dict | None:
         h = _clean_handle(first) if first.lower() not in _RESERVED.get(plat, set()) else ""
         disp = f"{bare}/{h}" if h else bare
         return _mk(plat, f"https://{bare}/{h}" if h else clean_url, display=disp)
+    if plat in ("paseoclub", "holdyfy") and not segs:
+        # la portada de la plataforma no es una pagina para agendar con alguien: es su sitio web
+        # (un video de la propia marca no debe decir "Agenda en PaseoClub")
+        return _mk("web", clean_url, display=bare)
     if plat == "paseoclub":
         disp = _short_web(host, segs, ("business", "negocio", "b", "p"), keep_slug=True)
         return _mk("paseoclub", clean_url, display=disp)

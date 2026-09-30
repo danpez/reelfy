@@ -1854,7 +1854,472 @@
     return true;
   }
 
+  // ------------------------------------------------------------------ armado con IA (montaje)
+  /* "Armar con IA": el servidor (POST /montage) escucha cada clip de la grabacion, elige la mejor
+     toma de cada parte del guion y devuelve plan.montage {order, script, slots (cada parte con su
+     toma elegida y sus alternativas), timeline (mismos campos que los items de /compose + slot,
+     cand y join), discarded, uncovered, extra}. Aqui: el orden de grabacion, la linea de tiempo del
+     ensamblado a partir del montaje, cambiar una toma ("Usar esta toma") re-empacando lo que sigue,
+     el panel "Tomas" y el cuerpo de /compose. */
+  const CONF_ALTA = 0.8, CONF_MEDIA = 0.6;
+  const CONF_LABEL = { alta: "Alta", media: "Media", baja: "Baja" };
+  const DISCARD_LABEL = { retoma: "Retoma", blooper: "Blooper", fuera_de_guion: "Fuera del guion", incompleta: "Incompleta", sin_audio: "Sin audio" };
+  const JOIN_KINDS = ["section", "line", "splice"];
+  // aviso del servidor al volver un montaje a las tomas sin error (jobstore: "...Tu montaje sigue aquí.")
+  const MONTAGE_BACK_RE = /sigue aqu[ií]/i;
+
+  const mClipLen = c => (c && c.type === "image" ? +c.dur || 0 : (+c.out || 0) - (+c.in || 0));
+  const mClipEnd = c => (+c.start || 0) + mClipLen(c);
+  /** Fecha de grabacion ISO 8601 -> ms (NaN si no hay). Acepta "-0600" y "AAAA-MM-DD hh:mm:ss"
+      (el WebView de escritorio no siempre los entiende). */
+  function createdMs(s) {
+    if (s == null || s === "") return NaN;
+    if (typeof s === "number") return s > 1e11 ? s : s * 1000;
+    const t = String(s).trim().replace(/^(\d{4}-\d{2}-\d{2}) (\d)/, "$1T$2").replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+    return Date.parse(t);
+  }
+  /** Orden natural de nombres de archivo ("IMG_9" < "IMG_10"), sin distinguir mayusculas. */
+  function natCmp(a, b) {
+    return String(a == null ? "" : a).localeCompare(String(b == null ? "" : b), undefined, { numeric: true, sensitivity: "base" });
+  }
+  /** Fecha de GRABACION de una fuente (ms) o NaN. La del archivo (created_src "mtime": la de la
+      copia) no dice cuando se grabo: cuenta como sin fecha (igual que server.rec_order). */
+  function recordedMs(s) {
+    if (!s) return NaN;
+    if (s.created_src != null && !["apple", "creation_time"].includes(s.created_src)) return NaN;
+    if (s.created_ts != null && isFinite(+s.created_ts)) return +s.created_ts * 1000;
+    return createdMs(s.created);
+  }
+  /** Fuentes en ORDEN DE GRABACION: fecha de grabacion, luego nombre natural, luego orden de subida
+      (`_idx` o su posicion). Sin fecha van al final. -> copia ordenada. */
+  function recordingOrder(sources) {
+    return (sources || []).filter(Boolean).map((s, i) => ({ s, t: recordedMs(s), k: s._idx != null && isFinite(+s._idx) ? +s._idx : i }))
+      .sort((a, b) => {
+        const fa = isFinite(a.t), fb = isFinite(b.t);
+        if (fa && fb && a.t !== b.t) return a.t - b.t;
+        if (fa !== fb) return fa ? -1 : 1;
+        return natCmp(a.s.name, b.s.name) || a.k - b.k;
+      }).map(x => x.s);
+  }
+  /** Nivel de confianza de una toma (su score 0..1). */
+  function montageConf(score) {
+    const v = +score;
+    if (!isFinite(v)) return "baja";
+    return v >= CONF_ALTA ? "alta" : v >= CONF_MEDIA ? "media" : "baja";
+  }
+  function slotById(montage, id) { return ((montage && montage.slots) || []).find(s => s && s.id === id) || null; }
+  function findCand(montage, slotId, candId) {
+    const s = slotById(montage, slotId);
+    const c = s && (s.cands || []).find(x => x && x.id === candId);
+    if (c) return c;
+    for (const t of (montage && montage.slots) || []) { const x = (t.cands || []).find(y => y && y.id === candId); if (x) return x; }
+    return null;
+  }
+  /** Numero (1..n) de cada parte en orden del guion: el que se ve en el panel y en el timeline. */
+  function slotNumbers(montage) {
+    const out = {};
+    let n = 0;
+    ((montage && montage.slots) || []).forEach(s => { if (s && s.id != null && !isExtraSlot(s)) out[s.id] = ++n; });
+    return out;
+  }
+  /** Parte "extra": material fuera del guion que el montaje puso porque lo enriquece (sin lineas). */
+  function isExtraSlot(s) { return !!s && (s.extra === true || !(s.lines || []).length); }
+  /** Confianza de un tramo: la del montaje (timeline.conf: calidad y margen sobre la siguiente) o la
+      de su toma. */
+  function itemConf(montage, it) {
+    if (it && isFinite(+it.conf) && it.conf !== null && it.conf !== "") return round3(+it.conf);
+    return candConf(it ? findCand(montage, it.slot, it.cand) : null);
+  }
+  /** Confianza de una toma si se usa: la que calcula el montaje para ella (cand.conf, con el mismo
+      margen que la elegida: en un empate las dos quedan igual) o, si no viene, su puntaje. */
+  function candConf(c) {
+    if (!c) return 0;
+    if (isFinite(+c.conf) && c.conf !== null && c.conf !== "") return round3(+c.conf);
+    return round3(+c.score || 0);
+  }
+  /** Volumen de una toma: el suyo, el de un tramo del montaje con esa toma o ese clip (misma
+      sonoridad medida) o, con LUFS, la ganancia hasta el objetivo del montaje. */
+  function candVol(montage, cand) {
+    const v = candVolKnown(montage, cand);
+    return v == null ? 1 : v;
+  }
+  /** Como candVol pero null si no hay con que medirla (el servidor la mide: vol "auto"). */
+  function candVolKnown(montage, cand) {
+    if (!cand) return null;
+    if (isFinite(+cand.vol) && cand.vol !== null && cand.vol !== "") return +cand.vol;
+    const tl = (montage && montage.timeline) || [];
+    const hit = tl.find(it => it && it.cand === cand.id && isFinite(+it.vol)) || tl.find(it => it && it.sid === cand.sid && isFinite(+it.vol));
+    if (hit) return +hit.vol;
+    const st = (montage && montage.stats) || {}, tgt = +(st.target_lufs != null ? st.target_lufs : st.lufs_target);
+    if (isFinite(+cand.lufs) && cand.lufs !== null && isFinite(tgt)) return Math.round(Math.max(0.1, Math.min(4, Math.pow(10, (tgt - +cand.lufs) / 20))) * 1000) / 1000;
+    return null;
+  }
+  function srcMap(sources, montage) {
+    const m = {};
+    ((montage && montage.order) || []).forEach(o => { if (o && o.sid) m[o.sid] = { id: o.sid, name: o.name, created: o.created }; });
+    (sources || []).forEach(s => { if (s && s.id) m[s.id] = Object.assign({}, m[s.id], s); });
+    return m;
+  }
+  function mkClip(src, it, id) {
+    const s = src || {}, known = isFinite(+it.vol) && it.vol !== null && it.vol !== "" && it.vol !== "auto";
+    const c = { _id: id, sid: it.sid, type: "video", name: s.name || it.sid, thumb: s.thumb || null, srcdur: +s.dur || 0,
+      vol: known ? +it.vol : 1, mute: false, fadeIn: 0, fadeOut: 0, layer: 0,
+      start: +it.start || 0, in: +it.in || 0, out: +it.out || 0 };
+    if (!known) c.volAuto = true;        // sin nivel medido: el servidor lo mide (vol "auto")
+    return c;
+  }
+  /** Clips del ensamblado (ASM.clips) desde plan.montage.timeline: en su lugar (start del
+      montaje; sin start, uno tras otro) y cada uno con montage {slot, cand, join, conf}. */
+  function montageClips(montage, sources, idgen) {
+    const src = srcMap(sources, montage), gen = idgen || (k => "m" + k);
+    let t = 0;
+    return ((montage && montage.timeline) || []).filter(it => it && it.sid && +it.out > +it.in).map((it, k) => {
+      const start = isFinite(+it.start) && it.start !== null ? +it.start : t;
+      const c = mkClip(src[it.sid], Object.assign({}, it, { start }), gen(k));
+      t = start + mClipLen(c);
+      if (it.slot != null) {
+        c.montage = { slot: it.slot, cand: it.cand != null ? it.cand : null, join: JOIN_KINDS.includes(it.join) ? it.join : null,
+          conf: itemConf(montage, it) };
+        const cd = findCand(montage, it.slot, it.cand);
+        if (cd && isFinite(+cd.setup) && cd.setup !== null) c.montage.setup = +cd.setup;   // camara/encuadre (el director describe una toma por setup)
+      } else c.extra = true;           // material fuera del guion que el montaje ya puso (plan.montage.extra)
+      return c;
+    });
+  }
+  /** Tramos para usar la toma `candId` en la parte `slotId`: la elegida por la IA vuelve tal como
+      la armo el montaje (puede venir intercalada con otro angulo); otra toma entra completa. */
+  function slotItems(montage, slotId, candId) {
+    const slot = slotById(montage, slotId);
+    if (!slot) return [];
+    if (candId === slot.chosen) {
+      const tl = ((montage && montage.timeline) || []).filter(it => it && it.slot === slotId && +it.out > +it.in);
+      if (tl.length) return tl.map(it => ({ sid: it.sid, in: +it.in, out: +it.out, vol: isFinite(+it.vol) && it.vol !== null && it.vol !== "auto" ? +it.vol : candVolKnown(montage, findCand(montage, slotId, it.cand)), cand: it.cand, join: it.join || null, conf: itemConf(montage, it) }));
+    }
+    const c = findCand(montage, slotId, candId);
+    if (!c || !(+c.out > +c.in)) return [];
+    return [{ sid: c.sid, in: +c.in, out: +c.out, vol: candVolKnown(montage, c), cand: c.id, join: null }];
+  }
+  /** Corre `delta` s todo lo que empieza en `t` o despues (copias; lo demas se conserva). */
+  function shiftAfter(items, t, delta) {
+    if (!delta) return (items || []).slice();
+    return (items || []).map(x => ((+x.start || 0) >= t - 1e-6 ? Object.assign({}, x, { start: round3(Math.max(0, (+x.start || 0) + delta)) }) : x));
+  }
+  /** Segundos libres en la pista base desde `t` hasta el siguiente clip (Infinity si no hay). */
+  function gapAfter(clips, t) {
+    let nx = Infinity;
+    (clips || []).forEach(c => { const s0 = +c.start || 0; if ((c.layer || 0) === 0 && s0 >= t - 1e-6 && s0 < nx) nx = s0; });
+    return Math.max(0, nx - t);
+  }
+  /** Indices (en la pista base) de los clips de una parte del montaje, en orden de tiempo. */
+  function slotClipIdx(clips, slotId) {
+    return (clips || []).map((c, i) => [c, i]).filter(([c]) => c && c.montage && c.montage.slot === slotId && (c.layer || 0) === 0)
+      .sort((a, b) => (+a[0].start || 0) - (+b[0].start || 0)).map(x => x[1]);
+  }
+  /** Toma en uso de una parte (la del primer tramo) o null si se quito del video. */
+  function currentCand(clips, slotId) {
+    const ix = slotClipIdx(clips, slotId);
+    return ix.length ? clips[ix[0]].montage.cand : null;
+  }
+  /** "Usar esta toma": cambia la toma de la parte `slotId` por `candId`. Los tramos de esa parte se
+      reemplazan (sid, in, out, vol, nombre, miniatura) en el mismo lugar y todo lo que sigue se corre
+      lo que cambio el largo (los huecos se conservan: salen en negro). Si la parte ya no esta en el
+      video, entra despues de la parte anterior que si este. o = {sources, idgen, overlays}.
+      -> {clips, overlays, first (id del primer clip nuevo), delta} o null. */
+  function swapTake(clips, montage, slotId, candId, o) {
+    const opt = o || {}, src = srcMap(opt.sources, montage);
+    let seq = 0;
+    const gen = opt.idgen || (() => "s" + Date.now().toString(36) + (seq++));
+    const items = slotItems(montage, slotId, candId);
+    if (!items.length) return null;
+    const cs = (clips || []).slice();
+    const ix = slotClipIdx(cs, slotId);
+    let start, end, at;
+    const old = ix.map(i => cs[i]);
+    if (old.length) {
+      start = Math.min(...old.map(c => +c.start || 0)); end = Math.max(...old.map(mClipEnd)); at = Math.min(...ix);
+    } else {
+      // la parte se quito: entra al final de la parte anterior (en el orden del guion) que siga en el video
+      const order = ((montage && montage.slots) || []).map(s => s.id), k = order.indexOf(slotId);
+      let prev = null;
+      for (let j = k - 1; j >= 0 && !prev; j--) { const pi = slotClipIdx(cs, order[j]); if (pi.length) prev = pi; }
+      if (prev) { const last = prev.reduce((a, i) => (mClipEnd(cs[i]) > mClipEnd(cs[a]) ? i : a), prev[0]); start = end = mClipEnd(cs[last]); at = Math.max(...prev) + 1; }
+      else { start = end = 0; at = 0; }
+      // el hueco que dejo al quitarse se vuelve a llenar: lo de despues solo se corre si no cabe
+      const len = items.reduce((a, it) => a + Math.max(0, it.out - it.in), 0);
+      end = start + Math.min(len, gapAfter(cs, start));
+    }
+    const first = old[0] || null, last = old.length ? old.reduce((a, c) => (mClipEnd(c) > mClipEnd(a) ? c : a), old[0]) : null;
+    const slot = slotById(montage, slotId);
+    let t = start;
+    const neu = items.map((it, k) => {
+      const c = mkClip(src[it.sid], Object.assign({}, it, { start: round3(t) }), k === 0 && first ? first._id : gen());
+      if (first) { c.mute = !!first.mute; if (k === 0) { c.fadeIn = +first.fadeIn || 0; if (first.trans) c.trans = clone(first.trans); } }
+      if (last && k === items.length - 1) c.fadeOut = +last.fadeOut || 0;
+      const cand = findCand(montage, slotId, it.cand);
+      const j0 = first && first.montage ? first.montage.join : (slot && (montage.timeline || []).find(x => x.slot === slotId) || {}).join;
+      c.montage = { slot: slotId, cand: it.cand, join: k === 0 ? (JOIN_KINDS.includes(j0) ? j0 : null) : (JOIN_KINDS.includes(it.join) ? it.join : "splice"),
+        conf: it.conf != null ? it.conf : candConf(cand) };
+      if (cand && isFinite(+cand.setup) && cand.setup !== null) c.montage.setup = +cand.setup;
+      t += mClipLen(c);
+      return c;
+    });
+    const delta = round3(t - end);
+    const drop = new Set(ix);
+    const rest = shiftAfter(cs.filter((c, i) => !drop.has(i)), end, delta);
+    const pos = cs.slice(0, at).filter((c, i) => !drop.has(i)).length;
+    rest.splice(pos, 0, ...neu);
+    return { clips: rest, overlays: opt.overlays ? shiftAfter(opt.overlays, end, delta) : undefined, first: neu[0]._id, delta };
+  }
+  /** El material extra `x` ({sid, in, out}) esta en el video: indice del clip o -1. */
+  function extraInVideo(clips, x) {
+    if (!x) return -1;
+    return (clips || []).findIndex(c => c && c.sid === x.sid && !(c.montage && c.montage.slot != null) &&
+      Math.min(+c.out, +x.out) - Math.max(+c.in, +x.in) > 0.5 * Math.max(0.05, +x.out - +x.in));
+  }
+  /** Agrega el material extra `x` (plan.montage.extra: {sid, in, out, after}) despues de la parte que
+      tiene su linea `after` (sin parte: la anterior en el guion; si esa se quito, la anterior que
+      siga en el video) y corre lo que sigue. o = {sources, idgen, overlays}. -> como swapTake. */
+  function addExtra(clips, montage, x, o) {
+    const opt = o || {}, src = srcMap(opt.sources, montage), cs = (clips || []).slice();
+    if (!x || !(+x.out > +x.in)) return null;
+    const slots = (montage && montage.slots) || [], order = slots.map(s => s.id);
+    const lines = (((montage && montage.script) || {}).lines || []).map(L => L && L.id);
+    let k = -1;
+    for (let j = lines.indexOf(x.after); j >= 0 && k < 0; j--) { const s = slots.find(t => (t.lines || []).includes(lines[j])); if (s) k = order.indexOf(s.id); }
+    if (k < 0) { const s = slots.find(t => (t.lines || []).includes(x.after)); k = s ? order.indexOf(s.id) : -1; }
+    let prev = null;
+    for (let j = k; j >= 0 && !prev; j--) { const pi = slotClipIdx(cs, order[j]); if (pi.length) prev = pi; }
+    let start = 0, at = 0;
+    if (prev) { const last = prev.reduce((a, i) => (mClipEnd(cs[i]) > mClipEnd(cs[a]) ? i : a), prev[0]); start = mClipEnd(cs[last]); at = Math.max(...prev) + 1; }
+    else if (k < 0 && lines.indexOf(x.after) < 0) {   // sin linea conocida: al final de la pista base
+      cs.forEach((c, i) => { if ((c.layer || 0) === 0 && mClipEnd(c) >= start) { start = mClipEnd(c); at = i + 1; } });
+    }
+    // otro extra ya puesto en ese mismo punto: este va despues
+    for (;;) { const e = cs.findIndex(c => c && c.extra && Math.abs((+c.start || 0) - start) < 1e-3 && (c.layer || 0) === 0); if (e < 0) break; start = mClipEnd(cs[e]); at = Math.max(at, e + 1); }
+    let seq = 0;
+    const gen = opt.idgen || (() => "e" + Date.now().toString(36) + (seq++));
+    const c = mkClip(src[x.sid], { sid: x.sid, in: +x.in, out: +x.out, start: round3(start), vol: candVolKnown(montage, { id: null, sid: x.sid, vol: x.vol, lufs: x.lufs }) }, gen());
+    c.extra = true;
+    // su union de entrada es una linea nueva (corte seco: el director no pone transicion ni whoosh
+    // a media seccion y la limpieza de tomas no cruza su inicio); sin parte (slot null)
+    c.montage = { slot: null, cand: null, join: "line" };
+    // si ahi hay un hueco, lo usa; lo de despues solo se corre lo que no cabe
+    const len = mClipLen(c), d = Math.max(0, len - gapAfter(cs, start)), end = start + (len - d);
+    const rest = shiftAfter(cs, end, d);
+    rest.splice(Math.min(at, rest.length), 0, c);
+    return { clips: rest, overlays: opt.overlays ? shiftAfter(opt.overlays, end, d) : undefined, first: c._id, delta: round3(d) };
+  }
+  /** Quita un clip y cierra el hueco (lo que sigue se corre hacia atras). -> {clips, overlays, delta} */
+  function removeClip(clips, id, o) {
+    const cs = (clips || []).slice(), i = cs.findIndex(c => c && c._id === id);
+    if (i < 0) return null;
+    const c = cs[i], len = mClipLen(c), end = mClipEnd(c);
+    cs.splice(i, 1);
+    const opt = o || {};
+    return { clips: shiftAfter(cs, end, -len), overlays: opt.overlays ? shiftAfter(opt.overlays, end, -len) : undefined, delta: round3(-len) };
+  }
+  /** Quita del video todos los tramos de una parte (p. ej. un extra) y cierra el hueco. */
+  function removeSlot(clips, slotId, o) {
+    const ix = slotClipIdx(clips, slotId);
+    if (!ix.length) return null;
+    let cs = (clips || []).slice(), ov = o && o.overlays ? o.overlays.slice() : undefined, delta = 0;
+    // de la ultima a la primera: cada una cierra su propio hueco
+    ix.map(i => cs[i]).sort((a, b) => (+b.start || 0) - (+a.start || 0)).forEach(c => {
+      const r = removeClip(cs, c._id, { overlays: ov });
+      cs = r.clips; ov = r.overlays; delta += r.delta;
+    });
+    return { clips: cs, overlays: ov, delta: round3(delta) };
+  }
+  /** Filas del panel "Tomas" en orden del guion: {type:"section", n}, {type:"slot", ...} (una por
+      parte, en su primera linea), {type:"uncovered", line} (linea sin toma) y {type:"extra", ...}
+      (material fuera del guion que lo enriquece, despues de su linea). */
+  function montageRows(montage, clips) {
+    const m = montage || {}, sc = m.script || {}, lines = sc.lines || [], sections = sc.sections || [];
+    const lineText = {}; lines.forEach(L => { if (L) lineText[L.id] = L.text; });
+    const secOf = {}; sections.forEach((s, k) => (s.lines || []).forEach(l => { if (!(l in secOf)) secOf[l] = k; }));
+    const slotOf = {}; (m.slots || []).forEach(s => (s.lines || []).forEach(l => { if (!(l in slotOf)) slotOf[l] = s; }));
+    const nums = slotNumbers(m), rows = [], seenL = new Set(), lineIdx = {};
+    lines.forEach((L, i) => { if (L) lineIdx[L.id] = i; });
+    // una linea partida entre dos partes (empalme): cada tarjeta muestra SU pedazo del guion y "1/2"
+    const slotsOfLine = {};
+    (m.slots || []).forEach(s => { if (s && !isExtraSlot(s)) (s.lines || []).forEach(l => { (slotsOfLine[l] = slotsOfLine[l] || []).push(s.id); }); });
+    const slotRow = s => {
+      const ix = slotClipIdx(clips, s.id), cur = ix.length ? clips[ix[0]].montage.cand : null;
+      const cands = (s.cands || []).slice().sort((a, b) => (+b.score || 0) - (+a.score || 0));
+      const curC = cands.find(c => c.id === cur) || null, ex = isExtraSlot(s);
+      const used = [...new Set(ix.map(i => clips[i].montage.cand))];
+      const conf = ix.length ? +clips[ix[0]].montage.conf : NaN;
+      const chosenC = cands.find(c => c.id === s.chosen) || cands[0] || {};
+      const shared = ex ? null : (s.lines || []).find(l => (slotsOfLine[l] || []).length > 1);
+      const part = shared ? { i: slotsOfLine[shared].indexOf(s.id) + 1, n: slotsOfLine[shared].length } : null;
+      const full = (s.lines || []).map(l => lineText[l] || "").filter(Boolean).join(" ");
+      const edited = cur != null && cur !== s.chosen;
+      return { type: "slot", id: s.id, n: nums[s.id] || null, extra: ex, lines: (s.lines || []).map(l => ({ id: l, text: lineText[l] || "" })),
+        text: ex ? String(s.text || chosenC.text || "") : (part ? String(s.text || (curC || chosenC).text || full) : full || String(s.text || "")),
+        part, chosen: s.chosen, cur, curCand: curC, inVideo: cur != null, edited,
+        said: curC ? String(curC.text || "") : "", score: curC ? +curC.score || 0 : null,
+        reason: curC ? usedReason(curC, edited) : "",
+        conf: isFinite(conf) ? conf : candConf(chosenC), level: montageConf(isFinite(conf) ? conf : candConf(chosenC)),
+        mixed: used.filter(c => c !== cur), alts: ex ? [] : cands.filter(c => c.id !== cur) };
+    };
+    // sugerencias fuera del guion que el montaje NO puso (las puestas son partes "extra")
+    const sugg = (m.extra || []).map((x, k) => (x && x.kept !== true ? Object.assign({ type: "extra", k }, x) : null)).filter(Boolean);
+    const extrasAfter = ids => sugg.filter(x => ids.includes(x.after)).forEach(x => { x.done = true; rows.push(x); });
+    let lastSec = null;
+    const sec = id => { const k = secOf[id]; if (sections.length > 1 && k != null && k !== lastSec) { rows.push({ type: "section", n: k + 1 }); lastSec = k; } };
+    const unc = L => { sec(L.id); rows.push({ type: "uncovered", line: { id: L.id, text: L.text || "" } }); seenL.add(L.id); extrasAfter([L.id]); };
+    // las partes van en el orden del montaje (el de la linea de tiempo); antes de cada una, las lineas
+    // del guion anteriores que no tienen toma
+    (m.slots || []).forEach(s => {
+      if (!s) return;
+      if (!isExtraSlot(s)) {
+        const first = Math.min(...(s.lines || []).map(l => (l in lineIdx ? lineIdx[l] : Infinity)));
+        lines.forEach((L, i) => { if (L && i < first && !seenL.has(L.id) && !slotOf[L.id]) unc(L); });
+        if (s.lines && s.lines.length) sec(s.lines[0]);
+      }
+      rows.push(slotRow(s));
+      (s.lines || []).forEach(l => seenL.add(l));
+      extrasAfter(s.lines || []);
+    });
+    lines.forEach(L => { if (L && !seenL.has(L.id) && !slotOf[L.id]) unc(L); });
+    sugg.filter(x => !x.done).forEach(x => rows.push(x));
+    return rows;
+  }
+  /** Motivo de la toma EN USO. El de una alternativa esta escrito comparandola con la elegida ("Igual
+      de buena; se usa la otra cámara para intercalar ángulos", "Toma anterior (en empate...)"): si el
+      usuario la eligio y va sola, eso ya no aplica y se dice lo que es. Sus defectos se conservan. */
+  function usedReason(c, edited) {
+    const r = String((c && c.reason) || "");
+    if (!edited) return r;
+    if (/^(Igual de buena|Toma anterior)/i.test(r)) return "Toma completa y fiel al guion (igual de buena que la de la IA)";
+    if (/^El juez LLM prefiri/i.test(r)) return "Toma completa; el juez LLM prefería la de la IA";
+    return r;
+  }
+  /** Resumen del panel: partes, sin toma, cambiadas por el usuario y por nivel de confianza. */
+  function montageSummary(montage, clips) {
+    const rows = montageRows(montage, clips), out = { slots: 0, extras: 0, uncovered: 0, edited: 0, removed: 0, alta: 0, media: 0, baja: 0,
+      discarded: ((montage && montage.discarded) || []).length };
+    rows.forEach(r => {
+      if (r.type === "uncovered") out.uncovered++;
+      if (r.type !== "slot") return;
+      if (r.extra) { if (r.inVideo) out.extras++; return; }
+      out.slots++;
+      if (!r.inVideo) out.removed++;
+      else { out[r.level]++; if (r.edited) out.edited++; }
+    });
+    return out;
+  }
+  /** Texto del guion para editarlo: una linea por renglon y una linea en blanco entre secciones. */
+  function scriptText(script) {
+    const sc = script || {}, lines = sc.lines || [], secs = sc.sections || [];
+    if (!lines.length) return String(sc.text || "").trim();
+    const txt = {}; lines.forEach(L => { if (L) txt[L.id] = String(L.text || "").trim(); });
+    if (secs.length) {
+      const used = new Set(), out = [];
+      secs.forEach(s => { const ls = (s.lines || []).filter(l => l in txt && !used.has(l)); ls.forEach(l => used.add(l)); if (ls.length) out.push(ls.map(l => txt[l]).join("\n")); });
+      const rest = lines.filter(L => L && !used.has(L.id)).map(L => txt[L.id]);
+      if (rest.length) out.push(rest.join("\n"));
+      return out.join("\n\n");
+    }
+    return lines.map(L => txt[L.id]).join("\n");
+  }
+  /** Items `main` de POST /compose desde los clips del ensamblado (con montage si lo tienen). Un extra
+      (fuera del guion, agregado desde el panel) va con su union: "line" si no trae otra. */
+  function composeMain(clips) {
+    return (clips || []).map(c => {
+      const base = c.type === "image"
+        ? { sid: c.sid, type: "image", dur: c.dur, start: c.start || 0, layer: c.layer || 0, fadeIn: c.fadeIn || 0, fadeOut: c.fadeOut || 0, trans: c.trans }
+        : { sid: c.sid, type: "video", in: c.in, out: c.out, vol: c.volAuto && (c.montage || c.extra) ? "auto" : c.vol, mute: c.mute, start: c.start || 0, layer: c.layer || 0, fadeIn: c.fadeIn || 0, fadeOut: c.fadeOut || 0, trans: c.trans };
+      const mm = c.montage || null;
+      if (mm && mm.slot != null)
+        base.montage = Object.assign({ slot: mm.slot, cand: mm.cand != null ? mm.cand : null, join: mm.join || null, conf: mm.conf != null ? +mm.conf : null },
+          mm.setup != null ? { setup: mm.setup } : {});
+      else if (c.extra || mm)
+        base.montage = { slot: null, cand: null, join: mm && JOIN_KINDS.includes(mm.join) ? mm.join : "line", conf: null };
+      return base;
+    });
+  }
+  /** Cuerpo de POST /compose. o = {clips, overlays, glossary, highlights, director, montageJob, script}:
+      desde un montaje manda montage_job (el servidor re-encola ESE trabajo como compose y conserva
+      plan.montage) y el guion. */
+  function composeBody(o) {
+    const b = {
+      main: composeMain(o.clips),
+      overlays: (o.overlays || []).map(v => {
+        const x = { sid: v.sid, type: v.type, start: v.start, dur: v.dur, pos: v.pos, size: v.size };
+        if (v.x != null && v.y != null) { x.x = v.x; x.y = v.y; }
+        return x;
+      }),
+      glossary: o.glossary || "", highlights: Math.max(1, Math.min(5, parseInt(o.highlights, 10) || 2)),
+      director: o.director === undefined ? false : o.director,
+    };
+    if (o.montageJob) {
+      b.montage_job = o.montageJob;
+      const s = o.script == null ? "" : String(o.script).trim();
+      b.script = s || null;
+    }
+    return b;
+  }
+  /** Estado de un trabajo de montaje (GET /status): {state: "running" | "ready" | "error" | "other",
+      stage: "queued" | "words" | "match", n, N (clips escuchados), message, pct}. */
+  function montageStatus(j) {
+    if (!j) return { state: "other" };
+    if (j.phase === "error" || j.state === "error" || j.state === "canceled")
+      return { state: "error", error: j.error || "No se pudo armar el video." };
+    if (j.phase && j.phase !== "assembly") return { state: "other", phase: j.phase };
+    const running = j.state === "queued" || j.state === "running";
+    const m = j.plan && j.plan.montage;
+    const msg = String(j.message || ""), nn = /(\d+)\s*(?:\/|de)\s*(\d+)/.exec(msg);
+    // un rearmado o una composicion que fallo vuelve a las tomas de antes con su error (nada se pierde);
+    // una composicion interrumpida (la app se cerro) o cancelada lo dice en el mensaje, sin error
+    if (!running && (m || j.has_plan)) return { state: "ready", montage: m || null, note: j.error || (MONTAGE_BACK_RE.test(msg) ? msg : null) };
+    const w = j.words && typeof j.words === "object" ? j.words : null;
+    let stage = j.state === "queued" ? "queued" : "words";
+    if (j.stage === "words") stage = "words";
+    else if (j.stage === "montage" || j.stage === "match") stage = "match";
+    else if (/escuch|transcrib/i.test(msg)) stage = "words";
+    else if (/elig|arm|compar|guion/i.test(msg)) stage = "match";
+    const n = w && isFinite(+w.done) && w.done !== null ? +w.done : nn ? +nn[1] : null;
+    const N = w && isFinite(+w.total) && +w.total > 0 ? +w.total : nn ? +nn[2] : null;
+    return { state: "running", stage, n, N, errors: w && +w.errors > 0 ? +w.errors : 0, message: msg, pct: +j.pct || 0 };
+  }
+  /** Transcripcion por clip ya lista: {n (videos), ready, error, pending}. */
+  function wordsProgress(sources) {
+    const out = { n: 0, ready: 0, error: 0, pending: 0 };
+    (sources || []).forEach(s => {
+      if (!s || s.type === "image") return;
+      out.n++;
+      if (s.words === "ready") out.ready++; else if (s.words === "error") out.error++; else out.pending++;
+    });
+    return out;
+  }
+  /** Progreso global de la subida (0..100) desde [{loaded, total}] por archivo. */
+  function uploadPct(rows) {
+    let l = 0, t = 0;
+    (rows || []).forEach(r => { const tt = Math.max(0, +r.total || 0); t += tt; l += Math.min(tt, Math.max(0, +r.loaded || 0)); });
+    return t > 0 ? Math.round(l / t * 1000) / 10 : 0;
+  }
+  /** Un proyecto reciente se puede abrir y en que estado esta -> {open, label}. Un armado con IA
+      se abre armandose (progreso) o listo (revisar las tomas). */
+  function projectState(j) {
+    if (!j) return { open: false, label: "" };
+    if (j.phase === "assembly") {
+      const running = j.state === "queued" || j.state === "running";
+      return { open: true, label: running ? "armando con IA" : "tomas por revisar" };
+    }
+    const open = j.has_plan !== false && ["review", "done"].includes(j.phase);
+    return { open, label: open ? (j.phase === "done" ? "exportado" : "en edición") : "no se terminó" };
+  }
+  /** Tiempo de la fuente con decimas: "0:04.1". */
+  function fmtSrc(s) {
+    const v = Math.max(0, Math.round((+s || 0) * 10) / 10), m = Math.floor(v / 60), sec = v - m * 60;
+    return `${m}:${sec.toFixed(1).padStart(4, "0")}`;
+  }
+
   return {
+    CONF_LABEL, DISCARD_LABEL, JOIN_KINDS, createdMs, recordedMs, natCmp, recordingOrder, montageConf, findCand, slotNumbers, candVol, candVolKnown, montageClips,
+    slotItems, shiftAfter, slotClipIdx, currentCand, swapTake, extraInVideo, addExtra, removeClip, removeSlot, isExtraSlot, itemConf, candConf, usedReason, montageRows, montageSummary, scriptText, composeMain, composeBody,
+    montageStatus, wordsProgress, uploadPct, projectState, fmtSrc,
     MIN_KEEP, MIN_FRAG, SNAP_S, TRACKS, EVENT_TRACKS, RULER_STEPS, SAFE, XC, SYM_W, SNAP_X, PRO_LANGS, MIXERS,
     symDefaults, ltCentered, setLowerThirdAlign, snapCenterX, lowerThirdReveal, lowerThirdX,
     keepsFromCuts, Timeline, timelineFromPlan,

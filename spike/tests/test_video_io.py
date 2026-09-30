@@ -245,6 +245,28 @@ def test_cut_audio_final_recortado_termina_en_silencio():
     assert V.VOICE_VERSION != "v3"                                # la voz cacheada se rehace
 
 
+def test_read_audio_limpia_nan_de_la_fuente_o_del_filtro(tmp_path):
+    """Una fuente (o la cadena de estudio: arnndn rellena la cola y deesser divide 0/0) con NaN:
+    read_audio devuelve muestras finitas (la voz cacheada nunca lleva NaN a la mezcla) y la voz
+    cacheada con NaN de antes se rehace (VOICE_VERSION)."""
+    import soundfile as sf
+    x = (0.3 * np.sin(2 * np.pi * 220 * np.arange(V.SR) / V.SR)).astype(np.float32)[:, None].repeat(2, 1)
+    x[-480:] = np.nan
+    x[100] = np.inf
+    src = tmp_path / "nan.wav"
+    sf.write(str(src), x, V.SR, subtype="FLOAT")
+    a = V.read_audio(src, V.SR, 2)
+    assert a.shape == x.shape and np.isfinite(a).all()
+    assert np.abs(a[-480:]).max() == 0.0 and np.abs(a[1000:2000]).max() > 0.25
+    # la cadena de estudio real sobre un tono de largo "raro" (2.0101 s): ffmpeg suelta NaN al final
+    s2 = tmp_path / "tono.wav"
+    subprocess.run([V.FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", "sine=f=220:r=48000:d=2.0101",
+                    "-ac", "2", str(s2)], check=True)
+    b = V.read_audio(s2, V.SR, 2, V._studio_chain())
+    assert np.isfinite(b).all() and len(b) >= int(2.0 * V.SR)
+    assert V.VOICE_VERSION not in ("v3", "v4")
+
+
 # ------------------------------------------------------------------ base pass
 def _synthetic_source(path: Path, dur=6.0):
     if path.exists():

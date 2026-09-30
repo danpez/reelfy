@@ -661,3 +661,11 @@ def test_media_wanted_link_for_and_sids():
                                        {"url": "instagram.com/dra.demo/", "photo": FOTO, "media_src": {"photo": "auto"}}]})
     assert len(d["links"]) == 1 and d["links"][0]["photo"]["sid"] == FOTO["sid"]
     assert d["links"][0]["media_src"] == {"photo": "auto"}
+
+
+@pytest.mark.parametrize("url", ["https://paseo.club", "paseo.club/", "https://holdyfy.mixiuh.online"])
+def test_portada_de_plataforma_de_reservas_es_sitio_web(url):
+    # la portada no es una agenda: un video de la propia marca no debe decir "Agenda en ..."
+    l = P.parse_link(url)
+    assert l["kind"] == "web" and "Agenda" not in (l.get("label") or "") + (l.get("cta") or "")
+    assert P.parse_link(url.rstrip("/") + "/business/dra-demo")["kind"] == "booking" or "holdyfy" in url

@@ -399,7 +399,7 @@
       const f = fi.files && fi.files[0]; if (!f) return;
       msg(slot === "logo" ? "Subiendo el logo…" : "Subiendo la foto…");
       try {
-        const fd = new FormData(); fd.append("files", f);
+        const fd = new FormData(); fd.append("files", f); fd.append("transcribe", "0");
         const r = await fetch("/sources", { method: "POST", body: fd });
         const d = await r.json(); const x = d && d.sources && d.sources[0];
         if (!r.ok || !x || x.type !== "image") throw new Error("usa una imagen (JPG, PNG, WEBP o HEIC)");
@@ -527,7 +527,7 @@
         const f = fi.files && fi.files[0]; if (!f) return;
         msg("Subiendo la foto…");
         try {
-          const fd = new FormData(); fd.append("files", f);
+          const fd = new FormData(); fd.append("files", f); fd.append("transcribe", "0");
           const r = await fetch("/sources", { method: "POST", body: fd });
           const d = await r.json(); const s = d && d.sources && d.sources[0];
           if (!r.ok || !s || s.type !== "image") throw new Error("usa una imagen (JPG, PNG, WEBP o HEIC)");

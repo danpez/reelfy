@@ -31,6 +31,12 @@ Motor pro (v0.5):
     saben cuales son suyos (la voz no dice de que fuente salio).
   - Los proyectos NUNCA se purgan solos (antes: los 50 mas recientes, o 5 con poco disco). Solo
     se borran con delete() (DELETE /jobs/{id}: sus archivos van a la Papelera).
+
+Carriles (`lanes`): un tipo de trabajo con carril propio (el montaje "Armar con IA": kind
+"montage", fase "assembly") lo toma SOLO su worker; los workers generales no lo tocan. Asi un
+montaje no espera detras de un export en la cola FIFO (y un montaje esperando la transcripcion de
+sus clips no frena los exports). Un montaje que corria al cerrarse la app se vuelve a encolar (es
+determinista y barato: reusa la transcripcion en cache de cada clip).
 """
 import hashlib
 import json
@@ -50,6 +56,9 @@ CACHE_FILES_MAX = 64    # nombres de intermedios anotados por trabajo (los mas r
 _local = threading.local()
 _handlers: dict = {}
 _wake = threading.Event()
+_lane_wake: dict = {}           # kind con carril propio -> Event de su worker
+_LANE_KINDS = frozenset()       # kinds que los workers generales NO toman (start_workers(lanes=))
+REQUEUE_ON_RECOVER = ("montage",)   # kinds que al arrancar se re-encolan en vez de fallar
 _side_lock = threading.Lock()   # lectura-modificacion-escritura atomica de `side`
 
 _JSON_COLS = ("params", "plan", "clips", "warnings", "side", "meta", "cache_files")
@@ -60,9 +69,10 @@ _COLS = ("id", "kind", "state", "phase", "pct", "message", "eta", "elapsed",
 _NEW_COLS = {"stage": "TEXT", "warnings": "TEXT", "plan_rev": "INTEGER DEFAULT 0",
              "side": "TEXT", "plan_hash": "TEXT", "meta": "TEXT", "cache_files": "TEXT"}
 CANCELED_EXPORT_MSG = "Export cancelado. Tu edición sigue aquí."
+MONTAGE_CANCELED_MSG = "Cancelado. Tu montaje sigue aquí."
 # claves de las tareas laterales que /status aplana como <tarea>_<clave>
 SIDE_FLAT = ("state", "pct", "file", "stage", "error", "done", "t", "message", "music_pending",
-             "url", "resync", "prev_file")
+             "url", "resync", "prev_file", "total")
 
 
 def _final_duration(dur, cuts):
@@ -101,6 +111,8 @@ def plan_meta(plan):
             return None
     if not isinstance(plan, dict):
         return None
+    if montage_only(plan):
+        return _montage_meta(plan["montage"])
     d = plan.get("director") if isinstance(plan.get("director"), dict) else {}
     sc = d.get("script") if isinstance(d.get("script"), dict) else {}
     topic = sc.get("topic") or plan.get("topic")
@@ -124,6 +136,26 @@ def plan_meta(plan):
         out["takes"] = {"n": len(tk), "enabled": sum(1 for c in tk if c.get("enabled") is not False),
                         "removed_s": round(max(0.0, extra), 2)}
     return out
+
+
+def _montage_meta(m):
+    """Resumen de un montaje aun sin componer (fase `assembly`) para "Proyectos recientes": tema =
+    la primera linea del guion, duracion = la de la linea de tiempo armada, tomas = sus segmentos."""
+    sc = m.get("script") if isinstance(m.get("script"), dict) else {}
+    lines = [ln for ln in sc.get("lines") or [] if isinstance(ln, dict) and ln.get("text")]
+    topic = lines[0]["text"] if lines else next(
+        (t.strip() for t in str(sc.get("text") or "").splitlines() if t.strip()), None)
+    tl = [t for t in m.get("timeline") or [] if isinstance(t, dict)]
+    dur = 0.0
+    for t in tl:
+        try:
+            dur = max(dur, float(t.get("start") or 0) + float(t["out"]) - float(t["in"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return {"version": 1, "topic": str(topic)[:120] if topic else None, "duration": round(dur, 2),
+            "final_duration": round(dur, 2) if dur else None, "style": None, "shots": len(tl),
+            "montage": {"clips": len(m.get("order") or []), "slots": len(m.get("slots") or []),
+                        "uncovered": len(m.get("uncovered") or [])}}
 
 
 def plan_hash(plan):
@@ -181,6 +213,25 @@ def recover():
                   message='El export se interrumpió (la app se cerró). Vuelve a exportar.',
                   error=NULL, cancel=0, eta=NULL, updated=?
                   WHERE state='running' AND kind='render' AND plan IS NOT NULL""", (now,))
+    # el montaje se rehace solo (determinista; la transcripcion de cada clip queda en cache). Uno
+    # cancelado mientras corria (cancel=1) se da por cancelado
+    for kind in REQUEUE_ON_RECOVER:
+        cx.execute("""UPDATE jobs SET state='canceled', phase='error', error='Cancelado.', updated=?
+                      WHERE state='running' AND kind=? AND cancel=1""", (now, kind))
+        cx.execute("""UPDATE jobs SET state='queued', pct=0, eta=NULL, stage=NULL,
+                      message='En cola…', updated=? WHERE state='running' AND kind=?""", (now, kind))
+    # la composicion de un montaje que se interrumpio: de vuelta a la pantalla de tomas
+    for row in cx.execute("SELECT id, plan FROM jobs WHERE state='running' AND kind='compose' "
+                          "AND plan IS NOT NULL").fetchall():
+        try:
+            plan = json.loads(row["plan"])
+        except Exception:  # noqa
+            continue
+        if montage_only(plan):
+            cx.execute("""UPDATE jobs SET state='review', phase='assembly', pct=100, stage='assembly',
+                          message=?, error=NULL, cancel=0, eta=NULL, updated=? WHERE id=?""",
+                       ("La composición se interrumpió (la app se cerró). Tu montaje sigue aquí.",
+                        now, row["id"]))
     cx.execute("""UPDATE jobs SET state='error', phase='error',
                   error='El proceso se interrumpió (la app se cerró a media tarea). Vuelve a intentarlo.',
                   updated=? WHERE state='running'""", (now,))
@@ -271,11 +322,25 @@ def sids_by_job():
     salen de all_params()."""
     out = {}
     for r in _cx().execute("SELECT id, params, plan FROM jobs WHERE plan LIKE '%\"sid\"%' "
-                           "OR params LIKE '%\"sid\"%'").fetchall():
-        s = set(_SID_RE.findall(r["plan"] or "")) | set(_SID_RE.findall(r["params"] or ""))
+                           "OR params LIKE '%\"sid\"%' OR params LIKE '%\"sids\"%'").fetchall():
+        s = set(_SID_RE.findall(r["plan"] or "")) | set(_SID_RE.findall(r["params"] or "")) | \
+            params_sids(r["params"])
         if s:
             out[r["id"]] = s
     return out
+
+
+def params_sids(params):
+    """Fuentes que los PARAMETROS de un trabajo nombran como lista `sids` (el montaje "Armar con
+    IA" y la composicion que lo sigue): la limpieza del disco no las borra mientras el trabajo
+    exista, aunque todavia no haya plan."""
+    if isinstance(params, str):
+        try:
+            params = json.loads(params) if params else {}
+        except Exception:  # noqa
+            return set()
+    sids = (params or {}).get("sids") if isinstance(params, dict) else None
+    return {s for s in sids or [] if isinstance(s, str) and _SID_OK.match(s)}
 
 
 def all_params():
@@ -310,7 +375,7 @@ def create(job_id, kind, ext, params=None, plan=None, phase="analyzing",
                 1 if plan is not None else 0, plan_hash(plan),
                 json.dumps(meta) if meta is not None else None))
     cx.commit()
-    _wake.set()
+    _kick(kind)
 
 
 def requeue(job_id, kind, params=None, plan=None, phase="rendering",
@@ -332,7 +397,13 @@ def requeue(job_id, kind, params=None, plan=None, phase="rendering",
                (kind, phase, message, kw["params"], kw.get("plan"), h, h, h,
                 json.dumps(meta) if meta is not None else None, time.time(), job_id))
     cx.commit()
-    _wake.set()
+    _kick(kind)
+
+
+def _kick(kind):
+    """Despierta al worker que toma `kind` (su carril o los generales)."""
+    ev = _lane_wake.get(kind)
+    (ev if ev is not None else _wake).set()
 
 
 def update(job_id, **kw):
@@ -517,6 +588,7 @@ def recent(limit=20):
 
 
 _SID_RE = re.compile(r'"sid"\s*:\s*"([0-9a-f]{12})"')
+_SID_OK = re.compile(r"^[0-9a-f]{12}$")
 
 
 def referenced_sids():
@@ -536,15 +608,37 @@ def canceled_export(job_id):
            message=CANCELED_EXPORT_MSG, error=None, cancel=0)
 
 
+def montage_only(plan):
+    """El plan es SOLO el resultado de un montaje (aun sin componer ni analizar)."""
+    return isinstance(plan, dict) and isinstance(plan.get("montage"), dict) and not plan.get("video")
+
+
+def back_to_assembly(job_id, message, error=None):
+    """Un montaje (o la composicion que lo siguio) cancelado o fallido cuyo plan guardado es un
+    montaje: vuelve a la fase `assembly` (el usuario sigue en la pantalla de tomas; nada se pierde).
+    -> True si aplico."""
+    plan, _ = get_plan(job_id)
+    if not montage_only(plan):
+        return False
+    update(job_id, state="review", phase="assembly", pct=100, stage="assembly", eta=None,
+           message=message, error=error, cancel=0)
+    return True
+
+
 def request_cancel(job_id):
     """Marca cancel. Si aún está en cola, se cancela de inmediato (un export en cola con
-    plan vuelve a `review`)."""
+    plan vuelve a `review`; un montaje o su composicion con un montaje guardado, a `assembly`)."""
     cx = _cx()
     now = time.time()
     cur = cx.execute("""UPDATE jobs SET state='review', phase='review', pct=100, stage='review',
                         message=?, error=NULL, cancel=0, updated=?
                         WHERE id=? AND state='queued' AND kind='render' AND plan IS NOT NULL""",
                      (CANCELED_EXPORT_MSG, now, job_id))
+    if cur.rowcount == 0:
+        row = cx.execute("SELECT state, kind FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row and row["state"] == "queued" and row["kind"] in ("montage", "compose") and \
+                back_to_assembly(job_id, MONTAGE_CANCELED_MSG):
+            return True
     if cur.rowcount == 0:
         cur = cx.execute("""UPDATE jobs SET state='canceled', phase='error',
                             error='Cancelado.', updated=? WHERE id=? AND state='queued'""",
@@ -604,12 +698,21 @@ class Progress:
 
 # ---- pool de workers ----
 
-def _claim_next():
+def _claim(only=None, exclude=()):
+    """Toma el trabajo en cola mas antiguo (de los kinds `only`, o de cualquiera salvo `exclude`)
+    y lo marca running -> (id, kind) o None."""
+    where, args = "state='queued'", []
+    if only:
+        where += f" AND kind IN ({','.join('?' * len(only))})"
+        args += list(only)
+    elif exclude:
+        where += f" AND kind NOT IN ({','.join('?' * len(exclude))})"
+        args += list(exclude)
     cx = _cx()
     with cx:                     # BEGIN IMMEDIATE evita que 2 workers tomen el mismo
         cx.execute("BEGIN IMMEDIATE")
-        row = cx.execute("SELECT id, kind FROM jobs WHERE state='queued' "
-                         "ORDER BY created LIMIT 1").fetchone()
+        row = cx.execute(f"SELECT id, kind FROM jobs WHERE {where} ORDER BY created LIMIT 1",
+                         args).fetchone()
         if not row:
             return None
         cx.execute("UPDATE jobs SET state='running', message='Iniciando…', updated=? "
@@ -617,20 +720,35 @@ def _claim_next():
     return row["id"], row["kind"]
 
 
+def _claim_next():
+    """Workers generales: cualquier kind SIN carril propio."""
+    return _claim(exclude=tuple(sorted(_LANE_KINDS)))
+
+
+def _claim_lane(kinds):
+    """Worker de un carril: solo sus kinds."""
+    return _claim(only=tuple(kinds))
+
+
 def _error_label(kind):
+    if kind == "montage":
+        return "Montaje"
     return "Análisis" if kind in ("analyze", "compose") else "Render"
 
 
-def _worker_loop(idx):
-    while True:
+def _worker_loop(idx, lane=None, stop=None):
+    """Worker: toma trabajos en cola (los de su carril, o los generales) y corre su handler.
+    `stop` (Event): termina el hilo (pruebas); el servidor corre para siempre."""
+    wake = _wake if lane is None else _lane_wake[lane]
+    while stop is None or not stop.is_set():
         claimed = None
         try:
-            claimed = _claim_next()
+            claimed = _claim_next() if lane is None else _claim_lane((lane,))
         except Exception:  # noqa
             traceback.print_exc()
         if not claimed:
-            _wake.wait(timeout=2.0)
-            _wake.clear()
+            wake.wait(timeout=2.0)
+            wake.clear()
             continue
         job_id, kind = claimed
         fn = _handlers.get(kind)
@@ -642,20 +760,34 @@ def _worker_loop(idx):
             job = get_light(job_id) or {}
             if kind == "render" and job.get("plan_len"):
                 canceled_export(job_id)          # el plan sigue valido: vuelve a review
-            else:
+            elif not back_to_assembly(job_id, MONTAGE_CANCELED_MSG):
                 update(job_id, state="canceled", phase="error", error="Cancelado.")
             print(f"[worker{idx}] {job_id} cancelado")
         except Exception as e:  # noqa
             traceback.print_exc()
-            update(job_id, state="error", phase="error",
-                   error=f"{_error_label(kind)} falló: {e}")
+            err = f"{_error_label(kind)} falló: {e}"
+            if not back_to_assembly(job_id, err, error=err):
+                update(job_id, state="error", phase="error", error=err)
 
 
-def start_workers(handlers, n=None):
-    global _handlers
+def start_workers(handlers, n=None, lanes=None):
+    """`n` workers generales (REELFY_WORKERS, default 1: FIFO) + un worker por cada kind de
+    `lanes` (carril propio; esos kinds nunca los toman los generales). REELFY_WORKERS=0 (pruebas)
+    no arranca ninguno."""
+    global _handlers, _LANE_KINDS
     _handlers = dict(handlers)
-    n = n or int(os.environ.get("REELFY_WORKERS", "1"))
+    env_n = os.environ.get("REELFY_WORKERS", "1")
+    n = int(env_n) if n is None else int(n)
+    lanes = tuple(lanes or ())
+    _LANE_KINDS = frozenset(lanes)
+    for k in lanes:
+        _lane_wake.setdefault(k, threading.Event())
     for i in range(n):
         threading.Thread(target=_worker_loop, args=(i,), daemon=True,
                          name=f"reelfy-worker-{i}").start()
-    print(f"[jobstore] {n} worker(s) listos; db={DB}")
+    if n > 0:
+        for k in lanes:
+            threading.Thread(target=_worker_loop, args=(f"-{k}", k), daemon=True,
+                             name=f"reelfy-worker-{k}").start()
+    print(f"[jobstore] {n} worker(s) listos{' + carriles ' + ', '.join(lanes) if lanes and n else ''}; "
+          f"db={DB}")

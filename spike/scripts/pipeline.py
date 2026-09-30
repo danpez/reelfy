@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -187,8 +188,10 @@ def extract_audio(video, wav):
     if not has_audio(video):
         raise RuntimeError("El video no tiene pista de audio. Reelfy necesita audio con "
                            "voz para transcribir y generar los subtítulos sincronizados.")
-    r = subprocess.run([FFMPEG, "-y", "-i", str(video), "-ar", "16000", "-ac", "1",
-                        "-c:a", "pcm_s16le", str(wav)],
+    # -map 0:a:0: SIEMPRE la 1a pista de audio. Sin el, ffmpeg elige la de mas canales y los
+    # iPhone traen una 2a pista APAC espacial (4.0) que no se decodifica bien: la voz se perdia
+    r = subprocess.run([FFMPEG, "-y", "-i", str(video), "-map", "0:a:0", "-vn", "-ar", "16000",
+                        "-ac", "1", "-c:a", "pcm_s16le", str(wav)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     if r.returncode != 0:
         tail = " ".join((r.stderr or "").strip().splitlines()[-2:]) or f"código {r.returncode}"
@@ -204,6 +207,12 @@ def need_dtw():
         return not (paths_mod.aligner_model_ready() and align_mod.preload())
     except Exception:  # noqa: sin poder cargar el alineador, el plan B usa el DTW
         return True
+
+
+# Semaforo de la GPU de whisper: la transcripcion por clip ("Armar con IA", en su propio carril al
+# importar) y la del analisis del video combinado corren en hilos distintos del mismo proceso; dos
+# whisper a la vez en Metal se estorban (y duplican la memoria del modelo)
+WHISPER_GPU = threading.BoundedSemaphore(1)
 
 
 def transcribe(wav, out_prefix, glossary="", dtw=None):
@@ -233,8 +242,9 @@ def transcribe(wav, out_prefix, glossary="", dtw=None):
     last = ""
     for extra in ([], ["-ng"]):
         print(f"$ whisper ({'CPU' if extra else 'GPU'})")
-        r = subprocess.run(base + extra, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.PIPE, text=True)
+        with WHISPER_GPU:      # un whisper a la vez: el de cada clip y el del analisis comparten GPU
+            r = subprocess.run(base + extra, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, text=True)
         if r.returncode == 0 and Path(f"{out_prefix}.json").exists():
             if extra:
                 print("   whisper: Metal (GPU) falló en este equipo, se usó CPU")
@@ -252,6 +262,58 @@ def load_words(json_path):
     ('dtw'|'whisper'): align_words lo usa para elegir el plan B y lo quita."""
     with open(json_path) as f:
         return align_mod.whisper_words(json.load(f))
+
+
+def transcribe_clip(video, wav, glossary="", align=True, detect_takes=True, dtw=None):
+    """Transcribe UN clip de una sesion de grabacion ("Armar con IA"), nunca concatenado con otros:
+    una sola pasada sobre todos los clips juntos perdio una toma entera y corrio palabras de un clip
+    a la ventana de otro. 1a pista de audio a 16 kHz (`wav` se queda: el montaje mide la voz y ajusta
+    los cortes con el) -> whisper -> alineador -> tomas DENTRO del clip (takes.detect: reinicios,
+    arranques en falso, errores; las retomas entre clips las resuelve el montaje).
+
+    -> {"audio": bool, "words": [{text, start, end}], "takes": [cortes de tomas del clip],
+        "dur": s, "dtw": bool, "align": metodo|None, "ms": int}. Un clip sin pista de audio no es un
+    error: words vacias y audio False (el montaje lo descarta como "sin_audio")."""
+    import tempfile
+    import time
+    t0 = time.time()
+    video, wav = Path(video), Path(wav)
+    dur = probe_duration(video)
+    out = {"audio": False, "words": [], "takes": [], "dur": round(dur, 3), "dtw": False,
+           "align": None}
+    if not has_audio(video):
+        out["ms"] = int(round((time.time() - t0) * 1000))
+        return out
+    out["audio"] = True
+    extract_audio(video, wav)
+    if dtw is None:
+        dtw = need_dtw()
+    out["dtw"] = bool(dtw)
+    gloss = f"Nombres propios y términos: {glossary}." if str(glossary or "").strip() else ""
+    tmp = Path(tempfile.mkdtemp(prefix="clipwords_", dir=str(WORK)))
+    try:
+        words = load_words(transcribe(wav, tmp / "w", gloss, dtw=dtw))
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    if align and words:
+        try:
+            words = align_mod.align_words(wav, words)
+            out["align"] = align_mod.LAST.get("method")
+        except Exception as e:  # noqa: sin alineador quedan los tiempos de whisper
+            print(f"   alineacion del clip fallo ({e}); tiempos de whisper")
+    words = [{"text": w["text"], "start": round(float(w["start"]), 3), "end": round(float(w["end"]), 3)}
+             for w in words if str(w.get("text") or "").strip()]
+    out["words"] = words
+    if detect_takes and words:
+        try:
+            import takes as takes_mod
+            clip_dur = max(dur, words[-1]["end"])
+            out["takes"] = takes_mod.detect(words, clip_dur, audio=str(wav))["cuts"]
+        except Exception as e:  # noqa: sin tomas internas el montaje igual compara entre clips
+            print(f"   tomas del clip fallaron ({e})")
+    out["ms"] = int(round((time.time() - t0) * 1000))
+    return out
 
 
 def group_phrases(words):
@@ -722,10 +784,12 @@ def finish_short(clip_in, clip_out, dynamic, hook_title, w, h):
     Path(clip_out).with_suffix(".hook.ass").unlink(missing_ok=True)
 
 
-def analyze(video, glossary="", n=2, align=True, on_step=None):
+def analyze(video, glossary="", n=2, align=True, on_step=None, joins=None):
     """Light phase (no heavy render): audio -> transcribe -> align -> phrases +
     highlights + emphasis beats + tracking trajectory. Returns an EDITABLE plan dict
-    (JSON-serializable) the UI can review/tweak before rendering."""
+    (JSON-serializable) the UI can review/tweak before rendering.
+    `joins`: uniones (s) de un montaje con IA en el video combinado: la limpieza de tomas nunca
+    corta a traves de una (takes.detect)."""
     def step(p, m):
         print(f"   [{p}%] {m}")
         if on_step:
@@ -770,7 +834,8 @@ def analyze(video, glossary="", n=2, align=True, on_step=None):
     import takes as takes_mod
     takes_meta, topic = None, None
     try:
-        tk = takes_mod.detect(words, src_len, audio=str(wav), existing_cuts=cuts)
+        tk = takes_mod.detect(words, src_len, audio=str(wav), existing_cuts=cuts,
+                              **({"joins": joins} if joins else {}))
         cuts = takes_mod.merge(cuts, tk["cuts"])
         takes_meta = tk["meta"]
         st = takes_meta["stats"]

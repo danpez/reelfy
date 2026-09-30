@@ -113,6 +113,24 @@ def test_normalize_clamps_y_campos_comunes(v1):
     assert S.validate(n) == []
 
 
+def test_normalize_hasta_el_final_con_duracion_de_5_decimales(v1):
+    """Un video compuesto (montaje) dura p. ej. 81.59069 s: un item hasta el final redondeado a 4
+    decimales (81.5907) quedaba DESPUES del final y validate avisaba "rango fuera del video"
+    (aviso falso en el Studio). Ahora se redondea sin pasarse."""
+    p = _plan(v1, graphics=[{"kind": "cta", "variant": "follow", "start": 5.0, "end": 999}],
+              effects=[{"kind": "zoom", "start": 3.0, "end": 81.59069}],
+              transitions=[{"kind": "flash", "at": 999, "dur": 0.3}])
+    p["duration"] = 81.59069
+    n = S.normalize(p)
+    g, e, tr = n["fx"]["graphics"][0], n["fx"]["effects"][0], n["fx"]["transitions"][0]
+    assert g["end"] == 81.5906 and e["end"] == 81.5906 and tr["at"] == 81.5906
+    assert not [x for x in S.validate(n) if "fuera del video" in x]
+    p["duration"] = 81.757357                 # 81.7574 tambien se pasaba: se queda en 81.7573
+    n = S.normalize(p)
+    assert n["fx"]["graphics"][0]["end"] == 81.7573 and n["fx"]["effects"][0]["end"] == 81.5907
+    assert not [x for x in S.validate(n) if "fuera del video" in x]
+
+
 def test_normalize_completa_requeridos_no_opcionales(v1):
     p = _plan(v1, graphics=[{"kind": "doodle", "start": 1, "end": 2},
                             {"kind": "card", "start": 1, "end": 2}],

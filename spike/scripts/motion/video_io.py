@@ -47,7 +47,7 @@ FFPROBE = str(paths.FFPROBE)
 IS_MAC = paths.IS_MAC
 
 BASE_VERSION = "b4"          # cambia si cambia el algoritmo del base pass (invalida cache)
-VOICE_VERSION = "v4"         # v4: fundido de salida si el ultimo keep corta la fuente
+VOICE_VERSION = "v5"         # v5: sin NaN (deesser tras el relleno de arnndn); v4: fundido de salida
 SR = 48000                   # voz / mezcla
 XFADE_MS = 8.0               # microfundido en cada union de la voz (5-10 ms)
 END_FADE_MS = 25.0           # fundido de salida de la voz si el ultimo keep corta la fuente
@@ -887,7 +887,13 @@ def read_audio(src, sr: int = SR, channels: int = 2, af: str | None = None,
             err.seek(0)
             raise RuntimeError("ffmpeg (audio) fallo: " + err.read().decode("utf-8", "replace")[-400:])
     a = np.frombuffer(b"".join(chunks), np.float32)
-    return a[: len(a) // channels * channels].reshape(-1, channels).copy()
+    a = a[: len(a) // channels * channels].reshape(-1, channels).copy()
+    # la cadena de estudio puede soltar NaN: arnndn rellena la cola con ceros exactos (bloques de
+    # 480) y deesser divide 0/0 ahi. Un solo NaN en la voz envenena la mezcla ENTERA (actividad de
+    # voz -> curvas de musica y SFX) y el export sale mudo: se limpian aqui, en la lectura
+    if not np.isfinite(a).all():
+        np.nan_to_num(a, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    return a
 
 
 def cut_audio(audio: np.ndarray, timeline, fps: float, sr: int = SR,

@@ -541,3 +541,44 @@ def test_scan_caps_medium_frames_on_long_videos(monkeypatch, tmp_path):
     sc3 = D.scan_video(str(v), 8.0, on_progress=fr.append)
     assert np.array_equal(sc3["diff"], sc2["diff"]) and len(sc3["med"]) == len(sc2["med"])
     assert fr and fr == sorted(fr) and fr[-1] > 0.9
+
+
+# ---------------------------------------------------------------- montaje: VLM antes del guion
+def _montage_plan(montage=True):
+    p = long_plan(n_words=60)
+    d = p["duration"]
+    p["shots"] = [{"start": round(d * i / 3, 3), "end": round(d * (i + 1) / 3, 3)} for i in range(3)]
+    if montage:
+        p["montage"] = {"timeline": [{"slot": f"s{i}", "sid": f"c{i}", "in": 0, "out": d / 3} for i in range(3)]}
+    return p
+
+
+@pytest.mark.parametrize("montage", [True, False])
+def test_montage_describe_camaras_antes_del_guion(monkeypatch, montage):
+    """ollama atiende una peticion a la vez: en un montaje el guion (LLM) espera a que el VLM
+    describa las camaras (antes les ganaba la cola y quedaban sin describir); fuera de montaje
+    el guion sigue arrancando en paralelo, como siempre."""
+    ev = []
+    real_shots = D.analyze_shots
+
+    def fake_shots(p, use_llm=True, on_step=None, deadline=None, on_basic=None, turn=None, stats=None, **k):
+        basic = [dict(s, person=True, framing="medio", place="", text_seen=[], use="a_camara",
+                      free_space="arriba", face=[0.5, 0.35, 0.12, 0.2]) for s in p["shots"]]
+        if on_basic:
+            on_basic(basic)
+        time.sleep(0.2)
+        ev.append("vlm_listo")
+        return basic
+    monkeypatch.setattr(D, "analyze_shots", fake_shots)
+    monkeypatch.setattr(D, "llm_available", lambda: True)
+    monkeypatch.setattr(D, "_llm_script", lambda sents, shots: ev.append("guion") or None)
+    budgets = []
+    real_budget = D.director_budget
+    monkeypatch.setattr(D, "director_budget", lambda d: budgets.append(real_budget(d)) or real_budget(d))
+    D.direct(_montage_plan(montage), use_llm=True, trim=False, music_sync=False)
+    assert "guion" in ev and "vlm_listo" in ev
+    if montage:
+        assert ev.index("guion") > ev.index("vlm_listo")
+    else:
+        assert ev.index("guion") < ev.index("vlm_listo")
+    assert real_shots is not None and budgets

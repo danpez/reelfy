@@ -50,15 +50,29 @@ plan['takes'] = {"version": 1, "sensitivity", "topic", "summary", "sections": [{
                  "stats": {n, enabled, removed_s, suggested, by_kind: {kind: {n, s}}}, "llm", "ms"}
 
 API:
-  detect(words, dur, *, sensitivity="normal", audio=None, existing_cuts=None) -> {"cuts", "meta"}
-  merge(old_cuts, take_cuts) -> cuts   (reemplaza los src "takes" salvo los user/edges; idempotente)
+  detect(words, dur, *, sensitivity="normal", audio=None, existing_cuts=None, joins=None)
+      -> {"cuts", "meta"}
+  merge(old_cuts, take_cuts, joins=None) -> cuts   (reemplaza los src "takes" salvo los user/edges;
+      idempotente)
+  plan_joins(plan | shots) -> tiempos de las uniones de un montaje con IA (plan.shots[i].join)
+  respect_joins(cuts, joins) -> cuts sin cortes de tomas (no tocados por el usuario) que crucen una
+      union ; script_sections(montage, shots) -> secciones de plan.takes desde el guion
   apply_sensitivity(cuts, sensitivity) -> cuts ; stats(cuts) -> dict
   effective_words(words, cuts) -> palabras que se quedan ; plan_words(plan) -> palabras del plan
   topic(words, timeout) -> {"topic", "summary", "sections"} | None  (LLM local; None sin LLM)
+
+Uniones de un montaje con IA (`joins`, s del video compuesto): el montaje ya eligio la toma de cada
+parte del guion, asi que sobre el video compuesto la limpieza solo trabaja DENTRO de cada segmento:
+un corte cuyas palabras (o la toma que se queda, la palabra siguiente) caen en otro segmento no se
+propone (una retoma que sobro junto a la union la resuelve el montaje, no un corte que deje una
+astilla), y los bordes de cada corte nunca pasan de las uniones de su segmento. Sin uniones (un
+solo video o un ensamble manual) todo queda igual.
+
 Solo biblioteca estandar (numpy solo para el ajuste al audio, importado al usarlo).
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import re
 import threading
@@ -95,6 +109,8 @@ KEPT_WORDS = 10         # palabras de la toma que se queda (kept_text)
 TOPIC_TIMEOUT = 35.0    # s: tope del tema con el LLM (el analisis nunca espera mas de ~40 s)
 TOPIC_WORDS = 16        # palabras por oracion en el prompt del tema
 TOPIC_MAX_WORDS = 1800  # palabras totales del prompt (cabe en 4096 de contexto)
+JOIN_KINDS = ("section", "line", "splice")   # uniones de un montaje con IA (plan.shots[i].join)
+JOIN_EPS = 0.02         # s: un corte que solo TOCA una union (hasta esto) no la cruza
 
 
 def _gap_pads():
@@ -943,24 +959,171 @@ def _dedupe(cuts: list[Cut]) -> list[Cut]:
     return sorted(main + _merge_overlaps(pieces), key=lambda c: (c.i0, c.i1))
 
 
-def detect_raw(words: list[dict], opts: Opts | None = None, mask=None) -> tuple[list[Tok], list[Cut]]:
+# ----------------------------------------------------------------------------- uniones (montaje)
+def _norm_joins(joins) -> list[float]:
+    """Uniones como tiempos ordenados (acepta numeros o dicts con t/at/start); > 0."""
+    out = set()
+    for j in joins or []:
+        v = j
+        if isinstance(j, dict):
+            v = j.get("t", j.get("at", j.get("start")))
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            out.add(round(v, 3))
+    return sorted(out)
+
+
+def _seg(t: Tok, joins: list[float]) -> int:
+    """Segmento del montaje de una palabra (por su punto medio)."""
+    return bisect.bisect_right(joins, _mid((t.start, t.end)))
+
+
+def _in_segment(toks: list[Tok], c: Cut, joins: list[float]) -> bool:
+    """El corte quita palabras de UN solo segmento y la toma que se queda (la palabra siguiente)
+    sigue en ese segmento."""
+    if not joins:
+        return True
+    s = _seg(toks[c.i0], joins)
+    if _seg(toks[c.i1 - 1], joins) != s:
+        return False
+    return c.i1 >= len(toks) or _seg(toks[c.i1], joins) == s
+
+
+def _seg_bounds(t: Tok, joins: list[float], dur: float) -> tuple[float, float]:
+    """[inicio, fin] del segmento del montaje que contiene la palabra."""
+    k = bisect.bisect_right(joins, _mid((t.start, t.end)))
+    lo = joins[k - 1] if k > 0 else 0.0
+    hi = joins[k] if k < len(joins) else (dur or float("inf"))
+    return lo, hi
+
+
+def plan_joins(plan_or_shots) -> list[float]:
+    """Tiempos (s del video compuesto) de las uniones de un montaje con IA: el inicio de cada toma
+    de plan.shots con join (section|line|splice). [] sin montaje."""
+    shots = plan_or_shots.get("shots") if isinstance(plan_or_shots, dict) else plan_or_shots
+    out = set()
+    for s in shots or []:
+        if not isinstance(s, dict) or s.get("join") not in JOIN_KINDS:
+            continue
+        try:
+            t = float(s["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if t > 0:
+            out.add(round(t, 3))
+    return sorted(out)
+
+
+def crosses_join(c: dict, joins) -> bool:
+    """El corte [start, end] tiene una union estrictamente adentro (tocarla no es cruzarla)."""
+    try:
+        a, b = float(c["start"]), float(c["end"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return any(a + JOIN_EPS < j < b - JOIN_EPS for j in _norm_joins(joins))
+
+
+def respect_joins(cuts: list[dict] | None, joins) -> list[dict]:
+    """Cortes sin los de tomas que cruzan una union del montaje (red de seguridad sobre un plan ya
+    analizado). Los que el usuario toco (user/edges), silencios, manuales y 'ai' se conservan."""
+    jn = _norm_joins(joins)
+    out = []
+    for c in cuts or []:
+        if jn and _is_take(c) and not (c.get("user") or c.get("edges")) and crosses_join(c, jn):
+            continue
+        out.append(c)
+    return out
+
+
+def _section_title(text: str) -> str:
+    """Titulo corto (2 a 6 palabras) de una seccion del guion: su primera frase si es corta, si no
+    sus primeras palabras."""
+    s = " ".join(str(text or "").replace("\n", " ").split()).strip()
+    if not s:
+        return ""
+    m = re.match(r"^(.+?)[.,:;?!…]", s)
+    head = m.group(1).strip(" ¿¡\"'«»“”") if m else ""
+    ws = head.split()
+    if not (2 <= len(ws) <= 6):
+        ws = s.strip(" ¿¡\"'«»“”").split()[:5]
+        # sin colgar en un articulo o conector ("Hola a todos los que" -> "Hola a todos")
+        while len(ws) > 2 and norm(ws[-1]) in DANGLING:
+            ws = ws[:-1]
+    return _clean_str(" ".join(ws), 60).rstrip(".,:;")
+
+
+def script_sections(montage: dict | None, shots: list[dict] | None = None) -> list[dict]:
+    """plan.takes.sections desde el guion del montaje (en vez del tema del LLM): una seccion por
+    seccion del guion que quedo en el video, en el inicio (s del video compuesto) de su primer
+    segmento; titulo = inicio de su primera linea. [] sin guion o sin segmentos mapeados."""
+    if not isinstance(montage, dict):
+        return []
+    script = montage.get("script") if isinstance(montage.get("script"), dict) else {}
+    texts = {str(ln.get("id")): str(ln.get("text") or "") for ln in script.get("lines") or []
+             if isinstance(ln, dict)}
+    slot_lines = {sl.get("id"): [str(x) for x in sl.get("lines") or []]
+                  for sl in montage.get("slots") or [] if isinstance(sl, dict)}
+    first: dict[str, float] = {}
+    for e in montage.get("timeline") or []:
+        if not isinstance(e, dict):
+            continue
+        t = e.get("t0")
+        if t is None and e.get("shot") is not None and shots:
+            try:
+                t = shots[int(e["shot"])]["start"]
+            except (IndexError, KeyError, TypeError, ValueError):
+                t = None
+        if t is None:
+            continue
+        for lid in slot_lines.get(e.get("slot")) or []:
+            first.setdefault(lid, float(t))
+    out: list[dict] = []
+    for sec in script.get("sections") or []:
+        if not isinstance(sec, dict):
+            continue
+        lids = [str(x) for x in sec.get("lines") or []]
+        ts = [first[x] for x in lids if x in first]
+        if not ts:
+            continue
+        title = _section_title(texts.get(lids[0], "")) or f"Parte {len(out) + 1}"
+        out.append({"start": round(min(ts), 2), "title": title})
+    out.sort(key=lambda d: d["start"])
+    dedup: list[dict] = []
+    for d in out:
+        if dedup and abs(d["start"] - dedup[-1]["start"]) < 0.05:
+            continue
+        dedup.append(d)
+    return dedup
+
+
+def detect_raw(words: list[dict], opts: Opts | None = None, mask=None,
+               joins: list[float] | None = None) -> tuple[list[Tok], list[Cut]]:
     """Reglas sobre las palabras (sin tiempos de corte): (tokens, cortes por indice de token).
-    `mask` (huecos de voz, con audio): R3 ve si Whisper se trago el arranque de la oracion siguiente."""
+    `mask` (huecos de voz, con audio): R3 ve si Whisper se trago el arranque de la oracion siguiente.
+    `joins` (uniones de un montaje, s): solo quedan los cortes enteros dentro de UN segmento (ver
+    el modulo), antes de fundir los encimados (uno que cruza no arrastra a uno valido)."""
     opts = opts or Opts()
     toks = tokenize(words)
+    jn = _norm_joins(joins)
     raw: list[Cut] = []
     for fn in (detect_restarts, detect_micro, detect_dead_repeats, detect_abandoned,
                detect_corrections, detect_bloopers, detect_word_stutter):
         raw += fn(toks, opts, mask) if fn is detect_abandoned else fn(toks, opts)
     if opts.restatement:
         raw += detect_restatements(toks, opts)
+    if jn:
+        raw = [c for c in raw if _in_segment(toks, c, jn)]
     cuts = _dedupe(raw)
     # una muletilla pura ('pues,' 'eh') entre la toma quitada y una pausa es la cola del intento
     # malo, no el arranque de la toma buena: se va con el corte (la buena arranca tras la pausa)
     starts = {c.i0 for c in cuts}
     for c in cuts:
         while c.i1 < len(toks) - 1 and c.i1 not in starts and toks[c.i1].filler and \
-                toks[c.i1].n in FILLERS and toks[c.i1 + 1].pause_before >= 0.3:
+                toks[c.i1].n in FILLERS and toks[c.i1 + 1].pause_before >= 0.3 and \
+                (not jn or _seg(toks[c.i1 + 1], jn) == _seg(toks[c.i0], jn)):
             c.i1 += 1
     # un error (groseria/comentario) solo se corta solo dentro de una cadena de retomas; aislado
     # puede ser parte del mensaje ("¡que rico, no mames!"): queda como sugerencia
@@ -1375,8 +1538,9 @@ def _frag_guard(toks: list[Tok], recs: list[dict], existing, dur: float) -> None
 
 
 def detect(words: list[dict], dur: float, *, sensitivity: str = "normal", audio=None,
-           existing_cuts: list[dict] | None = None) -> dict:
-    """Cortes de tomas (contrato arriba) + meta de plan['takes'] (sin tema: lo pone topic())."""
+           existing_cuts: list[dict] | None = None, joins=None) -> dict:
+    """Cortes de tomas (contrato arriba) + meta de plan['takes'] (sin tema: lo pone topic()).
+    `joins`: uniones de un montaje con IA (s; ver el modulo): ningun corte las cruza."""
     t0 = time.time()
     sens = _norm_sens(sensitivity)
     toks = tokenize(words)
@@ -1394,14 +1558,22 @@ def detect(words: list[dict], dur: float, *, sensitivity: str = "normal", audio=
                if 0 <= k < len(db)]
         ref = float(np.median(db[idx])) if idx else float(np.median(db))
     mask = _gap_mask(db, ref + GAP_DB, MIN_GAP) if db is not None else None
-    toks, raw = detect_raw(words, mask=mask)
+    jn = _norm_joins(joins)
+    toks, raw = detect_raw(words, mask=mask, joins=jn)
     if mask is not None:
-        raw = sorted(raw + _voice_gaps(toks, raw, mask), key=lambda c: (c.i0, c.i1))
+        raw = sorted(raw + [c for c in _voice_gaps(toks, raw, mask) if _in_segment(toks, c, jn)],
+                     key=lambda c: (c.i0, c.i1))
     recs: list[dict] = []
     for c in raw:
         ed = _edges(toks, c, dur, db, ref, mask)
         if ed is None:
             continue
+        if jn:
+            # el aire y el ajuste a la energia nunca pasan de las uniones del segmento
+            lo, hi = _seg_bounds(toks[c.i0], jn, dur)
+            ed = (max(ed[0], lo), min(ed[1], hi))
+            if ed[1] - ed[0] < MIN_CUT:
+                continue
         ed = _fix_kept(toks, c, *ed)
         if ed is None:
             continue
@@ -1470,15 +1642,17 @@ def detect(words: list[dict], dur: float, *, sensitivity: str = "normal", audio=
 
 
 # ----------------------------------------------------------------------------- plan
-def merge(old_cuts: list[dict] | None, take_cuts: list[dict] | None) -> list[dict]:
+def merge(old_cuts: list[dict] | None, take_cuts: list[dict] | None, joins=None) -> list[dict]:
     """Cortes del plan con la deteccion nueva: se conservan los silencios, manuales, 'ai' y las
     tomas que el usuario toco (user: true, o edges: true si movio sus bordes); las demas tomas se
-    reemplazan. Idempotente."""
+    reemplazan. `joins` (montaje con IA): ninguna toma nueva cruza una union. Idempotente."""
     old = [c for c in old_cuts or [] if isinstance(c, dict)]
     keep = [c for c in old if not _is_take(c)]
     user = [c for c in old if _is_take(c) and (c.get("user") or c.get("edges"))]
     uid = {c.get("id") for c in user}
     new = [dict(c) for c in take_cuts or [] if isinstance(c, dict) and c.get("id") not in uid]
+    if joins:
+        new = respect_joins(new, joins)
     new.sort(key=lambda c: (float(c.get("start", 0)), float(c.get("end", 0)), str(c.get("id"))))
     return keep + user + new
 
