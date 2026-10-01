@@ -39,8 +39,8 @@
     { v: "energetico", label: "Energético", icon: "flame", desc: "Máxima densidad: sacudidas, glitch y SFX." },
   ];
   const STAGES = [
-    ["director", "Dirigiendo"], ["timeline", "Línea de tiempo"], ["base", "Video base"], ["analysis", "Rostro y recorte"],
-    ["audio", "Audio y música"], ["render", "Componiendo"], ["mux", "Uniendo"], ["shorts", "Shorts"],
+    ["director", "Dirigiendo"], ["recompose", "Alta resolución"], ["timeline", "Línea de tiempo"], ["base", "Video base"], ["analysis", "Rostro y recorte"],
+    ["audio", "Audio y música"], ["render", "Componiendo"], ["mux", "Uniendo"], ["shorts", "Shorts"], ["save", "Guardando"],
   ];
   const LABELS_ES = {
     // opciones frecuentes de selects (se muestran en espanol; el valor sigue siendo el del esquema)
@@ -3806,16 +3806,23 @@
     const base = typeof renderOpts === "function" ? renderOpts() : {};
     return Object.assign({}, base, { plan: planForServer(), fmt: FMT || "9:16", format: FMT || "9:16", shorts: FX.shortsOn() });
   };
+  // el export en curso (startExport): resolucion, si recompone los clips (etapa "Video en 4K") y si pide shorts
+  FX.exportRes = "1080p"; FX.exportRecompose = false; FX.exportShorts = null;
   FX.renderStatus = function (j) {
     const box = $("#r-stages"); if (!box) return;
     let cur = j.stage || null;
     if (cur !== "shorts" && /short/i.test(j.message || "") && (cur === "mux" || cur === "done")) cur = "shorts";
     const order = STAGES.map(s => s[0]);
     const ci = order.indexOf(cur);
-    box.innerHTML = isPro() || cur ? STAGES.filter(s => (s[0] !== "director" || cur === "director") && (s[0] !== "shorts" || cur === "shorts" || FX.shortsOn())).map(([k, l], i) => {
+    // "Video en 4K": recomponer los clips originales a la resolucion pedida (solo si hace falta)
+    const hiLbl = C.EXPORT_RES_LABEL[FX.exportRes] || "alta resolución";
+    if (cur === "recompose" && !j.message) { const m = $("#r-msg"); if (m) m.textContent = `Preparando el video en ${hiLbl}…`; }
+    box.innerHTML = isPro() || cur ? STAGES.filter(s => (s[0] !== "director" || cur === "director") && (s[0] !== "save" || cur === "save")
+      && (s[0] !== "recompose" || cur === "recompose" || FX.exportRecompose)
+      && (s[0] !== "shorts" || cur === "shorts" || (FX.exportShorts !== false && FX.shortsOn()))).map(([k, l], i) => {
       const idx = order.indexOf(k);
       const cls = cur === k ? "cur" : (ci >= 0 && idx < ci ? "done" : "");
-      return `<span class="stg ${cls}"><span class="d"></span>${l}</span>`;
+      return `<span class="stg ${cls}"><span class="d"></span>${k === "recompose" ? `Video en ${esc(hiLbl)}` : l}</span>`;
     }).join("") : "";
     const w = $("#r-warn");
     if (w) w.innerHTML = FX.shortsNote() + warningsHtml(j.warnings || [], true);
@@ -3826,6 +3833,438 @@
     // solo el export (?only=job): la vista previa, la musica IA y el analisis de fondo siguen
     try { await fetch(`/cancel/${JOB}?only=job`, { method: "POST" }); } catch (e) { /* el poll lo resolvera */ }
   };
+
+  // ------------------------------------------------------------------ hoja "Exportar"
+  /* Formato (el del proyecto: cambia el mismo selector del panel), resolucion (nunca por encima de
+     las fuentes originales: max_res de GET /export/estimate), calidad, nombre del archivo (saneado
+     aqui y en el servidor), carpeta (SOLO del selector nativo POST /pick-folder o la recordada por
+     el servidor: aqui nunca se escribe una ruta) e "Incluir shorts", con la estimacion "Tardará ~X
+     min · ~Y MB". Lo elegido se recuerda: resolucion, calidad y shorts en este navegador (y el
+     servidor guarda carpeta, resolucion y calidad al exportar); el nombre, por proyecto.
+     Habla con las dos formas del servidor: la completa (GET /export/options: resoluciones con su
+     motivo, calidades, carpeta y nombre por defecto; POST /render con `export: {res, quality, name,
+     folder, shorts}`; POST /reveal {action}) y la minima del contrato (GET /settings/export, max_res
+     de la estimacion, campos planos en POST /render, POST /open). */
+  const XP_KEY = "reelfy.export", XP_NAMES = "reelfy.export.names";
+  const XP = { open: false, shown: false, job: null, wired: false, picked: false, maxResAny: null, prefs: null, opt: null,
+    folderLabel: null, defName: null, shortsN: null, want: "1080p", res: "1080p", quality: "high", shorts: true, folder: null,
+    name: "", est: null, estLoading: false, estSeq: 0, timer: 0, maxRes: {}, srcRes: null, st: null, busy: false, picking: false,
+    err: null, dirErr: "", dirNotice: "", prevFocus: null, recompose: false };
+  const xpLoad = k => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch (e) { return null; } };
+  const xpSave = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* sin almacenamiento: no se recuerda */ } };
+  async function xpGetJson(u) { try { const r = await fetch(u); return r.ok ? await r.json() : null; } catch (e) { return null; } }
+  async function xpPostJson(u, body) {
+    const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { const det = d && d.detail; const e = new Error(typeof det === "string" ? det : det && (det.message || det.msg) || `Error ${r.status}`); e.code = det && det.code || d.code; throw e; }
+    return d;
+  }
+  const xpFmt = () => (typeof FMT !== "undefined" && FMT) || "9:16";
+  const xpVid = () => typeof V !== "undefined" && V && V.videoWidth ? { w: V.videoWidth, h: V.videoHeight }
+    : C.parseDims(typeof PLAN !== "undefined" && PLAN && PLAN.dims);
+  const xpMulti = () => !!(PLAN && (PLAN.montage || new Set((PLAN.shots || []).map(s => s && s.src).filter(Boolean)).size > 1));
+  const xpShortsN = () => ((PLAN && PLAN.highlights) || []).filter(h => h && h.enabled !== false).length;
+  const xpQualities = () => {
+    const q = XP.opt && Array.isArray(XP.opt.qualities) ? XP.opt.qualities.map(x => ({ v: C.normQuality(x && x.id), label: x && x.label, hint: x && x.hint })).filter(x => x.v) : [];
+    return q.length === 3 ? q : C.EXPORT_QUALITY.map(v => ({ v, label: C.EXPORT_QUALITY_LABEL[v], hint: C.EXPORT_QUALITY_HINT[v] }));
+  };
+  const xpSrvQ = q => C.serverQuality(q, XP.opt && XP.opt.qualities);
+  const xpShortsOk = () => isPro() && xpShortsN() > 0 && FX.shortsOn();
+  const xpShortsEff = () => !!(XP.shorts && xpShortsOk());
+  const xpDefaultName = () => XP.defName || C.defaultExportName(C.projectTitle(PLAN, JOB), new Date(), XP.prefs && XP.prefs.name_pattern);
+  const xpPlatform = () => (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || "";
+  /** Filas del servidor para el formato (GET /export/options) o, sin ellas, la matriz local. */
+  const xpSrvRows = () => { const f = xpFmt(), o = XP.opt && XP.opt.formats && XP.opt.formats[f]; return o ? C.serverResRows(o.resolutions) : null; };
+  function xpResOpts() {
+    const rows = xpSrvRows(); if (rows) return rows;
+    const f = xpFmt(), vid = xpVid();
+    return C.exportResOptions(f, XP.maxRes[f] || XP.maxResAny || C.exportMaxRes(null, XP.srcRes || vid), vid);
+  }
+  /** Cuerpo extra de POST /render (la hoja ya lo saneo; el servidor vuelve a validar). El modo
+      clasico no manda `shorts` (sus clips salen como siempre). */
+  FX.exportBody = function (xo) {
+    const o = xo || {};
+    const b = { resolution: C.EXPORT_RES.includes(o.resolution) ? o.resolution : "1080p",
+      quality: C.normQuality(o.quality) || "high",
+      name: C.sanitizeFileName(o.name, xpDefaultName()), folder: typeof o.folder === "string" && o.folder ? o.folder : null };
+    if (isPro()) b.shorts = !!o.shorts && FX.shortsOn();
+    // la forma del servidor de Reelfy: {export: {res, quality (estandar|alta|maxima), name, folder, shorts}}
+    b.export = { res: b.resolution, quality: xpSrvQ(b.quality), name: b.name };
+    if (b.folder) b.export.folder = b.folder;
+    if (isPro()) b.export.shorts = b.shorts;
+    return b;
+  };
+
+  FX.openExport = async function (o) {
+    if (XP.open || FX.busy() || typeof JOB === "undefined" || !JOB || !PLAN) return;
+    xpWire();
+    XP.open = true; XP.err = o && o.error || null; XP.dirErr = ""; XP.est = null; XP.busy = false; XP.picking = false;
+    XP.prevFocus = document.activeElement;
+    try { await xpOpen(); }
+    catch (e) { XP.open = XP.shown = false; $("#xpSheet").classList.remove("on"); toast(`No se pudo abrir la hoja de exportación: ${e.message || e}`, "alert"); }
+  };
+  async function xpOpen() {
+    const q = new URLSearchParams({ job: JOB, fmt: xpFmt() });
+    const [opt, st] = await Promise.all([JOB !== "demo" ? xpGetJson("/export/options?" + q.toString()) : null,
+      JOB !== "demo" ? xpGetJson(`/status/${encodeURIComponent(JOB)}?plan=0`) : null]);
+    if (!XP.open) return;
+    XP.opt = opt && typeof opt === "object" && opt.formats && typeof opt.formats === "object" ? opt : null;
+    let srv;
+    if (XP.opt) srv = C.normSettings({ defaults: XP.opt.defaults, folder: XP.opt.folder });
+    else srv = C.normSettings((await xpGetJson("/settings/export")) || (await xpGetJson("/export/settings")));
+    if (!XP.open) return;
+    XP.prefs = C.mergeExportPrefs(srv, xpLoad(XP_KEY));
+    XP.want = XP.prefs.resolution; XP.quality = XP.prefs.quality; XP.shorts = XP.prefs.shorts; XP.st = st;
+    if (!XP.folder || !XP.picked) { XP.folder = XP.prefs.folder; XP.folderLabel = srv.folder_label || null; }
+    // la carpeta recordada no esta (disco desconectado): se usa la de siempre CON aviso
+    const fo = XP.opt && XP.opt.folder;
+    XP.dirErr = (!XP.picked && fo && fo.error) || "";
+    XP.dirNotice = (!XP.picked && fo && !fo.error && typeof fo.notice === "string" && fo.notice) || "";
+    XP.defName = XP.opt && typeof XP.opt.name === "string" && XP.opt.name.trim() ? C.sanitizeFileName(XP.opt.name, "") : null;
+    const names = xpLoad(XP_NAMES) || {};
+    XP.name = typeof names[JOB] === "string" && names[JOB] ? names[JOB] : xpDefaultName();
+    $("#xpName").value = XP.name;
+    if (XP.job !== JOB) { XP.job = JOB; XP.maxRes = {}; XP.maxResAny = null; XP.srcRes = null; }
+    xpRender();
+    // la primera estimacion trae la resolucion maxima de las fuentes: la hoja abre ya con las
+    // resoluciones correctas (o, si tarda, a los 0.7 s con lo que se sabe)
+    await Promise.race([xpFetchEst(), new Promise(r => setTimeout(r, 700))]);
+    if (!XP.open) return;
+    XP.shown = true; xpRender();
+    const sh = $("#xpSheet"); sh.classList.add("on");
+    requestAnimationFrame(() => { const g = $("#xpGo"); if (g) g.focus(); });
+  }
+  function xpClose() {
+    if (!XP.open) return;
+    XP.open = false; XP.shown = false; XP.estSeq++; clearTimeout(XP.timer);
+    $("#xpSheet").classList.remove("on");
+    const f = XP.prevFocus; XP.prevFocus = null;
+    if (f && f.focus && document.contains(f)) f.focus();
+  }
+  FX.closeExport = xpClose;
+  FX.esc = esc;
+  FX.exportOpen = () => XP.open;
+
+  function xpSeg(sel, items, cur) {
+    const el = $(sel), act = document.activeElement, keep = act && el.contains(act) ? act.dataset.v : null;
+    el.innerHTML = items.map(it => `<button type="button" role="radio" data-v="${esc(it.v)}" aria-checked="${it.v === cur}"`
+      + ` class="${it.v === cur ? "sel" : ""}${it.off ? " off" : ""}"${it.off ? ' aria-disabled="true"' : ""}`
+      + ` tabindex="${it.v === cur ? 0 : -1}"${it.title ? ` title="${esc(it.title)}"` : ""}>${it.html}</button>`).join("");
+    if (keep != null) { const b = el.querySelector(`[data-v="${CSS.escape(keep)}"]`); if (b) b.focus(); }
+  }
+  function xpRender() {
+    if (!XP.prefs) return;
+    const f = xpFmt();
+    xpSeg("#xpFmt", C.FORMATS.map(v => ({ v, html: v === "original" ? "Original" : esc(v),
+      title: v === "original" ? "Conserva el tamaño y el encuadre originales" : "" })), f);
+    // resolucion
+    const opts = xpResOpts(), vid = xpVid();
+    XP.res = C.pickExportRes(XP.want, opts);
+    const srcCls = (XP.srcRes && C.resClass(XP.srcRes.w, XP.srcRes.h)) || (vid && C.resClass(vid.w, vid.h));
+    const note = xpSrvRows() ? C.combineReasons(opts) : C.exportResNote(srcCls, opts, xpMulti());
+    xpSeg("#xpRes", opts.map(o => ({ v: o.id, off: !o.enabled, title: o.enabled ? `${o.W} × ${o.H} px` : (o.reason || note),
+      html: `<b>${esc(o.label)}</b><span>${o.W} × ${o.H}</span>` })), XP.res);
+    $("#xpResNote").textContent = note;
+    // calidad
+    const qs = xpQualities();
+    xpSeg("#xpQual", qs.map(x => ({ v: x.v, html: esc(x.label || C.EXPORT_QUALITY_LABEL[x.v]) })), XP.quality);
+    const qh = (qs.find(x => x.v === XP.quality) || {}).hint || C.EXPORT_QUALITY_HINT[XP.quality] || "";
+    $("#xpQualNote").textContent = /[.!?…]$/.test(qh) || !qh ? qh : qh + ".";
+    xpNameNote();
+    // carpeta (solo lectura: se cambia con el selector nativo)
+    const dir = XP.folder || "";
+    const d = $("#xpDir"); d.textContent = dir ? C.shortPath(XP.folderLabel || dir, 46) : "~/Movies/Reelfy"; d.title = dir || "Carpeta predeterminada de Reelfy";
+    const dn = $("#xpDirNote");
+    dn.textContent = XP.dirErr || (XP.picked ? "" : XP.dirNotice) || "";
+    dn.classList.toggle("xp-bad", !!XP.dirErr);
+    dn.classList.toggle("xp-notice", !XP.dirErr && !!dn.textContent);
+    const pk = $("#xpPick"); pk.disabled = XP.picking || XP.busy;
+    pk.innerHTML = XP.picking ? `<span class="spinner"></span>Eligiendo…` : `${ICO("folder")}Cambiar…`;
+    // shorts
+    const n = xpShortsN(), ok = xpShortsOk(), sw = $("#xpShorts");     // (PLAN: lo que el editor tiene ahora)
+    // proyecto del editor anterior (plan v1): el servidor solo exporta 1080p dentro de Reelfy
+    const v2 = isPro();
+    document.querySelectorAll("#xpSheet .xp-v2").forEach(x => { x.hidden = !v2; });
+    $("#xpV1Note").hidden = v2;
+    sw.disabled = !ok; sw.checked = xpShortsEff();
+    $("#xpShortsN").textContent = n ? `(${n})` : "";
+    $("#xpShortsNote").textContent = !n ? "Este proyecto no tiene shorts marcados."
+      : !FX.shortsOn() ? `Los shorts son verticales: con el formato ${f === "original" ? "original (horizontal)" : f} no se generan.`
+      : sw.checked ? "Se guardan en la misma carpeta, junto al video." : "Solo se exporta el video completo.";
+    xpRenderEst();
+    const er = $("#xpErr");
+    if (XP.err) {
+      const hi = C.EXPORT_RES.indexOf(XP.res) > C.EXPORT_RES.indexOf("1080p");
+      er.innerHTML = `${ICO("alert")}<span>${esc(XP.err.text || XP.err)}</span>`
+        + (XP.err.code === "recompose" && hi ? `<button type="button" class="rlnk" data-a="1080">Usar 1080p</button>` : "")
+        + (XP.err.code === "folder" ? `<button type="button" class="rlnk" data-a="pick">Elegir otra carpeta</button>` : "");
+      er.hidden = false;
+    } else { er.hidden = true; er.innerHTML = ""; }
+    const go = $("#xpGo"); go.disabled = XP.busy || XP.picking;
+    go.innerHTML = XP.busy ? `<span class="spinner"></span>Iniciando…` : `${ICO("download")}Exportar`;
+    $("#xpCancel").disabled = XP.busy;
+  }
+  function xpNameNote() {
+    const raw = $("#xpName").value, san = C.sanitizeFileName(raw, ""), def = xpDefaultName();
+    const t = !raw.trim() ? `Se usará «${def}.mp4».`
+      : san === "Reelfy" && !/reelfy/i.test(raw) ? `Ese nombre no sirve; se usará «${def}.mp4».`
+      : san !== raw.trim().replace(/(\.mp4)+$/i, "").trim() ? `Se guardará como «${san}.mp4» (sin / \\ : * ? " < > |).` : "";
+    $("#xpNameNote").textContent = t;
+  }
+  function xpRenderEst() {
+    const box = $("#xpEst"), e = XP.est, lbl = C.EXPORT_RES_LABEL[XP.res] || XP.res;
+    let h;
+    if (XP.estLoading && !e) h = `<div class="xp-eline">${ICO("clock")}<span>Calculando el tiempo…</span></div>`;
+    else if (e && C.estimateText(e)) h = `<div class="xp-eline">${ICO("clock")}<span>${esc(C.estimateText(e))}</span></div>`;
+    else h = `<div class="xp-eline xp-dim">${ICO("clock")}<span>Sin estimación del tiempo por ahora.</span></div>`;
+    XP.recompose = !!(e && e.recompose);
+    // montaje con clips de menos resolucion: cuantos se veran escalados en la resolucion elegida
+    const row = (xpSrvRows() || []).find(r => r.id === XP.res), warn = (row && row.warn) || (e && e.res === XP.res && e.warn) || "";
+    if (warn) h += `<div class="xp-esub xp-warn">${esc(/[.!?…]$/.test(warn) ? warn : warn + ".")}</div>`;
+    if (XP.recompose && !e.recompose_cached) h += `<div class="xp-esub">Primero se prepara el video en ${esc(lbl)} desde ${xpMulti() ? "tus clips originales" : "tu video original"}.</div>`;
+    else if (XP.recompose) h += `<div class="xp-esub">Usa el video en ${esc(lbl)} que ya se preparó.</div>`;
+    const st = XP.st, free = st && +st.disk_free_gb;
+    if (e && e.space_ok === false)
+      h += `<div class="xp-esub xp-warn">No hay espacio suficiente: ${+e.need_bytes > 0 ? `hacen falta ${esc(C.approxSize(e.need_bytes))}` : "falta espacio"}${+e.free_bytes > 0 ? ` y quedan ${esc(C.approxSize(e.free_bytes).replace("~", ""))}` : ""}. Libera espacio o elige una resolución menor.</div>`;
+    else if (e && +e.bytes > 0 && free > 0 && +e.bytes > free * 1e9)
+      h += `<div class="xp-esub xp-warn">No hay espacio suficiente: este export ocupa ${esc(C.approxSize(e.bytes))} y quedan ${free.toFixed(1)} GB.</div>`;
+    else if (st && st.low_space)
+      h += `<div class="xp-esub xp-warn">${esc(st.low_space_message || "Poco espacio en el disco")}${free > 0 ? ` (quedan ${free.toFixed(1)} GB)` : ""}.</div>`;
+    box.innerHTML = h;
+  }
+  /** Una estimacion (GET /export/estimate) con lo elegido; trae tambien la resolucion maxima de
+      las fuentes originales (max_res) y la de la fuente (source_res). */
+  async function xpFetchEst() {
+    if (!XP.open) return;
+    const f = xpFmt(), res = XP.res, seq = ++XP.estSeq;
+    XP.estLoading = true; XP.est = null; if (XP.shown) xpRenderEst();
+    const q = new URLSearchParams({ job: JOB, res, fmt: f, shorts: xpShortsEff() ? "1" : "0", quality: xpSrvQ(XP.quality) });
+    if (XP.folder) q.set("folder", XP.folder);
+    const d = JOB !== "demo" ? await xpGetJson("/export/estimate?" + q.toString()) : null;
+    if (seq !== XP.estSeq || !XP.open) return;
+    XP.estLoading = false; XP.est = d && typeof d === "object" ? d : null;
+    if (XP.est) {
+      if (C.EXPORT_RES.includes(XP.est.max_res)) XP.maxRes[f] = XP.maxResAny = XP.est.max_res;
+      const sd = C.parseDims(XP.est.source_res); if (sd) XP.srcRes = sd;
+    }
+    xpRender();
+    if (XP.res !== res) xpEstimate(0);       // la resolucion pedida no se ofrece en este proyecto
+  }
+  function xpEstimate(delay) {
+    clearTimeout(XP.timer);
+    XP.timer = setTimeout(xpFetchEst, delay == null ? 140 : delay);
+  }
+  async function xpPick() {
+    if (XP.picking || XP.busy) return;
+    XP.picking = true; XP.dirErr = ""; xpRender();
+    try {
+      const d = await xpPostJson("/pick-folder", XP.folder ? { start: XP.folder } : {});
+      if (d && typeof d.path === "string" && d.path) {
+        XP.folder = d.path; XP.folderLabel = typeof d.label === "string" && d.label ? d.label : null; XP.picked = true;
+        if (XP.err && XP.err.code === "folder") XP.err = null;
+        xpEstimate(0);                          // otro disco: cambia el tiempo de copia y el espacio
+      }
+    } catch (e) {
+      XP.dirErr = C.exportError(e.message, e.code).text;
+    }
+    XP.picking = false;
+    if (XP.open) { xpRender(); const pk = $("#xpPick"); if (pk) pk.focus(); }
+  }
+  async function xpGo() {
+    if (XP.busy || XP.picking || !XP.open) return;
+    const raw = $("#xpName").value;
+    const name = C.sanitizeFileName(raw, xpDefaultName());
+    const v2 = isPro();       // el editor anterior (v1) exporta como siempre: 1080p, calidad de siempre
+    const xo = { resolution: v2 ? XP.res : "1080p", quality: v2 ? XP.quality : "high", name, folder: XP.folder || null,
+      shorts: xpShortsEff(), recompose: v2 && XP.recompose };
+    XP.busy = true; XP.err = null; xpRender();
+    let r;
+    try { r = await startExport(xo, XP.st); } catch (e) { r = { ok: false, code: null, text: String((e && e.message) || e) }; }
+    XP.busy = false;
+    if (!r || !r.ok) { XP.err = r || { text: "No se pudo iniciar el export." }; if (XP.open) xpRender(); return; }
+    xpSave(XP_KEY, { resolution: XP.want, quality: XP.quality, shorts: XP.shorts });
+    const names = xpLoad(XP_NAMES) || {};
+    if (raw.trim() && name !== xpDefaultName()) names[JOB] = name; else delete names[JOB];
+    const ks = Object.keys(names); ks.slice(0, Math.max(0, ks.length - 40)).forEach(k => delete names[k]);
+    xpSave(XP_NAMES, names);
+    xpClose();
+  }
+  function xpSegKey(e) {
+    const seg = e.target.closest(".xp-seg"); if (!seg) return false;
+    if (!/^Arrow(Left|Right|Up|Down)$|^Home$|^End$/.test(e.key)) return false;
+    const bs = [...seg.querySelectorAll("button:not(.off)")], i = bs.indexOf(e.target.closest("button"));
+    const n = e.key === "Home" ? 0 : e.key === "End" ? bs.length - 1 : (i + (/Left|Up/.test(e.key) ? -1 : 1) + bs.length) % bs.length;
+    e.preventDefault(); if (bs[n]) { bs[n].focus(); bs[n].click(); }
+    return true;
+  }
+  function xpWire() {
+    if (XP.wired) return; XP.wired = true;
+    const sh = $("#xpSheet");
+    $("#xpFmt").addEventListener("click", e => {
+      const b = e.target.closest("button[data-v]"); if (!b || XP.busy) return;
+      const v = b.dataset.v;
+      if (v !== xpFmt()) { const pb = document.querySelector(`#segFmt button[data-v="${CSS.escape(v)}"]`); if (pb) pb.click(); }
+      xpRender(); xpEstimate();
+    });
+    $("#xpRes").addEventListener("click", e => {
+      const b = e.target.closest("button[data-v]"); if (!b || XP.busy) return;
+      if (b.classList.contains("off")) { const n = $("#xpResNote"); n.classList.remove("xp-flash"); void n.offsetWidth; n.classList.add("xp-flash"); return; }
+      XP.want = b.dataset.v; xpRender(); xpEstimate();
+    });
+    $("#xpQual").addEventListener("click", e => {
+      const b = e.target.closest("button[data-v]"); if (!b || XP.busy) return;
+      XP.quality = b.dataset.v; xpRender(); xpEstimate();
+    });
+    const nm = $("#xpName");
+    nm.addEventListener("input", () => { XP.name = nm.value; xpNameNote(); });
+    nm.addEventListener("blur", () => { if (nm.value.trim()) { const s = C.sanitizeFileName(nm.value, xpDefaultName()); if (s !== nm.value) { nm.value = s; XP.name = s; } } xpNameNote(); });
+    nm.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); xpGo(); } });
+    $("#xpShorts").addEventListener("change", e => { XP.shorts = e.target.checked; xpRender(); xpEstimate(); });
+    $("#xpPick").addEventListener("click", xpPick);
+    $("#xpCancel").addEventListener("click", () => { if (!XP.busy) xpClose(); });
+    $("#xpGo").addEventListener("click", xpGo);
+    $("#xpErr").addEventListener("click", e => {
+      const a = e.target.closest("[data-a]"); if (!a) return;
+      if (a.dataset.a === "1080") { XP.want = "1080p"; XP.err = null; xpRender(); xpEstimate(); }
+      else if (a.dataset.a === "pick") xpPick();
+    });
+    sh.addEventListener("mousedown", e => { if (e.target === sh && !XP.busy) xpClose(); });
+    // el teclado de la hoja no llega al editor (Espacio = reproducir, flechas = mover el cabezal...)
+    sh.addEventListener("keydown", e => {
+      e.stopPropagation();
+      if (e.key === "Escape") { e.preventDefault(); if (!XP.busy) xpClose(); return; }
+      if (e.key === "Tab") {
+        const fs = [...sh.querySelectorAll("button:not([disabled]),input:not([disabled])")].filter(x => x.offsetParent && x.tabIndex >= 0);
+        const i = fs.indexOf(document.activeElement); e.preventDefault();
+        const n = fs[(i + (e.shiftKey ? fs.length - 1 : 1) + fs.length) % fs.length]; if (n) n.focus();
+        return;
+      }
+      xpSegKey(e);
+    });
+    // foco fuera de la hoja (clic en el fondo, otra ventana): los atajos tampoco llegan al editor
+    document.addEventListener("keydown", e => {
+      if (!XP.shown || sh.contains(e.target)) return;
+      e.stopPropagation(); e.preventDefault();
+      if (e.key === "Escape" && !XP.busy) xpClose(); else { const g = $("#xpGo"); if (g) g.focus(); }
+    }, true);
+  }
+
+  /** Linea "a donde va" del export en curso: "<nombre>.mp4 en ~/Movies/Reelfy · 4K · Calidad alta". */
+  /** Linea "a donde va" del export en curso: "<nombre>.mp4 en ~/Movies/Reelfy · 4K · Calidad alta".
+      `srv` = lo que respondio POST /render (export: {file_name, folder_label, label}) si lo trae. */
+  FX.exportDest = function (el, xo, srv) {
+    if (!el) return;
+    if (!xo) { el.hidden = true; el.innerHTML = ""; return; }
+    const sv = srv && typeof srv === "object" ? srv : {};
+    const lbl = sv.label || C.EXPORT_RES_LABEL[xo.resolution] || "1080p";
+    const file = sv.file_name || `${xo.name}.mp4`, folder = sv.folder || xo.folder;
+    const where = sv.folder_label || folder || XP.folderLabel || "~/Movies/Reelfy";
+    const q = C.EXPORT_QUALITY_LABEL[C.normQuality(xo.quality) || "high"];
+    el.innerHTML = `${ICO("folder")}<span><b>${esc(file)}</b> en ${esc(C.shortPath(where, 48))} · ${esc(lbl)} · Calidad ${esc(q.toLowerCase())}</span>`;
+    el.title = folder || "";
+    el.hidden = false;
+  };
+
+  /** Tarjeta de un resultado del export. Con `path` (guardado en la carpeta elegida): nombre final,
+      carpeta, resolucion, duracion, tamano y "Mostrar en Finder" / "Abrir". `o.hero`: el video
+      completo arriba, a lo ancho. Con `save_error` (se renderizo pero no se pudo guardar en la
+      carpeta): el motivo y "Guardar de nuevo…" (otra carpeta, POST /export/save). Sin `path` (lote,
+      servidor anterior): descarga como antes. */
+  FX.resultCard = function (c, o) {
+    const el = document.createElement("div"), hero = !!(o && o.hero);
+    el.className = "clip" + (hero ? " xp-hero" + (+c.W > +c.H ? " xp-land" : "") : "");
+    el.style.animationDelay = (((o && o.i) || 0) * 0.06) + "s";
+    const file = encodeURIComponent(c.file || ""), poster = c.thumb ? ` poster="/image/${encodeURIComponent(c.thumb)}"` : "";
+    const ar = +c.W > 0 && +c.H > 0 ? `${+c.W} / ${+c.H}` : "9 / 16";
+    const video = `<video src="/video/${file}"${poster} controls preload="metadata"${hero ? ` style="--ar:${ar}"` : ""}></video>`;
+    const thumbRow = c.thumb ? `<div class="m xp-thumb"><span>Miniatura + hook</span><a class="dl" href="/image/${encodeURIComponent(c.thumb)}" download>Imagen</a></div>` : "";
+    const dsec = +c.duration > 0 ? +c.duration : (+c.end > +c.start ? +c.end - +c.start : 0);
+    const dur = dsec > 0 ? C.fmtDuration(dsec) : "", size = +c.bytes > 0 ? C.fmtSize(c.bytes) : "";
+    const meta = [C.resLabel(c.W, c.H), dur, size].filter(Boolean);
+    if (hero && !c.path && c.save_error) {
+      el.innerHTML = video + `<div class="xp-info"><b class="xp-kick">${esc(c.name || "Video completo")}</b>`
+        + `<div class="xp-fname">${esc(c.file_name || (o && o.xo && o.xo.name ? o.xo.name + ".mp4" : c.file || ""))}</div>`
+        + `<div class="xp-saveerr" role="alert">${ICO("alert")}<span>${esc(c.save_error)}</span></div>`
+        + `<div class="xp-chips">${meta.map(m => `<span class="xp-chip">${esc(m)}</span>`).join("")}</div>`
+        + `<div class="xp-acts"><button type="button" class="btn mini xp-resave" data-xa="resave">${ICO("folder")}<span>Guardar de nuevo…</span></button>`
+        + `<a class="btn ghost mini" href="/video/${file}" download>${ICO("download")}<span>Descargar</span></a></div></div>`;
+      el.dataset.file = c.file || "";
+      return el;
+    }
+    if (!c.path) {
+      el.innerHTML = video + `<div class="m"><b>${esc(c.name)}</b><a class="dl" href="/video/${file}" download>Video</a></div>` + thumbRow;
+      return el;
+    }
+    const rl = C.revealLabel(xpPlatform());
+    const acts = `<div class="xp-acts"><button type="button" class="btn ghost mini" data-xa="reveal" title="${esc(rl)}" aria-label="${esc(rl)}: ${esc(C.pathBase(c.path))}">${ICO("folder")}<span>${hero ? esc(rl) : "Mostrar"}</span></button>`
+      + `<button type="button" class="btn ghost mini" data-xa="open" title="Abrir con la app de video" aria-label="Abrir ${esc(C.pathBase(c.path))}">${ICO("external")}<span>Abrir</span></button></div>`;
+    const dir = c.folder || C.pathDir(c.path);
+    if (hero) {
+      el.innerHTML = video + `<div class="xp-info"><b class="xp-kick">${esc(c.name || "Video completo")}</b>`
+        + `<div class="xp-fname" title="${esc(c.path)}">${esc(c.file_name || C.pathBase(c.path))}</div>`
+        + `<div class="xp-fdir" title="${esc(dir)}">${ICO("folder")}<span>${esc(C.shortPath(c.folder_label || dir, 60))}</span></div>`
+        + `<div class="xp-chips">${meta.map(m => `<span class="xp-chip">${esc(m)}</span>`).join("")}</div>${acts}</div>`;
+    } else {
+      const sm = [+c.W > 0 && +c.H > 0 ? `${+c.W} × ${+c.H}` : "", dur, size].filter(Boolean);
+      el.innerHTML = video + `<div class="m"><b>${esc(c.name)}</b></div>`
+        + `<div class="xp-meta" title="${esc(c.path)}"><div class="xp-mfile">${esc(c.file_name || C.pathBase(c.path))}</div>`
+        + (sm.length ? `<div>${sm.map(x => `<span>${esc(x)}</span>`).join(" · ")}</div>` : "") + `</div>${acts}` + thumbRow;
+    }
+    el.dataset.path = c.path;
+    // servidor de Reelfy (clips con saved/folder_label): "Abrir" es POST /reveal {action: "open"}
+    if ((o && o.srv) || c.saved !== undefined || c.folder_label !== undefined) el.dataset.api = "srv";
+    return el;
+  };
+  /** "Mostrar en Finder" (POST /reveal {path, action: "reveal"}) y "Abrir" (POST /open; si el
+      servidor no lo tiene, POST /reveal {action: "open"}). */
+  async function xpReveal(path, action, srv) {
+    if (action === "open" && !srv) {
+      const r = await fetch("/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) });
+      if (r.status !== 404 && r.status !== 405) {
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(typeof d.detail === "string" ? d.detail : `Error ${r.status}`); }
+        return;
+      }
+    }
+    await xpPostJson("/reveal", { path, action });
+  }
+  /** Guardar de nuevo un export que no se pudo copiar a la carpeta: elegir otra (selector nativo) y
+      POST /export/save {job, file, folder}. */
+  async function xpResave(c, btn) {
+    btn.disabled = true;
+    try {
+      const d = await xpPostJson("/pick-folder", c.folder ? { start: c.folder } : {});
+      if (!d || !d.path) return;
+      const sv = await xpPostJson("/export/save", { job: JOB, file: c.file, folder: d.path });
+      if (!sv || !sv.saved) throw new Error((sv && sv.save_error) || "No se pudo guardar.");
+      Object.assign(c, { saved: true, path: sv.path, file_name: sv.file_name, bytes: sv.bytes || c.bytes, folder: sv.folder, folder_label: sv.folder_label });
+      delete c.save_error;
+      const sh = Array.isArray(sv.shorts) ? sv.shorts : [];
+      const grp = typeof RESULTS !== "undefined" ? RESULTS.find(g => g.clips && g.clips[0] === c) : null;
+      if (grp) grp.clips.slice(1).forEach((x, i) => { if (sh[i]) { x.path = sh[i]; x.file_name = C.pathBase(sh[i]); } });
+      toast(`Guardado en ${C.shortPath(sv.folder_label || sv.folder || "", 48)}.`, "check");
+      if (typeof showResults === "function") showResults();
+    } catch (err) {
+      toast(C.exportError(err.message, err.code).text, "alert");
+    } finally { btn.disabled = false; }
+  }
+  /** Botones de las tarjetas (delegado: la cuadricula se redibuja). */
+  (function wireResultActions() {
+    const g = document.getElementById("clips"); if (!g) return;
+    g.addEventListener("click", async e => {
+      const b = e.target.closest("button[data-xa]"); if (!b || b.disabled) return;
+      if (b.dataset.xa === "resave") {
+        const f = b.closest("[data-file]"), fn = f && f.dataset.file;
+        const c = typeof RESULTS !== "undefined" ? RESULTS.flatMap(x => x.clips || []).find(x => x.file === fn) : null;
+        if (c) xpResave(c, b);
+        return;
+      }
+      const card = b.closest("[data-path]"); const p = card && card.dataset.path; if (!p) return;
+      b.disabled = true;
+      try { await xpReveal(p, b.dataset.xa === "open" ? "open" : "reveal", card.dataset.api === "srv" || !!XP.opt); }
+      catch (err) { toast(`No se pudo ${b.dataset.xa === "open" ? "abrir" : "mostrar"} el archivo: ${err.message || err}`, "alert"); }
+      b.disabled = false;
+    });
+  })();
 
   // ------------------------------------------------------------------ presets de marca
   FX.gatherPreset = function () {

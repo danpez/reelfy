@@ -2,7 +2,7 @@
 expansiva, fragmentos absorbidos y uniones pegadas a cambios de toma."""
 import pytest
 
-from motion.timeline import Timeline, keeps_from_cuts
+from motion.timeline import Timeline, keeps_from_cuts, shot_frame, snap_window
 from conftest import load_plan_v1
 
 
@@ -173,6 +173,51 @@ def test_union_pegada_al_cambio_de_toma():
     t = Timeline.from_plan({"duration": 10.0, "cuts": [cut(3.0, 4.9)], "shots": shots}, fps=60)
     assert t.frame_ranges() == [(0, 180), (300, 600)]
 
+
+
+def test_shot_frame_es_el_primer_cuadro_real_de_la_toma():
+    """round(t * fps) con empates hacia arriba (filtro fps round=near), no ceil(t * fps - 0.1)."""
+    assert shot_frame(34 / 30, 30) == 34
+    assert shot_frame(1.133, 30) == shot_frame(1.134, 30) == 34      # ms abajo / arriba
+    assert shot_frame(61.104, 30) == 1833                            # +4 ms de deriva (antes 1834)
+    # fuente de 60 fps a 30: la toma del cuadro 61 de la fuente (empate) sale en el 31
+    assert shot_frame(61 / 60, 30) == 31
+    # combinado de 30 fps exportado a 24: el cuadro 38 (30.4) cae en el 30 (antes 31)
+    assert shot_frame(38 / 30, 24) == 30
+
+
+def test_keep_en_un_cambio_de_toma_no_toma_cuadros_de_la_otra():
+    """Toma nueva en el cuadro 150 guardada a ms por debajo (4.9997) o corrida +4 ms (5.004)."""
+    for s in (4.9997, 5.004):
+        shots = [{"start": 0.0}, {"start": s}]
+        # el keep EMPIEZA justo en el cambio (antes con 4.9997: cuadro 149, de la toma anterior)
+        t = Timeline.from_plan({"duration": 10.0, "cuts": [cut(3.0, s)], "shots": shots}, fps=30)
+        assert t.frame_ranges() == [(0, 90), (150, 300)], s
+        # el keep TERMINA justo en el cambio (antes con 5.004: cuadro 150, de la toma siguiente)
+        t = Timeline.from_plan({"duration": 10.0, "cuts": [cut(s, 7.0)], "shots": shots}, fps=30)
+        assert t.frame_ranges() == [(0, 150), (210, 300)], s
+        # pegado al cambio (el corte termina 2 cuadros antes): al cuadro real (antes 151 con 5.004)
+        t = Timeline.from_plan({"duration": 10.0, "cuts": [cut(3.0, s - 0.066)], "shots": shots},
+                               fps=30)
+        assert t.frame_ranges() == [(0, 90), (150, 300)], s
+        assert t.shot_change_frames(shots) == [90]
+        # un keep que empieza a mas de un cuadro del cambio no se toca
+        t = Timeline.from_plan({"duration": 10.0, "cuts": [cut(3.0, s + 0.05)], "shots": shots},
+                               fps=30)
+        assert t.frame_ranges()[1][0] == int((s + 0.05) * 30 + 1e-6), s
+
+
+def test_snap_window_pega_limites_a_menos_de_cuadro_y_medio():
+    fr = [0, 88, 103, 180]                        # inicio, union, cambio de toma, final
+    assert snap_window(1.0, 2.93, fr, 30) == (1.0, 88 / 30)       # termina en el corte
+    assert snap_window(1.0, 2.9, fr, 30) == (1.0, 88 / 30)        # un cuadro antes
+    assert snap_window(1.0, 2.8997, fr, 30) == (1.0, 88 / 30)     # 1 cuadro redondeado (86.99)
+    assert snap_window(2.95, 4.0, fr, 30) == (88 / 30, 4.0)       # empieza medio cuadro tarde
+    assert snap_window(3.4, 4.0, fr, 30) == (103 / 30, 4.0)       # en el cambio de toma
+    assert snap_window(0.02, 5.99, fr, 30) == (0.0, 6.0)          # inicio y fin del video
+    assert snap_window(1.0, 2.83, fr, 30) == (1.0, 2.83)          # 3 cuadros antes: intacto
+    assert snap_window(2.92, 2.95, fr, 30) == (2.92, 2.95)        # quedaria sin cuadros: intacto
+    assert snap_window(1.0, 2.9, [], 30) == (1.0, 2.9)
 
 def test_to_dict_ida_y_vuelta_con_ajustes():
     plan = {"duration": 10.0, "cuts": [cut(1.013, 2.02), cut(3.0, 4.97), cut(6.0, 6.07)],

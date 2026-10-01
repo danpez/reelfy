@@ -1,7 +1,8 @@
 """Vista en vivo del Studio para los recursos flotantes (app/static/floatcard.js, window.FloatCard):
 el port JS de motion/media.py da la MISMA geometria (tarjeta centrada, simetrica al pixel, arriba
-de los subtitulos) y la MISMA animacion que el render, con cientos de casos al azar; mas sus
-pruebas unitarias en node (tests/js/floatcard.test.js).
+de los subtitulos), la MISMA animacion (flotacion, vaiven 3D, paralaje) y la MISMA luz (franja,
+irisado, franjas de la perspectiva) que el render, con cientos de casos al azar; mas sus pruebas
+unitarias en node (tests/js/floatcard.test.js).
 
 Las pruebas que necesitan node se SALTAN si no esta instalado (la app no depende de node)."""
 import json
@@ -105,7 +106,7 @@ def test_animacion_y_tiempos_iguales_al_render(tmp_path):
         st = MF.card_anim(c["lt"], c["dur"], c["in"] if c["in"] is not None else MF.IN_DUR,
                           c["out"] if c["out"] is not None else MF.OUT_DUR,
                           c["fl"] if c["fl"] is not None else 1.0)
-        for k in ("alpha", "scale", "dy", "tilt", "bg"):
+        for k in ("alpha", "scale", "dy", "tilt", "bg", "sway", "fdy", "lift"):
             assert _close(st[k], g["st"][k], 1e-9), (k, c, st, g["st"])
         assert _close(MF.kenburns_zoom(c["lt"], c["dur"], c["kb"] if c["kb"] is not None else MF.KENBURNS), g["kb"], 1e-9)
         it = {k: v for k, v in c["it"].items() if v is not None}
@@ -116,10 +117,89 @@ def test_animacion_y_tiempos_iguales_al_render(tmp_path):
             assert _close(x, gx, 1e-9) and _close(y, gy, 1e-9), (c, g)
 
 
+LIVE_CONSTS = ("FLOAT_AMP", "FLOAT_T", "BREATH", "SWAY", "SWAY_T", "PERSP", "KB_LEAD", "PARALLAX",
+               "PARALLAX_MAX", "SHEEN_A", "SHEEN_DELAY", "SHEEN_EVERY", "SHEEN_DUR", "SHEEN_MIN", "SHEEN_OUT",
+               "SHEEN_EASE", "SHUTTER", "SHUTTER_N", "GLOSS_A", "HOLO_A", "RIM_A", "WARP_STEP", "WARP_MIN", "WARP_MAX")
+
+
+@needs_node
+def test_vida_luz_y_franjas_iguales_al_render(tmp_path):
+    """La vida en reposo de la vista en vivo = la del render, paso a paso: paralaje, horario de la
+    franja de luz, el degradado de la luz (con irisado y vaiven), las franjas de la perspectiva,
+    el cuadrilatero animado y cuanto brillo lleva cada recurso."""
+    rnd = random.Random(13)
+    cases = []
+    for _ in range(400):
+        dur = round(rnd.uniform(0.4, 9.0), 3)
+        cases.append({
+            "lt": round(rnd.uniform(-0.3, dur + 0.3), 4), "dur": dur,
+            "in": rnd.choice([None, 0.2, 0.35, 0.8]), "out": rnd.choice([None, 0.15, 0.25, 1.0]),
+            "fl": rnd.choice([None, 0.0, 0.5, 1.0, 2.0]),
+            "px": [round(rnd.uniform(-0.03, 0.03), 5), rnd.choice([384, 960, 1920]), rnd.choice([205, 513, 1026]),
+                   rnd.choice([1.0, 1.024, 1.08, 1.3])],
+            "ls": [rnd.choice([None, [round(rnd.uniform(-0.4, 1.4), 4), round(rnd.uniform(0, 1), 4)]]),
+                   round(rnd.uniform(-6, 6), 3), rnd.choice([0.0, 0.3, 1.0, 1.5]), rnd.choice([0.0, 0.6, 1.0])],
+            "ws": [rnd.choice([164, 821, 1642]), rnd.choice([205, 1026, 2053]), round(rnd.uniform(-16, 16), 3),
+                   round(rnd.uniform(0.85, 1.05), 4)],
+            "card": {"cy": round(rnd.uniform(0.3, 0.6), 5), "w": round(rnd.uniform(0.4, 0.76), 5),
+                     "aspect": rnd.choice([0.5625, 0.8, 1.0])},
+            "bw": rnd.choice([216, 540, 1080, 1081]),
+            "it": rnd.choice([{}, {"kind": "image"}, {"kind": "video"}, {"kind": "video", "sheen": 0.4},
+                              {"sheen": 2}, {"sheen": -1, "holo": 0.3}]),
+            "baked": rnd.random() < 0.2})
+    (tmp_path / "v.json").write_text(json.dumps(cases))
+    got = _node_json(tmp_path, "v.js", "const d=JSON.parse(fs.readFileSync(%s,'utf8'));"
+                     "process.stdout.write(JSON.stringify(d.map(c=>{const st=FC.cardAnim(c.lt,c.dur,c.in,c.out,c.fl);"
+                     "return {px: FC.parallaxPx(...c.px), sh: FC.sheenState(c.lt,c.dur,c.in,c.out),"
+                     "ls: FC.lightStops(...c.ls), ws: FC.warpStrips(...c.ws), q: FC.cardQuad(c.card,c.bw,c.bw*16/9,st),"
+                     "am: FC.sheenAmount(c.it,c.baked), ho: FC.param(c.it,'holo'),"
+                     "lsx: FC.lightStops(FC.sheenState(c.lt,c.dur,c.in,c.out), st.sway, FC.sheenAmount(c.it,c.baked), FC.param(c.it,'holo')),"
+                     "la: FC.lightAt(c.lt,c.dur,st.sway,FC.sheenAmount(c.it,c.baked),FC.param(c.it,'holo'),c.in,c.out)};})));"
+                     % json.dumps(str(tmp_path / "v.json")))
+    n_light = n_blur = 0
+    for c, g in zip(cases, got):
+        inn = c["in"] if c["in"] is not None else MF.IN_DUR
+        out = c["out"] if c["out"] is not None else MF.OUT_DUR
+        st = MF.card_anim(c["lt"], c["dur"], inn, out, c["fl"] if c["fl"] is not None else 1.0)
+        assert _close(MF.parallax_px(*c["px"]), g["px"], 1e-9), (c, g["px"])
+        sh = MF.sheen_state(c["lt"], c["dur"], inn, out)
+        assert (sh is None) == (g["sh"] is None), (c, sh, g["sh"])
+        if sh is not None:
+            assert _close(sh[0], g["sh"][0], 1e-9) and _close(sh[1], g["sh"][1], 1e-9), (c, sh, g["sh"])
+        for mine, theirs in ((MF.light_stops(*c["ls"]), g["ls"]),
+                             (MF.light_stops(sh, st["sway"], MF.sheen_amount(c["it"], c["baked"]),
+                                             MF.param(c["it"], "holo")), g["lsx"])):
+            assert len(mine) == len(theirs), (c, mine, theirs)
+            n_light += bool(mine)
+            for a, b in zip(mine, theirs):
+                assert all(_close(x, y, 1e-7) for x, y in zip(a, b)), (c, a, b)
+        # la luz que se DIBUJA (con desenfoque de movimiento): igual en la vista y en el render
+        la = MF.light_at(c["lt"], c["dur"], st["sway"], MF.sheen_amount(c["it"], c["baked"]),
+                         MF.param(c["it"], "holo"), inn, out)
+        assert len(la) == len(g["la"]), (c, la, g["la"])
+        n_blur += len(la) > 12
+        for a, b in zip(la, g["la"]):
+            assert all(_close(x, y, 1e-7) for x, y in zip(a, b)), (c, a, b)
+        ws = MF.warp_strips(*c["ws"])
+        assert len(ws) == len(g["ws"]), c
+        for a, b in zip(ws, g["ws"]):
+            assert all(_close(x, y, 1e-7) for x, y in zip(a, b)), (c, a, b)
+        for (x, y), (gx, gy) in zip(MF.card_quad(c["card"], c["bw"], c["bw"] * 16 / 9, st), g["q"]):
+            assert _close(x, gx, 1e-7) and _close(y, gy, 1e-7), (c, g["q"])
+        assert _close(MF.sheen_amount(c["it"], c["baked"]), g["am"], 1e-12), c
+        assert _close(MF.param(c["it"], "holo"), g["ho"], 1e-12), c
+    assert n_light > 300                              # se probo luz de verdad (no solo listas vacias)
+    assert n_blur > 20                                # y franjas promediadas en el obturador
+
+
 @needs_node
 def test_defaults_y_constantes_iguales(tmp_path):
     got = _node_json(tmp_path, "k.js", "process.stdout.write(JSON.stringify({d: FC.DEFAULTS, s: FC.STYLES, f: FC.FITS,"
-                     "w: FC.CARD_W, a: FC.ASPECT, t: FC.ASPECT_TALL, r: FC.RADIUS, safe: FC.SAFE}));")
+                     "w: FC.CARD_W, a: FC.ASPECT, t: FC.ASPECT_TALL, r: FC.RADIUS, safe: FC.SAFE, live: FC.LIVE_DEFAULTS,"
+                     "k: {%s}}));" % ",".join(f"{k}: FC.{k}" for k in LIVE_CONSTS))
+    assert got["live"] == pytest.approx(MF.LIVE_DEFAULTS)
+    for k in LIVE_CONSTS:
+        assert got["k"][k] == pytest.approx(getattr(MF, k)), k
     assert got["d"] == pytest.approx(MF.DEFAULTS) and got["s"] == list(MF.STYLES) and got["f"] == list(MF.FITS)
     assert got["w"] == pytest.approx(MF.CARD_W) and got["a"] == pytest.approx(MF.ASPECT)
     assert got["t"] == pytest.approx(MF.ASPECT_TALL) and got["r"] == pytest.approx(MF.RADIUS)
@@ -146,3 +226,100 @@ def test_tarjeta_debajo_de_subtitulos_subidos_igual_en_la_vista(tmp_path):
             assert top_edge >= b + MF.MARGIN - 1e-6, (c, card, b)     # debajo de los subtitulos
         else:
             assert bot_edge <= t - MF.MARGIN + 1e-6, (c, card, t)     # arriba
+
+
+# ------------------------------------------------------------------ dibujo real en Chromium (opcional)
+PW = __import__("os").environ.get("REELFY_PLAYWRIGHT")      # ruta a node_modules/playwright-core
+needs_pw = pytest.mark.skipif(NODE is None or not PW, reason="sin playwright-core (REELFY_PLAYWRIGHT)")
+_PW_JS = r"""
+const { chromium } = require(process.env.REELFY_PLAYWRIGHT);
+const fs = require("fs");
+const d = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+(async () => {
+  const opt = { headless: true };
+  if (process.env.REELFY_PW_EXE) opt.executablePath = process.env.REELFY_PW_EXE;
+  else if (process.env.REELFY_PW_CHANNEL) opt.channel = process.env.REELFY_PW_CHANNEL;
+  const b = await chromium.launch(opt);
+  const pg = await b.newPage({ viewport: { width: d.W, height: d.H } });
+  await pg.setContent(`<canvas id="c" width="${d.W}" height="${d.H}"></canvas>`);
+  await pg.addScriptTag({ path: d.fc });
+  const out = [];
+  for (const t of d.ts) {
+    out.push(await pg.evaluate(async ({ d, t }) => {
+      const ld = s => new Promise(r => { const i = new Image(); i.onload = () => r(i); i.src = s; });
+      const im = await ld(d.img), FC = window.FloatCard, g = document.getElementById("c").getContext("2d");
+      const it = d.it, lt = t - it.start, dur = it.end - it.start, B = { x: 0, y: 0, w: d.W, h: d.H };
+      const card = FC.cardLayout(im.naturalWidth, im.naturalHeight, B.w / B.h, FC.captionTop(d.cap, true, it.start, it.end, B.w / B.h),
+        null, null, null, FC.captionBottom(d.cap, true, it.start, it.end, B.w / B.h));
+      const st = FC.cardAnim(lt, dur, FC.param(it, "in_dur"), FC.param(it, "out_dur"), FC.param(it, "float"));
+      g.fillStyle = d.bg; g.fillRect(0, 0, d.W, d.H);
+      FC.drawCard(g, { src: im, w: im.naturalWidth, h: im.naturalHeight }, B, card, st, it, lt, dur);
+      return document.getElementById("c").toDataURL("image/png");
+    }, { d, t }));
+  }
+  await b.close();
+  process.stdout.write(JSON.stringify(out));
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_pw
+def test_dibujo_de_la_vista_en_vivo_en_chromium_igual_al_render(tmp_path):
+    """La tarjeta que dibuja floatcard.js en un canvas 2D REAL (Chromium) es la del render (Skia):
+    misma perspectiva por franjas, Ken Burns con paralaje y franja de luz; diferencia media < 3
+    niveles dentro de la tarjeta, con la franja de luz a media tarjeta y con el vaiven al maximo.
+    Opcional (playwright-core no es dependencia): REELFY_PLAYWRIGHT=/ruta/playwright-core y
+    REELFY_PW_EXE (ejecutable) o REELFY_PW_CHANNEL=chrome."""
+    import base64
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    from motion import render as R
+    from motion import video_io as V
+    W, H = 540, 960
+    bg = (32, 40, 48)
+    src = tmp_path / "plano.mp4"
+    subprocess.run([V.FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", f"color=c=0x202830:s={W}x{H}:r=30:d=6",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv444p", "-qp", "0", str(src)], check=True)
+    media = tmp_path / "media"
+    media.mkdir()
+    yy, xx = np.mgrid[0:1350, 0:1080]
+    arr = np.zeros((1350, 1080, 3), np.uint8)
+    arr[..., 0] = (60 + 150 * yy / 1350).astype(np.uint8)
+    arr[..., 1] = (40 + 120 * xx / 1080).astype(np.uint8)
+    arr[..., 2] = 140
+    arr[(yy // 90) % 2 == 0] //= 2                                 # franjas: se nota el paralaje
+    Image.fromarray(arr).save(media / "poster01.png")
+    it = {"id": "md_p", "start": 0.5, "end": 5.5, "sid": "poster01", "path": None, "kind": "image", "fit": "hold",
+          "speed": 1.0, "src_in": 0.0, "style": "float_card", "enabled": True, "locked": True, "src": "script",
+          "name": "p", "shadow": 0, "holo": 0}
+    plan = {"video": str(src), "duration": 6.0, "cuts": [], "version": 2, "phrases": [],
+            "fx": {"captions": {"enabled": True}, "grade": {"enabled": False},
+                   "music": {"enabled": False, "source": "none"}, "media": [it]}}
+    o = {"W": W, "H": H, "dither": 0.0, "cache_dir": str(tmp_path / "cache"), "media_root": str(media),
+         "enhance_audio": False}
+    job = R.prepare(plan, o)["job"]
+    lt_band = MF.IN_DUR + MF.SHEEN_DELAY + MF.SHEEN_DUR / 2
+    ts = [round((0.5 + lt_band) * 30) / 30, round((0.5 + MF.SWAY_T * 3 / 4) * 30) / 30]
+    # el fondo del render es el video plano oscurecido (sin textura: el desenfoque no cambia nada)
+    py = [R.render_frame(plan, t, o)[..., :3].astype(int) for t in ts]
+    bgc = py[0][4, 4]
+    d = {"W": W, "H": H, "ts": ts, "it": it, "cap": job["captions"], "fc": str(STATIC / "floatcard.js"),
+         "bg": "rgb(%d,%d,%d)" % tuple(int(v) for v in bgc),
+         "img": "data:image/png;base64," + base64.b64encode((media / "poster01.png").read_bytes()).decode()}
+    (tmp_path / "d.json").write_text(json.dumps(d))
+    (tmp_path / "pw.js").write_text(_PW_JS)
+    r = subprocess.run([NODE, str(tmp_path / "pw.js"), str(tmp_path / "d.json")], capture_output=True, text=True,
+                       timeout=180, env=dict(__import__("os").environ))
+    assert r.returncode == 0, r.stderr[-2000:]
+    js = [np.asarray(Image.open(io.BytesIO(base64.b64decode(u.split(",")[1]))).convert("RGB")).astype(int)
+          for u in json.loads(r.stdout)]
+    for t, a, b in zip(ts, js, py):
+        st = MF.card_anim(t - 0.5, 5.0)
+        q = MF.card_quad(job["media"][0]["_card"], W, H, st)
+        x0, x1 = int(max(q[0][0], q[3][0])) + 6, int(min(q[1][0], q[2][0])) - 6
+        y0, y1 = int(q[0][1]) + 6, int(q[3][1]) - 6
+        diff = np.abs(a[y0:y1, x0:x1] - b[y0:y1, x0:x1]).mean(axis=2)
+        assert diff.mean() < 3.0 and np.percentile(diff, 95) < 10, (t, diff.mean(), np.percentile(diff, 95))

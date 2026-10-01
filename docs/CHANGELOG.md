@@ -2,6 +2,35 @@
 
 Formato: cada versión = un tag `reelfy-v*` que dispara el build de los 3 instaladores.
 
+## v0.5.5 — 2026-10-01
+
+**Exportar como tú quieras (hasta 4K), lo negativo se ve negativo e imágenes con vida.**
+
+### Exportar
+- Nueva ventana de exportación: formato, resolución (720p, 1080p, 1440p, 4K), calidad (Estándar /
+  Alta / Máxima), nombre del archivo, carpeta (selector de macOS; se recuerda) e incluir shorts, con el
+  tiempo y el peso estimados antes de exportar.
+- 4K real: si tus clips originales lo tienen, Reelfy vuelve a montar el video desde ellos a la
+  resolución elegida (nunca escala de más; avisa si un clip es de menor resolución).
+- Al terminar: ruta, peso y resolución, con "Mostrar en Finder" y "Abrir". Nunca sobrescribe un
+  archivo (agrega " (2)").
+
+### Edición con IA
+- Las frases negativas (errores, "nadie", "cero", fracasos, dudas) reciben un tratamiento serio: color
+  apagado o blanco y negro frío con viñeta, un glitch corto, un título serio, un ícono sobrio y un golpe
+  grave; ya no llevan estrellitas ni adornos de celebración. Las frases positivas no cambian.
+- El color y el estilo de subtítulos que ajustas ya no se pierden al re-dirigir.
+- Una palabra en color oscuro dentro de un título claro lleva un contorno fino para leerse.
+
+### Recursos flotantes
+- Las imágenes flotan, se inclinan en 3D con perspectiva, tienen acercamiento con paralaje y un brillo
+  de luz que las cruza (con reflejo irisado suave); los videos flotan y se inclinan.
+
+### Correcciones
+- El video compuesto queda exacto al cuadro (antes el render podía mostrar el cuadro anterior).
+
+---
+
 ## v0.5.4 — 2026-09-30
 
 **Cambios de cámara con aceleración y recursos flotantes desde el guion.**

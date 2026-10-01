@@ -364,9 +364,11 @@
   @keyframes pop{from{opacity:0;transform:scale(.95)}to{opacity:1;transform:none}}
   .modal video{width:280px;aspect-ratio:9/16;object-fit:contain;background:#000;border-radius:14px;border:1px solid var(--line2)}
   .modal .cap{color:var(--muted);font-size:12.5px;margin-top:12px}
-  .clips{display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:16px}
-  .gtitle{grid-column:1/-1;color:var(--muted);font-size:12.5px;font-weight:600;margin:6px 0 -6px;
-          display:flex;align-items:center;gap:7px}
+  /* resultados centrados (mismo espacio a izquierda y derecha aunque haya 1 o 2 tarjetas) */
+  .clips{display:flex;flex-wrap:wrap;justify-content:center;gap:16px}
+  .clips>.clip{flex:0 0 200px;min-width:0}
+  .gtitle{flex:1 0 100%;color:var(--muted);font-size:12.5px;font-weight:600;margin:6px 0 -6px;
+          display:flex;align-items:center;justify-content:center;gap:7px}
   .clip{background:var(--panel2);border:1px solid var(--line);border-radius:12px;overflow:hidden;
         transition:all .18s var(--ease);animation:enter .45s both}
   .clip:hover{transform:translateY(-2px);border-color:var(--line2);box-shadow:0 12px 30px -14px rgba(0,0,0,.7)}
@@ -418,7 +420,7 @@
   .rdlg .rbtns .rdel{background:#d33c3c;box-shadow:none}
   @media (max-width:480px){ #recent .rrow .ro{display:none} }   /* telefono: la fila entera abre; mas lugar para el nombre */
 </style>
-<link rel="stylesheet" href="/static/fx.css?v=fffd0439">
+<link rel="stylesheet" href="/static/fx.css?v=42ad0c24">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute">
@@ -482,6 +484,9 @@
     <g id="i-restore"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.5V9H9"/></g>
     <g id="i-book"><path d="M4.5 5.5A1.5 1.5 0 0 1 6 4h13.5v14H6a1.5 1.5 0 0 0-1.5 1.5z"/><path d="M4.5 19.5A1.5 1.5 0 0 0 6 21h13.5v-3"/></g>
     <g id="i-pausebar"><rect x="7" y="5.5" width="3.2" height="13" rx="1" fill="currentColor" stroke="none"/><rect x="13.8" y="5.5" width="3.2" height="13" rx="1" fill="currentColor" stroke="none"/></g>
+    <g id="i-folder"><path d="M4 7.5A1.5 1.5 0 0 1 5.5 6h4l2 2.2h7A1.5 1.5 0 0 1 20 9.7v7.8a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/></g>
+    <g id="i-clock"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></g>
+    <g id="i-external"><path d="M13.5 5H19v5.5"/><path d="M19 5l-8 8"/><path d="M17 13.5V18a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 5 18V9a1.5 1.5 0 0 1 1.5-1.5H11"/></g>
   </defs>
 </svg>
 
@@ -867,6 +872,7 @@
 
   <section class="screen" id="s-rendering"><div class="card">
     <h3><svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg>Exportando…</h3>
+    <div class="xp-rdest" id="r-dest" hidden></div>
     <div class="stages" id="r-stages"></div>
     <div class="bar"><i id="r-fill"></i></div>
     <div class="pmsg" id="r-msg">Montando…</div>
@@ -892,7 +898,7 @@
     <h3><svg class="ic" viewBox="0 0 24 24" style="color:var(--ok)"><use href="#i-check"/></svg>Listo</h3>
     <div class="clips" id="clips"></div>
     <div class="warnlist" id="resWarn"></div>
-    <div style="margin-top:18px">
+    <div class="xp-resfoot">
       <button class="btn ghost" id="backEditor"><svg class="ic" viewBox="0 0 24 24"><use href="#i-undo"/></svg>Volver al editor</button>
       <button class="btn ghost" id="again">Procesar más videos</button>
     </div>
@@ -901,6 +907,7 @@
   <section class="screen" id="s-error"><div class="card err">
     <svg class="ic" viewBox="0 0 24 24"><use href="#i-alert"/></svg> <span id="err-msg"></span>
     <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn" id="retry1080" hidden><svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg>Exportar en 1080p</button>
       <button class="btn ghost" id="retry">Volver</button>
       <button class="btn ghost" id="showLog"><svg class="ic" viewBox="0 0 24 24"><use href="#i-type"/></svg>Ver detalles del error</button>
       <button class="btn ghost" id="saveLog"><svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg>Guardar registro (.txt)</button>
@@ -919,12 +926,40 @@
   <div class="btnrow" style="margin-top:12px"><button class="btn ghost mini" id="pvmCancel"><svg class="ic" viewBox="0 0 24 24"><use href="#i-x"/></svg>Cancelar</button></div>
 </div></div>
 
+<!-- hoja "Exportar": formato, resolucion, calidad, nombre, carpeta (selector nativo) y shorts (fx.js: FX.openExport) -->
+<div class="modal xp" id="xpSheet" role="dialog" aria-modal="true" aria-labelledby="xpTitle">
+  <div class="box xp-box">
+    <h3 class="xp-h" id="xpTitle"><svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg>Exportar video</h3>
+    <div class="xp-body">
+      <div class="xp-fld"><label id="xpFmtL">Formato</label><div class="seg xp-seg" id="xpFmt" role="radiogroup" aria-labelledby="xpFmtL"></div></div>
+      <div class="xp-v1note" id="xpV1Note" hidden>Este proyecto es del editor anterior: se exporta en 1080p y lo descargas desde Reelfy al terminar.</div>
+      <div class="xp-fld xp-v2" id="xpResF"><label id="xpResL">Resolución</label><div class="seg xp-seg xp-res" id="xpRes" role="radiogroup" aria-labelledby="xpResL"></div>
+        <div class="xp-note" id="xpResNote"></div></div>
+      <div class="xp-fld xp-v2"><label id="xpQualL">Calidad</label><div class="seg xp-seg" id="xpQual" role="radiogroup" aria-labelledby="xpQualL"></div>
+        <div class="xp-note" id="xpQualNote"></div></div>
+      <div class="xp-fld xp-v2"><label for="xpName">Nombre del archivo</label>
+        <div class="xp-name"><input type="text" id="xpName" spellcheck="false" autocomplete="off" maxlength="240"><span class="xp-ext">.mp4</span></div>
+        <div class="xp-note" id="xpNameNote"></div></div>
+      <div class="xp-fld xp-v2"><label id="xpDirL">Carpeta</label>
+        <div class="xp-dir"><div class="xp-path" id="xpDir" aria-labelledby="xpDirL"></div>
+          <button class="btn ghost mini" id="xpPick" type="button"><svg class="ic" viewBox="0 0 24 24"><use href="#i-folder"/></svg>Cambiar…</button></div>
+        <div class="xp-note xp-bad" id="xpDirNote" role="alert"></div></div>
+      <div class="xp-fld xp-v2 xp-shorts"><label class="swlabel" for="xpShorts"><input type="checkbox" class="toggle" id="xpShorts">Incluir shorts <span class="xp-cnt" id="xpShortsN"></span></label>
+        <div class="xp-note" id="xpShortsNote"></div></div>
+    </div>
+    <div class="xp-est" id="xpEst" aria-live="polite"></div>
+    <div class="xp-err" id="xpErr" role="alert" hidden></div>
+    <div class="xp-foot"><button class="btn ghost" id="xpCancel" type="button">Cancelar</button>
+      <button class="btn" id="xpGo" type="button"><svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg>Exportar</button></div>
+  </div>
+</div>
+
 <video id="srcVid" style="display:none" playsinline></video>
 
-<script src="/static/floatcard.js?v=fe2b0932"></script>
-<script src="/static/fxcore.js?v=fffd0439"></script>
-<script src="/static/fx.js?v=fffd0439"></script>
-<script src="/static/profile.js?v=fffd0439"></script>
+<script src="/static/floatcard.js?v=5c7b07c9"></script>
+<script src="/static/fxcore.js?v=42ad0c24"></script>
+<script src="/static/fx.js?v=42ad0c24"></script>
+<script src="/static/profile.js?v=42ad0c24"></script>
 <script>
 const $=s=>document.querySelector(s);
 /* tooltips flotantes (position:fixed) para que NO se corten dentro de paneles con overflow */
@@ -2396,12 +2431,12 @@ async function poll(){
     asmSaved(JOB,null);          // ya compuesto: los cambios del ensamble quedaron en el video
     if(!PLAN&&!j.plan){ try{ j.plan=(await(await fetch("/plan/"+JOB)).json()).plan; }catch(e){ return setTimeout(poll,1200); } }
     if(!PLAN){ PLAN=j.plan; if(j.plan_rev!=null) FX.serverRev=j.plan_rev; FX.restoreEngine(j.engine); openEditor(); FX.watchStatus(j); }
-    else if(!$("#s-editor").classList.contains("on")){ backToEditor(); if(window.RENDER_CANCELED){ window.RENDER_CANCELED=false; FX.toast("Export cancelado.","alert"); } }
+    else if(!$("#s-editor").classList.contains("on")){ EXPORTING=null; backToEditor(); if(window.RENDER_CANCELED){ window.RENDER_CANCELED=false; FX.toast("Export cancelado.","alert"); } }
     return; }
   else if(j.phase==="rendering"){ show("#s-rendering"); setBar("#r-fill",j.pct);
     $("#r-msg").textContent=j.message||"Montando…"; $("#r-pct").textContent=Math.round(j.pct)+"%";
     $("#r-el").textContent=(j.elapsed||0)+"s"; $("#r-eta").textContent=j.eta!=null?j.eta+"s":"calculando…"; FX.renderStatus(j); }
-  else if(j.phase==="done"){ asmSaved(JOB,null); FX.lastWarnings=j.warnings||[]; addResults(j.clips); return showResults(); }
+  else if(j.phase==="done"){ asmSaved(JOB,null); FX.lastWarnings=j.warnings||[]; const xo=EXPORTING; EXPORTING=null; addResults(j.clips,null,xo); return showResults(); }
   else if(j.phase==="assembly"){   // componer un armado con IA fallo o se cancelo: vuelve a las tomas (nada se pierde)
     const why=j.error||j.message||"La composición se detuvo.";
     if(ASM.montage&&ASM.montageJob===JOB){ show("#s-assembly"); asmSideMode(); asmFit(); FX.toast(why,"alert",false,[],true); }
@@ -2409,8 +2444,9 @@ async function poll(){
       if(jj) mtReopen(JOB,jj); else fail(why); }
     return; }
   else if(j.phase==="error"){
-    if(PLAN&&(window.RENDER_CANCELED||/cancel/i.test(j.error||""))){ window.RENDER_CANCELED=false; backToEditor(); FX.toast("Export cancelado. Tu edición sigue aquí.","alert"); return; }
-    return fail(j.error); }
+    if(PLAN&&(window.RENDER_CANCELED||/cancel/i.test(j.error||""))){ window.RENDER_CANCELED=false; EXPORTING=null; backToEditor(); FX.toast("Export cancelado. Tu edición sigue aquí.","alert"); return; }
+    const xe=j.export&&typeof j.export==="object"&&j.export.state==="error"?j.export:{};
+    return EXPORTING?failExport(j.error||xe.message,xe.code||j.error_code,xe.fallback_res):fail(j.error); }
   setTimeout(poll,900);
 }
 function backToEditor(){ if(!EDITOR_WIRED||EDITOR_JOB!==JOB) openEditor(); else show("#s-editor"); }
@@ -3431,28 +3467,51 @@ function renderSubs(){
 
 
 /* ---- export ---- */
-$("#render").onclick=async()=>{
-  if(FX.busy()) return;
-  if(JOB&&JOB!=="demo"){
-    let st=null; try{ st=await(await fetch("/status/"+JOB+"?plan=0")).json(); }catch(e){ st=null; }
-    if(st&&st.low_space&&!confirm(lowSpaceMsg(st)+"\n\nExportar un video largo necesita varios GB libres. ¿Exportar de todos modos?")) return;
-    showLow("#r-low",st);
-  }
+// "Exportar" abre la hoja (formato, resolucion, calidad, nombre, carpeta, shorts: fx.js FX.openExport);
+// su boton "Exportar" llama a startExport.
+$("#render").onclick=()=>{ if(FX.busy()) return; FX.openExport(); };
+let EXPORTING=null;                   // opciones del export en curso (para "Exportar en 1080p" si falla)
+/** Lanza el export con las opciones de la hoja xo = {resolution, quality, name, folder, shorts};
+    `st` = /status (aviso de poco disco). -> {ok:true} o {ok:false, code, text} (la hoja lo muestra). */
+async function startExport(xo,st){
   if(FX.isPro()) await FX.saveNow();
   V.pause(); M&&M.pause(); FX.onPlay();
-  window.RENDER_CANCELED=false;
-  const cb=$("#r-cancel"); cb.disabled=false; cb.innerHTML=ICO("x")+"Cancelar export";
-  setBar("#r-fill",1); $("#r-msg").textContent="Preparando el render…"; $("#r-pct").textContent="0%"; $("#r-el").textContent="0s"; $("#r-eta").textContent="calculando…";
-  FX.renderStatus({stage:FX.isPro()?"timeline":null}); $("#r-warn").innerHTML="";
-  show("#s-rendering");
-  const body=FX.isPro()?FX.renderBody():{plan:PLAN,...renderOpts()};
+  const body=Object.assign(FX.isPro()?FX.renderBody():{plan:PLAN,...renderOpts()},FX.exportBody(xo));
+  let d;
   try{
     const r=await fetch("/render/"+JOB,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    const d=await r.json().catch(()=>({}));
-    if(!r.ok) throw new Error(d.detail||("Error "+r.status));
+    d=await r.json().catch(()=>({}));
+    if(!r.ok){ const det=d.detail, msg=typeof det==="string"?det:det&&(det.message||det.msg)||("Error "+r.status);
+      return Object.assign({ok:false},FXCore.exportError(msg,(det&&det.code)||d.code||d.error_code||(r.status===507?"no_space":null))); }
     if(d.plan_rev!=null) FX.serverRev=d.plan_rev;     // el export guarda el plan que viaja
-  }catch(e){ return fail("No se pudo iniciar el export: "+(e.message||e)); }
+  }catch(e){ return {ok:false,code:null,text:"No se pudo iniciar el export: "+(e.message||e)}; }
+  EXPORTING=Object.assign({},xo); window.RENDER_CANCELED=false;
+  FX.exportRes=xo.resolution||"1080p"; FX.exportRecompose=!!xo.recompose; FX.exportShorts=body.shorts!==false;
+  const cb=$("#r-cancel"); cb.disabled=false; cb.innerHTML=ICO("x")+"Cancelar export";
+  setBar("#r-fill",1); $("#r-msg").textContent="Preparando el render…"; $("#r-pct").textContent="0%"; $("#r-el").textContent="0s"; $("#r-eta").textContent="calculando…";
+  showLow("#r-low",st); FX.exportDest($("#r-dest"),xo,d&&d.export);
+  FX.renderStatus({stage:FX.isPro()?"timeline":null}); $("#r-warn").innerHTML="";
+  show("#s-rendering");
   poll();
+  return {ok:true};
+}
+/** El export fallo: mensaje en espanol y, si era mas que 1080p (o el servidor ofrece otra:
+    export.fallback_res), "Exportar en 1080p". */
+function failExport(msg,code,fallback){
+  const xo=EXPORTING; EXPORTING=null;
+  const e=FXCore.exportError(msg,code);
+  fail(e.text);
+  const R=FXCore.EXPORT_RES, to=R.includes(fallback)?fallback:"1080p";
+  const hi=xo&&PLAN&&JOB&&R.indexOf(xo.resolution)>R.indexOf(to);
+  const b=$("#retry1080"); b.hidden=!hi; b._xo=hi?Object.assign({},xo,{resolution:to,recompose:false}):null;
+  if(hi) b.innerHTML=ICO("download")+"Exportar en "+FXCore.EXPORT_RES_LABEL[to];
+}
+$("#retry1080").onclick=async()=>{
+  const b=$("#retry1080"), xo=b._xo; if(!xo||b.disabled) return;
+  b.disabled=true;
+  const r=await startExport(xo,null);
+  b.disabled=false;
+  if(!r.ok){ backToEditor(); FX.openExport({error:r}); }
 };
 $("#r-cancel").onclick=()=>FX.cancelRender();
 $("#cancel").onclick=async()=>{
@@ -3512,19 +3571,19 @@ function waitPhase(job,phase,onTick){
 
 /* ============ results ============ */
 let RESULTS=[];
-function addResults(clips,group){ RESULTS.push({group,clips}); }
+function addResults(clips,group,xo){ RESULTS.push({group,clips:clips||[],xo:xo||null}); }
 function showResults(){
   const g=$("#clips"); g.innerHTML="";
-  RESULTS.forEach(({group,clips})=>{
+  RESULTS.forEach(({group,clips,xo})=>{
     if(group){ const t=document.createElement("div"); t.className="gtitle";
-      t.innerHTML=ICO("film")+" "+group; g.appendChild(t); }
+      t.innerHTML=ICO("film")+" "+FX.esc(group); g.appendChild(t); }
+    // export del editor guardado en la carpeta elegida: el video completo arriba (ruta, tamano,
+    // duracion, resolucion, "Mostrar en Finder", "Abrir") y los shorts en la cuadricula
+    const hero=!group&&clips[0]&&!!(clips[0].path||clips[0].save_error);
     clips.forEach((c,i)=>{
-      const el=document.createElement("div"); el.className="clip"; el.style.animationDelay=(i*.06)+"s";
-      const poster=c.thumb?` poster="/image/${c.thumb}"`:"";
-      el.innerHTML=`<video src="/video/${c.file}"${poster} controls preload="metadata"></video>
-        <div class="m"><b>${c.name}</b><a class="dl" href="/video/${c.file}" download>Video</a></div>`
-        +(c.thumb?`<div class="m" style="border-top:1px solid var(--line)"><span style="color:var(--faint);font-size:11.5px">Miniatura + hook</span><a class="dl" href="/image/${c.thumb}" download>Imagen</a></div>`:"");
-      g.appendChild(el);
+      if(hero&&i===1){ const t=document.createElement("div"); t.className="gtitle";
+        t.innerHTML=ICO("film")+` Shorts (${clips.length-1})`+(clips[0].path?" · en la misma carpeta":""); g.appendChild(t); }
+      g.appendChild(FX.resultCard(c,{hero:hero&&i===0,i,xo,srv:!!clips[0]&&clips[0].saved!==undefined}));
     });
   });
   $("#backEditor").style.display=PLAN?"inline-flex":"none";
@@ -3535,7 +3594,7 @@ function showResults(){
 $("#backEditor").onclick=()=>{ RESULTS=[]; backToEditor(); };
 $("#again").onclick=()=>{ location.href=location.pathname; };
 $("#retry").onclick=()=>{ if(PLAN&&JOB) backToEditor(); else location.href=location.pathname; };
-function fail(m){ show("#s-error"); $("#err-msg").textContent=m||"Ocurrió un error."; }
+function fail(m){ show("#s-error"); $("#err-msg").textContent=m||"Ocurrió un error."; $("#retry1080").hidden=true; }
 async function loadLog(){ try{ return await(await fetch("/logs")).text(); }catch(e){ return "(no se pudo leer el registro)"; } }
 $("#showLog").onclick=async()=>{ const b=$("#logBox");
   if(b.style.display==="none"){ b.textContent=await loadLog(); b.style.display="block"; }

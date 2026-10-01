@@ -430,6 +430,10 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
         if msg not in skipped:
             skipped.append(msg)
 
+    # uniones y cambios de toma (cuadros finales): un item que empieza/termina a <= 1.5 cuadros de uno
+    # se pega a el (T.snap_window: sin un cuadro sin zoom justo antes del salto)
+    bounds = tl.content_frames(plan.get("shots"), fps)
+
     def mapped(track):
         out = []
         for i, it in enumerate(fx.get(track) or []):
@@ -438,7 +442,7 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
             r = tl.map_item(it)
             if r is None:
                 continue
-            fs, fe = r[0], min(r[1], fdur)
+            fs, fe = T.snap_window(r[0], min(r[1], fdur), bounds, fps)
             if fe - fs <= 1e-6:
                 continue
             d = copy.deepcopy(it)

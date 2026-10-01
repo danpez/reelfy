@@ -138,3 +138,43 @@ assert tick.last.get("state") == "synced", tick.last
 assert saved["fx"]["accent"] == "#3366FF" and saved["fx"]["captions"]["accent"] == "#3366FF", saved["fx"]
 print("OK")
 ''', tmp_path)
+
+
+def test_redirigir_no_deja_el_acento_del_estilo_en_transiciones_ni_efectos(directed_blue, tmp_path):
+    """Re-dirigir un proyecto con acento propio: el glitch de una transicion (y cualquier efecto que
+    la IA tina con el acento de su estilo, como el contorno del sujeto) sale con el acento del
+    proyecto; antes el servidor solo recorria titulos, graficos y escenas y volvia un glitch
+    amarillo. Lo bloqueado o del usuario conserva su color."""
+    import json
+    plans = []
+    for seed in (4, 7, 9):
+        out = D.redirect(copy.deepcopy(directed_blue), seed=seed, music_sync=False)
+        assert out["fx"]["accent"] == BLUE
+        assert any(t["kind"] == "glitch" and t.get("color") == "#FFD23F" for t in out["fx"]["transitions"]), seed
+        plans.append(out)
+    extra = copy.deepcopy(plans[0])
+    extra["fx"]["effects"].append({"id": "fx_outline_ia", "kind": "subject_outline", "start": 1.0, "end": 2.0,
+                                   "color": "#FFD23F", "width": 6.0, "glow": 0.5, "src": "ai"})
+    extra["fx"]["transitions"] += [
+        {"id": "tr_user_glitch", "at": 2.0, "kind": "glitch", "dur": 0.3, "color": "#FFD23F", "src": "user"},
+        {"id": "tr_lock_glitch", "at": 3.0, "kind": "glitch", "dur": 0.3, "color": "#FFD23F", "locked": True}]
+    plans.append(extra)
+    (tmp_path / "planes.json").write_text(json.dumps(plans))
+    _run('''
+import server as S
+plans = json.load(open(%r))
+for i, p in enumerate(plans):
+    out = S._accent_apply(p)
+    fx = out["fx"]
+    ia = [x for tk in ("text", "graphics", "cutaways", "transitions", "effects") for x in fx[tk]
+          if not x.get("locked") and x.get("src") != "user"]
+    left = [x["id"] for x in ia if "#FFD23F" in json.dumps(x).upper()]
+    assert left == [], (i, left)
+    assert all(t.get("color") == "#3366FF" for t in fx["transitions"] if t["kind"] == "glitch"
+               and not t.get("locked") and t.get("src") != "user"), i
+    assert fx["accent"] == "#3366FF" and fx["captions"]["accent"] == "#3366FF"
+by = {x["id"]: x for tk in ("transitions", "effects") for x in plans[-1]["fx"][tk]}
+assert by["fx_outline_ia"]["color"] == "#3366FF"
+assert by["tr_user_glitch"]["color"] == "#FFD23F" and by["tr_lock_glitch"]["color"] == "#FFD23F"
+print("OK")
+''' % str(tmp_path / "planes.json"), tmp_path)

@@ -175,6 +175,7 @@ except Exception:  # pragma: no cover
     _paths = None
 
 PROMPT_VERSION = "d6"
+SCRIPT_VERSION = "g1"         # prompt del guion (g1: polaridad 'pol' por frase); solo su cache
 SHOTS_VERSION = "s9"          # analisis de tomas (rostro por tiempo, calidad del recorte, fondo por celdas)
 TRACKS = ("text", "graphics", "cutaways", "effects", "transitions", "sfx")
 ID_PREFIX = {"text": "tx", "graphics": "gr", "cutaways": "cw", "effects": "fx",
@@ -241,7 +242,7 @@ FIELDS = {
     "effects": _COMMON | {"kind", "from", "to", "easing", "amount", "hold", "amp", "freq", "decay",
                           "pan", "contrast", "subject_color", "bg_desat", "bg_dark", "radius",
                           "background", "bg_colors", "color", "width", "glow", "mode", "release",
-                          "target", "fade_in", "fade_out", "grain", "vignette", "tone", "lift"},
+                          "target", "fade_in", "fade_out", "grain", "vignette", "tone", "lift", "fade"},
     "transitions": _EVENT | {"kind", "dur", "dir", "color", "align", "x", "y", "ring", "mode",
                              "peak", "gate"},
     "sfx": _EVENT | {"name", "gain_db", "pan", "dur", "variant", "pitch"},
@@ -1441,6 +1442,63 @@ def _keep_accent(fx: dict, old: dict, style: str | None = None) -> dict:
     return fx
 
 
+# valores neutros de los ajustes de color del Studio (schema.GRADE_PARAMS)
+_GRADE_NEUTRAL = {"strength": 1.0, "exposure": 0.0, "temperature": 0.0, "tint": 0.0, "saturation": 1.0,
+                  "contrast": 0.0, "clarity": None}
+
+
+def _grade_tuned(g: Any, style: str | None) -> bool:
+    """El color del plan lo ajusto el usuario: algun valor difiere del look del estilo con que se
+    dirigio (exposicion, contraste, saturacion, look, vineta, grano, nitidez, apagado...)."""
+    if not isinstance(g, dict):
+        return False
+    base = dict(_GRADE_NEUTRAL, **_grade_cfg(style if style in STYLES else "dinamico"))
+    for k, v in g.items():
+        if k not in base:
+            continue
+        d = base[k]
+        if isinstance(d, (int, float)) and not isinstance(d, bool) and isinstance(v, (int, float)) \
+                and not isinstance(v, bool):
+            if abs(float(v) - float(d)) > 1e-4:
+                return True
+        elif v != d:
+            return True
+    return False
+
+
+def _keep_grade(fx: dict, old: dict, style: str | None) -> dict:
+    """El color que ajusto el usuario pasa tal cual al plan nuevo al dirigir o re-dirigir (como el
+    acento del proyecto); sin ajustes propios queda el look del estilo."""
+    g = old.get("grade") if isinstance(old, dict) else None
+    if _grade_tuned(g, style):
+        fx["grade"] = copy.deepcopy(g)
+    return fx
+
+
+# lo que el usuario elige del estilo de los subtitulos en el Studio (la geometria -y, tamano, tramos
+# ocultos- la calcula la coreografia para el estilo y no se copia)
+_CAP_LOOK = ("enabled", "preset", "font", "color", "case", "max_words", "highlight", "stroke", "shadow",
+             "box", "kw_accent", "recenter", "max_lines")
+
+
+def _keep_captions(fx: dict, old: dict, style: str | None) -> dict:
+    """El estilo de subtitulos que eligio el usuario (preset, p. ej. 'boxed' para que el resaltado
+    de un acento oscuro se lea; fuente, mayusculas, resaltado...) pasa al plan nuevo al dirigir o
+    re-dirigir, como el color: cada campo que difiere del estilo con que se dirigio se conserva; sin
+    cambios propios los subtitulos siguen el estilo nuevo."""
+    oc = old.get("captions") if isinstance(old, dict) else None
+    cap = fx.get("captions")
+    if not isinstance(oc, dict) or not isinstance(cap, dict):
+        return fx
+    c = STYLES[style if style in STYLES else "dinamico"]["captions"]
+    base = {"enabled": True, "preset": c["preset"], "font": c["font"], "color": "#FFFFFF", "case": c["case"],
+            "max_words": c["max_words"]}
+    for k in _CAP_LOOK:
+        if k in oc and oc[k] is not None and oc[k] != base.get(k):
+            cap[k] = copy.deepcopy(oc[k])
+    return fx
+
+
 def _carry_montage(out: list[dict], shots_in: list[dict]) -> list[dict]:
     """Copia a cada toma analizada los campos del montaje de la toma de entrada (mismo indice) y
     quita los que ya no trae: una cache de otra direccion nunca deja joins viejos."""
@@ -2244,6 +2302,486 @@ def sign_name(video: str, shots: list[dict], role: str, deadline: float | None =
     return None
 
 
+# ---------------------------------------------------------------- tono negativo (tropiezos)
+# Un tropiezo (error, fracaso, cero resultados, nadie, perdida, rechazo) NO se celebra: ni en la
+# frase ni a menos de NEG_PAD s hay destellos, estrellas, corazones, palomitas ni sonidos de premio;
+# lleva un tratamiento negativo sobrio (look desaturado con vineta, glitch corto, icono negativo,
+# titulo serio y golpe grave). Nivel 2 = tropiezo claro (tratamiento completo); nivel 1 = problema,
+# dificultad o duda (sin celebracion; look ligero solo si el LLM confirma la frase negativa). Lexico
+# del espanol hablado (no de un guion en particular): raices que cubren la conjugacion, negaciones
+# de lo bueno ('no funciono', 'sin resultados', 'cero reservas', 'ninguna venta') y lo que NO es
+# tropiezo aunque lo parezca: dobles negaciones ('sin dolor', 'cero estres', 'no te preocupes',
+# 'nunca falla', 'no perdimos ni un cliente'), beneficios ('¿Comisiones? Cero.', 'sin cita previa'),
+# presuncion ('nadie lo hace como nosotros') e invitaciones a quien mira ('no te lo puedes perder',
+# 'si tienes dudas'). La polaridad del LLM por frase (pol) tambien quita (negative_beats).
+NEG_STRONG, NEG_WEAK = 2, 1
+NEG_PAD = 1.0             # s (tiempo final) alrededor del tropiezo sin nada celebratorio
+NEG_SENT_MAX = 8.0        # s: en una frase hasta de este largo nada celebratorio en TODA la frase
+# (raiz, nivel, clase): la raiz es prefijo de la palabra normalizada ('equivoc' -> equivocamos,
+# equivocado, equivocacion; 'fracas' -> fracaso, fracasamos)
+_NEG_STEMS = (
+    ("equivoc", 2, "error"), ("equivoqu", 2, "error"), ("error", 2, "error"), ("erron", 2, "error"),
+    ("fracas", 2, "error"), ("fall", 2, "error"), ("desastr", 2, "error"), ("catastrof", 2, "error"),
+    ("horribl", 2, "error"), ("terribl", 2, "error"), ("pesim", 2, "error"), ("fatal", 2, "error"),
+    ("perd", 2, "baja"), ("pierd", 2, "baja"), ("quebr", 2, "baja"), ("quiebr", 2, "baja"),
+    ("rechaz", 2, "rechazo"), ("lamentabl", 2, "problema"), ("desafortunad", 2, "problema"),
+    ("frustr", 2, "problema"), ("crisis", 2, "problema"),
+    ("dificil", 1, "problema"), ("dificult", 1, "problema"), ("complic", 1, "problema"),
+    ("problem", 1, "problema"), ("dolor", 1, "problema"), ("duele", 1, "problema"),
+    ("molest", 1, "problema"), ("riesgo", 1, "problema"), ("peligr", 1, "problema"),
+    ("estres", 1, "problema"), ("cansad", 1, "problema"), ("sufr", 1, "problema"),
+    ("deuda", 1, "problema"), ("endeud", 1, "problema"), ("trist", 1, "problema"),
+    ("falt", 1, "problema"), ("miedo", 1, "duda"), ("temor", 1, "duda"), ("dud", 1, "duda"),
+    ("preocup", 1, "duda"), ("insegur", 1, "duda"),
+)
+_NEG_EXACT = {"mal": (1, "problema"), "malo": (1, "problema"), "mala": (1, "problema"),
+              "malos": (1, "problema"), "malas": (1, "problema"), "peor": (1, "problema"),
+              "peores": (1, "problema"), "nadie": (2, "nadie")}
+_NEG_SKIP = ("perdon", "perdur", "fallecid")
+# sustantivos negativos: un verbo que resuelve los vuelve beneficio ('resolvemos tu problema',
+# 'evita errores', 'adios al dolor', 'problema resuelto')
+_NEG_NOUN = ("error", "problem", "dolor", "miedo", "temor", "duda", "estres", "riesgo", "deuda",
+             "molestia", "complicac", "preocupac", "perdida", "crisis", "fracaso", "falla", "fallo",
+             "quiebra", "dificultad", "insegur", "tristeza", "frustrac", "rechazo", "peligro",
+             "desastre", "sufrimiento")
+_NEG_FIX = ("resolv", "resuelv", "solucion", "arregl", "quit", "elimin", "evit", "acab", "adios",
+            "olvid", "previen", "preven", "corrig", "correg", "supera", "venc", "alivi", "reduc",
+            "disminu", "termin", "perd", "pierd", "despid")
+# antes del sustantivo tambien resuelve quien ayuda o explica ('te ayudamos con tus dudas')
+_NEG_FIX_BEFORE = _NEG_FIX + ("ayud", "explic", "aclar", "respond", "contest")
+_NEG_FIXED_AFTER = ("resuelt", "solucionad", "arreglad", "corregid", "superad", "eliminad")
+# palabras que niegan: ante una negativa la vuelven beneficio; ante una buena, tropiezo
+_NEG_NEGATORS = {"sin", "cero", "ningun", "ninguna", "ninguno", "ningunos", "ningunas", "ni", "nada",
+                 "no", "nunca", "jamas", "menos", "adios", "olvidate", "olvidese", "olvidense", "basta"}
+# lo que puede ir entre el negador y la palabra ('no te preocupes', 'no fue un error', 'nada de dolor')
+_NEG_GLUE = (STOP - {"pero", "porque", "como", "cuando", "donde"}) | {
+    "fue", "fueron", "hay", "hubo", "habia", "tiene", "tienes", "tuvo", "tenemos", "tuvimos", "tengo",
+    "tanto", "tanta", "tantos", "tantas", "gran", "grandes", "nuevo", "nueva", "nuevos", "nuevas",
+    "mas", "tu", "tus", "nuestro", "nuestra", "nuestros", "nuestras"}
+_NEG_CLITIC = {"me", "te", "se", "le", "les", "nos", "lo", "la", "los", "las", "os"}
+# lo bueno que un 'no / sin / cero / ningun' convierte en tropiezo (resultados del negocio)
+_NEG_GOOD = ("result", "venta", "client", "reserv", "cita", "visita", "seguidor", "dinero", "ganancia",
+             "ingreso", "exito", "respuesta", "pedido", "compra", "agend", "lead", "contacto",
+             "llamada", "mensaje", "usuario", "alcance", "like", "comentario", "inscrip", "registro",
+             "paciente", "alumno")
+# lo malo que, negado, es beneficio ('sin comisiones', 'cero filas', 'no hay letras chiquitas')
+_NEG_BAD = ("comision", "costo", "cargo", "letra", "contrato", "plazo", "fila", "espera", "anticipo",
+            "tramite", "papeleo", "interes", "gasto") + _NEG_NOUN
+# verbos de exito: negados ('no funciono', 'nunca llegaron', 'no pudimos') son tropiezo
+_NEG_GOOD_V = (("funcion", "error"), ("sirv", "error"), ("servi", "error"), ("result", "error"),
+               ("logr", "error"), ("consegu", "error"), ("pud", "error"), ("gust", "rechazo"),
+               ("vend", "baja"), ("lleg", "cero"), ("vin", "cero"), ("entr", "cero"),
+               ("reserv", "cero"), ("agend", "cero"), ("compr", "cero"), ("respond", "cero"),
+               ("contest", "cero"), ("jal", "error"), ("crec", "baja"), ("avanz", "baja"),
+               ("gan", "baja"), ("convirt", "error"))
+_NEG_HAVE = {"hay", "habia", "hubo", "tenemos", "teniamos", "tuvimos", "tengo", "tenia", "tiene",
+             "tienen", "tenian", "tuvieron", "tuvo", "tuve"}
+_NEG_DOWN = ("baj", "cay", "cae", "caid", "disminu", "reduj", "reduc", "desplom", "hund")
+_NEG_UP = ("sub", "aument", "dispar", "elev", "increment")
+_NEG_UP_BAD = ("costo", "gasto", "deuda", "comision")
+_NEG_BREAK_W = {"pero", "aunque", "sino", "mientras", "porque"}
+_NEG_LOSE_OK = ("peso", "kilo", "grasa", "centimetro", "talla", "miedo", "verguenza", "pena", "estres")
+_INF_RX = re.compile(r"^[a-z]{2,}(ar|er|ir)(lo|la|los|las|le|les|se|me|te|nos)?$")
+# raices de tropiezo INEQUIVOCO: siguen en nivel 2 aunque el LLM lea la frase 'neutra' (una lista:
+# 'que si funciona y en que nos equivocamos'); lo contextual (cero, sin, ningun, nadie, no + verbo,
+# perder, bajar) lo baja el LLM. Con 'positiva' ni estas llevan tratamiento (solo no se celebra)
+_NEG_FIRM = ("equivoc", "equivoqu", "error", "erron", "fracas", "fall", "desastr", "catastrof",
+             "quebr", "quiebr", "rechaz")
+# 'sin X' de servicio (una condicion, no un resultado): 'sin cita previa', 'sin registro', 'sin agendar'
+_NEG_SERVICE = {"cita", "registro", "inscripcion", "compra", "contacto"}
+_NEG_PRIOR = ("previ", "minim", "obligatori")
+# lo malo despues de 'ningun cliente / nadie / ni un cliente' es doble negacion: beneficio
+# ('ningun cliente se va insatisfecho', 'nadie se queja')
+_NEG_DISSAT = ("insatisf", "descontent", "quej", "arrepent", "arrepient", "decepcion", "enoj", "inconform")
+# 'nadie' comparativo o exclusivo ('nadie lo hace como nosotros', 'nadie te atiende mejor', 'nadie
+# mas te ofrece esto') o gancho / sorpresa ('lo que nadie te dice', 'nadie lo esperaba')
+_NEG_NADIE_CMP = {"como", "mejor", "mejores", "igual", "tan", "menos", "asi"}
+_NEG_NADIE_HOOK = ("dic", "dich", "cuent", "contad", "explic", "ensen", "habl", "mencion", "muestr",
+                   "sab", "revel", "ofrec", "esperab", "imagin")
+# 'perder' dicho a quien mira ('no te lo puedes perder', 'te lo vas a perder'): invitacion, no perdida
+_NEG_YOU_MODAL = {"puedes", "puede", "pueden", "vas", "van", "quieres", "quieren", "debes", "deben",
+                  "tienes", "te"}
+_NEG_LOSE_YOU = {"pierdes", "pierdas", "perdiste", "perdias", "perderas", "perderias"}
+# 'no pude creerlo', 'no podia parar de reir': asombro, no fracaso
+_NEG_PUD_OK = ("creer", "imagin", "esperar", "parar", "dejar", "evitar", "aguantar", "conten")
+# 'no nos fue bien', 'no le salio bien'
+_NEG_WENT = {"fue", "fueron", "salio", "salieron", "iba", "va", "funciono"}
+# 'faltan tres dias', 'falta muy poquito': cuenta regresiva, no carencia
+_NEG_COUNT = {"uno", "una", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez",
+              "unos", "unas", "pocos", "pocas", "poco", "menos", "poquito", "poquitos", "poquita"}
+# antes de 'dudas' en una invitacion ('si tienes dudas', 'cualquier duda', '¿tienes dudas?')
+_NEG_ASK = {"si", "tienes", "tengas", "tienen", "tiene", "cualquier", "alguna", "algunas", "algun"}
+# iconos negativos por clase (existen en el catalogo; ICON_BLOCK los saca de lo normal porque ahi
+# se leen fuera de tono: aqui son justo el tono)
+NEG_ICONS = {"error": ("circle-x", "x"), "cero": ("circle-off",), "nadie": ("user-off",),
+             "baja": ("trending-down",), "rechazo": ("thumb-down",), "problema": ("alert-triangle",),
+             "duda": ("help-circle",)}
+# lo que se lee como fiesta: nunca sobre un tropiezo ni pegado a el
+CELEB_DOODLES = {"sparkle", "star4", "star5", "burst", "rays", "heart", "check", "swirl", "loop"}
+CELEB_ICON_PFX = ("sparkles", "star", "heart", "confetti", "trophy", "award", "medal", "rosette",
+                  "thumb-up", "circle-check", "square-check", "check", "gift", "balloon", "crown",
+                  "diamond", "rocket", "trending-up", "glass", "cake", "party", "flame", "fire",
+                  "mood-happy", "mood-smile", "mood-heart", "mood-crazy-happy", "mood-wink")
+CELEB_SFX = {"sparkle", "success", "chime", "ding", "bell", "cash", "coin", "notification"}
+CELEB_BGS = {"rays", "dark_stars"}
+
+
+def celebratory(kind: str | None, name: str | None) -> bool:
+    """Un grafico de fiesta (destello, estrella, corazon, palomita, trofeo, cohete...)."""
+    n = str(name or "")
+    if kind == "doodle":
+        return n in CELEB_DOODLES
+    if kind == "icon":
+        return n.startswith(CELEB_ICON_PFX)
+    return False
+
+
+def _neg_lex(n: str) -> tuple[int, str] | None:
+    if n in _NEG_EXACT:
+        return _NEG_EXACT[n]
+    if len(n) < 3 or n.startswith(_NEG_SKIP):
+        return None
+    for st, lv, kd in _NEG_STEMS:
+        if n.startswith(st):
+            return lv, kd
+    return None
+
+
+def _punct_end(w: dict) -> bool:
+    return bool(re.search(r"[,;:.!?…]$", str(w.get("text", "")).rstrip()))
+
+
+def _neg_negated(words: list[dict], k: int, w0: int) -> bool:
+    """Doble negacion: un negador (sin, cero, ningun, no, nunca, nada de, menos...) hasta 3 palabras
+    antes, sin cruzar una pausa de puntuacion ('No, nos equivocamos' SI es tropiezo)."""
+    for j in range(k - 1, max(w0, k - 4) - 1, -1):
+        w = words[j]
+        if _punct_end(w):
+            return False
+        if w["n"] in _NEG_NEGATORS:
+            return True
+        if w["n"] not in _NEG_GLUE:
+            return False
+    return False
+
+
+def _neg_fixed(words: list[dict], k: int, w0: int, w1: int) -> bool:
+    """'resolvemos tu problema', 'evita errores', 'adios al dolor', 'te ayudamos con tus dudas',
+    'problema resuelto'."""
+    if not words[k]["n"].startswith(_NEG_NOUN):
+        return False
+    for j in range(k - 1, max(w0, k - 5) - 1, -1):
+        n = words[j]["n"]
+        if n.startswith(_NEG_FIX_BEFORE):
+            return True
+        if n not in _NEG_GLUE or _punct_end(words[j]):
+            break
+    for j in range(k + 1, min(w1, k + 2) + 1):
+        if words[j]["n"].startswith(_NEG_FIXED_AFTER):
+            return True
+        if _punct_end(words[j - 1]):
+            break
+    return False
+
+
+def _next_content(words: list[dict], k: int, w1: int, n: int = 2) -> list[dict]:
+    """Hasta n palabras de contenido despues de k (sin articulos ni cliticos; no cruza puntuacion)."""
+    out = []
+    j = k + 1
+    while j <= w1 and len(out) < n:
+        if _punct_end(words[j - 1]):
+            break
+        if words[j]["n"] not in _NEG_GLUE or words[j]["n"] in ("nadie", "nada"):
+            out.append(words[j])
+        j += 1
+    return out
+
+
+def _prev_words(words: list[dict], k: int, w0: int, n: int = 4) -> list[str]:
+    """Hasta n palabras (normalizadas, de la mas cercana a la mas lejana) antes de k en su clausula
+    (no cruza puntuacion ni el inicio de la frase)."""
+    out = []
+    j = k - 1
+    while j >= w0 and len(out) < n and not _punct_end(words[j]):
+        out.append(words[j]["n"])
+        j -= 1
+    return out
+
+
+def _tail_words(words: list[dict], k: int, w1: int, n: int = 5) -> list[str]:
+    """Hasta n palabras (normalizadas) despues de k en su clausula (no cruza puntuacion)."""
+    out = []
+    j = k + 1
+    while j <= w1 and len(out) < n and not _punct_end(words[j - 1]):
+        out.append(words[j]["n"])
+        j += 1
+    return out
+
+
+def _neg_tail_bad(words: list[dict], k: int, w1: int) -> bool:
+    """Lo que sigue a 'ningun cliente / nadie / ni un cliente' es malo: doble negacion, beneficio
+    ('ningun cliente se va insatisfecho', 'nadie se queja', 'ningun cliente sin su cita')."""
+    for x in _tail_words(words, k, w1):
+        if x == "sin" or x.startswith(_NEG_DISSAT + _NEG_BAD) or (x != "nadie" and _neg_lex(x) is not None):
+            return True
+    return False
+
+
+def _second_person(v: str) -> bool:
+    """Verbo dicho a quien mira ('llegues', 'vendes', 'consigues', 'pudiste'): una invitacion o un
+    consejo ('no llegues tarde'), no un tropiezo de quien habla."""
+    return (v.endswith("s") and not v.endswith(("mos", "is")) and len(v) > 3) or v.endswith("ste")
+
+
+def _cero_subject(words: list[dict], k: int) -> list[str]:
+    """Lo que contesta un 'cero' final ('¿Reservas? Cero.', 'Riesgo cero.', 'Y las ventas, cero.'):
+    hasta 4 palabras de contenido antes, en su clausula o en la pregunta / rotulo / tema de antes
+    (puede ser la frase anterior: el '¿Reservas?' de un 'Cero.' suelto). Tras un punto ('Lo
+    intentamos todo. Cero.') no hay sujeto claro: []."""
+    out: list[str] = []
+    j = k - 1
+    if j >= 0 and _punct_end(words[j]) and not re.search(r"[?:,]$", str(words[j].get("text", "")).rstrip()):
+        return out
+    while j >= 0 and len(out) < 4:
+        if j < k - 1 and _punct_end(words[j]):
+            break
+        n = words[j]["n"]
+        if n and n not in _NEG_GLUE:
+            out.append(n)
+        j -= 1
+    return out
+
+
+def _neg_hits(words: list[dict], w0: int, w1: int) -> list[tuple[int, int, str, bool, bool]]:
+    """Tropiezos de la frase [w0, w1] -> [(indice de palabra, nivel, clase, firme, sube)]: `firme` =
+    raiz inequivoca (_NEG_FIRM: el LLM en 'neutra' no la baja); `sube` = nivel 1 que pasa a 2 si el
+    LLM lee la frase 'negativa' (un 'Cero.' sin sujeto claro)."""
+    hits: list[tuple[int, int, str, bool, bool]] = []
+    for k in range(w0, w1 + 1):
+        w = words[k]
+        n = w["n"]
+        if not n:
+            continue
+        prev = words[k - 1]["n"] if k > w0 and not _punct_end(words[k - 1]) else ""
+        nxt = _next_content(words, k, w1, 3)
+        nx0 = nxt[0]["n"] if nxt else ""
+        last = k == w1 or _punct_end(w)
+        if n in ("cero", "0"):
+            if prev in ("desde", "de", "a"):
+                continue                     # 'desde cero': empezar, no fracasar
+            if not last:
+                if nx0 and nx0.startswith(_NEG_GOOD):
+                    hits.append((k, 2, "cero", False, False))      # 'cero reservas'
+                continue
+            # 'X? Cero.': tropiezo si X es lo bueno del negocio ('¿Reservas? Cero.'), beneficio si es
+            # lo malo ('¿Comisiones? Cero.', 'Riesgo cero.', 'Error cero.'); sin X claro, nivel 1
+            # que el LLM sube a 2 si lee la frase negativa
+            subj = _cero_subject(words, k)
+            if any(x.startswith(_NEG_BAD) for x in subj):
+                continue
+            if any(x.startswith(_NEG_GOOD) for x in subj):
+                hits.append((k, 2, "cero", False, False))
+            else:
+                hits.append((k, 1, "cero", False, True))
+            continue
+        if n == "sin":
+            # 'nos quedamos sin clientes' si; 'no te quedes sin tu cita' (doble negacion), 'sin cita
+            # previa', 'sin registro', 'sin agendar' (condicion de un servicio) no
+            if nx0.startswith(_NEG_GOOD) and not ({"no", "nunca", "jamas"} & set(_prev_words(words, k, w0))) \
+                    and nx0 not in _NEG_SERVICE and not _INF_RX.match(nx0) \
+                    and not (len(nxt) > 1 and nxt[1]["n"].startswith(_NEG_PRIOR)):
+                hits.append((nxt[0]["i"], 2, "cero", False, False))
+            continue
+        if n.startswith("ningun"):
+            if nx0.startswith(_NEG_GOOD) or (last and n in ("ninguno", "ninguna")):
+                j_ = nxt[0]["i"] if nxt and not last else k
+                if not ({"no", "nunca", "jamas"} & set(_prev_words(words, k, w0))) \
+                        and not _neg_tail_bad(words, j_, w1):
+                    hits.append((j_, 2, "cero", False, False))
+            continue
+        if n == "ni":
+            # 'ni una reserva', 'ni un cliente', '... ni uno.'; 'no perdimos ni un cliente' es logro
+            if any(x.startswith(("perd", "pierd", "quej", "fall", "cobr", "pag")) for x in _prev_words(words, k, w0)):
+                continue
+            tail = [x for x in nxt if x["n"] not in ("uno", "una", "solo", "sola", "siquiera")]
+            if tail and tail[0]["n"].startswith(_NEG_GOOD):
+                if not _neg_tail_bad(words, tail[0]["i"], w1):
+                    hits.append((tail[0]["i"], 2, "cero", False, False))
+            elif k < w1 and words[k + 1]["n"] in ("uno", "una") and (k + 1 == w1 or _punct_end(words[k + 1])):
+                hits.append((k + 1, 2, "cero", False, False))
+            continue
+        if n in ("no", "nunca", "jamas", "nada"):
+            if "?" in w["text"] or last or prev == "si":
+                continue                     # '¿no?' de muletilla; 'si no funciona...' es condicion
+            j = k + 1
+            while j <= w1 and words[j]["n"] in _NEG_CLITIC and not _punct_end(words[j - 1]):
+                j += 1
+            if j > w1 or _punct_end(words[j - 1]):
+                continue
+            v = words[j]["n"]
+            clit = {words[i]["n"] for i in range(k + 1, j)}
+            if n != "nada" and ("te" in clit or _second_person(v)):
+                continue                     # dicho a quien mira: 'no llegues tarde', 'no te lo pierdas'
+            after = _next_content(words, j, w1, 3)
+            if any(x["n"].startswith(_NEG_BAD) for x in after):
+                continue                     # 'no tiene comisiones', 'no hay problema'
+            nxw = words[j + 1]["n"] if j < w1 and not _punct_end(words[j]) else ""
+            kd = next((c for st, c in _NEG_GOOD_V if v.startswith(st)), None)
+            if kd and v.startswith("pud") and nxw.startswith(_NEG_PUD_OK):
+                continue                     # 'no pude creer los resultados': asombro
+            if kd:
+                hits.append((j, 2, kd, False, False))      # 'no funciono', 'nunca llegaron', 'nada funciona'
+            elif v in _NEG_HAVE and n != "nada":
+                if nxw == "que":
+                    continue                 # 'no tuvimos que pagar nada': no hizo falta (beneficio)
+                # 'no hubo reservas', 'no habia nadie', 'no vendimos nada.' (no 'no hay nada mejor')
+                for x in after:
+                    xi = int(x["i"])
+                    if x["n"].startswith(_NEG_GOOD) or x["n"] == "nadie" or x["n"].startswith("ningun") or (
+                            x["n"] == "nada" and (xi == w1 or _punct_end(x))):
+                        hits.append((xi, 2, "cero", False, False))
+                        break
+            elif n == "no" and v in _NEG_WENT and nxw == "bien":
+                hits.append((j, 2, "error", False, False))      # 'no nos fue bien'
+            elif n == "no" and (v.startswith("sab") or (v == "se" and j < w1 and words[j + 1]["n"] == "si")):
+                hits.append((j, 1, "duda", False, False))       # 'no sabemos si...'
+            continue
+        if n.startswith(_NEG_DOWN) or n.startswith(_NEG_UP):
+            if re.fullmatch(r"baj[ae](la|lo|las|los|le|te)", n):
+                continue                     # 'bajala y agenda': descargar, no caer
+            near = [words[j]["n"] for j in range(max(w0, k - 3), min(w1, k + 3) + 1) if j != k]
+            if n.startswith(_NEG_DOWN):
+                if any(x.startswith(_NEG_GOOD) for x in near) and not any(x.startswith(_NEG_BAD) for x in near):
+                    hits.append((k, 2, "baja", False, False))
+            elif any(x.startswith(_NEG_UP_BAD) for x in near):
+                hits.append((k, 1, "problema", False, False))
+            continue
+        lx = _neg_lex(n)
+        if lx is None:
+            continue
+        lv, kd = lx
+        if n == "nadie":
+            if prev == "como" or (prev == "que" and k - 2 >= w0 and words[k - 2]["n"] in ("mejor", "mas", "antes")):
+                continue                     # 'como nadie', 'mejor que nadie': elogio
+            raw = _tail_words(words, k, w1, 4)
+            cmp_ = [x for i_, x in enumerate(raw) if x in _NEG_NADIE_CMP and not (x == "asi" and raw[i_ + 1:i_ + 2] == ["que"])]
+            if (raw[:1] == ["mas"] and len(raw) > 1) or cmp_ or any(x.startswith(_NEG_NADIE_HOOK) for x in raw) \
+                    or _neg_tail_bad(words, k, w1):
+                continue                     # exclusivo, comparativo, gancho o 'nadie se queja'
+        if n.startswith("falt") and (prev in ("hace", "sin") or nx0 in _NEG_COUNT or re.fullmatch(r"\d+", nx0 or "-")
+                                     or (nx0 and _INF_RX.match(nx0) and k + 1 <= w1 and words[k + 1]["n"] == nx0)
+                                     or (n == "faltar" and "no" in _prev_words(words, k, w0, 3))):
+            continue                         # 'hace falta', 'sin falta', 'falta poco', 'faltan tres dias',
+            #                                  'falta disenar', 'no te puede faltar'
+        if n.startswith("dud"):
+            pw = _prev_words(words, k, w0, 3)
+            if "?" in w["text"] or set(pw[:3]) & _NEG_ASK or pw[:2] == ["a", "lugar"]:
+                continue                     # 'si tienes dudas', '¿dudas?', 'sin lugar a dudas'
+        if n.startswith(("perd", "pierd")):
+            if nx0.startswith(_NEG_LOSE_OK):
+                continue                     # 'perder peso', 'pierdes el miedo': beneficio
+            if n in _NEG_LOSE_YOU or (n.startswith("perder") and _NEG_YOU_MODAL & set(_prev_words(words, k, w0, 3))):
+                # dicho a quien mira: 'no te lo puedes perder' es invitacion; 'pierdes clientes cada
+                # dia' es su dolor (nivel 1: sin celebracion, sin tratamiento)
+                if nx0.startswith(_NEG_GOOD) and not _neg_negated(words, k, w0):
+                    hits.append((k, 1, "problema", False, False))
+                continue
+        if n.startswith(("horribl", "terribl")) and n.endswith("mente"):
+            continue                         # 'terriblemente delicioso': intensificador
+        if n.startswith(_NEG_NOUN) and (nx0 in ("cero", "0", "nulo", "nula", "minimo", "minima")
+                                        or (prev == "de" and k - 2 >= w0 and words[k - 2]["n"] == "margen")):
+            continue                         # 'error cero', 'riesgo minimo', 'margen de error'
+        if _neg_negated(words, k, w0) or _neg_fixed(words, k, w0, w1):
+            continue
+        hits.append((k, lv, kd, lv >= NEG_STRONG and n.startswith(_NEG_FIRM), False))
+    # un problema que se resuelve o mejora en la misma frase es beneficio ('si te duele... tiene
+    # solucion', 'hasta el peor dia mejora con cafe')
+    weak = [h for h in hits if h[1] == NEG_WEAK]
+    if weak:
+        fix_at = [j for j in range(w0, w1 + 1) if words[j]["n"].startswith(_NEG_FIX + ("ayud", "mejor"))]
+        hits = [h for h in hits if h[1] != NEG_WEAK or not any(j > h[0] for j in fix_at)]
+    return hits
+
+
+def _clause_end(words: list[dict], j: int, w1: int) -> bool:
+    if j >= w1 or _punct_end(words[j]):
+        return True
+    return words[j + 1]["n"] in _NEG_BREAK_W or _gap(words, j + 1) > 0.45
+
+
+def _clause_of(words: list[dict], w0: int, w1: int, k: int) -> tuple[int, int]:
+    """Clausula (por puntuacion, 'pero/aunque/porque' o pausa) que contiene la palabra k; una
+    entrada corta antes ('al final,') pertenece al remate."""
+    a = k
+    while a > w0 and not _clause_end(words, a - 1, w1):
+        a -= 1
+    b = k
+    while b < w1 and not _clause_end(words, b, w1):
+        b += 1
+    if a > w0:
+        pa = a - 1
+        while pa > w0 and not _clause_end(words, pa - 1, w1):
+            pa -= 1
+        if a - pa <= 2 and words[pa]["n"] not in _NEG_BREAK_W:
+            a = pa
+    return a, b
+
+
+def negative_beats(words: list[dict], sents: list[dict]) -> list[dict]:
+    """Tropiezos del guion -> [{sid, level, kind, hits, w0, w1, t0, t1, look}] (una clausula cada
+    uno, en orden). Lexico + negaciones, y la polaridad del LLM por frase (info.pol) cuando existe:
+      sin pol (heuristicas) o 'negativa': manda el lexico; un 'Cero.' sin sujeto claro sube a 2
+        solo con 'negativa'
+      'neutra': lo contextual (cero, sin, ningun, nadie, no + verbo, perder, bajar) baja a nivel 1;
+        lo inequivoco (_NEG_FIRM: equivocarse, fracasar, error...) sigue en 2
+      'positiva': el LLM lo lee como logro o beneficio ('nadie lo hace como nosotros'): lo
+        contextual se descarta y lo inequivoco queda en nivel 1 (sin celebracion, sin tratamiento)
+    `look` = lleva look negativo (negative): todo nivel 2 y un nivel 1 solo si el LLM confirma la
+    frase 'negativa' (un problema o una duda sueltos solo quitan la celebracion). Si el lexico no
+    vio nada y el LLM dice 'negativa', la frase entera suma un nivel 1 sin look (`llm`)."""
+    out = []
+    for s in sents:
+        w0, w1 = int(s["w0"]), int(s["w1"])
+        if w1 < w0 or w1 >= len(words):
+            continue
+        pol = str((s.get("info") or {}).get("pol") or "")
+        hits = []
+        for k, lv, kd, firm, up in _neg_hits(words, w0, w1):
+            if up and pol == "negativa":
+                lv = NEG_STRONG
+            if pol == "positiva":
+                if not firm:
+                    continue
+                lv = NEG_WEAK
+            elif pol == "neutra" and not firm:
+                lv = min(lv, NEG_WEAK)
+            hits.append((k, lv, kd))
+        beats: list[dict] = []
+        for k, lv, kd in sorted(set(hits)):
+            a, b = _clause_of(words, w0, w1, k)
+            # clausulas que se tocan o se enciman ('sin resultados, cero ventas'): un solo tropiezo
+            cur = next((x for x in beats if a <= x["w1"] + 1 and x["w0"] <= b + 1), None)
+            if cur is None:
+                cur = {"sid": s["id"], "level": lv, "kind": kd, "hits": [], "w0": a, "w1": b}
+                beats.append(cur)
+            else:
+                cur["w0"], cur["w1"] = min(cur["w0"], a), max(cur["w1"], b)
+                if lv > cur["level"]:
+                    cur["level"], cur["kind"] = lv, kd
+            if k not in cur["hits"]:
+                cur["hits"].append(k)
+        for x in beats:
+            x["look"] = x["level"] >= NEG_STRONG or pol == "negativa"
+        if not beats and pol == "negativa":
+            # solo el LLM lo vio: sin celebracion en la frase, pero sin look (el modelo chico se equivoca)
+            beats.append({"sid": s["id"], "level": NEG_WEAK, "kind": "problema", "hits": [], "w0": w0, "w1": w1,
+                          "llm": True, "look": False})
+        for x in beats:
+            x["t0"], x["t1"] = float(words[x["w0"]]["t0"]), float(words[x["w1"]]["t1"])
+        out += beats
+    return sorted(out, key=lambda x: (x["t0"], x["sid"]))
+
+
 def _classify(sent: dict, words: list[dict], idx: int, n_sents: int, anc: dict) -> dict:
     ws = words[sent["w0"]:sent["w1"] + 1]
     sn = [w["n"] for w in ws]
@@ -2382,8 +2920,9 @@ _LLM_SCHEMA = {
             "icon": {"type": "array", "items": {"type": "string"}},
             "nrg": {"type": "string", "enum": ["baja", "media", "alta"]},
             "tone": {"type": "string", "enum": ["intriga", "serio", "alegre", "informativo",
-                                                "urgente", "humor"]}},
-            "required": ["id", "sec", "title", "emph", "fx", "icon", "nrg", "tone"]}},
+                                                "urgente", "humor"]},
+            "pol": {"type": "string", "enum": ["positiva", "neutra", "negativa"]}},
+            "required": ["id", "sec", "title", "emph", "fx", "icon", "nrg", "tone", "pol"]}},
     },
     "required": ["topic", "ent", "f"],
 }
@@ -2410,7 +2949,9 @@ def _llm_prompt(sents: list[dict], shots: list[dict] | None, part: tuple[int, in
                 d += "; textos: " + ", ".join(s["text_seen"][:4])
             desc.append(d)
         sh = "\nTomas:\n" + "\n".join(desc) + "\n"
-    head, tail = "Frases del video (id | segundos | texto):\n", ""
+    # JSON compacto: con la polaridad por frase, el JSON con sangria de un guion de ~20 frases ya no
+    # cabe en num_predict (se cortaba y el guion entero caia a heuristicas)
+    head, tail = "Frases del video (id | segundos | texto):\n", " Escribe el JSON compacto (sin sangrias)."
     if part is not None:
         k, n = part
         head = (f"Tramo {k + 1} de {n} de un video largo (ids globales; 'ent' y 'topic' solo con lo "
@@ -2429,9 +2970,12 @@ def _llm_prompt(sents: list[dict], shots: list[dict] | None, part: tuple[int, in
         "\"link_label\": texto de boton (2-3 palabras), \"handle\": usuario de redes dicho o \"\"};\n"
         "\"f\": una entrada por frase: {\"id\", \"sec\": seccion, \"title\": 1-4 palabras COPIADAS TAL CUAL "
         "de la frase para titulo grande, \"emph\": 1-2 palabras COPIADAS de la frase, \"fx\": tratamiento "
-        "visual, \"icon\": 1-2 palabras en ingles para buscar icono, \"nrg\": energia, \"tone\": tono}.\n"
+        "visual, \"icon\": 1-2 palabras en ingles para buscar icono, \"nrg\": energia, \"tone\": tono, "
+        "\"pol\": polaridad}.\n"
         "Reglas: solo UNA frase corta y punzante -> fx \"dramatico\". Precio, direccion, horario o link -> "
-        "fx \"tarjeta\". " + ("La primera frase es \"hook\". " if part is None or part[0] == 0 else "") +
+        "fx \"tarjeta\". Tropiezo (error, fracaso, perdida, cero resultados, nadie, rechazo, problema o "
+        "duda) -> pol \"negativa\"; logro o beneficio -> \"positiva\"; lo demas -> \"neutra\". " +
+        ("La primera frase es \"hook\". " if part is None or part[0] == 0 else "") +
         "Frase con chiste -> tone \"humor\"." + tail)
 
 
@@ -2547,7 +3091,7 @@ def _turn_call(turn: "_ModelTurn | None", deadline: float | None, need: float, f
 def _llm_script(sents: list[dict], shots: list[dict] | None, timeout: float | None = None) -> dict | None:
     if not sents:
         return None
-    key = _hkey([s["text"] for s in sents], _sh_key(shots), PROMPT_VERSION, _llm_model())
+    key = _hkey([s["text"] for s in sents], _sh_key(shots), PROMPT_VERSION, SCRIPT_VERSION, _llm_model())
     hit = _cache_get("script", key)
     if hit:
         return hit
@@ -2634,7 +3178,8 @@ def _llm_script_windows(sents: list[dict], shots: list[dict] | None, deadline: f
     t_all = _now()
     for k, w in enumerate(wins):
         wsh = _shots_between(shots, float(w[0]["t0"]), float(w[-1]["t1"]))
-        key = _hkey([s["text"] for s in w], _sh_key(wsh), PROMPT_VERSION, _llm_model(), "tramo", k, n)
+        key = _hkey([s["text"] for s in w], _sh_key(wsh), PROMPT_VERSION, SCRIPT_VERSION, _llm_model(),
+                    "tramo", k, n)
         hit = _cache_get("script", key)
         if hit:
             parts[k] = _window_result(hit, w)
@@ -2722,6 +3267,11 @@ def _merge_llm(script: dict, llm: dict, words: list[dict]) -> None:
             # el humor y la intriga de una pregunta (heuristicas seguras) no se sobrescriben
             if info["tone"] != "humor" and not (info["tone"] == "intriga" and "?" in s["text"]):
                 info["tone"] = f["tone"]
+        if f.get("pol") in ("positiva", "neutra", "negativa"):
+            # polaridad del LLM (negative_beats): un tropiezo que el lexico no ve suma la frase como
+            # nivel 1 (sin celebracion); 'positiva' / 'neutra' quitan o bajan lo contextual del lexico
+            # (presuncion, beneficio); el tratamiento completo sigue pidiendo una senal lexica
+            info["pol"] = f["pol"]
         ics = list(info["icons"])
         for tag in f.get("icon") or []:
             ic = resolve_icon(str(tag))
@@ -3380,6 +3930,26 @@ class _Choreo:
                 self.events.append((t, iid))
                 t += 1.0
             self.events.append((b, iid))
+        # tropiezos del guion (tono negativo): ventanas en tiempo final sin nada celebratorio (la
+        # frase del tropiezo, o su clausula en una frase larga; un tropiezo fuerte tambien a menos
+        # de NEG_PAD s) y nivel por frase (2 = tratamiento completo). El tratamiento (look, titulo
+        # serio, icono) va en la clausula
+        self.neg = negative_beats(self.words, self.sents)
+        self.neg_win: list[tuple[float, float, int]] = []
+        self.neg_sent: dict[int, int] = {}
+        s_by = {s_["id"]: s_ for s_ in self.sents}
+        for k_, b_ in enumerate(self.neg):
+            b_["k"] = k_
+            b_["f0"], b_["f1"] = self.f(b_["t0"]), self.f(b_["t1"])
+            wa, wb = b_["f0"], b_["f1"]
+            s_ = s_by.get(b_["sid"])
+            if s_ is not None and self.f(s_["t1"]) - self.f(s_["t0"]) <= NEG_SENT_MAX:
+                wa, wb = min(wa, self.f(s_["t0"])), max(wb, self.f(s_["t1"]))
+            pad_ = NEG_PAD if b_["level"] >= NEG_STRONG else 0.0
+            self.neg_win.append((wa - pad_, wb + pad_, int(b_["level"])))
+            self.neg_sent[b_["sid"]] = max(self.neg_sent.get(b_["sid"], 0), int(b_["level"]))
+        self.neg_icon_done: set = set()         # tropiezos que ya llevan su icono negativo
+        self.neg_looks: list[tuple[float, float, int]] = []    # looks negativos (tiempo final)
 
     # ---------------------------------------------------------- tiempo
     def f(self, t: float) -> float:
@@ -4547,9 +5117,11 @@ class _Choreo:
         return max(cont, key=lambda w: (len(w["n"]) <= 12, len(w["n"])))
 
     def _text_spec(self, preset: str, blk: list[list[dict]], emph: set, humor: bool = False,
-                   acc_words: set | None = None, compact: bool = False, label: str | None = None) -> dict:
+                   acc_words: set | None = None, compact: bool = False, label: str | None = None,
+                   neg: bool = False) -> dict:
         """Campos del item de texto (sin posicion) + lineas medidas para colocar. `emph` = palabra
-        protagonista (stack); `acc_words` = palabras que ademas van en color de acento."""
+        protagonista (stack); `acc_words` = palabras que ademas van en color de acento. `neg`
+        (tropiezo): titulo serio, la protagonista en la tinta (blanco) y sin palabras de acento."""
         pal = self.pal
         words = [w for ln in blk for w in ln]
         acc_ids = set(emph) | set(acc_words or ())
@@ -4666,6 +5238,12 @@ class _Choreo:
                              "kicker_scale": _r(min(0.8, MIN_LINE / max(1e-3, self.title_floor) + 0.006), 3)})
             elif preset == "script_accent":
                 spec["color"] = acc if humor else "#FFFFFF"
+        if neg:
+            for ln in lines:
+                if ln.get("color") == acc:
+                    ln["color"] = "#FFFFFF"
+            spec["accent_words"] = []
+            spec["shadow"] = max(float(spec.get("shadow", 0.5)), 0.7)
         spec["_lines"] = lines
         return spec
 
@@ -4784,7 +5362,7 @@ class _Choreo:
 
     def title_block(self, blk: list[list[dict]], preset: str, emph: set, zones: list[str], t0: float,
                     t1: float, role: str, humor: bool = False, fallback: bool = True,
-                    acc_words: set | None = None, first_bonus: float = 1.0) -> dict | None:
+                    acc_words: set | None = None, first_bonus: float = 1.0, neg: bool = False) -> dict | None:
         ws = [w for ln in blk for w in ln]
         shot = self.shot_at(ws[0]["t0"])
         g = self.geom(shot, t0, t1)
@@ -4798,7 +5376,7 @@ class _Choreo:
         if compact and g.get("head_top"):
             # sobre el fondo reemplazado el hueco llega casi a la cabeza (no hay nada detras)
             g = dict(g, top=(g["top"][0], g["top"][1] + 0.014))
-        spec0 = self._text_spec(preset, blk, emph, humor, acc_words, compact, label=label)
+        spec0 = self._text_spec(preset, blk, emph, humor, acc_words, compact, label=label, neg=neg)
         fa, fb = self.f(t0), self.f(t1)
         fr = self.face_rect(shot, t0, t1)
         zones_try = list(zones)
@@ -4810,7 +5388,7 @@ class _Choreo:
             spec = copy.deepcopy(spec0)
             pl = self._place(spec, g, zones_try, fa, fb, self.min_size(preset), first_bonus)
             if pl is None and fallback and preset not in ("title_pop", "kicker"):
-                spec = self._text_spec("title_pop", blk, emph, humor, acc_words)
+                spec = self._text_spec("title_pop", blk, emph, humor, acc_words, neg=neg)
                 pl = self._place(spec, g, zones_try, fa, fb, self.min_size("title_pop"), first_bonus)
             if pl is None:
                 return None
@@ -4873,6 +5451,58 @@ class _Choreo:
         it["_geom"] = (pr, zone, lines, mode)
         return it
 
+    # ---------------------------------------------------------- tono negativo (tropiezos)
+    def neg_level(self, t0: float, t1: float | None = None) -> int:
+        """Nivel del tropiezo cuya ventana sin celebracion (neg_win) toca [t0, t1] (tiempo
+        original): 0 = ninguno."""
+        if not self.neg_win:
+            return 0
+        fa = self.f(t0)
+        fb = self.f(t0 if t1 is None else t1)
+        best = 0
+        for a, b, lv in self.neg_win:
+            if (fa < b and a < fb) or (a <= fa <= b):
+                best = max(best, lv)
+        return best
+
+    def party_ok(self, t0: float, t1: float) -> bool:
+        """Un acento celebratorio (destello, estrella, corazon, palomita...) cabe en [t0, t1]."""
+        return self.neg_level(t0, t1) == 0
+
+    def _neg_beat_of(self, ws: list[dict]) -> dict | None:
+        """Tropiezo (el de mayor nivel) cuya clausula comparte palabras con `ws`."""
+        if not self.neg or not ws:
+            return None
+        idx = {w["i"] for w in ws}
+        best = None
+        for b in self.neg:
+            if any(b["w0"] <= i <= b["w1"] for i in idx) and (best is None or b["level"] > best["level"]):
+                best = b
+        return best
+
+    @staticmethod
+    def neg_icon(beat: dict | None) -> str | None:
+        """Icono negativo sobrio de la clase del tropiezo (x, apagado, a la baja, alerta, duda)."""
+        for n in NEG_ICONS.get((beat or {}).get("kind"), ()) + ("alert-triangle",):
+            if assets.icon_exists(n):
+                return n
+        return None
+
+    def _neg_icon_style(self, mode: str) -> dict:
+        """Icono negativo: disco monocromo (blanco con trazo oscuro; oscuro sobre fondo claro),
+        derecho y con entrada pesada (sin rebote)."""
+        light = mode == "light"
+        bcol = self.pal["dark"] if light else "#FFFFFF"
+        return {"badge_color": bcol, "color": "#FFFFFF" if light else self.pal["dark"],
+                "anim_in": "scale_down", "anim_out": "fade", "rotation": 0.0}
+
+    def _neg_hero(self, beat: dict | None, ws: list[dict]) -> dict | None:
+        """Palabra del tropiezo dentro del bloque ('FRACASAMOS', 'NADIE', 'CERO')."""
+        if not beat:
+            return None
+        return next((w for w in ws if w["i"] in beat["hits"] and (self.content_word(w) or w["n"] in ("cero",))),
+                    None)
+
     # ---------------------------------------------------------- acentos (garabatos / iconos)
     def _icon_for(self, ws: list[dict], emph: set, icons: list[str] | None) -> str | None:
         k = self.used["topic_icon"]
@@ -4901,16 +5531,23 @@ class _Choreo:
 
     def accent_for(self, it: dict, ws: list[dict], emph: set, key: str, t0: float, t1: float,
                    icons: list[str] | None = None, force: str | None = None,
-                   icon: str | None = None, only: bool = False) -> dict | None:
+                   icon: str | None = None, only: bool = False, neg: bool = False) -> dict | None:
         """Garabato o icono junto a un titulo (zona 'accent'): dura >= 0.8 s, nunca toca la
-        tinta de otro texto (con el relleno de su caja) ni la cabeza."""
+        tinta de otro texto (con el relleno de su caja) ni la cabeza. Sobre un tropiezo (o a menos
+        de NEG_PAD s) nada celebratorio: sin destellos/estrellas ni iconos de fiesta. `neg`: el
+        icono es el negativo del tropiezo (disco monocromo, se dibuja, sin rebote)."""
         (x0, y0, x1, y1), zone, lines, mode = it["_geom"]
         fa, fb = self.f(t0), self.f(t1)
         if fb - fa < 0.8:
             return None
         shot = self.shot_at(ws[0]["t0"])
+        party = neg is False and self.party_ok(t0, t1)
         icon = icon or self._icon_for(ws, emph, icons)
+        if not party and not neg and icon and celebratory("icon", icon):
+            icon = None
         choice = force
+        if not party and choice in CELEB_DOODLES:
+            choice = None                 # el destello de una composicion: sobre un tropiezo, no
         if choice is None:
             q = "?" in " ".join(w["text"] for w in ws)
             if q and "question" in DOODLES and self.last.get("accent_kind") != "question":
@@ -4924,6 +5561,10 @@ class _Choreo:
                 # la escalera (cascade) no tiene su ultima linea centrada: sin subrayado ni circulo
                 if it.get("box") or it.get("preset") in ("highlight_marker", "kicker", "cascade") or len(lines) > 2:
                     dd = [d_ for d_ in dd if d_ not in ("underline", "circle_scribble")] or ["sparkle"]
+                if not party:
+                    dd = [d_ for d_ in dd if d_ not in CELEB_DOODLES]
+                    if not dd:
+                        return None
                 choice = self.pick("doodle", dd)
         rect = (x0, y0, x1, y1)
         acc_col = self.acc_light if mode == "light" else self.pal["accent"]
@@ -4941,7 +5582,12 @@ class _Choreo:
                           "color": self.pal["dark"] if _luma(bcol) > 0.55 else "#FFFFFF",
                           "draw": True, "x": _r(ix, 3), "y": _r(iy, 4), "size": sz, "anim_in": "pop",
                           "anim_out": "pop_out", "rotation": _r((self.rand(key + "rot") - 0.5) * 14, 1)}
-                g = self.add("graphics", "icon", fields, zone="accent")
+                if neg:
+                    fields.update(self._neg_icon_style(mode))
+                g = self.add("graphics", "neg_icon" if neg else "icon", fields, zone="accent")
+                if g and neg:
+                    self.last["accent_kind"] = "icon"
+                    return g                  # su golpe es el grave del tropiezo (negative)
                 if g:
                     self.last["accent_kind"] = "icon"
                     self.used["topic_icon"] += 1
@@ -4951,13 +5597,21 @@ class _Choreo:
                 return g
             if only:
                 return None
-            choice = self.pick("doodle", [d for d in self.S["doodles"]
-                                          if d not in ("underline", "circle_scribble") and not d.startswith("arrow")]
-                               or ["sparkle"])
+            dd = [d for d in self.S["doodles"]
+                  if d not in ("underline", "circle_scribble") and not d.startswith("arrow")] or ["sparkle"]
+            if not party:
+                dd = [d for d in dd if d not in CELEB_DOODLES]
+                if not dd:
+                    return None
+            choice = self.pick("doodle", dd)
         name = choice if choice in DOODLES else "sparkle"
         if name.startswith("arrow") or name == "circle_scribble":
             # las flechas senalan algo (arrow_to); el circulo va en la linea protagonista (hero_mark)
             name = "sparkle"
+        if not party and name in CELEB_DOODLES:
+            # junto a un tropiezo: un trazo sobrio (subrayado bajo la linea o garabato centrado)
+            name = "squiggle" if (it.get("box") or it.get("preset") in ("highlight_marker", "kicker", "cascade")
+                                  or len(lines) > 2) else "underline"
         sz = {"sparkle": 0.1, "star4": 0.09, "burst": 0.15, "question": 0.11, "cross": 0.1,
               "exclaim": 0.1, "lightning": 0.1, "star5": 0.09, "rays": 0.16, "swirl": 0.12,
               "loop": 0.13, "heart": 0.1, "check": 0.1, "squiggle": 0.14}.get(name, 0.12)
@@ -5443,6 +6097,12 @@ class _Choreo:
         emph = {i for i in emph if w0 <= i <= w1 and (self.content_word(self.words[i])
                                                        or self._entity_word(self.words[i])
                                                        or re.search(r"\d", self.words[i]["text"]))}
+        # el tropiezo se recalca: su palabra ('FRACASAMOS', 'NADIE', 'CERO') es la protagonista
+        for nb_ in self.neg:
+            if nb_["level"] >= NEG_STRONG and nb_["w0"] <= w1 and w0 <= nb_["w1"]:
+                h_ = self._neg_hero(nb_, self.words[max(w0, nb_["w0"]):min(w1, nb_["w1"]) + 1])
+                if h_ is not None:
+                    emph.add(h_["i"])
         kw = {w["i"] for w in self.words[w0:w1 + 1] if w["kw"] and self.content_word(w) and len(w["n"]) >= 5}
         blocks = self._blocks(w0, w1, emph, kw)[:max_blocks]
         if not blocks:
@@ -5533,8 +6193,17 @@ class _Choreo:
             recent = self.last.get("tp_recent", [])
             if len(recent) >= 2 and recent[-1] == recent[-2] == preset:
                 preset = comp if preset == main else main
+            # tropiezo: titulo serio y pesado (pila con la palabra del tropiezo grande, en blanco y sin
+            # acentos de color), entrada pesada, aire hacia abajo y su icono negativo (sin destellos)
+            nbeat = None if on_bg else self._neg_beat_of(ws)
+            nhero = self._neg_hero(nbeat, ws) if nbeat is not None and nbeat["level"] >= NEG_STRONG else None
+            neg2 = nhero is not None
+            if neg2:
+                preset = self.sub_preset("stack")
+                hero = True
             shot = self.shot_at(ws[0]["t0"])
-            t0 = max(ws[0]["t0"] - 0.08, shot["start"] + 0.02)
+            # el tropiezo entra con su clausula hablada ('que NADIE vino': desde 'que'), para sostenerse
+            t0 = max((min(ws[0]["t0"], raw[0]["t0"]) if neg2 else ws[0]["t0"]) - 0.08, shot["start"] + 0.02)
             nxt = blocks[bi + 1][0][0]["t0"] if bi + 1 < len(blocks) else None
             lim = shot["end"] - 0.04
             if s["id"] + 1 < len(self.sents) and self.sents[s["id"] + 1]["t0"] > ws[-1]["t1"]:
@@ -5559,9 +6228,11 @@ class _Choreo:
                 zones = ["top"] + [z_ for z_ in zones if z_ != "top"]
                 top_bonus = 1.9
             hero_set = {w["i"] for w in ws if w["i"] in primary} or {w["i"] for w in ws if w["i"] in accent_set}
-            it = self.title_block(blk, preset, hero_set, zones, t0, t1, role, humor=humor,
-                                  acc_words={w["i"] for w in ws if w["i"] in accent_set},
-                                  first_bonus=top_bonus)
+            if nhero is not None:
+                hero_set = {nhero["i"]}
+            it = self.title_block(blk, preset, hero_set, zones, t0, t1, role, humor=humor and not neg2,
+                                  acc_words=set() if neg2 else {w["i"] for w in ws if w["i"] in accent_set},
+                                  first_bonus=top_bonus, neg=neg2)
             if not it:
                 key_ = tuple(w["i"] for w in ws)
                 if len(blk) >= 2 and key_ not in tried:
@@ -5569,6 +6240,9 @@ class _Choreo:
                     # bloques mas cortos que entran uno tras otro con la voz
                     tried.add(key_)
                     h_ = (len(blk) + 1) // 2
+                    kh = next((j for j, ln in enumerate(blk) if nhero in ln), 0) if neg2 else 0
+                    if kh > 0:
+                        h_ = kh               # el tropiezo abre su propio bloque ('que NADIE / vino')
                     blocks[bi + 1:bi + 1] = [blk[:h_], blk[h_:]]
                 continue
             self.last["tp_recent"] = (recent + [it["preset"]])[-2:]
@@ -5577,17 +6251,32 @@ class _Choreo:
             line_ts = []
             for ln in blk[1:]:
                 line_ts.append(ln[0]["t0"])
+            if neg2:
+                it.update({"anim_in": "scale_down", "anim_out": "fade"})
+                self.sfx(t0 + 0.05, "swoosh_down", prio=5, src_id=it["id"], vary=True)
+                nw = nhero or next((w for w in ws if w["i"] in primary), ws[-1])
+                if accents and nbeat["k"] not in self.neg_icon_done:
+                    t_acc = max(t0, min(nw["t0"] - 0.05, self.o(self.f(t1) - 0.95)))
+                    if self.accent_for(it, ws, accent_set, f"n{nw['i']}", t_acc, t1, force="icon",
+                                       icon=self.neg_icon(nbeat), only=True, neg=True):
+                        self.neg_icon_done.add(nbeat["k"])
+                if punches:
+                    self.punch_at(nw["t0"], 0.07 + 0.07 * self.I, 0.35)
+                continue
             self.text_sfx(it["preset"], t0, it, prio=5 if hero else 3, line_ts=line_ts,
                           reveal=max(0.3, self.f(ws[-1]["t1"]) - self.f(ws[0]["t0"]) + 0.2))
+            # frase del tropiezo: el remate lleva el enfasis; el resto de la frase, sin acentos
+            quiet = self.neg_sent.get(s["id"], 0) >= NEG_STRONG
             if hero:
                 hw = next((w for w in ws if w["i"] in primary), ws[-1])
                 p_acc = _lerp(*self.S["accent_p"], self.I)
                 # el acento entra con la palabra protagonista, o antes si esta llega al final del
                 # bloque (debe verse >= 0.9 s para alcanzar a dibujarse)
                 t_acc = max(t0, min(hw["t0"] - 0.05, self.o(self.f(t1) - 0.95)))
-                if accents and self.rand(f"acc{hw['i']}") < p_acc:
+                if accents and not quiet and self.rand(f"acc{hw['i']}") < p_acc:
                     self.accent_for(it, ws, accent_set, f"a{hw['i']}", t_acc, t1, info.get("icons"))
-                if accents and self.S.get("marks", 0) > 0 and self.rand(f"mk{hw['i']}") < self.S["marks"] * (0.5 + 0.5 * self.I):
+                if accents and not quiet and self.S.get("marks", 0) > 0 and \
+                        self.rand(f"mk{hw['i']}") < self.S["marks"] * (0.5 + 0.5 * self.I):
                     self.hero_mark(it, ws, f"m{hw['i']}", max(t0 + 0.15, hw["t0"]), t1, hero=hw)
                 if punches and (info["energy"] != "baja" or self.I > 0.8):
                     self.punch_at(hw["t0"], 0.07 + 0.07 * self.I, 0.35)
@@ -6036,6 +6725,128 @@ class _Choreo:
         self.music_stops.append({"at": _r(t0 - 0.12), "dur": _r(max(0.4, min(2.2, back - t0)), 3)})
         self.drop_at = _r(back)
         s["info"]["_done"] = True
+
+    # ---------------------------------------------------------- 4b. tropiezos (tono negativo)
+    # por estilo: intensidad del look (B/N parcial: fuerte, ligero), glitch corto y golpe grave
+    NEG_STYLE = {"dinamico": {"look": (0.82, 0.45), "glitch": "rgb", "sfx": "sub_drop"},
+                 "energetico": {"look": (0.88, 0.5), "glitch": "shake", "sfx": "sub_drop"},
+                 "elegante": {"look": (0.75, 0.4), "glitch": None, "sfx": "sub_drop"},
+                 "minimal": {"look": (0.7, 0.35), "glitch": None, "sfx": "impact_soft"}}
+    NEG_LOOK_SHARE = 0.22     # fraccion maxima del video con look negativo
+    NEG_LOOK_GAP = 2.5        # s (final) minimos entre dos looks negativos
+    NEG_LOOK_MIN = 1.0        # s (final) que dura un look negativo como minimo
+
+    def _look_busy(self, fa: float, fb: float) -> bool:
+        """Ya hay un look sobre [fa, fb] (B/N, sujeto a color, fondo reemplazado) o un recurso."""
+        for it in list(self.fx["effects"]) + list(self.fixed.get("effects") or []):
+            if it.get("enabled", True) is False or it.get("kind") not in ("bw", "color_pop", "bg_replace"):
+                continue
+            if self.f(float(it["start"])) < fb and fa < self.f(float(it["end"])):
+                return True
+        return self.on_media(fa, fb, 0.15)
+
+    def negative(self) -> None:
+        """Tratamiento de los tropiezos (negative_beats): look desaturado frio con vineta (B/N
+        parcial, sobre la cara que lo dice), glitch corto y golpe grave en la palabra, la musica
+        baja un poco y, si su titulo no lo trajo, el icono negativo sobre la cabeza. Tropiezos
+        pegados (< 1.2 s) son uno; el momento dramatico (drama) ya es su propio B/N; el hook no se
+        apaga; a lo mas NEG_LOOK_SHARE del video. Un problema o duda (nivel 1) solo lleva un look
+        ligero si el LLM confirma la frase negativa (look) y no hay un tropiezo fuerte cerca."""
+        if not self.neg or self.windows is not None:
+            return
+        cfg = self.NEG_STYLE.get(self.style, self.NEG_STYLE["dinamico"])
+        groups: list[list[dict]] = []
+        for b_ in self.neg:
+            if groups and b_["f0"] - max(x["f1"] for x in groups[-1]) < 1.2:
+                groups[-1].append(b_)
+            else:
+                groups.append([b_])
+        budget = self.NEG_LOOK_SHARE * self.D
+        order = sorted(groups, key=lambda g: (-max(x["level"] for x in g), g[0]["f0"]))
+        for g in order:
+            g = [x for x in g if x.get("look", not x.get("llm"))]
+            if not g:
+                continue                     # solo el LLM, o un problema / duda que el LLM no confirma:
+                #                              sin celebracion, sin look
+            lv = max(x["level"] for x in g)
+            main = next(x for x in g if x["level"] == lv)
+            fa0, fb0 = g[0]["f0"], max(x["f1"] for x in g)
+            if self.drama_range and self.f(self.drama_range[0]) - 0.3 < fb0 and fa0 < self.f(self.drama_range[1]) + 0.3:
+                self.neg_icon_done |= {x["k"] for x in g}    # el B/N dramatico ya lo cuenta
+                continue
+            if main["sid"] == 0:
+                continue                     # el hook muestra la cara a color (confianza)
+            hw = self.words[main["hits"][0]] if main["hits"] else self.words[main["w0"]]
+            shot = self.shot_at(hw["t0"])
+            a = self.snap_start(max(0.0, g[0]["t0"] - 0.06))
+            sid_last = max(x["sid"] for x in g)
+            nxt = next((s_["t0"] for s_ in self.sents if s_["id"] == sid_last + 1), None)
+            hold = 0.45 if lv >= NEG_STRONG else 0.3
+            b = max(x["t1"] for x in g) + hold
+            if nxt is not None and self.neg_sent.get(sid_last + 1, 0) == 0:
+                b = min(b, max(nxt - 0.05, max(x["t1"] for x in g) + 0.1))
+            if self.f(b) - self.f(a) < self.NEG_LOOK_MIN:
+                b = self.o(self.f(a) + self.NEG_LOOK_MIN)
+            b = min(b, self.tl.duration)
+            fa, fb = self.f(a), self.f(b)
+            for ma, _mb, _mid in self.media_win:
+                if fa < ma <= fb + 0.15:
+                    fb = ma - 0.2             # termina antes de que entre la tarjeta de un recurso
+            b = self.o(fb)
+            if fb - fa < 0.5 or self._look_busy(fa, fb):
+                continue
+            if any(fa < lb + self.NEG_LOOK_GAP and la - self.NEG_LOOK_GAP < fb for la, lb, _l in self.neg_looks):
+                continue
+            if lv < NEG_STRONG and any(l_ >= NEG_STRONG and fa < lb + 4.0 and la - 4.0 < fb
+                                       for la, lb, l_ in self.neg_looks):
+                continue
+            if sum(lb - la for la, lb, _l in self.neg_looks) + (fb - fa) > budget:
+                continue
+            k_strong, k_weak = cfg["look"]
+            fields = {"start": a, "end": b, "kind": "bw", "intensity": k_strong if lv >= NEG_STRONG else k_weak,
+                      "contrast": 1.12 if lv >= NEG_STRONG else 1.05, "tone": "cool",
+                      "vignette": 0.5 if lv >= NEG_STRONG else 0.35, "lift": 0.05,
+                      "fade": 0.22 if lv >= NEG_STRONG else 0.3, "subject_color": False}
+            look = self.add("effects", "neg", fields, event=lv >= NEG_STRONG)
+            if not look:
+                continue
+            self.neg_looks.append((fa, fb, lv))
+            if lv < NEG_STRONG:
+                continue
+            th = self.snap_start(max(a, hw["t0"] - 0.02))
+            if cfg["glitch"] == "rgb":
+                self.add("effects", "neg_glitch", {"start": th, "end": th + 0.22, "kind": "rgb_split",
+                                                   "amount": 7.0}, event=False)
+            elif cfg["glitch"] == "shake" and shot["talk"]:
+                self.add("effects", "neg_shake", {"start": th, "end": th + 0.35, "kind": "shake",
+                                                  "amp": 6.0, "freq": 12.0, "decay": 0.7}, event=False)
+            name = cfg["sfx"]
+            self.sfx(th, name, prio=8, gain=SFX_GAIN.get(name, -6) - 4.0, src_id=look["id"])
+            self.music_swells.append({"start": _r(a), "end": _r(b), "db": -3.0})
+            if main["k"] not in self.neg_icon_done:
+                ic = self.neg_icon(main)
+                if ic and self._float_accent(hw, shot, icon_only=True, icon=ic, neg=True):
+                    self.neg_icon_done.add(main["k"])
+
+    def neg_guard(self) -> None:
+        """Red de seguridad del tono: nada celebratorio de la IA (destellos, estrellas, corazones,
+        palomitas, iconos de fiesta; fondos de rayos o estrellas en escenas) sobre un tropiezo ni a
+        menos de NEG_PAD s. Lo del usuario y lo bloqueado (self.fixed) no se toca."""
+        if not self.neg_win:
+            return
+        for it in list(self.fx["graphics"]):
+            if not any(x is it for x in self.fx["graphics"]):
+                continue                      # se fue con su gemelo espejo
+            if celebratory(it.get("kind"), it.get("name")) and self.neg_level(float(it["start"]), float(it["end"])):
+                self._unplace(it)
+        for it in self.fx["cutaways"]:
+            if not self.neg_level(float(it["start"]), float(it["end"])):
+                continue
+            if isinstance(it.get("graphics"), list):
+                it["graphics"] = [g for g in it["graphics"]
+                                  if not (isinstance(g, dict) and celebratory(g.get("kind"), g.get("name")))]
+            if it.get("background") in CELEB_BGS:
+                it["background"] = "grid_warp"
 
     # ---------------------------------------------------------- 5. datos (tarjetas / escenas)
     def _sent_of(self, wi: int) -> dict:
@@ -6745,8 +7556,8 @@ class _Choreo:
         cands = []
         for s in self.sents:
             sec = s["info"]["section"]
-            if sec not in order:
-                continue
+            if sec not in order or self.neg_sent.get(s["id"], 0) >= NEG_STRONG:
+                continue                     # el tropiezo no es un inserto: se queda la cara (negative)
             ws = self.words[s["w0"]:s["w1"] + 1]
             emph = set(s["info"]["emph"]) | {w["i"] for w in ws if w["kw"] and w["n"] not in STOP}
             if s["info"].get("title"):
@@ -6826,17 +7637,26 @@ class _Choreo:
         lines.append({"text": _display(hero["text"]).strip("¿?¡!").upper(), "scale": 1.0, "font": font,
                       "color": self.pal["accent"]})
         size = self._fit_lines(lines, 0.2, 0.74)
-        bg = self.pick("bg", [b_ for b_ in self.S["backgrounds"] if b_ not in LIGHT_BG and b_ != "blur_self"]
-                       or ["dark_stars"])
+        party = self.party_ok(a, b)
+        bgs = [b_ for b_ in self.S["backgrounds"] if b_ not in LIGHT_BG and b_ != "blur_self"] or ["dark_stars"]
+        if not party:
+            bgs = [b_ for b_ in bgs if b_ not in CELEB_BGS] or ["grid_warp"]
+        bg = self.pick("bg", bgs)
         bcol = self.pal["accent"] if _luma(self.pal["accent"]) < 0.9 else "#FFFFFF"
         ty = 0.5
+        nb_ = next((x for x in self.neg if hero["i"] in x["hits"]), None)
+        if nb_ is not None:
+            icon = self.neg_icon(nb_) or icon      # la palabra ES el problema ('DOLOR'): su icono
+        elif not party and celebratory("icon", icon):
+            icon = "alert-triangle"
         gr = [{"kind": "icon", "name": icon, "variant": "outline", "badge": "circle", "badge_color": bcol,
                "color": self.pal["dark"] if _luma(bcol) > 0.55 else "#FFFFFF", "draw": True,
                "x": 0.5, "y": _r(ty - size * 0.95 / self.aspect - 0.1, 4), "size": 0.2, "anim_in": "pop",
-               "offset": 0.04},
-              *self._scene_pair({"kind": "doodle", "name": "sparkle", "x": 0.78,
-                                 "y": _r(ty - size * 0.55 / self.aspect, 4), "size": 0.1,
-                                 "color": self.pal["accent"], "draw": True, "anim_in": "draw", "offset": 0.12})]
+               "offset": 0.04}]
+        if party:
+            gr += self._scene_pair({"kind": "doodle", "name": "sparkle", "x": 0.78,
+                                    "y": _r(ty - size * 0.55 / self.aspect, 4), "size": 0.1,
+                                    "color": self.pal["accent"], "draw": True, "anim_in": "draw", "offset": 0.12})
         cw = self.add("cutaways", "flash", {
             "start": a, "end": b, "kind": "title_card", "background": bg,
             "bg_colors": [self.pal["dark"], self.pal["accent2"]],
@@ -6851,7 +7671,8 @@ class _Choreo:
         self.request_transition(a, "scene")
         self.sfx(a + 0.02, "pop", prio=7, src_id=cw["id"], vary=True)
         self.sfx(b - 0.02, "whoosh_soft", prio=8, src_id=cw["id"] + "o")
-        self.music_swells.append({"start": _r(a), "end": _r(b), "db": 2.0})
+        if party:
+            self.music_swells.append({"start": _r(a), "end": _r(b), "db": 2.0})
         self.used["topic_icon"] += 1
         for w in self.words[s["w0"]:s["w1"] + 1]:
             if fa - 0.05 <= w["f0"] and w["f1"] <= fb + 0.1:
@@ -7811,16 +8632,18 @@ class _Choreo:
             if s["info"].get("_done"):
                 continue
             covered = sum(self.f(w["t1"]) - self.f(w["t0"]) for w in self.words if w["i"] in self.titled_words)
-            # el remate con humor siempre lleva titulo (es el chiste: se lee, no solo se oye)
+            # el remate con humor siempre lleva titulo (es el chiste: se lee, no solo se oye); el
+            # tropiezo tambien (se recalca)
+            neg2 = self.neg_sent.get(s["id"], 0) >= NEG_STRONG
             if covered / total >= target and s["info"]["section"] not in ("beneficio", "problema") \
-                    and s["info"].get("tone") != "humor":
+                    and s["info"].get("tone") != "humor" and not neg2:
                 continue
             info = s["info"]
-            humor = info["tone"] == "humor"
+            humor = info["tone"] == "humor" and not neg2
             fxk = info["fx"]
             ws = self.words[s["w0"]:s["w1"] + 1]
             shot = self.shot_at(ws[0]["t0"])
-            if fxk == "escena" and self.n_cut_left > 0 and self.S["cutaways"] > 0:
+            if fxk == "escena" and self.n_cut_left > 0 and self.S["cutaways"] > 0 and not neg2:
                 if self._scene(s):
                     self.n_cut_left -= 1
                     info["_done"] = True
@@ -8190,6 +9013,8 @@ class _Choreo:
         t = self.o(mid)
         shot = self.shot_at(t)
         t1 = self.o(mid + 1.2)
+        if not self.party_ok(t, t1):
+            return False                     # junto a un tropiezo no hay destello decorativo
         for x in (self.XC, 0.78):
             ok = self.accent_ok(x, 0.2, 0.1, mid, mid + 1.2, shot, t, t1)
             if ok and x != self.XC:
@@ -8218,20 +9043,25 @@ class _Choreo:
                 out |= set(range(a, b + 1))
         return out
 
-    def _float_accent(self, w: dict, shot: dict, icon_only: bool = False, icon: str | None = None) -> dict | None:
+    def _float_accent(self, w: dict, shot: dict, icon_only: bool = False, icon: str | None = None,
+                      neg: bool = False) -> dict | None:
         """Acento de ritmo sobre la cabeza: un icono (siempre centrado: tiene mano) o un garabato
         (glifo simetrico en par espejo a los lados de la cabeza, o uno centrado). Si nada cabe
-        simetrico (la cabeza ocupa el centro), no hay acento."""
+        simetrico (la cabeza ocupa el centro), no hay acento. Junto a un tropiezo nada
+        celebratorio; `neg`: `icon` es el icono negativo del tropiezo."""
         t0 = w["t0"] - 0.05
         t1 = min(w["t1"] + 1.2, shot["end"] - 0.03)
         fa, fb = self.f(t0), self.f(t1)
         if fb - fa < 0.9:
             return None
+        party = neg or self.party_ok(t0, t1)
         ht = self.geom(shot, t0, t1)["head_top"]
         base_y = _clamp((ht - 0.02) if ht else 0.3, SAFE["top"] + 0.06, 0.45)
         single = next(((self.XC, y) for y in (base_y, base_y - 0.06)
                        if self.accent_ok(self.XC, y, 0.12, fa, fb, shot, t0, t1)), None)
         icon = icon or tone_icon(w["n"], self.role, self.used["topic_icon"])
+        if icon and not party and celebratory("icon", icon):
+            icon = None
         if icon:
             if single is None:
                 return None
@@ -8239,12 +9069,16 @@ class _Choreo:
             dark_bg = self._bg_at(shot, y - 0.03, y + 0.03, t0, t1)
             light = dark_bg is not None and contrast("#FFFFFF", dark_bg["rgb"]) < 2.4
             bcol = self.pal["dark"] if light else self.pal["accent"]
-            g = self.add("graphics", "beat_icon", {
+            fields = {
                 "start": t0, "end": t1, "kind": "icon", "name": icon, "variant": "outline",
                 "badge": "circle", "badge_color": bcol,
                 "color": self.pal["dark"] if _luma(bcol) > 0.55 else "#FFFFFF", "draw": True,
                 "x": _r(x, 3), "y": _r(y, 4), "size": 0.12, "anim_in": "pop", "anim_out": "pop_out",
-                "rotation": _r((self.rand("bi" + str(w["i"])) - 0.5) * 14, 1)}, zone="accent")
+                "rotation": _r((self.rand("bi" + str(w["i"])) - 0.5) * 14, 1)}
+            if neg:
+                fields.update(self._neg_icon_style("light" if light else "dark"))
+                return self.add("graphics", "neg_icon", fields, zone="accent")
+            g = self.add("graphics", "beat_icon", fields, zone="accent")
             if g:
                 self.used["topic_icon"] += 1
                 self.sfx(t0 + 0.02, "bubble", prio=4, pan=(x - 0.5), src_id=g["id"], vary=True)
@@ -8258,6 +9092,8 @@ class _Choreo:
             return None
         pool = [d for d in self.S["doodles"] if d not in ("underline", "circle_scribble", "arrow_curve")
                 and not d.startswith("arrow")] or ["sparkle"]
+        if not party:
+            return None                      # junto a un tropiezo no hay garabato de ritmo
         if single is None:
             pool = [d for d in pool if d in SYM_GLYPHS] or ["sparkle"]     # solo cabe el par
         name = self.pick("doodle", pool)
@@ -8319,6 +9155,8 @@ class _Choreo:
         for r in reqs:
             if self.I < 0.35 and r["prio"] <= 3:
                 continue
+            if r["name"] in CELEB_SFX and self.neg_level(r["at"]):
+                continue                          # sin sonido de premio junto a un tropiezo
             ft = self.f(r["at"])
             if ft < 0 or ft > self.D:
                 continue
@@ -8979,12 +9817,14 @@ class _Choreo:
         self.broll()
         self.sentences()
         self.enum_icons()
+        self.negative()
         self.final_cta()
         self._fix_lt_bg()
         self.riser()
         self.assign_transitions()
         self.rhythm()
         self.watermark()
+        self.neg_guard()                 # nada celebratorio sobre un tropiezo (ni pegado a el)
         # red de seguridad: todo lo que coloco esta coreografia queda simetrico (lo del usuario y
         # lo bloqueado viven en self.fixed y no se tocan)
         self.symmetry()
@@ -9159,7 +9999,7 @@ def _script_from_public(plan: dict, pub: dict, shots: list[dict]) -> dict:
         if src is None:
             continue
         shift = 0 if ok else s["w0"] - int(src.get("w0", s["w0"]))
-        for key in ("section", "emph", "fx", "icons", "energy", "tone", "title"):
+        for key in ("section", "emph", "fx", "icons", "energy", "tone", "title", "pol"):
             if key not in src:
                 continue
             v = src[key]
@@ -9888,6 +10728,8 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
     fx["captions"] = _captions_cfg(style, pal, ch)
     fx["music"] = mcfg
     fx["grade"] = _grade_cfg(style)
+    _keep_grade(fx, old, (plan.get("director") or {}).get("style"))     # el color que ajusto el usuario
+    _keep_captions(fx, old, (plan.get("director") or {}).get("style"))  # su estilo de subtitulos
     _keep_media(fx, old)                 # recursos del guion: contenido bloqueado, tal cual
     _keep_accent(fx, old, style)         # el color de acento que eligio el usuario
     p["fx"] = fx
@@ -10167,6 +11009,9 @@ def _graphic_variant(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict:
         if abs(x_ - 0.5) > SYM_TOL and it.get("name") in SYM_GLYPHS:
             # miembro de un par espejo: sigue siendo un glifo simetrico (su gemelo lo refleja)
             fam = tuple(n for n in fam if n in SYM_GLYPHS) or ("sparkle", "star4", "star5", "burst")
+        elif ch.neg_level(float(it["start"]), float(it["end"])):
+            # junto a un tropiezo la variante no es de fiesta (subrayado / garabato / signos)
+            fam = tuple(n for n in fam if n not in CELEB_DOODLES) or ("underline", "squiggle")
         out["name"] = _pick_other(list(fam), it.get("name"), seed, rev, iid, "name")
         cols = _legible([pal["accent"], "#FFFFFF", pal["accent2"], ch.acc_light, pal["dark"]], bg) or \
             [ch.doodle_color(float(it["start"]), float(it["end"]), float(it.get("x", 0.5)), float(it.get("y", 0.5)))]
@@ -10240,6 +11085,8 @@ def _cutaway_variant(ch: "_Choreo", it: dict, seed: int, rev: int) -> dict:
     out = copy.deepcopy(it)
     pool = [b for b in list(ch.S["backgrounds"]) + ["grid_warp", "dark_stars", "rays", "gradient", "halftone"]
             if b in BACKGROUNDS and b not in ("blur_self",)]
+    if ch.neg_level(float(it["start"]), float(it["end"])):
+        pool = [b for b in pool if b not in CELEB_BGS] or ["grid_warp", "gradient"]
     out["background"] = _pick_other(pool, it.get("background"), seed, rev, iid, "bg")
     out["anim_in"] = _pick_other(["cut", "zoom", "circle", "wipe", "fade"], it.get("anim_in", "cut"), seed, rev, iid, "ain")
     t = out.get("text")
@@ -10799,6 +11646,9 @@ def redirect(plan: dict, style: str | None = None, intensity: float | None = Non
                      ("grade", lambda: _grade_cfg(style))):
         keep = key_ in locked_ids or (only and key_ not in only)
         fx[key_] = copy.deepcopy(old[key_]) if keep and isinstance(old.get(key_), dict) else fn()
+    _keep_grade(fx, old, d.get("style"))     # el color que ajusto el usuario (exposicion, contraste...)
+    if "captions" not in locked_ids:
+        _keep_captions(fx, old, d.get("style"))  # el estilo de subtitulos que eligio el usuario
     fx["music"] = mcfg
     _keep_media(fx, old)                 # recursos del guion: contenido bloqueado, tal cual
     _keep_accent(fx, old, style)         # el color de acento que eligio el usuario

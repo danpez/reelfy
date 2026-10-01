@@ -63,10 +63,12 @@ Con spec["inserts_timeline"] == "main" los inserts YA estan en la linea de tiemp
 compone (los recoloco la UI sobre los clips actuales: FXCore.placeInserts) y se anclan en ella, no en
 la linea de tiempo guardada del montaje (que puede ser la de antes de cambiar tomas).
 """
+import contextvars
 import copy
 import math
 import os
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
@@ -111,12 +113,13 @@ IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".heic")
 VIDEO_EXT = (".mp4", ".mov", ".m4v", ".mkv", ".webm")
 
 
-def canvas_size(w, h):
+def canvas_size(w, h, max_vertical=None):
     """Lienzo del montaje a partir de las dims de display del primer video (pares). Vertical
-    (h > w): se escala para caber en MAX_VERTICAL conservando el aspecto; si no, tal cual."""
+    (h > w): se escala para caber en MAX_VERTICAL (o `max_vertical` (w, h): el export en alta
+    resolucion recompone con un tope mayor) conservando el aspecto; si no, tal cual."""
     w, h = int(w or 0), int(h or 0)
     if w > 0 and h > w:
-        mw, mh = MAX_VERTICAL
+        mw, mh = max_vertical or MAX_VERTICAL
         k = min(1.0, mw / w, mh / h)
         w, h = int(round(w * k)), int(round(h * k))
     return w - w % 2, h - h % 2
@@ -184,9 +187,60 @@ def _color_tags():
 SETPARAMS = video_io.SETPARAMS_709
 
 
+# cancelacion de una composicion en curso (compose(cancel=...)): la leen _run y cada segmento,
+# tambien en los hilos del compositor (cada tarea corre en una copia del contexto del llamador)
+_CANCEL = contextvars.ContextVar("compose_cancel", default=None)
+CANCEL_POLL = 0.1        # s entre revisiones de la cancelacion mientras corre un ffmpeg
+
+
+class Canceled(Exception):
+    """La composicion se cancelo: `cancel()` devolvio True (el ffmpeg en curso ya se mato)."""
+
+
+def _check_cancel():
+    """Lanza Canceled si la composicion en curso se cancelo (o lo que lance `cancel`)."""
+    cancel = _CANCEL.get()
+    if cancel is not None and cancel():
+        raise Canceled()
+
+
+def _run_cancelable(cmd, cancel):
+    """ffmpeg revisando `cancel` cada CANCEL_POLL s: al cancelar (o si `cancel` lanza, p. ej.
+    JobCanceled del servidor) MATA el proceso y propaga. Error de ffmpeg -> CalledProcessError
+    con la cola de stderr (como paths.run_ff)."""
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+        try:
+            while True:
+                try:
+                    p.wait(timeout=CANCEL_POLL)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if cancel():
+                    raise Canceled()
+        except BaseException:
+            p.kill()
+            p.wait()
+            raise
+        if p.returncode != 0:
+            err.seek(0)
+            raise subprocess.CalledProcessError(p.returncode, cmd, stderr=err.read()[-4000:])
+
+
 def _run(cmd):
     # run_ff reintenta con libx264 si videotoolbox falla (p. ej. lado > 4096 px).
-    paths.run_ff(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    cancel = _CANCEL.get()
+    if cancel is None:
+        paths.run_ff(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        return
+    _check_cancel()
+    try:
+        _run_cancelable(cmd, cancel)
+    except subprocess.CalledProcessError:
+        if "h264_videotoolbox" not in cmd:
+            raise
+        _run_cancelable(paths._to_libx264(cmd), cancel)
 
 
 _DATE_MIN = 366 * 86400      # 1904/1970 = "sin fecha" en algunas camaras y exportadores
@@ -508,17 +562,56 @@ def _concat_xfade(parts, trans, out, w=1080, h=1920, fps=FPS_DEFAULT, br=None):
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)])
 
 
-def _shots(seq, parts, trans):
+def _seg_frames(path, fps):
+    """Cuadros de un segmento normalizado (nb_frames del stream; si falta, por su duracion)."""
+    i = video_io.probe(path)
+    return int(i.get("nb_frames") or 0) or int(round(float(i.get("duration") or 0.0) * float(fps)))
+
+
+def _concat_exact(parts, out, work, fps):
+    """Une segmentos de cuadros enteros (uniones exactas) con el video copiado y el audio
+    re-codificado una vez, TODO desde t = 0 y en la reticula de cuadros.
+
+    El concat demuxer alinea el paquete mas temprano de cada archivo con su inicio, y en un mp4 ese
+    es el relleno inicial del AAC (1024 muestras = 21.3 ms antes de 0): el video combinado salia con
+    su video en 0.021354 s (y el audio, que se decodifica sin el relleno, ~21 ms tarde) mientras
+    plan.shots y la reticula del render cuentan desde 0; el render mostraba en el cuadro k el
+    cuadro k-1 del combinado. Por eso:
+      - VIDEO: una lista con `inpoint 0` (cada archivo empieza en su 0, no en el del relleno) y
+        `duration` = sus cuadros / fps (cada segmento donde lo pone _shots, exacto);
+      - AUDIO: la lista normal (el decodificador quita el relleno de cada archivo y las muestras
+        quedan continuas) llevada a 0 con asetpts. Con `inpoint 0` el demuxer tiraba el paquete
+        del relleno y el primer cuadro AAC se decodificaba mal (~20 ms de basura al inicio)."""
+    work = Path(work)
+    vlist, alist = work / "concat_v.txt", work / "concat.txt"
+    vlist.write_text("".join(f"file '{Path(p).as_posix()}'\ninpoint 0\n"
+                             f"duration {_seg_frames(p, fps) / float(fps):.6f}\n" for p in parts))
+    alist.write_text("".join(f"file '{Path(p).as_posix()}'\n" for p in parts))
+    _run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(vlist),
+          "-f", "concat", "-safe", "0", "-i", str(alist),
+          "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-af", "asetpts=PTS-STARTPTS",
+          "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k", str(out)])
+
+
+def _shots(seq, parts, trans, fps=FPS_DEFAULT, exact=False):
     """Limites reales de cada segmento de la pista principal en el video compuesto.
 
     Replica la aritmetica del montaje: con concat demuxer (sin transiciones) cada segmento
-    empieza donde acaba el anterior (duracion del contenedor); con xfade (hay algun
-    crossfade) CADA union se superpone T s (el crossfade pedido o 0.04 s) y el limite queda
-    a la MITAD de la superposicion. Devuelve [{start, end, src, index, kind}] (kind "clip" o
-    "black"), en segundos del video compuesto."""
-    durs = [float(probe(p)["dur"] or 0.0) for p in parts]
+    empieza donde acaba el anterior (duracion del contenedor; `exact`: sus cuadros enteros, que es
+    donde _concat_exact pone cada uno); con xfade (hay algun crossfade) CADA union se superpone T s
+    (el crossfade pedido o 0.04 s) y el limite queda a la MITAD de la superposicion. Devuelve
+    [{start, end, src, index, kind}] (kind "clip" o "black"), en segundos del video compuesto.
+    Solo el resultado se redondea a ms: sumar duraciones ya redondeadas corria cada toma ~0.3 ms
+    por union (+4 ms a la toma 11 de un montaje real) y el render tomaba un cuadro de la toma
+    anterior o de la siguiente."""
     has_trans = len(parts) > 1 and any(
         t and t.get("type") == "crossfade" and float(t.get("dur", 0)) > 0.05 for t in trans[1:])
+    if has_trans:
+        durs = [float(probe(p)["dur"] or 0.0) for p in parts]       # los mismos que usa xfade
+    elif exact:
+        durs = [_seg_frames(p, fps) / float(fps) for p in parts]
+    else:
+        durs = [float(video_io.probe(p)["duration"] or 0.0) for p in parts]
     out, acc = [], 0.0
     for i, (kind, data, _tr) in enumerate(seq):
         d = durs[i]
@@ -894,8 +987,10 @@ def seq_ramps(seq):
 
 RAMP_CUT_MIN = 0.05      # s: lo que queda de un silencio recortado por una rampa (menos no se corta)
 # s: ninguna parte del video (keep) empieza tan cerca de un cambio de camara con rampa: el render
-# mostraria 1-2 cuadros sueltos de la OTRA camara (limite del keep en la reticula + el desfase de
-# ~21 ms del video combinado); medido en un montaje real: un cuadro de la toma que sale tras el salto
+# mostraria 1-2 cuadros sueltos de la OTRA camara (medido en un montaje real: un cuadro de la toma
+# que sale tras el salto). Se midio cuando el video combinado aun venia 21 ms tarde y el primer
+# cuadro de una toma salia de ceil(t*fps - 0.1); con _concat_exact y timeline.shot_frame ese cuadro
+# ya no se cuela y el margen queda como holgura de estilo (no hace falta para la exactitud).
 RAMP_LEAK = 0.10
 RAMP_IN_EAT = 0.08       # s: un silencio que llega al cambio sigue esto dentro de la rampa de entrada
 
@@ -1425,13 +1520,180 @@ def finish_plan(plan, info, spec=None, montage=None, resolve=None):
     return plan
 
 
-def compose(spec, out, work, on_step=None, info=None):
+def _canvas_src(spec, main):
+    """Dims de DISPLAY de las que sale el lienzo (sin el tope vertical): las del primer VIDEO (o
+    del primer clip); en un montaje con IA (o canvas "majority"), las de la orientacion de la
+    MAYORIA de los clips."""
+    W = H = 0
+    if is_montage(spec) or spec.get("canvas") == "majority":
+        mc = majority_canvas(main)
+        if mc:
+            W, H = mc
+    if not W:
+        for s in main:
+            if s.get("type") == "video":
+                p = probe(s["path"]); W, H = p["w"], p["h"]; break
+    if not W:
+        p = probe(main[0]["path"]); W, H = (p["w"] or 1080), (p["h"] or 1920)
+    return int(W), int(H)
+
+
+def _even(v):
+    v = int(round(float(v)))
+    return max(2, v - v % 2)
+
+
+def clip_fill(wh, canvas_wh):
+    """Mayor lienzo con el aspecto de `canvas_wh` que un clip de `wh` (dims de display) llena SIN
+    escalar hacia arriba (los segmentos se normalizan con escala "increase" + recorte al centro:
+    el clip cubre el lienzo) -> (w, h) pares."""
+    w, h = float(wh[0]), float(wh[1])
+    cw, ch = float(canvas_wh[0]), float(canvas_wh[1])
+    k = min(w / cw, h / ch)
+    return _even(cw * k), _even(ch * k)
+
+
+def clip_canvases(spec, canvas_wh=None, main=None):
+    """[{w, h, secs, name}] de cada VIDEO de la composicion (todas las capas): el lienzo (con el
+    aspecto del video combinado) que ese clip llena sin escalar, y cuantos segundos aporta. Con
+    clips de distinta resolucion (un iPhone en 4K y otro en 1080p) el export decide con esto si
+    una resolucion alta la da la MAYORIA del video. [] sin videos legibles."""
+    main = main if main is not None else [s for s in (spec or {}).get("main", [])
+                                          if isinstance(s, dict) and s.get("path")]
+    if not main:
+        return []
+    if canvas_wh is None:
+        canvas_wh = _canvas_src(spec or {}, main)
+    if not canvas_wh or not canvas_wh[0] or not canvas_wh[1]:
+        return []
+    out = []
+    for s in main:
+        if s.get("type", "video") == "image":
+            continue
+        p = probe(s["path"])
+        if p.get("type") != "video" or not p.get("w") or not p.get("h"):
+            continue
+        ln = float(s.get("out", 0) or 0) - float(s.get("in", 0) or 0)
+        w, h = clip_fill((p["w"], p["h"]), canvas_wh)
+        out.append({"w": w, "h": h, "secs": round(ln if ln > 0 else float(p["dur"] or 0.0), 3),
+                    "name": Path(str(s.get("name") or s["path"])).name})
+    return out
+
+
+def _native_of(canvas_wh, clips):
+    """Lienzo nativo: el del clip de MAS resolucion (con el aspecto del lienzo), nunca menos que el
+    del clip del que sale el lienzo."""
+    best = (canvas_wh[0] - canvas_wh[0] % 2, canvas_wh[1] - canvas_wh[1] % 2)
+    for c in clips or []:
+        if c["w"] * c["h"] > best[0] * best[1]:
+            best = (c["w"], c["h"])
+    return best
+
+
+def native_canvas(spec):
+    """Lienzo que tendria el video combinado SIN el tope vertical a la resolucion del clip de MAS
+    resolucion (el aspecto es el del lienzo; pares) -> (w, h), o None si el spec no tiene clips
+    legibles. Lo usa el export en alta resolucion para saber hasta donde se puede recomponer sin
+    escalar hacia arriba (cuanto del video lo da sin escalar: clip_canvases)."""
+    main = [s for s in (spec or {}).get("main", []) if isinstance(s, dict) and s.get("path")]
+    if not main or not all(Path(str(s["path"])).exists() for s in main):
+        return None
+    try:
+        w, h = _canvas_src(spec, main)
+        if not w or not h:
+            return None
+        return _native_of((w, h), clip_canvases(spec, (w, h), main))
+    except Exception:  # noqa: fuente ilegible o borrada
+        return None
+
+
+# claves de un item que el registro del spec (spec_record) no necesita para recomponer: las palabras
+# solo sirven para MEDIR el volumen "auto" y el registro ya trae el volumen resuelto
+RECORD_DROP = ("words", "_lufs")
+
+
+def spec_record(spec, info):
+    """Lo que el servidor guarda tras componer para poder RECOMPONER el mismo video despues (export
+    en 4K): el spec con los volumenes "auto" ya resueltos (info["main"]: recomponer no vuelve a medir
+    y el audio sale identico), el lienzo usado, el nativo (sin tope) y los limites de cada toma (para
+    verificar que la recomposicion cae en los mismos cuadros)."""
+    info = info or {}
+    main = [{k: v for k, v in dict(s).items() if k not in RECORD_DROP}
+            for s in (info.get("main") or spec.get("main") or []) if isinstance(s, dict)]
+    sp = {"fps": int(spec.get("fps", FPS_DEFAULT)), "main": main,
+          "overlays": [dict(o) for o in spec.get("overlays") or [] if isinstance(o, dict)]}
+    for k in ("canvas", "montage"):
+        if spec.get(k) is not None:
+            sp[k] = copy.deepcopy(spec[k])
+    rec = {"v": 1, "spec": sp, "W": info.get("W"), "H": info.get("H"),
+           "native": list(info["native"]) if info.get("native") else None,
+           "clips": [dict(c) for c in info.get("clips") or []],
+           "shots": [[round(float(s["start"]), 4), round(float(s["end"]), 4)]
+                     for s in info.get("shots") or [] if "start" in s and "end" in s]}
+    return rec
+
+
+def spec_from_timeline(timeline, resolve, fps=FPS_DEFAULT):
+    """Spec para RECOMPONER un montaje compuesto antes de que se guardara su registro: la linea de
+    tiempo que de verdad se armo (plan.montage.timeline: sid, in, out, start, vol ya nivelado, union,
+    rampas) con el archivo de cada clip (`resolve(sid)` -> ruta o None). Lanza FileNotFoundError con
+    los sids que faltan en el disco. Mismos items que arma POST /compose para un montaje."""
+    main, missing = [], []
+    for e in timeline or []:
+        if not isinstance(e, dict) or not e.get("sid"):
+            continue
+        path = resolve(e["sid"])
+        if not path:
+            missing.append(str(e["sid"]))
+            continue
+        p = Path(str(path))
+        img = p.suffix.lower() in IMAGE_EXT
+        m = {k: e[k] for k in ("slot", "cand", "join", "conf", "setup") if e.get(k) is not None}
+        for k in ("ramp", "ramp_user", "ramp_auto"):
+            if isinstance(e.get(k), bool):
+                m[k] = e[k]
+        it = {"path": str(p), "sid": p.stem, "type": "image" if img else "video", "name": p.name,
+              "start": float(e.get("start") or 0.0), "layer": 0, "fadeIn": 0.0, "fadeOut": 0.0,
+              "montage": m}
+        if img:
+            it["dur"] = max(0.1, float(e.get("out") or 0.0) - float(e.get("in") or 0.0))
+        else:
+            it["in"], it["out"] = float(e.get("in") or 0.0), float(e.get("out") or 0.0)
+            v = e.get("vol")
+            it["vol"] = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else "auto"
+            it["mute"] = False
+            for k in ("ramp_in", "ramp_out"):
+                if isinstance(e.get(k), dict):
+                    it[k] = copy.deepcopy(e[k])
+        main.append(it)
+    if missing:
+        raise FileNotFoundError(", ".join(missing))
+    return {"fps": int(fps), "main": main, "overlays": []}
+
+
+def compose(spec, out, work, on_step=None, info=None, max_canvas=None, canvas=None, cancel=None):
     """spec: ver módulo. Devuelve la ruta del video compuesto (out).
 
     Si `info` es un dict, se llena con info["shots"] = limites REALES de cada clip de la
     pista principal en el video compuesto ([{start, end, src, index, kind}], segundos):
-    el servidor los pone en plan.shots para el director y el render (uniones exactas)."""
+    el servidor los pone en plan.shots para el director y el render (uniones exactas).
+    `max_canvas` (w, h): tope del lienzo vertical en vez de MAX_VERTICAL; `canvas` (w, h): el
+    lienzo EXACTO (el export en 4K recompone las mismas tomas al tamano que necesita, con el
+    aspecto del video combinado, aunque el primer clip sea de menos resolucion). info["native"] =
+    el lienzo sin tope a la resolucion del mejor clip; info["clips"] = clip_canvases.
+    `cancel`: funcion que devuelve True (o lanza) para cancelar: se revisa mientras corre cada
+    ffmpeg (que se mata) y antes de cada segmento -> Canceled (o lo que lance `cancel`)."""
+    tok = _CANCEL.set(cancel) if cancel is not None else None
+    try:
+        return _compose(spec, out, work, on_step, info, max_canvas, canvas)
+    finally:
+        if tok is not None:
+            _CANCEL.reset(tok)
+
+
+def _compose(spec, out, work, on_step, info, max_canvas, canvas):
     def step(m):
+        _check_cancel()
         if on_step:
             on_step(m)
 
@@ -1455,18 +1717,18 @@ def compose(spec, out, work, on_step=None, info=None):
     # lienzo: dimensiones de DISPLAY del primer VIDEO (o del primer clip); pipeline
     # reencuadra luego. probe ya aplica la rotación (iPhone vertical = 2160x3840). En un
     # montaje con IA: la orientacion de la MAYORIA de los clips (el orden lo decide el guion).
-    W = H = 0
-    if montage or spec.get("canvas") == "majority":
-        mc = majority_canvas(main)
-        if mc:
-            W, H = mc
-    if not W:
-        for s in main:
-            if s.get("type") == "video":
-                p = probe(s["path"]); W, H = p["w"], p["h"]; break
-    if not W:
-        p = probe(main[0]["path"]); W, H = (p["w"] or 1080), (p["h"] or 1920)
-    W, H = canvas_size(W, H)
+    W, H = _canvas_src(spec, main)
+    if info is not None:
+        try:
+            info["clips"] = clip_canvases(spec, (W, H), main)
+        except Exception as e:  # noqa: el detalle por clip es para el export; nunca tumba nada
+            print(f"   compose: resolucion por clip no disponible ({e})")
+            info["clips"] = []
+        info["native"] = list(_native_of((W, H), info["clips"]))
+    if canvas:
+        W, H = _even(canvas[0]), _even(canvas[1])
+    else:
+        W, H = canvas_size(W, H, max_canvas)
     if info is not None:
         info["W"], info["H"] = W, H
 
@@ -1535,6 +1797,7 @@ def compose(spec, out, work, on_step=None, info=None):
     ramp_eff = [None] * len(seq)
 
     def norm(i):
+        _check_cancel()
         kind, data, _tr = seq[i]
         seg = parts[i]
         if kind == "black":
@@ -1563,7 +1826,8 @@ def compose(spec, out, work, on_step=None, info=None):
     else:
         ex = ThreadPoolExecutor(max_workers=min(COMPOSE_JOBS, n), thread_name_prefix="compose")
         try:
-            futs = [ex.submit(norm, i) for i in range(n)]
+            # cada tarea en una COPIA del contexto: la cancelacion (_CANCEL) llega a los hilos
+            futs = [ex.submit(contextvars.copy_context().run, norm, i) for i in range(n)]
             for k, f in enumerate(as_completed(futs), 1):
                 f.result()                       # propaga el error del ffmpeg
                 step(f"Preparando {k}/{n}…")     # on_step puede lanzar (cancelacion)
@@ -1576,7 +1840,7 @@ def compose(spec, out, work, on_step=None, info=None):
 
     if info is not None:
         try:
-            info["shots"] = _shots(seq, parts, trans)
+            info["shots"] = _shots(seq, parts, trans, fps, exact)
         except Exception as e:  # noqa: los limites son una ayuda, nunca tumban el montaje
             print(f"   compose: limites de tomas no disponibles ({e})")
             info["shots"] = []
@@ -1596,15 +1860,19 @@ def compose(spec, out, work, on_step=None, info=None):
     main_mp4 = work / "main.mp4"
     if has_trans and len(parts) > 1:
         _concat_xfade(parts, trans, main_mp4, W, H, fps, br)
+    elif len(parts) == 1:
+        # un solo segmento ya es el video principal (video y audio desde 0): el concat de un
+        # archivo con `-c copy` lo corria 21 ms (relleno del AAC, ver _concat_exact)
+        Path(parts[0]).replace(main_mp4)
+    elif exact:
+        # montaje: el video se copia y el audio se decodifica (sin el relleno de cada AAC) y se
+        # re-codifica una vez: uniones sin hueco y en sincronia (segmentos de cuadros enteros)
+        _concat_exact(parts, main_mp4, work, fps)
     else:
         listf = work / "concat.txt"
         listf.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts))
-        # montaje: el video se copia y el audio se decodifica (sin el relleno de cada AAC) y se
-        # re-codifica una vez: uniones sin hueco y en sincronia (segmentos de cuadros enteros)
-        acodec = ["-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k"] \
-            if exact and len(parts) > 1 else ["-c", "copy"]
         _run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(listf),
-              *acodec, str(main_mp4)])
+              "-c", "copy", str(main_mp4)])
 
     # 3) encimar CAPAS superiores (full-frame, en su posición temporal) + STICKERS (PiP)
     overlays = [o for o in spec.get("overlays", []) if o.get("path")]

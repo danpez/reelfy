@@ -942,3 +942,104 @@ body.mclean .toast.on{transform:translateX(-50%) translateY(0)}
 .md-nm{min-width:0;display:flex;flex-direction:column;gap:2px}
 .md-nm b{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .md-nm span{font-size:11.5px;color:var(--muted)}
+/* ---------- hoja "Exportar" (formato, resolucion, calidad, nombre, carpeta, shorts) ----------
+   Simetrica: mismo margen a izquierda y derecha, controles a todo el ancho, botones de igual ancho.
+   Texto >= 11 px y en --muted o mas claro (contraste AA sobre --panel). */
+.modal.xp{z-index:70;padding:16px}
+.xp .xp-box{background:var(--panel);border:1px solid var(--line2);border-radius:16px;width:min(480px,100%);max-height:100%;
+  display:flex;flex-direction:column;text-align:left;box-shadow:0 30px 80px -24px rgba(0,0,0,.9);overflow:hidden}
+.xp-h{justify-content:center;margin:0;padding:17px 24px 15px;font-size:15px;border-bottom:1px solid var(--line);flex:none}
+.xp-h .ic{color:var(--brand2)}
+.xp-body{padding:16px 24px 2px;overflow-y:auto;min-height:0;display:flex;flex-direction:column;gap:15px}
+.xp-fld>label{margin-bottom:7px}
+.xp-seg{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);width:100%}
+.xp-seg button{padding:7px 4px;text-align:center;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.xp-seg button:focus-visible{outline:2px solid var(--brand2);outline-offset:1px}
+.xp-res button{display:flex;flex-direction:column;align-items:center;gap:1px;padding:6px 4px}
+.xp-res button b{font-size:12.5px;font-weight:700}
+.xp-res button span{font-size:11px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--muted)}
+.xp-res button.sel span{color:#fff}
+.xp-seg button.off{color:var(--muted);opacity:.5;cursor:not-allowed;text-decoration:line-through;text-decoration-thickness:1px}
+.xp-seg button.off:hover{color:var(--muted)}
+.xp-note{font-size:11.5px;color:var(--muted);line-height:1.45;margin-top:6px}
+.xp-note:empty{display:none}
+.xp-note.xp-flash{animation:xpflash .9s var(--ease)}
+@keyframes xpflash{0%,60%{color:var(--brand2)}100%{color:var(--muted)}}
+.xp-note.xp-bad{color:#ff9a8a}
+.xp-note.xp-notice{color:var(--brand2)}
+.xp-name{display:flex;align-items:center;background:var(--sunken);border:1px solid var(--line);border-radius:var(--rs);
+  transition:border .15s,box-shadow .15s}
+.xp-name:focus-within{border-color:var(--brand);box-shadow:0 0 0 3px rgba(255,90,60,.12)}
+.xp-name input[type=text]{border:0;background:none;box-shadow:none;padding:9px 2px 9px 12px;flex:1;min-width:0}
+.xp-name input[type=text]:focus{box-shadow:none}
+.xp-ext{padding:0 12px 0 1px;color:var(--muted);font-size:13.5px;flex:none}
+.xp-dir{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:stretch}
+.xp-path{display:flex;align-items:center;background:var(--sunken);border:1px solid var(--line);border-radius:var(--rs);padding:8px 12px;
+  font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;cursor:default}
+.xp-dir .btn{padding:8px 12px;font-size:12.5px}
+.xp-shorts .swlabel{font-size:13px;margin:0;text-transform:none;letter-spacing:0;font-weight:600;color:var(--text)}
+.xp-shorts .swlabel:has(input:disabled){color:var(--muted);cursor:default}
+.xp-cnt{color:var(--muted);font-weight:600}
+.xp-shorts .xp-note{margin-top:5px}
+.xp-est{margin:14px 24px 0;padding:10px 13px;border:1px solid var(--line);border-radius:10px;background:var(--sunken);font-size:12.5px;flex:none}
+.xp-eline{display:flex;align-items:center;gap:8px;font-weight:650;color:var(--text);font-variant-numeric:tabular-nums}
+.xp-eline .ic{color:var(--brand2)}
+.xp-eline.xp-dim{color:var(--muted);font-weight:500}
+.xp-eline.xp-dim .ic{color:var(--muted)}
+.xp-esub{color:var(--muted);font-size:11.5px;margin-top:5px;line-height:1.45;padding-left:23px}
+.xp-esub.xp-warn{color:var(--brand2)}
+.xp-err{margin:10px 24px 0;display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;color:#ffb0a4;font-size:12.5px;line-height:1.45;
+  border:1px solid rgba(255,110,110,.38);background:rgba(255,90,90,.08);border-radius:10px;padding:9px 12px;flex:none}
+.xp-err[hidden]{display:none}
+.xp-err .ic{width:14px;height:14px;flex:none;margin-top:2px}
+.xp-err span{flex:1 1 200px;min-width:0}
+.xp-err .rlnk{font-size:12.5px}
+.xp-foot{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:16px 24px 20px;flex:none}
+.xp-foot .btn{justify-content:center;min-width:0;white-space:nowrap}
+/* pantalla "Exportando…": a donde va */
+.xp-rdest{display:flex;align-items:center;gap:8px;margin:-6px 0 14px;color:var(--muted);font-size:12.5px;min-width:0}
+.xp-rdest[hidden]{display:none}
+.xp-rdest span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.xp-rdest b{color:var(--text);font-weight:650}
+/* resultados guardados en la carpeta elegida */
+.clips>.clip.xp-hero{flex:0 1 840px;display:grid;grid-template-columns:auto minmax(0,1fr);align-items:stretch}
+.clip.xp-hero video{width:auto;height:min(46vh,400px);max-width:min(56vw,640px);aspect-ratio:var(--ar,9 / 16);border-right:1px solid var(--line)}
+/* salida horizontal (16:9, original horizontal): el video arriba a lo ancho y los datos debajo */
+.clips>.clip.xp-hero.xp-land{grid-template-columns:minmax(0,1fr)}
+.clip.xp-hero.xp-land video{width:100%;height:auto;max-width:none;max-height:56vh;border-right:0;border-bottom:1px solid var(--line)}
+.xp-info{padding:20px 22px;display:flex;flex-direction:column;justify-content:center;gap:9px;min-width:0}
+.xp-kick{display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
+.xp-fname{font-size:17px;font-weight:700;letter-spacing:-.2px;overflow-wrap:anywhere;line-height:1.3}
+.xp-fdir{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12.5px;min-width:0}
+.xp-fdir span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.xp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.xp-chip{font-size:11.5px;font-weight:600;color:var(--text);background:var(--sunken);border:1px solid var(--line);border-radius:20px;
+  padding:3px 10px;font-variant-numeric:tabular-nums}
+.xp-hero .xp-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.clip .xp-meta{padding:0 11px 9px;font-size:11.5px;line-height:1.5;color:var(--muted)}
+.clip .xp-meta .xp-mfile{overflow-wrap:anywhere}
+.clip .xp-meta span{white-space:nowrap;font-variant-numeric:tabular-nums}
+.xp-resfoot{margin-top:18px;display:flex;justify-content:center;gap:10px;flex-wrap:wrap}
+.clip:not(.xp-hero) .xp-acts{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:0 11px 11px}
+.clip:not(.xp-hero) .xp-acts .btn{justify-content:center;min-width:0}
+.clip .xp-thumb{border-top:1px solid var(--line)}
+.clip .xp-thumb span{color:var(--muted);font-size:11.5px}
+@media (max-width:760px){
+  .clip.xp-hero{grid-template-columns:1fr}
+  .clip.xp-hero video{width:100%;height:auto;max-width:none;max-height:60vh;border-right:0;border-bottom:1px solid var(--line)}
+}
+/* contraste AA en la hoja: la opcion elegida en blanco sobre fondo oscuro con borde de marca (como las
+   pestañas) y el boton principal en un naranja mas profundo (texto blanco >= 4.5:1) */
+.xp-seg button.sel{background:#2b1710;color:#fff;box-shadow:inset 0 0 0 1.5px var(--brand)}
+.xp-foot .btn:not(.ghost){background:linear-gradient(135deg,#d2361a,#c93a12);box-shadow:0 6px 20px -8px rgba(255,90,60,.5)}
+#retry1080{background:linear-gradient(135deg,#d2361a,#c93a12)}
+/* resultado renderizado pero sin guardar en la carpeta (sin espacio, carpeta que desaparecio) */
+.xp-saveerr{display:flex;gap:8px;align-items:flex-start;color:#ffb0a4;font-size:12.5px;line-height:1.45;max-width:520px;
+  border:1px solid rgba(255,110,110,.38);background:rgba(255,90,90,.08);border-radius:10px;padding:8px 11px}
+.xp-saveerr .ic{width:14px;height:14px;flex:none;margin-top:2px}
+.xp-hero .xp-acts a.btn{text-decoration:none}
+.xp-resave{background:linear-gradient(135deg,#d2361a,#c93a12)}
+.xp-fld[hidden],.xp-v1note[hidden]{display:none}
+.xp-v1note{font-size:12.5px;color:var(--muted);line-height:1.5;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--sunken)}
+.xp .btn:focus-visible,.xp-acts .btn:focus-visible,#retry1080:focus-visible{outline:2px solid var(--brand2);outline-offset:2px}
+.xp .toggle:focus-visible{outline:2px solid var(--brand2);outline-offset:2px}

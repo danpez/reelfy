@@ -217,6 +217,28 @@ def videotoolbox_ok() -> bool:
         return False
 
 
+# Calidad del video ENTREGADO (kind "final"): bits por pixel (VideoToolbox) y CRF (libx264). El
+# export elige Estandar / Alta / Maxima y el servidor fija estas variables mientras dura el render
+# (los procesos del compositor, spawn, las heredan); sin ellas = Alta, lo de siempre.
+FINAL_BPP, FINAL_CRF = 0.22, 18
+
+
+def final_bpp() -> float:
+    try:
+        v = float(os.environ.get("REELFY_FINAL_BPP") or FINAL_BPP)
+    except ValueError:
+        return FINAL_BPP
+    return min(1.0, max(0.05, v)) if math.isfinite(v) else FINAL_BPP
+
+
+def final_crf() -> int:
+    try:
+        v = int(os.environ.get("REELFY_FINAL_CRF") or FINAL_CRF)
+    except ValueError:
+        return FINAL_CRF
+    return min(30, max(10, v))
+
+
 def encoder_args(W: int, H: int, fps: float, kind: str = "final", gop: int | None = None,
                  force_sw: bool = False) -> list[str]:
     """Argumentos de encoder por plataforma.
@@ -226,7 +248,7 @@ def encoder_args(W: int, H: int, fps: float, kind: str = "final", gop: int | Non
     """
     fps = float(fps)
     gop = int(gop or (max(1, int(round(fps / 2))) if kind == "inter" else int(round(fps * 2))))
-    bpp = {"inter": 0.5, "final": 0.22, "draft": 0.15}.get(kind, 0.22)
+    bpp = {"inter": 0.5, "final": final_bpp(), "draft": 0.15}.get(kind, 0.22)
     br = int(min(160e6, max(4e6 if kind != "draft" else 1.5e6, W * H * fps * bpp)))
     level = h264_level(W, H, fps) if kind != "inter" else None
     lv = ["-level:v", level] if level else []
@@ -234,7 +256,7 @@ def encoder_args(W: int, H: int, fps: float, kind: str = "final", gop: int | Non
         return ["-c:v", "h264_videotoolbox", "-b:v", str(br), "-maxrate", str(int(br * 1.5)),
                 "-bufsize", str(int(br * 2)), "-profile:v", "high"] + lv + [
                 "-g", str(gop), "-pix_fmt", "yuv420p"] + COLOR_TAGS
-    crf = {"inter": 12, "final": 18, "draft": 24}.get(kind, 18)
+    crf = {"inter": 12, "final": final_crf(), "draft": 24}.get(kind, 18)
     preset = {"inter": "veryfast", "final": "faster", "draft": "ultrafast"}.get(kind, "faster")
     return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-g", str(gop),
             "-bf", "0" if kind == "inter" else "2"] + lv + ["-pix_fmt", "yuv420p"] + COLOR_TAGS

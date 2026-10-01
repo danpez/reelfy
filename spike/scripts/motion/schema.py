@@ -694,7 +694,7 @@ MEDIA_COMMON = [
     num("speed", "Velocidad del clip", 1.0, 0.25, 4.0, 0.05, unit="x", hint="Solo con ajuste speed"),
     num("src_in", "Inicio en el clip", 0.0, 0.0, 36000.0, 0.05, unit="s"),
 ]
-# defaults espejo de motion/media.DEFAULTS (tests/test_media_float.py los compara)
+# defaults espejo de motion/media.DEFAULTS y LIVE_DEFAULTS (tests/test_media_float.py los compara)
 FLOAT_CARD_PARAMS = [
     num("width", "Ancho de la tarjeta", None, 0.4, SYM_W, 0.01, nullable=True,
         hint="Vacío = automático (banda segura, centrada)"),
@@ -709,6 +709,10 @@ FLOAT_CARD_PARAMS = [
     P("border", "bool", "Borde claro", True),
     num("kenburns", "Acercamiento lento (imágenes)", 0.08, 0.0, 0.3, 0.01),
     num("float", "Flotación", 1.0, 0.0, 2.0, 0.05),
+    # brillo de vidrio (franja de luz que cruza) e irisado: espejo de media.LIVE_DEFAULTS
+    num("sheen", "Brillo", None, 0.0, 1.0, 0.05, nullable=True,
+        hint="Vacío = automático: imágenes sí, clips no"),
+    num("holo", "Irisado", 0.6, 0.0, 1.0, 0.05, hint="Color tornasol en los bordes de la franja de luz"),
     num("in_dur", "Duración de la entrada", 0.35, 0.1, 1.5, 0.05, unit="s"),
     num("out_dur", "Duración de la salida", 0.25, 0.1, 1.5, 0.05, unit="s"),
 ]

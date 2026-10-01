@@ -704,7 +704,9 @@ try {
   if (EXPORT) {
     await check("export: Cancelar vuelve al editor sin perder la edicion", async () => {
       const s0 = await page.evaluate(() => JSON.stringify(PLAN.fx));
-      await page.click("#render");
+      await page.click("#render");                       // abre la hoja "Exportar"
+      await page.waitForSelector("#xpSheet.on");
+      await page.click("#xpGo");
       await page.waitForSelector("#s-rendering.on");
       await page.waitForFunction(() => document.querySelector("#r-stages .stg.cur"), null, { timeout: 120000 });
       await page.click("#r-cancel");
@@ -723,6 +725,8 @@ try {
       await page.evaluate(() => { FX.select(null); setPanelTab("proj"); });
       await page.evaluate(() => FX.saveNow());
       await page.click("#render");
+      await page.waitForSelector("#xpSheet.on");
+      await page.click("#xpGo");
       await page.waitForSelector("#s-rendering.on");
       const seen = new Set();
       const t0 = Date.now();

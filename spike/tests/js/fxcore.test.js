@@ -62,6 +62,21 @@ test("Timeline pega uniones a cambios de toma cercanos", () => {
   assert.ok(Math.abs(tl.keeps[0][1] - 4.0) < 1e-9);
 });
 
+test("Timeline: primer cuadro de la toma = shotFrame (igual que timeline.py)", () => {
+  assert.equal(C.shotFrame(1.133, 30), 34);
+  assert.equal(C.shotFrame(61.104, 30), 1833);            // +4 ms de deriva
+  assert.equal(C.shotFrame(61 / 60, 30), 31);             // empate hacia arriba
+  assert.equal(C.shotFrame(38 / 30, 24), 30);
+  const fr = tl => tl.keeps.map(([a, b]) => [Math.round(a * 30), Math.round(b * 30)]);
+  for (const s of [4.9997, 5.004]) {                       // toma nueva en el cuadro 150
+    const shots = [{ start: 0 }, { start: s }];
+    const plan = cuts => ({ duration: 10, cuts, shots });
+    assert.deepEqual(fr(C.timelineFromPlan(plan([{ start: 3, end: s }]), 30)), [[0, 90], [150, 300]]);
+    assert.deepEqual(fr(C.timelineFromPlan(plan([{ start: s, end: 7 }]), 30)), [[0, 150], [210, 300]]);
+    assert.deepEqual(fr(C.timelineFromPlan(plan([{ start: 3, end: s - 0.066 }]), 30)), [[0, 90], [150, 300]]);
+  }
+});
+
 test("rutas con punto: getPath / setPath", () => {
   const o = {};
   C.setPath(o, "text.text", "Hola");

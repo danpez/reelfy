@@ -9,6 +9,7 @@ su velocidad (speed / trim / hold) y SIN su audio.
 Todo con medios SINTETICOS (sin datos del cliente). Correr:
   cd spike && .venv/bin/python -m pytest tests/test_media_float.py -q
 """
+import copy
 import subprocess
 from pathlib import Path
 
@@ -183,10 +184,13 @@ def test_animacion_entrada_flotacion_y_salida():
     assert st0["alpha"] == 0 and st0["scale"] == pytest.approx(MF.POP_FROM) and st0["tilt"] == pytest.approx(MF.TILT)
     assert st0["bg"] == 0 and st0["dy"] == pytest.approx(MF.RISE)
     mid = [MF.card_anim(t, 3.0) for t in np.linspace(0.8, 2.6, 40)]
-    for st in mid:                                              # en reposo: flota muy poco
+    for st in mid:                       # en reposo: flota y se mece sin pasar de su amplitud
         assert st["alpha"] == pytest.approx(1.0) and st["bg"] == pytest.approx(1.0)
-        assert abs(st["scale"] - 1) < 0.01 and abs(st["dy"]) < 0.006 and abs(st["tilt"]) < 0.6
-    assert max(st["dy"] for st in mid) - min(st["dy"] for st in mid) > 0.004    # si flota
+        assert abs(st["scale"] - 1) <= MF.BREATH + 1e-6 and abs(st["dy"]) <= MF.FLOAT_AMP + 1e-6
+        assert abs(st["tilt"] - st["sway"]) < 0.6 and abs(st["sway"]) <= MF.SWAY + 1e-9
+    assert max(st["dy"] for st in mid) - min(st["dy"] for st in mid) > MF.FLOAT_AMP    # si flota
+    sw = [MF.card_anim(t, 8.0)["sway"] for t in np.linspace(0.8, 7.0, 120)]
+    assert max(sw) > 0.9 * MF.SWAY and min(sw) < -0.9 * MF.SWAY                          # y se mece
     # el resorte rebasa un poco (pop) antes de asentarse
     assert max(MF.card_anim(t, 3.0)["scale"] for t in np.linspace(0.1, 0.6, 60)) > 1.0
     end = MF.card_anim(3.0, 3.0)
@@ -194,9 +198,9 @@ def test_animacion_entrada_flotacion_y_salida():
     # items cortos: entrada y salida caben
     s = MF.card_anim(0.5, 1.0)
     assert 0 < s["alpha"] <= 1
-    # sin flotacion: quieto
+    # sin flotacion: quieto (ni flota, ni se mece, ni respira)
     q = [MF.card_anim(t, 3.0, float_amt=0.0) for t in (1.0, 1.7, 2.3)]
-    assert all(abs(x["dy"]) < 1e-4 and abs(x["scale"] - 1) < 1e-4 for x in q)
+    assert all(abs(x["dy"]) < 1e-4 and abs(x["scale"] - 1) < 1e-4 and abs(x["sway"]) < 1e-9 for x in q)
 
 
 def test_tiempo_del_clip_speed_trim_hold():
@@ -207,7 +211,9 @@ def test_tiempo_del_clip_speed_trim_hold():
     # hold: 1x y se congela en el ultimo cuadro del clip
     assert MF.src_time({"fit": "hold"}, 9.0, src_dur=3.0, fps=30) == pytest.approx(3.0 - 1 / 30)
     assert MF.speed_of({"fit": "speed", "speed": 99}) == 4.0 and MF.speed_of(None) == 1.0
-    assert MF.kenburns_zoom(0, 4) == 1.0 and MF.kenburns_zoom(4, 4) == pytest.approx(1 + MF.KENBURNS)
+    # Ken Burns: arranca un poco acercado (holgura del paralaje) y llega a 1 + kenburns; 0 = sin zoom
+    assert MF.kenburns_zoom(0, 4) == pytest.approx(1 + MF.KB_LEAD * MF.KENBURNS)
+    assert MF.kenburns_zoom(4, 4) == pytest.approx(1 + MF.KENBURNS) and MF.kenburns_zoom(2, 4, 0.0) == 1.0
     x, y, w, h = MF.cover_rect(1920, 1080, 800, 1000)
     assert h == 1080 and w == pytest.approx(864) and x == pytest.approx((1920 - 864) / 2) and y == 0
     q = MF.tilt_quad(100, 125, 14.0)
@@ -227,6 +233,30 @@ def test_pista_recursos_en_el_esquema():
     for k, v in MF.DEFAULTS.items():                             # defaults espejo del renderer
         assert ps[k]["default"] == pytest.approx(v) if not isinstance(v, bool) else ps[k]["default"] is v, k
     assert ps["width"]["max"] == pytest.approx(C.SYM_W)          # nunca mas ancha que la banda segura
+    # brillo e irisado con control en el Studio: 'Brillo' vacio = automatico (imagenes 1, clips 0)
+    assert set(MF.LIVE_DEFAULTS) <= set(ps)
+    assert ps["sheen"]["default"] is None and ps["sheen"]["nullable"] and (ps["sheen"]["min"], ps["sheen"]["max"]) == (0, 1)
+    assert ps["holo"]["default"] == pytest.approx(MF.LIVE_DEFAULTS["holo"]) and (ps["holo"]["min"], ps["holo"]["max"]) == (0, 1)
+    assert MF.sheen_amount({"kind": "image", "sheen": None}) == MF.LIVE_DEFAULTS["sheen"] == 1.0
+
+
+def test_brillo_e_irisado_se_validan_en_el_plan():
+    """normalize acota 'sheen' y 'holo' a 0..1 (lo que el Studio escribe llega sano al render), deja
+    'sheen' vacio como automatico y no agrega campos a un recurso que no los trae."""
+    p = {"video": "x.mp4", "duration": 10.0, "fx": {"media": [
+        _item("foto01", 1, 3, sheen=0, holo=0.2), _item("foto02", 3, 5, sheen=7, holo=-3),
+        _item("clip01", 5, 7, kind="video", sheen=None), _item("foto03", 7, 9),
+        _item("foto04", 9, 10, sheen="x", holo="y")]}}
+    m = S.normalize(p)["fx"]["media"]
+    assert (m[0]["sheen"], m[0]["holo"]) == (0.0, 0.2)
+    assert (m[1]["sheen"], m[1]["holo"]) == (1.0, 0.0)
+    assert m[2]["sheen"] is None and MF.sheen_amount(m[2]) == 0.0          # clip: automatico = sin luz
+    assert "sheen" not in m[3] and "holo" not in m[3]
+    assert m[4]["sheen"] is None and m[4]["holo"] == pytest.approx(MF.LIVE_DEFAULTS["holo"])
+    assert S.validate(S.normalize(p)) == []
+    bad = copy.deepcopy(S.normalize(p))
+    bad["fx"]["media"][0]["holo"] = 3
+    assert S.validate(bad)                                                    # fuera de rango: se avisa
 
 
 def test_normalize_y_validate_de_recursos():
@@ -251,7 +281,8 @@ def test_normalize_y_validate_de_recursos():
 # ================================================================== render por pixeles
 def test_tarjeta_de_imagen_ventana_centrado_esquinas_y_fondo(src, tmp_path, media_dir):
     o = _o(tmp_path, media_dir)
-    p = _plan(src, [_item("foto01", 1.0, 4.0)])
+    # sin la franja de luz (a media pasada en este cuadro; la luz se mide en test_media_float_vida)
+    p = _plan(src, [_item("foto01", 1.0, 4.0, sheen=0)])
     job = R.prepare(p, o)["job"]
     assert len(job["media"]) == 1 and job["media"][0]["_card"]["cx"] == 0.5
     x0, y0, w, h = MF.card_px(job["media"][0]["_card"], W, H)
@@ -506,7 +537,7 @@ def test_imagen_con_transparencia_sobre_la_tarjeta_oscura(src, tmp_path, media_d
     im.paste((255, 0, 255, 255), (390, 525, 690, 825))            # logo magenta al centro
     im.save(media_dir / "logo_transparente.png")
     o = _o(tmp_path, media_dir)
-    p = _plan(src, [_item("logo_transparente", 1.0, 4.0, kenburns=0.0)])
+    p = _plan(src, [_item("logo_transparente", 1.0, 4.0, kenburns=0.0, sheen=0)])     # sin franja de luz
     card = R.prepare(p, o)["job"]["media"][0]["_card"]
     x0, y0, w, h = MF.card_px(card, W, H)
     fr = R.render_frame(p, 2.5, o)

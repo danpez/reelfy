@@ -252,13 +252,13 @@ def test_montaje_en_sincronia_sin_deriva_en_muchas_uniones(media):
     """El audio de cada segmento cambia exactamente donde cambia su video, sin atrasarse union tras
     union (con `-c copy` cada union metia el relleno del AAC y la voz se iba atrasando)."""
     off, shots = _sync_offsets(media, "mont")
-    for s in shots:                                     # cada segmento: cuadros enteros
-        n = (s["end"] - s["start"]) * FPS
-        assert abs(n - round(n)) < 0.02, s
-    # desfase constante (el relleno inicial del AAC corre TODO el audio igual, ~21 ms, y el video
-    # del mp4 arranca ese mismo tiempo despues) y sin deriva
+    for s in shots:                                     # cada limite en la reticula (a ms, sin deriva)
+        for t in (s["start"], s["end"]):
+            assert abs(t * FPS - round(t * FPS)) <= 0.5e-3 * FPS + 1e-9, s
+    # sin desfase ni deriva: video y audio del combinado arrancan en 0 (antes el concat corria los
+    # dos ~21 ms, el relleno inicial del AAC, y plan.shots quedaba 21 ms antes del contenido)
     assert off.max() - off.min() < 6.0, off
-    assert -5.0 < float(np.median(off)) < 30.0, off
+    assert -5.0 < float(np.median(off)) < 5.0, off
 
 
 def test_uniones_exactas_tambien_en_el_ensamble_manual_si_se_pide(media, monkeypatch):

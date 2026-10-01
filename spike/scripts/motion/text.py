@@ -759,6 +759,21 @@ def _accent_plate(ctx, ln) -> float:
     return 0.24 + 0.16 * ease.clamp((3.0 - worst) / 1.5)
 
 
+DARK_INK = 0.4        # luminancia (C.luminance) bajo la cual una tinta es oscura
+RIM_W = 0.05          # trazo claro de una palabra oscura en un bloque claro (ancho total / tamano)
+
+
+def _rim_look(look: _Look, ink, size: float) -> _Look:
+    """Look de una palabra de tinta OSCURA (acento de marca oscuro, p. ej. un verde profundo) dentro
+    de un bloque de tinta clara con sombra negra: la sombra pegada al glifo la apaga (contraste ~2:1
+    con su entorno inmediato), asi que lleva un contorno fino de la tinta clara del bloque (el mismo
+    color de marca, legible: verde sobre blanco ~5.4:1). Es la contraparte de _accent_plate (acento
+    claro sobre fondo claro -> placa oscura)."""
+    return _Look(shadow=look.shadow, boost=look.boost, shadow_color=look.shadow_color,
+                 stroke=max(look.stroke, RIM_W * size), stroke_color=ink, glow=look.glow,
+                 glow_color=look.glow_color, max_sigma=look.max_sigma)
+
+
 def _plate(canvas, rect: skia.Rect, size: float, alpha: float) -> None:
     """Placa oscura muy difusa detras de una linea clara sobre fondo claro (legibilidad)."""
     if alpha <= 0.003:
@@ -1663,6 +1678,11 @@ def _render_block(canvas, item: dict, lt: float, dur: float, ctx, preset: str,
         # trazo fino sobre fondo cargado: placa difusa aunque el promedio sea medio
         plate_k = max(plate_k, 0.2 * ease.clamp((_bg_busy(ctx, B.rect) - 0.1) / 0.1))
     n_lines = len(B.lines)
+    # palabras de tinta oscura en un bloque claro (sin caja ni color propio por palabra): contorno
+    # claro fino (_rim_look); la tinta clara del bloque no cambia
+    rim_ok = not box and "word_color" not in hooks and C.luminance(color) >= DARK_INK and \
+        not (look.shadow > 0 and C.luminance(look.shadow_color) >= DARK_INK)
+    rims: dict = {}
     canvas.save()
     _block_transform(canvas, B, P, lt, dur, osc)
     excl = hooks["pre"](canvas, B, P, lt, dur, ctx, times, pout) if "pre" in hooks else None
@@ -1735,13 +1755,17 @@ def _render_block(canvas, item: dict, lt: float, dur: float, ctx, preset: str,
                 col = color
             if "word_color" in hooks:
                 col = hooks["word_color"](w, lt, times, P) or col
+            wlook = look
+            if rim_ok and col and C.luminance(col) < DARK_INK:
+                key_ = round(float(w.run.size), 2)
+                wlook = rims.get(key_) or rims.setdefault(key_, _rim_look(look, color, w.run.size))
             if letters:
                 for j in range(len(w.run.glyphs)):
                     u = lt - gtimes[w.idx][j]
                     a, dx, dy, sc, bl = _in_state(anim, u, w.run.size, amp, final)
                     if a <= 0:
                         continue
-                    units.append(dict(run=w.run, ox=w.ox, oy=w.oy, look=look, color=col, alpha=a * oa,
+                    units.append(dict(run=w.run, ox=w.ox, oy=w.oy, look=wlook, color=col, alpha=a * oa,
                                       dx=dx, dy=dy + ody, sc=sc, blur=bl, glyph=j, clip=clip,
                                       pivot=0.0 if anim == "type" else 0.5, word=w))
                 continue
@@ -1758,7 +1782,7 @@ def _render_block(canvas, item: dict, lt: float, dur: float, ctx, preset: str,
                 sc = _soft_scale(sc, w.run.ink[2] - w.run.ink[0], pivot, rooms.get(id(w)))
             if a <= 0:
                 continue
-            units.append(dict(run=w.run, ox=w.ox, oy=w.oy, look=look, color=col, alpha=a * oa, dx=dx,
+            units.append(dict(run=w.run, ox=w.ox, oy=w.oy, look=wlook, color=col, alpha=a * oa, dx=dx,
                               dy=dy + ody, sc=sc, blur=bl, pivot=pivot, origin=origin, clip=clip, word=w))
         if pk > 0 and len(units) > n0:
             vis = max(u["alpha"] for u in units[n0:])

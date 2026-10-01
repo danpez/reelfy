@@ -37,6 +37,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -48,7 +49,7 @@ SPIKE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SPIKE / "scripts"))
 import paths  # noqa: E402
 
-ENGINE_VERSION = "0.5.4"
+ENGINE_VERSION = "0.5.5"
 
 # ---- LLM embebido: si el binario de ollama viene en el bundle, corre en un
 # puerto propio con modelos en DATA. El pipeline (highlights/translate) y el director
@@ -114,6 +115,7 @@ app = FastAPI(title="Reelfy")
 # Cola de trabajos persistente (SQLite en DATA) + workers. Ver app/jobstore.py.
 import jobstore  # noqa: E402
 from jobstore import Progress, JobCanceled  # noqa: E402
+import exportkit as EK  # noqa: E402  (opciones del export: resolucion, carpeta, nombre)
 
 # ---- ciclo de vida del ollama embebido ----
 _ollama_proc = None
@@ -1348,10 +1350,11 @@ def _accent_apply(plan):
                 if isinstance(x.get(k), (dict, list)):
                     walk(x[k], depth + 1)
         # solo lo de la IA: lo bloqueado o lo del usuario conserva su color (un titulo que el usuario
-        # dejo amarillo a proposito sigue amarillo al dirigir, re-dirigir o regenerar otra cosa)
+        # dejo amarillo a proposito sigue amarillo al dirigir, re-dirigir o regenerar otra cosa).
+        # Tambien transiciones (el glitch se tine del acento) y efectos (contorno del sujeto...)
         def ai(it):
             return isinstance(it, dict) and not it.get("locked") and it.get("src") != "user"
-        for tk in ("text", "graphics", "cutaways"):
+        for tk in ("text", "graphics", "cutaways", "transitions", "effects"):
             for it in fx.get(tk) or []:
                 if ai(it):
                     walk(it)
@@ -2188,6 +2191,14 @@ def _compose(job_id, job):
     compose_mod.compose(spec, str(video), paths.WORK / f"compose_{job_id}", on_step=cstep,
                         info=info)
     shutil.rmtree(paths.WORK / f"compose_{job_id}", ignore_errors=True)   # segmentos 4K
+    try:
+        # lo que se compuso (volumenes resueltos, lienzo nativo, tomas): el export en 4K recompone
+        # las mismas tomas desde las fuentes; sobrevive al export (params se reemplaza)
+        rec = compose_mod.spec_record(spec, info)
+        rec["t"] = round(time.time(), 3)
+        jobstore.set_compose_spec(job_id, rec)
+    except Exception:  # noqa: sin registro el export en 4K lo reconstruye del montaje
+        traceback.print_exc()
     # el mismo montaje de otro proyecto (p. ej. el mismo video importado otra vez): un enlace
     twin = dedupe_import(video, full=True)
     how = "video copiado sin re-codificar" if info.get("copied") else \
@@ -2891,7 +2902,9 @@ def _render(job_id, job):
     """Handler 'render': job['params'] trae las opciones; job['plan'] el plan.
     Plan v2 -> motor pro (render.render_pro, con shorts); si no -> pipeline legacy."""
     p = job["params"] or {}
-    if p.get("pro"):
+    if p.get("pro") and ((p.get("export") or {}).get("res") not in EK.HIRES):
+        # 1440p/4K arman su propio base (al tamano de la salida): el analisis de fondo (base 1080)
+        # no les sirve y se cancela en vez de esperarlo
         _await_same_analysis(job_id, job["plan"], p.get("fmt") or "9:16", p.get("engine"))
     _EXPORTING.add(job_id)
     try:
@@ -2969,7 +2982,9 @@ def _render_legacy(job_id, job):
 STAGE_MSG = {"timeline": "Preparando la línea de tiempo…",
              "base": "Preparando el video base (reencuadre, color y cortes)…",
              "analysis": "Analizando rostro y sujeto…", "audio": "Preparando música y efectos de sonido…",
-             "render": "Componiendo efectos, textos y gráficos…", "mux": "Uniendo y exportando…"}
+             "render": "Componiendo efectos, textos y gráficos…", "mux": "Uniendo y exportando…",
+             # export de la hoja: tomas recompuestas a 4K desde las fuentes y copia a la carpeta
+             "recompose": "Preparando el video en alta resolución…", "save": "Guardando tu video…"}
 STATS_KEYS = ("duration", "n_frames", "W", "H", "fps", "fmt", "t_total", "t_base", "t_voice",
               "t_face", "t_matte", "t_analysis", "t_audio", "t_compose", "t_mux", "workers",
               "ms_per_frame_wall", "ms_per_frame_proc", "cached_base", "reframe", "sfx_events",
@@ -2978,7 +2993,10 @@ STATS_KEYS = ("duration", "n_frames", "W", "H", "fps", "fmt", "t_total", "t_base
 
 def _render_pro(job_id, job):
     """Export del plan v2: render.render_pro con shorts, progreso por etapa (stage) + ETA,
-    cancelable (mata ffmpeg y los procesos del compositor)."""
+    cancelable (mata ffmpeg y los procesos del compositor). Con `params.export` (la hoja
+    "Exportar"): resolucion (1440p/4K: base al tamano de la salida y, si el video combinado se
+    quedo corto, las tomas se RECOMPONEN desde las fuentes originales), calidad, y al terminar el
+    video se guarda en la carpeta elegida con su nombre (sin sobrescribir; shorts al lado)."""
     from motion import render as R
     from motion import video_io as V
     prog = Progress(job_id)
@@ -2986,15 +3004,19 @@ def _render_pro(job_id, job):
     plan = job["plan"]
     fmt = p.get("fmt") or "9:16"
     eo = p.get("engine") or {}
+    ex = p.get("export") if isinstance(p.get("export"), dict) else None
     token = uuid.uuid4().hex[:6]
     out = OUTPUT / f"{job_id}_{token}.mp4"
     t0 = time.time()
     last_stage = [None]
+    span = [0.0]          # % de la barra que ya uso la recomposicion (0 = como siempre)
 
     def on_pct(stage, pct):
+        lo = span[0]
+        tot = lo + (100.0 - lo) * float(pct) / 100.0
         el = time.time() - t0
-        eta = el / pct * (100 - pct) if pct > 3 else None
-        kw = dict(pct=round(float(pct), 1), stage=stage, elapsed=round(el),
+        eta = el / tot * (100 - tot) if tot > 3 else None
+        kw = dict(pct=round(float(tot), 1), stage=stage, elapsed=round(el),
                   eta=round(eta) if eta else None)
         if stage != last_stage[0]:
             last_stage[0] = stage
@@ -3010,41 +3032,1323 @@ def _render_pro(job_id, job):
                        on_pct=on_pct, on_step=on_step, cancel=prog.cancel.canceled)
     if p.get("workers"):
         opts["workers"] = int(p["workers"])
-    prog.update(force=True, pct=0, stage="timeline", message="Preparando el render…")
+    rplan, t_rec, rec_how, rec_frames = plan, 0.0, None, 0
     try:
-        stats = R.render_pro(plan, out, opts)
-    except V.Canceled:
-        raise JobCanceled()
-    _claim_cache(job_id, stats)
-    st = {k: stats[k] for k in STATS_KEYS if k in stats}
-    if isinstance(st.get("music"), dict):
-        st["music"] = {k: v for k, v in st["music"].items() if k != "wav"}   # ruta local
-    st["load"] = _load()
-    st["engine"] = {"air": eo.get("air"), "logo": bool(eo.get("logo")),
-                    "enhance_audio": eo.get("enhance_audio", True)}
-    clips = [{"name": "Video completo", "file": out.name, "duration": round(stats.get("duration", 0), 3),
-              "W": stats.get("W"), "H": stats.get("H"), "stats": st}]
-    import thumbnail as thumb_mod
-    for k, s in enumerate(stats.get("shorts") or [], 1):
-        f = Path(s["path"])
-        thumb = f.with_name(f.stem + "_thumb.jpg")
+        if ex:
+            jobstore.side_update(job_id, "export", replace=True, state="running", res=ex.get("res"),
+                                 W=ex.get("W"), H=ex.get("H"), quality=ex.get("quality"),
+                                 folder=ex.get("folder"), file_name=f"{ex.get('name')}.mp4",
+                                 recompose=bool(ex.get("recompose")))
+            opts.update(_export_size_opts(plan, fmt, ex))
+            if ex.get("recompose"):
+                span[0] = float(ex.get("rec_span") or 30.0)
+                prog.update(force=True, pct=0, stage="recompose", elapsed=0, eta=None,
+                            message=f"Preparando el video en {EK.RES_LABEL.get(ex['res'], ex['res'])}…")
+                t1 = time.time()
+                hv, rec_how, rec_frames = _hires_video(job_id, plan, ex, prog, span[0], t0)
+                t_rec = time.time() - t1
+                hi = V.probe(str(hv))
+                rplan = dict(plan, video=str(hv), dims=[int(hi["w"]), int(hi["h"])])
+        prog.update(force=True, pct=span[0], stage="timeline", message="Preparando el render…")
+        t_r = time.time()
         try:
-            thumb_mod.make_thumbnail(f, thumb, s.get("title", ""))
-        except Exception as e:  # noqa: la miniatura es un extra
-            print(f"   miniatura no disponible: {e}")
-        clips.append({"name": f"Short {k}: {s.get('title', '')}".strip(" :"), "file": f.name,
-                      "start": s.get("start"), "end": s.get("end"),
-                      "thumb": thumb.name if thumb.exists() else None})
-    warns = list(stats.get("warnings") or []) + [f"omitido: {x}" for x in stats.get("skipped") or []]
-    try:
-        (OUTPUT / f"{out.stem}_stats.json").write_text(json.dumps(stats, default=str, indent=1))
-    except Exception:  # noqa
-        pass
+            with _quality_env(ex.get("quality") if ex else None, bool(ex)):
+                stats = R.render_pro(rplan, out, opts)
+        except V.Canceled:
+            raise JobCanceled()
+        except (JobCanceled, ExportError):
+            raise
+        except Exception as e:  # noqa
+            if EK.is_no_space(e):
+                raise ExportError(NO_SPACE_MSG, "no_space", fallback=_fallback_res(ex)) from e
+            raise
+        t_render = time.time() - t_r
+        _claim_cache(job_id, stats)
+        st = {k: stats[k] for k in STATS_KEYS if k in stats}
+        if isinstance(st.get("music"), dict):
+            st["music"] = {k: v for k, v in st["music"].items() if k != "wav"}   # ruta local
+        st["load"] = _load()
+        st["engine"] = {"air": eo.get("air"), "logo": bool(eo.get("logo")),
+                        "enhance_audio": eo.get("enhance_audio", True)}
+        if ex:
+            st["export"] = {"res": ex.get("res"), "quality": ex.get("quality"),
+                            "recompose": rec_how, "t_recompose": round(t_rec, 2)}
+        clips = [{"name": "Video completo", "file": out.name, "duration": round(stats.get("duration", 0), 3),
+                  "W": stats.get("W"), "H": stats.get("H"), "stats": st}]
+        import thumbnail as thumb_mod
+        for k, s in enumerate(stats.get("shorts") or [], 1):
+            f = Path(s["path"])
+            thumb = f.with_name(f.stem + "_thumb.jpg")
+            try:
+                thumb_mod.make_thumbnail(f, thumb, s.get("title", ""))
+            except Exception as e:  # noqa: la miniatura es un extra
+                print(f"   miniatura no disponible: {e}")
+            clips.append({"name": f"Short {k}: {s.get('title', '')}".strip(" :"), "file": f.name,
+                          "start": s.get("start"), "end": s.get("end"),
+                          "thumb": thumb.name if thumb.exists() else None})
+        warns = list(stats.get("warnings") or []) + [f"omitido: {x}" for x in stats.get("skipped") or []]
+        try:
+            (OUTPUT / f"{out.stem}_stats.json").write_text(json.dumps(stats, default=str, indent=1))
+        except Exception:  # noqa
+            pass
+        _record_perf(stats, ex, t_render, t_rec if rec_how == "new" else 0.0, rec_frames, out,
+                     base_wh=(opts.get("base_W"), opts.get("base_H")))
+        saved = None
+        if ex:
+            saved = _save_export(job_id, out, [OUTPUT / c["file"] for c in clips[1:]], ex, prog)
+            _apply_saved(clips, saved, ex)
+            if saved.get("save_error") or not saved.get("saved"):
+                warns.append(saved.get("save_error") or "No se pudo guardar en la carpeta elegida.")
+    except ExportError as e:
+        if ex:
+            jobstore.side_update(job_id, "export", state="error", code=e.code, message=str(e),
+                                 fallback_res=e.fallback)
+        raise
+    except JobCanceled:
+        if ex:
+            jobstore.side_update(job_id, "export", state="canceled")
+        raise
+    except Exception as e:  # noqa
+        if ex:
+            jobstore.side_update(job_id, "export", state="error", code="error", message=str(e),
+                                 fallback_res=_fallback_res(ex))
+        raise
     jobstore.update(job_id, state="done", phase="done", pct=100, stage="done",
                     message="¡Listo!", clips=clips, eta=0, elapsed=round(time.time() - t0),
                     warnings=warns)
+    if ex:
+        jobstore.side_update(job_id, "export", state="done", **{k: v for k, v in (saved or {}).items()
+                                                                if k in EXPORT_SIDE_KEYS})
     _trim_exports(job_id, keep=KEEP_EXPORTS, protect=out.stem)
     _gc_later("export")
+
+
+# ================================================================ export: resolucion, calidad y destino
+# Contrato (la hoja "Exportar" del Studio):
+#   GET  /export/options?job=&fmt=   -> resoluciones por formato (habilitadas o con el motivo),
+#                                       calidades, nombre por defecto, carpeta, ultimas elecciones
+#   GET  /export/estimate?job=&res=&fmt=&quality=&shorts=  -> "Tardará ~X min · ~Y MB"
+#   POST /render/{id} {..., export: {res, quality, name, folder, shorts}}  -> el export; /status
+#        lleva stage "recompose" (preparando el video en 4K) y "save" (guardando) y la tarea
+#        lateral `export` (export_state, ...); clips[0] gana path/folder/file_name/bytes/saved
+#   POST /pick-folder {start?}        -> selector NATIVO de carpetas (osascript / PowerShell / zenity)
+#   GET|POST /export/settings         -> ultimas elecciones recordadas
+#   POST /reveal {path, action}       -> "Mostrar en Finder" / "Abrir" (solo archivos exportados)
+#   POST /export/save {job, file?, name?, folder?} -> guardar de nuevo un export (p. ej. sin espacio)
+# El video siempre se renderiza en DATA/output (como antes) y luego se clona/enlaza/copia a
+# <carpeta>/<nombre>.mp4 sin sobrescribir. Sin `export` en el cuerpo todo es como siempre.
+
+EXPORT_STORE = EK.Store(paths.DATA / "export.json")
+NO_SPACE_MSG = ("No hay espacio suficiente en el disco para terminar el export. Libera espacio "
+                "(o exporta en una resolución menor) y vuelve a intentarlo.")
+HIRES_KEEP = max(0, int(os.environ.get("REELFY_HIRES_KEEP", "2")))   # videos recompuestos en cache
+HIRES_VERSION = 2          # 2: lienzo EXACTO (compose canvas=) y verificacion por toma
+# verificacion de la recomposicion (misma edicion que el video del proyecto, toma por toma)
+VERIFY_SIDE = 64           # lado corto (px) de los cuadros que se comparan: el tamano no importa
+VERIFY_MAX_SHOTS = 80      # tomas que se revisan (repartidas) en un montaje muy largo
+VERIFY_PIX = 48            # 0-255: un pixel "distinto" (un sticker, un fundido a negro)
+VERIFY_FRAC = 0.003        # > 0.3 % de pixeles MUY distintos = otra imagen (ruido medido: 0 %)
+VERIFY_DB = 4.0            # audio por toma: +-4 dB
+VERIFY_SILENCE = 10 ** (-50 / 20.0)      # RMS ~0.003: debajo, la toma "no suena"
+EXPORT_SIDE_KEYS = ("saved", "path", "folder", "folder_label", "file_name", "bytes", "how", "shorts",
+                    "save_error", "W", "H", "duration", "res", "quality")
+_QUALITY_LOCK = threading.Lock()
+_PICK_LOCK = threading.Lock()
+_EST_CACHE = {}
+
+
+class ExportError(Exception):
+    """Error del export con mensaje PARA EL USUARIO (va tal cual a /status.error: jobstore no le
+    antepone "Render falló"). `code`: no_space | recompose_failed | folder; `fallback`: resolucion
+    que si se puede exportar (la UI la ofrece)."""
+    public = True
+
+    def __init__(self, msg, code="error", fallback=None):
+        super().__init__(msg)
+        self.code, self.fallback = code, fallback
+
+
+def _fallback_res(ex):
+    return "1080p" if (ex or {}).get("res") not in (None, "1080p") else None
+
+
+class _quality_env:
+    """Calidad del video entregado mientras dura el render: REELFY_FINAL_BPP/CRF (video_io.
+    encoder_args 'final'; los procesos spawn del compositor la heredan). 'alta' = sin variables =
+    lo de siempre. Con `lock` (exports de la hoja) los exports se serializan entre si para que
+    ninguno herede la calidad de otro."""
+
+    def __init__(self, quality, lock=False):
+        self.q = EK.QUALITY.get(quality) if quality and quality != EK.DEFAULT_QUALITY else None
+        self.lock = lock
+        self.active = quality is not None          # sin la hoja (export de siempre): no se toca nada
+
+    def __enter__(self):
+        self.old = {}
+        if not self.active:
+            return self
+        if self.lock:
+            _QUALITY_LOCK.acquire()
+        self.old = {k: os.environ.get(k) for k in ("REELFY_FINAL_BPP", "REELFY_FINAL_CRF")}
+        if self.q:
+            os.environ["REELFY_FINAL_BPP"] = str(self.q["bpp"])
+            os.environ["REELFY_FINAL_CRF"] = str(self.q["crf"])
+        else:
+            for k in self.old:
+                os.environ.pop(k, None)
+        return self
+
+    def __exit__(self, *a):
+        if not self.active:
+            return
+        try:
+            for k, v in self.old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        finally:
+            if self.lock:
+                _QUALITY_LOCK.release()
+
+
+def _video_wh(path):
+    """Dims de DISPLAY de un video ([w, h]) o None."""
+    try:
+        from motion import video_io as V
+        i = V.probe(str(path))
+        if i.get("w") and i.get("h"):
+            return [int(i["w"]), int(i["h"])]
+    except Exception:  # noqa
+        pass
+    return None
+
+
+def _item_path(it):
+    """Archivo de un item del spec: por su sid (la fuente subida, donde este hoy) o su ruta."""
+    if not isinstance(it, dict):
+        return None
+    sid = it.get("sid")
+    if sid:
+        r = _resolve_source(sid)
+        if r:
+            return r
+    pth = it.get("path")
+    return Path(str(pth)) if pth and Path(str(pth)).exists() else None
+
+
+def _is_composed(job_id, plan, rec=None):
+    """El video del proyecto salio de una composicion (montaje o ensamble a mano) y no es el
+    original subido: hay registro, el plan trae su montaje o los parametros su spec (plan.shots NO
+    sirve: el director detecta tomas tambien en un video subido)."""
+    if rec or isinstance((plan or {}).get("montage"), dict):
+        return True
+    params = (jobstore.get_light(job_id) or {}).get("params")
+    return isinstance(params, dict) and isinstance(params.get("spec"), dict) and bool(params["spec"].get("main"))
+
+
+def _compose_record(job_id, plan):
+    """Registro de composicion (compose.spec_record) del proyecto. Si falta (proyecto compuesto
+    antes de guardarlo y ya exportado): se reconstruye del spec de sus parametros (aun sin
+    exportar) o de plan.montage.timeline (lo que se compuso) y se guarda. La linea de tiempo del
+    montaje NO guarda todo lo que se compuso (clips silenciados, imagenes, transiciones, capas,
+    stickers): esa reconstruccion se revisa contra el video del proyecto (_backfill_lossy) y, si
+    no alcanza, queda marcada (`lossy`: el export no recompone). -> (rec | None, faltantes)."""
+    rec = jobstore.get_compose_spec(job_id)
+    if rec and (rec.get("spec") or {}).get("main"):
+        return rec, []
+    import compose as compose_mod
+    j = jobstore.get_light(job_id) or {}
+    params = j.get("params") if isinstance(j.get("params"), dict) else {}
+    spec, src = None, None
+    if isinstance(params.get("spec"), dict) and params["spec"].get("main"):
+        spec, src = json.loads(json.dumps(params["spec"])), "params"
+    elif isinstance((plan or {}).get("montage"), dict) and plan["montage"].get("timeline"):
+        try:
+            spec = compose_mod.spec_from_timeline(plan["montage"]["timeline"], _resolve_source)
+        except FileNotFoundError as e:
+            missing = [_montage_name(plan["montage"], s) or s for s in str(e).split(", ") if s]
+            return None, missing
+        src = "montage"
+    if spec is None:
+        return None, []
+    rec = {"v": 1, "spec": spec, "W": None, "H": None, "native": None, "src": f"backfill:{src}",
+           "shots": [[float(s["start"]), float(s["end"])] for s in (plan or {}).get("shots") or []
+                     if isinstance(s, dict) and "start" in s and "end" in s],
+           "t": round(time.time(), 3)}
+    wh = _video_wh((plan or {}).get("video")) if (plan or {}).get("video") else None
+    if wh:
+        rec["W"], rec["H"] = wh
+    nat = compose_mod.native_canvas(spec)
+    rec["native"] = list(nat) if nat else None
+    try:
+        rec["clips"] = compose_mod.clip_canvases(spec)
+    except Exception:  # noqa: sin el detalle por clip se usa el nativo
+        rec["clips"] = []
+    if src == "montage":
+        try:
+            rec["lossy"] = _backfill_lossy(plan, spec)
+        except Exception:  # noqa: sin poder revisarlo, no se recompone (nunca un 4K distinto)
+            traceback.print_exc()
+            rec["lossy"] = "no se pudo revisar"
+        if rec["lossy"]:
+            print(f"   export: el montaje de {job_id} no se puede recomponer desde su linea de tiempo "
+                  f"({rec['lossy']})")
+    try:
+        jobstore.set_compose_spec(job_id, rec)
+    except Exception:  # noqa: sin guardarlo se reconstruye la proxima vez
+        traceback.print_exc()
+    return rec, []
+
+
+def _seg_rms(x, a, b, sr=48000):
+    """RMS del audio `x` (mono) en [a, b] s, o None si el tramo es demasiado corto."""
+    import numpy as np
+    if x is None:
+        return None
+    i, k = max(0, int(a * sr)), min(len(x), int(b * sr))
+    if k - i < sr // 20:
+        return None
+    return float(np.sqrt(np.mean(np.square(x[i:k]))))
+
+
+def _backfill_lossy(plan, spec):
+    """Motivo (en espanol) por el que la linea de tiempo del montaje NO alcanza para recomponer
+    lo que se compuso, o None. La linea de tiempo guarda in/out/start/volumen/rampas de cada clip
+    de la pista principal, pero no si el clip iba silenciado, las imagenes (su duracion), los
+    fundidos o transiciones ni las capas y stickers. Se revisa, barato y sin recomponer: imagenes;
+    que cada toma dure out-in y empiece donde la pone su `start` (una transicion o un clip que no
+    esta en la linea de tiempo las mueve); y que cada toma suene como su clip (un clip silenciado
+    no suena en el video del proyecto). Las capas y stickers los atrapa la verificacion despues de
+    recomponer (_verify_hires)."""
+    import compose as compose_mod
+    fps = float(spec.get("fps") or 30)
+    tol = 1.5 / fps
+    if any(it.get("type") == "image" for it in spec.get("main") or []):
+        return "tiene imágenes"
+    tl = [e for e in (plan or {}).get("montage", {}).get("timeline") or [] if isinstance(e, dict) and e.get("sid")]
+    items = spec.get("main") or []
+    if len(tl) != len(items) or not items:
+        return "su línea de tiempo está incompleta"
+    pairs = sorted(zip(tl, items), key=lambda p: float(p[1].get("start") or 0.0))
+    cursor, prev_t1 = 0.0, None
+    for k, (e, it) in enumerate(pairs):
+        if e.get("t0") is None or e.get("t1") is None:
+            return "su línea de tiempo está incompleta"
+        st, ln = float(it.get("start") or 0.0), float(it["out"]) - float(it["in"])
+        gap = st - cursor if st > cursor + 0.05 else 0.0
+        t0, t1 = float(e["t0"]), float(e["t1"])
+        if prev_t1 is not None and abs((t0 - prev_t1) - gap) > tol:
+            return "tiene transiciones o clips que no guardó"
+        if k < len(pairs) - 1 and abs((t1 - t0) - ln) > tol:
+            return "tiene transiciones o clips que no guardó"
+        cursor = max(cursor, st) + ln
+        prev_t1 = t1
+    # audio: cada toma suena como su clip (x su volumen). Un clip silenciado en el ensamble no
+    # suena en el video del proyecto pero si al recomponer desde la linea de tiempo
+    sr = 16000
+    xv = compose_mod._pcm(plan["video"], sr=sr)
+    if xv is None:
+        return None
+    for e, it in pairs:
+        t0, t1 = float(e["t0"]), float(e["t1"])
+        a_in, a_out = float(it["in"]), float(it["out"])
+        m = min(0.15, 0.2 * (t1 - t0))
+        got = _seg_rms(xv, t0 + m, t1 - m, sr)
+        if got is None:
+            continue
+        xs = compose_mod._pcm(it["path"], a_in + m, max(a_in + m + 0.05, a_out - m), sr=sr)
+        ref = _seg_rms(xs, 0.0, len(xs) / float(sr), sr) if xs is not None else None
+        if ref is None:
+            continue
+        want = ref * float(it.get("vol") if isinstance(it.get("vol"), (int, float)) else 1.0)
+        if want > 3 * VERIFY_SILENCE and got < 0.25 * want:
+            return "tiene clips silenciados"
+    return None
+
+
+def _legacy_composed(plan, combined):
+    """Ensamble compuesto ANTES de guardar su registro y ya exportado (sin registro, sin
+    params.spec, sin montaje): plan.shots trae tomas de mas de un clip de origen o el video
+    combinado quedo al tope vertical del compositor (1620x2880). Sus originales no se conocen."""
+    srcs = {str(s.get("src")) for s in (plan or {}).get("shots") or [] if isinstance(s, dict) and s.get("src")}
+    if len(srcs) > 1:
+        return True
+    try:
+        import compose as compose_mod
+        mw, mh = compose_mod.MAX_VERTICAL
+    except Exception:  # noqa
+        mw, mh = 1620, 2880
+    w, h = int(combined[0] or 0), int(combined[1] or 0)
+    return h > w and (abs(w - mw) <= 2 or abs(h - mh) <= 2)
+
+
+def _source_info(job_id, plan):
+    """De donde sale la resolucion del export -> {kind: single|compose, combined: [w, h] (el video
+    del proyecto), native: [w, h] (la resolucion real de las fuentes: el mejor clip), clips:
+    [{w, h, secs}] (lo que da cada clip de un montaje), label, orientation, can_recompose,
+    missing: [nombres], lossy (motivo por el que no se puede recomponer), legacy (ensamble de antes
+    del registro: originales desconocidos), rec}."""
+    combined = _video_wh((plan or {}).get("video")) or list((plan or {}).get("dims") or [1080, 1920])
+    rec = jobstore.get_compose_spec(job_id)
+    out = {"kind": "single", "combined": combined, "native": combined, "can_recompose": False,
+           "missing": [], "rec": None, "clips": [], "lossy": None, "legacy": False}
+    if _is_composed(job_id, plan, rec):
+        out["kind"] = "compose"
+        rec, missing = _compose_record(job_id, plan)
+        out["rec"] = rec
+        if rec:
+            missing = []
+            for it in (rec["spec"].get("main") or []) + (rec["spec"].get("overlays") or []):
+                if _item_path(it) is None:
+                    missing.append(it.get("name") or Path(str(it.get("path") or "?")).name)
+            import compose as compose_mod
+            if not missing and "clips" not in rec:
+                # registro de antes del detalle por clip: se calcula una vez y se guarda
+                try:
+                    hs = _hires_spec(rec)
+                    rec["clips"] = compose_mod.clip_canvases(hs)
+                    nat = compose_mod.native_canvas(hs)
+                    if nat:
+                        rec["native"] = list(nat)
+                    jobstore.set_compose_spec(job_id, rec)
+                except Exception:  # noqa
+                    traceback.print_exc()
+            nat = rec.get("native")
+            if not nat and not missing:
+                nat = compose_mod.native_canvas(_hires_spec(rec))
+            if nat and int(nat[0]) * int(nat[1]) >= combined[0] * combined[1]:
+                out["native"] = [int(nat[0]), int(nat[1])]
+            out["clips"] = [c for c in rec.get("clips") or [] if isinstance(c, dict)]
+            out["lossy"] = rec.get("lossy") or (rec.get("verify_fail") or {}).get("why")
+            out["lossy_old"] = str(rec.get("src") or "").startswith("backfill")
+        out["missing"] = missing
+        out["can_recompose"] = bool(rec) and not missing and not out["lossy"]
+    elif _legacy_composed(plan, combined):
+        out.update(kind="compose", legacy=True)
+    nw, nh = out["native"]
+    out["label"] = EK.res_label_of(min(nw, nh))
+    out["orientation"] = EK.orientation(nw, nh)
+    return out
+
+
+def _missing_msg(src, best):
+    if src.get("missing"):
+        names = ", ".join(str(n) for n in src["missing"][:3])
+        return f"Faltan clips originales en este equipo ({names}): sin ellos el máximo es {best}"
+    if src.get("lossy") and src.get("lossy_old"):
+        return (f"Este montaje se armó con una versión anterior de Reelfy y no guardó todos sus "
+                f"detalles ({src['lossy']}): el máximo es {best}")
+    if src.get("lossy"):
+        return f"Este proyecto no se pudo recomponer igual a tu edición: el máximo es {best}"
+    return f"Este proyecto se armó antes de guardar sus clips originales: el máximo es {best}"
+
+
+def _export_rows(src, fmt):
+    from motion import render as R
+    rows = EK.resolution_matrix(fmt, src["native"], src["combined"], src["can_recompose"],
+                                formats=R.FORMATS, clips=src.get("clips"))
+    if not src["can_recompose"] and src.get("kind") == "compose":
+        best = max((r for r in rows if r["enabled"]), key=lambda r: EK.RES_SHORT[r["id"]])["label"]
+        for r in rows:
+            # sin registro de sus originales (ensamble de antes), el video combinado NO es "tu
+            # video original": el motivo dice que faltan los clips
+            if not r["enabled"] and r["reason"] and (r["reason"].startswith("Los clips originales") or
+                                                     src.get("legacy")):
+                r["reason"] = _missing_msg(src, best)
+    return rows
+
+
+def _export_size_opts(plan, fmt, ex):
+    """opts del motor para la resolucion del export: 1080p = nada (lo de siempre); 720p = salida
+    chica sobre el MISMO base de 1080 (el del analisis de fondo); 1440p/4K = base al tamano de la
+    salida."""
+    res = ex.get("res") or EK.DEFAULT_RES
+    if res == "1080p" or not ex.get("W"):
+        return {}
+    o = {"W": int(ex["W"]), "H": int(ex["H"])}
+    if res in EK.HIRES:
+        o["base_W"], o["base_H"] = o["W"], o["H"]
+    else:
+        from motion import render as R
+        from motion import video_io as V
+        o["base_W"], o["base_H"] = R.output_size(fmt, V.probe(plan["video"]))
+    return o
+
+
+def _plan_frames(plan, fps=30):
+    try:
+        from motion import timeline as TL
+        return int(TL.Timeline.from_plan(plan, fps=fps).n_frames(fps))
+    except Exception:  # noqa: plan invalido -> duracion menos cortes
+        dur = float((plan or {}).get("duration") or 0)
+        return int(round(jobstore._final_duration(dur, (plan or {}).get("cuts")) * fps))
+
+
+def _shorts_frames(plan, fps=30):
+    n = 0
+    for h in (plan or {}).get("highlights") or []:
+        if isinstance(h, dict) and h.get("enabled", True):
+            try:
+                d = float(h["end"]) - float(h["start"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if d >= 1.0:
+                n += int(round(d * fps))
+    return n
+
+
+def _hires_spec(rec):
+    """Spec del registro con el archivo de HOY de cada clip (por sid). FileNotFoundError si falta."""
+    spec = json.loads(json.dumps(rec["spec"]))
+    missing = []
+    for it in (spec.get("main") or []) + (spec.get("overlays") or []):
+        p = _item_path(it)
+        if p is None:
+            missing.append(it.get("name") or Path(str(it.get("path") or "?")).name)
+        else:
+            it["path"] = str(p)
+    if missing:
+        raise FileNotFoundError(", ".join(missing[:5]))
+    return spec
+
+
+def _hires_key(job_id, plan, rec, spec, need):
+    sig = []
+    for it in (spec.get("main") or []) + (spec.get("overlays") or []):
+        try:
+            stt = Path(it["path"]).stat()
+            sig.append([Path(it["path"]).name, stt.st_size, int(stt.st_mtime)])
+        except OSError:
+            sig.append([str(it.get("path")), 0, 0])
+    try:
+        vs = Path(plan["video"]).stat()
+        vsig = [vs.st_size, int(vs.st_mtime)]
+    except (OSError, KeyError, TypeError):
+        vsig = None
+    raw = json.dumps({"v": HIRES_VERSION, "spec": spec, "need": list(need), "sig": sig,
+                      "t": rec.get("t"), "video": vsig}, sort_keys=True, default=str)
+    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
+def _hires_paths(job_id, key, need):
+    stem = f"{job_id}_{key}_{int(need[0])}x{int(need[1])}_hires"
+    return paths.WORK / f"{stem}.mp4", paths.WORK / f"{stem}.json", paths.WORK / f"{stem}.part.mp4"
+
+
+def _hires_cached(job_id, plan, need):
+    """Ruta del video recompuesto en cache para (proyecto, spec, tamano) o None."""
+    try:
+        rec, _ = _compose_record(job_id, plan)
+        if not rec:
+            return None
+        spec = _hires_spec(rec)
+        out, meta, _ = _hires_paths(job_id, _hires_key(job_id, plan, rec, spec, need), need)
+        if out.exists() and meta.exists():
+            return out
+    except Exception:  # noqa
+        pass
+    return None
+
+
+def _shots_match(got, want, fps=30.0):
+    """Las tomas recompuestas caen en los mismos cuadros (tolerancia 1.5 cuadros; el final de la
+    ultima no cuenta: plan.shots lo acota a la duracion analizada)."""
+    if not want:
+        return True
+    if len(got) != len(want):
+        return False
+    tol = 1.5 / float(fps)
+    for k, (a, b) in enumerate(zip(got, want)):
+        if abs(float(a[0]) - float(b[0])) > tol:
+            return False
+        if k < len(want) - 1 and abs(float(a[1]) - float(b[1])) > tol:
+            return False
+    return True
+
+
+def _prune_hires(keep_job=None, keep_path=None, keep=None):
+    """Videos recompuestos en cache: uno por proyecto (el vigente) y HIRES_KEEP en total (los mas
+    recientes). -> bytes liberados."""
+    keep = HIRES_KEEP if keep is None else keep
+
+    def mtime(q):
+        # uso mas reciente: el .json (lo toca cada uso; el video no se toca: su mtime es parte de la
+        # clave del video base) o, sin el, el video
+        t = 0.0
+        for f in (q, q.with_name(q.name[:-len(".mp4")] + ".json")):
+            try:
+                t = max(t, f.stat().st_mtime)
+            except OSError:
+                pass
+        return t
+    files = sorted(paths.WORK.glob("*_hires.mp4"), key=mtime, reverse=True) if paths.WORK.exists() else []
+    freed, kept = 0, 0
+    for f in files:
+        jid = f.name.split("_")[0]
+        if keep_path and f == keep_path:
+            kept += 1
+            continue
+        drop = (keep_job and jid == keep_job) or kept >= keep
+        if not drop:
+            kept += 1
+            continue
+        for q in (f, f.with_name(f.name[:-len(".mp4")] + ".json")):
+            try:
+                freed += q.stat().st_size
+                q.unlink()
+            except OSError:
+                pass
+    return freed
+
+
+def _frames_at(path, idx, side=VERIFY_SIDE, cancel=None):
+    """Cuadros `idx` (numeros de cuadro) de un video, chicos (lado corto `side`, RGB) -> {n:
+    ndarray (h, w, 3)} (los que existan). UNA pasada de ffmpeg leida en flujo (solo se guardan los
+    pedidos; se corta tras el ultimo). Decodificar en CPU es mas rapido que videotoolbox aqui
+    (4K: ~10 s contra ~28 s por 80 s de video); un `select` con cientos de terminos falla."""
+    import numpy as np
+    from motion import video_io as V
+    want = {int(n) for n in idx if int(n) >= 0}
+    i = V.probe(str(path))
+    w, h = int(i.get("w") or 0), int(i.get("h") or 0)
+    if not w or not h or not want:
+        return {}
+    k = side / float(min(w, h))
+    sw, sh = max(2, int(round(w * k / 2)) * 2), max(2, int(round(h * k / 2)) * 2)
+    cmd = [str(paths.FFMPEG), "-v", "error", "-nostdin", "-i", str(path), "-map", "0:v:0",
+           "-vf", f"scale={sw}:{sh}:flags=area,format=rgb24", "-fps_mode", "passthrough",
+           "-f", "rawvideo", "-"]
+    fsz, last, out, n = sw * sh * 3, max(want), {}, 0
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err)
+        try:
+            while n <= last:
+                buf = p.stdout.read(fsz)
+                if len(buf) < fsz:
+                    break
+                if n in want:
+                    out[n] = np.frombuffer(buf, dtype=np.uint8).reshape(sh, sw, 3).copy()
+                n += 1
+                if cancel and n % 120 == 0 and cancel():
+                    raise JobCanceled()
+        finally:
+            if p.poll() is None:
+                p.kill()
+            p.wait()
+            p.stdout.close()
+        if not out and p.returncode not in (0, -9):
+            err.seek(0)
+            raise RuntimeError(err.read().decode("utf-8", "replace")[-400:])
+    return out
+
+
+def _verify_hires(old, new, shots, fps=30.0, cancel=None):
+    """La recomposicion es la MISMA edicion que el video del proyecto? -> None o el motivo (para
+    el registro). Toma por toma: el audio (RMS sin los bordes: un clip silenciado o con otro
+    volumen) y tres cuadros (cerca del inicio, a la mitad y cerca del final: un sticker, una capa,
+    un fundido a negro), chicos (el tamano no importa); cada cuadro del proyecto contra el mismo
+    cuadro +-1 del recompuesto (las tomas caen dentro de un cuadro)."""
+    import numpy as np
+    import compose as compose_mod
+    shots = [(float(a), float(b)) for a, b in shots or [] if float(b) - float(a) > 0.05]
+    if not shots:
+        return None
+    if len(shots) > VERIFY_MAX_SHOTS:
+        step = len(shots) / float(VERIFY_MAX_SHOTS)
+        shots = [shots[int(k * step)] for k in range(VERIFY_MAX_SHOTS)]
+    # audio
+    sr = 16000
+    xo = compose_mod._pcm(old, sr=sr)
+    xn = compose_mod._pcm(new, sr=sr)
+    if (xo is None) != (xn is None):
+        return "audio distinto (una version no tiene audio)"
+    if xo is not None:
+        for k, (a, b) in enumerate(shots):
+            m = min(0.1, 0.2 * (b - a))
+            ro, rn = _seg_rms(xo, a + m, b - m, sr), _seg_rms(xn, a + m, b - m, sr)
+            if ro is None or rn is None:
+                continue
+            if max(ro, rn) < VERIFY_SILENCE:
+                continue
+            if min(ro, rn) < VERIFY_SILENCE or abs(20 * math.log10(rn / ro)) > VERIFY_DB:
+                return f"audio de la toma {k + 1} distinto ({ro:.4f} vs {rn:.4f} RMS)"
+    # cuadros
+    samples = []
+    for k, (a, b) in enumerate(shots):
+        na, nb = int(math.ceil(a * fps - 1e-6)), int(math.floor(b * fps + 1e-6)) - 1
+        if nb - na >= 8:
+            samples += [(k, na + 2), (k, (na + nb) // 2), (k, nb - 2)]
+        elif nb >= na:
+            samples.append((k, (na + nb) // 2))
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="verify") as tp:
+        fo = tp.submit(_frames_at, old, [n for _k, n in samples], cancel=cancel)
+        fn = tp.submit(_frames_at, new, [n + d for _k, n in samples for d in (-1, 0, 1)], cancel=cancel)
+        old_f, new_f = fo.result(), fn.result()
+    for k, n in samples:
+        o = old_f.get(n)
+        cand = [new_f[n + d] for d in (-1, 0, 1) if n + d in new_f]
+        if o is None or not cand:
+            continue
+        cand = [c for c in cand if c.shape == o.shape]
+        if not cand:
+            return "cuadros de otro tamano"
+        d = np.min(np.stack([np.abs(o.astype(np.int16) - c.astype(np.int16)).max(axis=2) for c in cand]),
+                   axis=0)
+        frac = float(np.mean(d > VERIFY_PIX))
+        if frac > VERIFY_FRAC:
+            return f"imagen de la toma {k + 1} distinta (cuadro {n}: {100 * frac:.1f} % de pixeles)"
+    return None
+
+
+def _hires_video(job_id, plan, ex, prog, span, t0):
+    """Video combinado a la resolucion del export: las MISMAS tomas (mismos in/out, volumenes ya
+    resueltos, rampas) recompuestas desde las fuentes originales al lienzo `need`. En cache por
+    (spec, tamano). Verifica que las tomas caen en los mismos cuadros que el video del proyecto y
+    que es la misma edicion (audio y cuadros de cada toma: _verify_hires); si no, el registro
+    queda marcado (la hoja ya no ofrece recomponer) y se ofrece 1080p. Cancelable a media
+    recomposicion (mata el ffmpeg en curso). -> (ruta, 'cache'|'new', cuadros recompuestos).
+    ExportError(recompose_failed) si no."""
+    import compose as compose_mod
+    need = tuple(int(x) for x in ex["recompose"])
+    label = EK.RES_LABEL.get(ex.get("res"), ex.get("res"))
+    fail = f"No se pudo preparar el video en {label}"
+    rec, missing = _compose_record(job_id, plan)
+    if not rec:
+        raise ExportError(f"{fail}: faltan clips originales ({', '.join(missing[:3]) or 'sin registro'}). "
+                          "Puedes exportarlo en 1080p.", "recompose_failed", "1080p")
+    if rec.get("lossy"):
+        raise ExportError(f"{fail}: este montaje no guardó todos sus detalles ({rec['lossy']}). Puedes "
+                          "exportarlo en 1080p.", "recompose_failed", "1080p")
+    if rec.get("verify_fail"):
+        # ya se recompuso y no quedo igual: no se hace esperar minutos para fallar otra vez
+        raise ExportError(f"{fail}: el video recompuesto no queda igual a tu edición. Puedes "
+                          "exportarlo en 1080p.", "recompose_failed", "1080p")
+    try:
+        spec = _hires_spec(rec)
+    except FileNotFoundError as e:
+        raise ExportError(f"{fail}: faltan clips originales en este equipo ({e}). Puedes exportarlo "
+                          "en 1080p.", "recompose_failed", "1080p") from e
+    key = _hires_key(job_id, plan, rec, spec, need)
+    out, meta, tmp = _hires_paths(job_id, key, need)
+    if out.exists() and meta.exists():
+        # "usado hace poco" va en el .json: la clave del video base (y del rostro y el matte) lleva
+        # el mtime del video; tocarlo tiraba la cache y cada export en 4K rehacia el base
+        os.utime(meta)
+        prog.update(force=True, pct=span, stage="recompose",
+                    message=f"Preparando el video en {label}… (ya estaba listo)")
+        try:
+            frames = int(json.loads(meta.read_text()).get("frames") or 0)
+        except Exception:  # noqa
+            frames = 0
+        return out, "cache", frames
+    work = paths.WORK / f"compose_{job_id}_hires"
+    info = {}
+    canceled = getattr(prog.cancel, "canceled", None)
+    check = getattr(prog.cancel, "check", None)
+
+    def cstep(m):
+        if check:
+            check()                       # JobCanceled entre segmentos
+        mm = re.search(r"(\d+)\s*/\s*(\d+)", str(m))
+        frac = min(1.0, int(mm.group(1)) / int(mm.group(2))) * 0.92 if mm and int(mm.group(2)) > 0 else 0.95
+        el = time.time() - t0
+        tot = span * frac
+        prog.update(force=True, pct=round(tot, 1), stage="recompose", elapsed=round(el),
+                    eta=round(el / tot * (100 - tot)) if tot > 3 else None,
+                    message=f"Preparando el video en {label}…")
+    try:
+        tmp.unlink(missing_ok=True)
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            # lienzo EXACTO `need` (con el aspecto del video combinado aunque el primer clip sea de
+            # menos resolucion); `cancel` se revisa mientras corre cada ffmpeg (y lo mata)
+            compose_mod.compose(spec, str(tmp), work, on_step=cstep, info=info, canvas=need,
+                                cancel=canceled)
+        except compose_mod.Canceled:
+            raise JobCanceled()
+        fps = float(spec.get("fps") or 30)
+        got = [[float(s["start"]), float(s["end"])] for s in info.get("shots") or []]
+        want = rec.get("shots") or []
+        d_new = float(compose_mod.probe(str(tmp))["dur"] or 0)
+        d_old = float(compose_mod.probe(str(plan["video"]))["dur"] or 0)
+        if abs(d_new - d_old) > max(0.1, 3.0 / fps) or not _shots_match(got, want, fps):
+            # el detalle (duraciones y tomas) va al registro; al usuario, la frase y la salida
+            print(f"   export {label}: tomas recompuestas distintas: {d_new:.3f}s vs {d_old:.3f}s; "
+                  f"tomas {got} vs {want}")
+            raise ExportError(f"{fail}: las tomas recompuestas no coinciden con tu edición. Puedes "
+                              "exportarlo en 1080p.", "recompose_failed", "1080p")
+        prog.update(force=True, pct=round(span * 0.97, 1), stage="recompose",
+                    message=f"Preparando el video en {label}… (revisando)")
+        try:
+            why = _verify_hires(str(plan["video"]), str(tmp), want or got, fps, cancel=canceled)
+        except (JobCanceled, ExportError):
+            raise
+        except Exception:  # noqa: la revision es una guarda extra; si no corre, no tumba el export
+            traceback.print_exc()
+            why = None
+        if why:
+            print(f"   export {label}: la recomposicion NO es la misma edicion: {why}")
+            _mark_verify_fail(job_id, rec, why)
+            raise ExportError(f"{fail}: el video recompuesto no queda igual a tu edición. Puedes "
+                              "exportarlo en 1080p.", "recompose_failed", "1080p")
+        os.replace(tmp, out)
+        frames = int(round(d_new * fps))
+        meta.write_text(json.dumps({"key": key, "W": info.get("W"), "H": info.get("H"), "frames": frames,
+                                    "dur": round(d_new, 3), "verified": True, "t": round(time.time(), 1)}))
+    except (JobCanceled, ExportError):
+        tmp.unlink(missing_ok=True)
+        raise
+    except Exception as e:  # noqa
+        tmp.unlink(missing_ok=True)
+        traceback.print_exc()
+        if EK.is_no_space(e):
+            raise ExportError(f"{fail}: no hay espacio suficiente en el disco. Libera espacio o "
+                              "expórtalo en 1080p.", "no_space", "1080p") from e
+        # el error tecnico (ffmpeg...) ya quedo en el registro (traceback): al usuario, la frase
+        raise ExportError(f"{fail} desde tus clips originales. Puedes exportarlo en 1080p.",
+                          "recompose_failed", "1080p") from e
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    print(f"   export {label}: tomas recompuestas a {info.get('W')}x{info.get('H')} ({out.name})")
+    _prune_hires(keep_job=job_id, keep_path=out)
+    _storage_invalidate()
+    return out, "new", frames
+
+
+def _mark_verify_fail(job_id, rec, why):
+    """La recomposicion de este registro no da la misma edicion: queda anotado (la hoja apaga lo
+    que pide recomponer, con el motivo, en vez de hacer esperar minutos para fallar otra vez)."""
+    try:
+        cur = jobstore.get_compose_spec(job_id)
+        if cur and cur.get("t") == rec.get("t"):
+            cur["verify_fail"] = {"why": "no queda igual a tu edición", "detail": str(why)[:300],
+                                  "t": round(time.time(), 1)}
+            jobstore.set_compose_spec(job_id, cur)
+    except Exception:  # noqa
+        traceback.print_exc()
+
+
+def _record_perf(stats, ex, t_render, t_rec, rec_frames, out, base_wh=None):
+    """Rendimiento medido de este export (segundos por cuadro por megapixel) para las estimaciones.
+    `base_wh`: el video base que el render armo DE VERDAD (720p compone sobre un base de 1080: su
+    tiempo se divide entre el area del base, no la de la salida); sin el, el de la salida."""
+    try:
+        n = int(stats.get("n_frames") or 0)
+        W, H = int(stats.get("W") or 0), int(stats.get("H") or 0)
+        if n <= 0 or W <= 0 or H <= 0:
+            return
+        mpx = W * H / 1e6
+        fps = float(stats.get("fps") or 30)
+        tb = float(stats.get("t_base") or 0)
+        sh = sum(int(round((float(s.get("end") or 0) - float(s.get("start") or 0)) * fps))
+                 for s in stats.get("shorts") or [] if isinstance(s, dict))
+        r = float(t_render) - tb - sh * mpx * EK.SPFM_DEFAULTS["shorts"]
+        EXPORT_STORE.add_perf("render", r / (n * mpx))
+        if not stats.get("cached_base") and tb > 1.0:
+            bw, bh = (int(base_wh[0]), int(base_wh[1])) if base_wh and base_wh[0] and base_wh[1] else (W, H)
+            EXPORT_STORE.add_perf("base", tb / (n * bw * bh / 1e6))
+        if t_rec > 1.0 and rec_frames > 0 and (ex or {}).get("recompose"):
+            rw, rh = ex["recompose"]
+            EXPORT_STORE.add_perf("recompose", t_rec / (rec_frames * rw * rh / 1e6))
+        size = Path(out).stat().st_size
+        q = (ex or {}).get("quality") or EK.DEFAULT_QUALITY
+        pred = (EK.video_bps(W, H, fps, q) + EK.AUDIO_BPS) / 8.0 * (n / fps)
+        if pred > 0:
+            EXPORT_STORE.add_perf("size_ratio", size / pred)
+    except Exception:  # noqa: medir nunca tumba el export
+        traceback.print_exc()
+
+
+def _folder_name(folder):
+    return Path(str(folder)).name or str(folder)
+
+
+def _save_export(job_id, out, shorts, ex, prog=None):
+    """Clona/enlaza/copia el export (y sus shorts) a la carpeta elegida, sin sobrescribir ->
+    {saved, path, folder, folder_label, file_name, bytes, how, shorts: [rutas], save_error?}."""
+    folder = ex.get("folder")
+    fname = _folder_name(folder)
+    res = {"saved": False, "folder": folder, "folder_label": EK.home_label(folder) if folder else None}
+    st = EK.folder_status(folder, paths.DATA, create=(folder == str(EK.default_folder())))
+    if st["error"]:
+        res["save_error"] = st["error"] + " Tu video quedó en Reelfy: usa «Guardar de nuevo»."
+        return res
+    if prog is not None:
+        prog.update(force=True, pct=99.5, stage="save", message=f"Guardando en «{fname}»…")
+
+    def on_bytes(done, total):
+        if prog is not None and total > 0:
+            prog.update(message=f"Guardando en «{fname}»… {int(100 * done / total)} %")
+    cancel = prog.cancel.canceled if prog is not None else None
+    try:
+        dst, how = EK.place_file(out, st["path"], ex.get("name") or "Reelfy", on_bytes=on_bytes,
+                                 cancel=cancel)
+    except InterruptedError:
+        raise JobCanceled()
+    except OSError as e:
+        if EK.is_no_space(e):
+            res["save_error"] = (f"No hay espacio en «{fname}» para guardar el video. Tu video quedó en "
+                                 "Reelfy: libera espacio y usa «Guardar de nuevo».")
+        else:
+            # el texto del sistema (en ingles: "Input/output error") va al registro; al usuario, la
+            # frase en espanol
+            print(f"   export: no se pudo guardar en {folder}: {e!r}")
+            res["save_error"] = f"{EK.save_error_text(e, fname)}. Tu video quedó en Reelfy: usa «Guardar de nuevo»."
+        return res
+    res.update(saved=True, path=str(dst), file_name=dst.name, how=how, bytes=dst.stat().st_size,
+               shorts=[])
+    stem = dst.stem
+    for k, s in enumerate(shorts or [], 1):
+        try:
+            sd, _ = EK.place_file(s, st["path"], f"{stem} - Short {k}", cancel=cancel)
+            res["shorts"].append(str(sd))
+        except InterruptedError:
+            raise JobCanceled()
+        except OSError as e:
+            res["shorts"].append(None)
+            print(f"   export: un short no se pudo guardar en {folder}: {e!r}")
+            res.setdefault("save_error", f"Un short no se pudo guardar: {EK.save_error_text(e, fname)}.")
+    EXPORT_STORE.add_exported([res["path"]] + [x for x in res["shorts"] if x], job_id)
+    print(f"   export guardado: {dst} ({how})")
+    return res
+
+
+def _apply_saved(clips, saved, ex):
+    """clips[0] (el video completo) y los shorts ganan donde quedaron en la carpeta elegida."""
+    c0 = clips[0]
+    c0.update(saved=bool(saved.get("saved")), folder=saved.get("folder"),
+              folder_label=saved.get("folder_label"), res=ex.get("res"), quality=ex.get("quality"),
+              label=EK.RES_LABEL.get(ex.get("res"), ex.get("res")))
+    if saved.get("saved"):
+        c0.update(path=saved["path"], file_name=saved["file_name"], bytes=saved.get("bytes"))
+    else:
+        c0["save_error"] = saved.get("save_error")
+        try:
+            c0["bytes"] = (OUTPUT / c0["file"]).stat().st_size
+        except OSError:
+            pass
+    for c, sp in zip(clips[1:], saved.get("shorts") or []):
+        if sp:
+            c["path"] = sp
+            c["file_name"] = Path(sp).name
+    saved.update(W=c0.get("W"), H=c0.get("H"), duration=c0.get("duration"), res=ex.get("res"),
+                 quality=ex.get("quality"))
+
+
+def _export_job_plan(job_id):
+    """Plan guardado del proyecto para la hoja de export (404/409 como /render)."""
+    _job_or_404(job_id)
+    plan = _sym_stored(job_id, *jobstore.get_plan(job_id))[0]
+    if not plan:
+        raise HTTPException(409, "El proyecto no tiene plan; analiza el video primero.")
+    return _not_montage(plan)
+
+
+def _check_fmt(fmt):
+    from motion import render as R
+    fmt = str(fmt or "9:16")
+    if fmt not in R.FORMAT_NAMES:
+        raise HTTPException(400, f"Formato desconocido: {fmt}. Usa {', '.join(R.FORMAT_NAMES)}.")
+    return fmt
+
+
+def _folder_choice(raw=None):
+    """Carpeta de destino: la pedida SOLO si vino del selector, es la recordada o la de siempre;
+    sin pedirla, la recordada (si sigue sirviendo) o la de siempre. Si la recordada NO sirve ahora
+    (un disco desconectado) se usa la de siempre CON aviso (`notice`, `fallback_from`): la
+    recordada no se olvida y vuelve a ser la elegida en cuanto aparece. -> folder_status."""
+    allowed = EXPORT_STORE.allowed_folders()
+    dflt = str(EK.default_folder())
+    if raw is not None and str(raw).strip():
+        f = EK.norm_folder(raw)
+        if not f or f not in allowed:
+            raise HTTPException(400, "Elige la carpeta con «Cambiar…»: Reelfy solo guarda en carpetas "
+                                     "que elegiste.")
+        st = EK.folder_status(f, paths.DATA, create=(f == dflt))
+        if st["error"]:
+            raise HTTPException(400, st["error"])
+        return st
+    last = EK.norm_folder((EXPORT_STORE.load().get("last") or {}).get("folder"))
+    gone = None
+    if last and last in allowed:
+        st = EK.folder_status(last, paths.DATA, create=(last == dflt))
+        if not st["error"]:
+            return st
+        gone = st
+    st = EK.folder_status(dflt, paths.DATA, create=True)
+    if gone and gone.get("path") and gone["path"] != st.get("path"):
+        nm = gone.get("name") or gone["path"]
+        why = "no se puede escribir en ella" if gone.get("exists") else "no está disponible (¿disco desconectado?)"
+        st = dict(st, fallback_from={"path": gone["path"], "label": gone.get("label"), "name": nm},
+                  notice=f"Tu carpeta «{nm}» {why}; se usará {st.get('label') or dflt}.")
+    return st
+
+
+def _folder_out(st):
+    d = {k: st.get(k) for k in ("path", "label", "name", "exists", "writable", "free_bytes", "error",
+                                "notice", "fallback_from")}
+    d["default"] = st.get("path") == str(EK.default_folder())
+    return d
+
+
+def _sweep_parts(folders=None):
+    """Copias a medias (".<nombre>.<pid>.<hilo>.reelfy-part", ocultas) que dejo un Reelfy cerrado a
+    mitad de "Guardando en «USB»…" en las carpetas de destino conocidas -> bytes liberados."""
+    freed = 0
+    try:
+        for f in folders if folders is not None else EXPORT_STORE.allowed_folders():
+            if f and os.path.isdir(f):
+                freed += EK.sweep_parts(f)
+    except Exception:  # noqa: limpiar nunca tumba nada
+        traceback.print_exc()
+    if freed:
+        print(f"   export: {freed / 1e6:.1f} MB de copias a medias borradas")
+    return freed
+
+
+def _base_cold(job_id, plan, fmt, eo, row, hires_path):
+    """El video base de esta resolucion NO esta en cache (el export lo arma: mas lento)."""
+    rev = jobstore.get_light(job_id) or {}
+    ck = (job_id, rev.get("plan_rev"), fmt, row["id"], str(hires_path), json.dumps(eo, sort_keys=True))
+    hit = _EST_CACHE.get(ck)
+    if hit and time.time() - hit[1] < 30:
+        return hit[0]
+    cold = True
+    try:
+        from motion import render as R
+        from motion import video_io as V
+        if row["recompose"] and not hires_path:
+            cold = True
+        else:
+            rp = dict(plan, video=str(hires_path)) if hires_path else plan
+            o = _motor_opts(_base_part(_eff_engine(plan, fmt, eo)), fmt, workers=0)
+            o.update(_export_size_opts(rp, fmt, {"res": row["id"], "W": row["W"], "H": row["H"]}))
+            pr = R.prepare(rp, o)
+            bv, bw = R._base_files(pr)
+            oo, n = pr["opts"], pr["job"]["n_frames"]
+            cold = not (V._meta_ok(bv, {"frames": n, "W": oo["base_W"], "H": oo["base_H"]}) and
+                        V._meta_ok(bw, {"samples": int(round(n / oo["fps"] * V.SR))}))
+    except Exception:  # noqa: sin poder saberlo se asume frio (estimacion conservadora)
+        cold = True
+    _EST_CACHE[ck] = (cold, time.time())
+    if len(_EST_CACHE) > 200:
+        _EST_CACHE.pop(next(iter(_EST_CACHE)))
+    return cold
+
+
+def _export_estimate(job_id, plan, fmt, res, quality, shorts, src=None, folder=None):
+    src = src or _source_info(job_id, plan)
+    rows = _export_rows(src, fmt)
+    row = next(r for r in rows if r["id"] == res)
+    eo = _get_engine(job_id)
+    hp = _hires_cached(job_id, plan, row["recompose_size"]) if row["recompose"] else None
+    fps = 30
+    frames = _plan_frames(plan, fps)
+    cold = _base_cold(job_id, plan, fmt, eo, row, hp)
+    base_wh = (row["W"], row["H"]) if res in EK.HIRES else None
+    if base_wh is None:
+        try:
+            from motion import render as R
+            base_wh = R.output_size(fmt, {"w": src["combined"][0], "h": src["combined"][1]})
+        except Exception:  # noqa
+            base_wh = (row["W"], row["H"])
+    rec_frames = 0
+    if row["recompose"] and not hp:
+        try:
+            from motion import video_io as V
+            rec_frames = int(round(float(V.probe(plan["video"])["duration"] or 0) * fps))
+        except Exception:  # noqa
+            rec_frames = frames
+    copy = False
+    if folder:
+        try:
+            copy = os.stat(folder).st_dev != os.stat(OUTPUT if OUTPUT.exists() else paths.DATA).st_dev
+        except OSError:
+            copy = False
+    est = EK.estimate(W=row["W"], H=row["H"], fps=fps, frames=frames, quality=quality,
+                      base_cold=cold, base_wh=base_wh, rec_frames=rec_frames,
+                      rec_wh=row["recompose_size"], shorts_frames=_shorts_frames(plan, fps) if shorts else 0,
+                      perf=EXPORT_STORE.load().get("perf"), copy=copy)
+    # disco: el render escribe trozos + el final (~2x) y, si toca, el video recompuesto y el base
+    need = est["bytes"] * 2
+    if rec_frames:
+        rw, rh = row["recompose_size"]
+        need += min(rw * rh * fps * 0.3, 60e6) / 8 * rec_frames / fps      # = compose._vbitrate
+    if cold:
+        need += base_wh[0] * base_wh[1] * fps * 0.5 / 8 * frames / fps
+    try:
+        free = shutil.disk_usage(paths.DATA).free
+    except OSError:
+        free = None
+    est["max_res"] = max((r["id"] for r in rows if r["enabled"]), key=lambda r: EK.RES_SHORT[r])
+    est["source_res"] = f"{src['native'][0]}x{src['native'][1]}"
+    est.update(res=res, label=row["label"], W=row["W"], H=row["H"], quality=quality, fmt=fmt,
+               frames=frames, duration=round(frames / fps, 2), recompose=bool(row["recompose"]),
+               recompose_cached=bool(hp), base_cached=not cold, enabled=row["enabled"],
+               reason=row["reason"], warn=row.get("warn"), need_bytes=int(need), free_bytes=free,
+               space_ok=free is None or free >= need + 300e6)
+    est["folder_space_ok"] = True
+    if copy and folder:
+        try:
+            dfree = shutil.disk_usage(folder).free
+            est["folder_free_bytes"] = dfree
+            est["folder_space_ok"] = dfree >= est["bytes"] + 50e6
+            est["space_ok"] = est["space_ok"] and est["folder_space_ok"]
+        except OSError:
+            pass
+    return est
+
+
+def _export_params(job_id, plan, fmt, raw, shorts_default=True):
+    """Valida las opciones de la hoja (`export` de POST /render) -> params.export, o HTTPException
+    con el motivo en espanol (400: resolucion/calidad/carpeta; 507: sin espacio)."""
+    raw = raw if isinstance(raw, dict) else {}
+    res = str(raw.get("res") or EK.DEFAULT_RES).lower()
+    if res not in EK.RES_IDS:
+        raise HTTPException(400, f"Resolución desconocida: {res}. Usa {', '.join(EK.RES_LABEL.values())}.")
+    quality = str(raw.get("quality") or EK.DEFAULT_QUALITY).lower()
+    if quality not in EK.QUALITY_IDS:
+        raise HTTPException(400, "Calidad desconocida: usa Estándar, Alta o Máxima.")
+    src = _source_info(job_id, plan)
+    rows = _export_rows(src, fmt)
+    row = next(r for r in rows if r["id"] == res)
+    if not row["enabled"]:
+        raise HTTPException(400, row["reason"] or f"{row['label']} no está disponible para este video.")
+    topic = (jobstore.plan_meta(plan) or {}).get("topic")
+    name = EK.sanitize_name(raw.get("name"), EK.default_name(topic)) if raw.get("name") else EK.default_name(topic)
+    fst = _folder_choice(raw.get("folder"))
+    if fst["error"]:
+        raise HTTPException(400, fst["error"])
+    shorts = bool(raw.get("shorts", shorts_default))
+    est = _export_estimate(job_id, plan, fmt, res, quality, shorts, src=src, folder=fst["path"])
+    if not est["space_ok"]:
+        gb = lambda b: f"{b / 1e9:.1f} GB"  # noqa: E731
+        if not est.get("folder_space_ok", True):
+            raise HTTPException(507, f"No hay espacio en «{fst['name']}»: el video pesará ~{gb(est['bytes'])} y "
+                                     f"quedan {gb(est.get('folder_free_bytes') or 0)}. Libera espacio o elige otra "
+                                     "carpeta con «Cambiar…».")
+        raise HTTPException(507, f"No hay espacio suficiente para exportar en {row['label']}: hacen falta "
+                                 f"~{gb(est['need_bytes'])} y quedan {gb(est['free_bytes'] or 0)}. Libera "
+                                 "espacio o elige una resolución menor.")
+    ex = {"res": res, "W": row["W"], "H": row["H"], "base_W": row["W"] if res in EK.HIRES else None,
+          "base_H": row["H"] if res in EK.HIRES else None, "quality": quality, "name": name,
+          "folder": fst["path"], "shorts": shorts,
+          "recompose": row["recompose_size"] if row["recompose"] else None,
+          "est": {k: est[k] for k in ("seconds", "bytes", "text", "parts", "basis")}}
+    if row["recompose"] and not est.get("recompose_cached"):
+        tot = max(1.0, float(est["seconds"]))
+        ex["rec_span"] = round(min(60.0, max(10.0, 100.0 * est["parts"]["recompose"] / tot)), 1)
+    else:
+        ex["rec_span"] = 5.0
+    # si la carpeta es la de siempre SOLO porque la recordada no esta (disco desconectado), la
+    # recordada se conserva: al volver el disco, la hoja la vuelve a proponer
+    fb = _folder_choice()
+    keep = bool(fb.get("fallback_from")) and fst["path"] == fb.get("path")
+    EXPORT_STORE.remember(res=res, quality=quality, shorts=shorts, fmt=fmt,
+                          folder=None if keep else fst["path"])
+    return ex
+
+
+def _export_public(ex):
+    """Lo que la respuesta de POST /render dice del export."""
+    return {"res": ex["res"], "label": EK.RES_LABEL[ex["res"]], "W": ex["W"], "H": ex["H"],
+            "quality": ex["quality"], "name": ex["name"], "file_name": ex["name"] + ".mp4",
+            "folder": ex["folder"], "folder_label": EK.home_label(ex["folder"]), "shorts": ex["shorts"],
+            "recompose": bool(ex.get("recompose")), "estimate": ex.get("est")}
+
+
+@app.get("/export/options")
+def export_options(job: str, fmt: str | None = None):
+    """Todo lo que la hoja "Exportar" necesita: {job, name (por defecto, sin extension), ext,
+    fmt, source {w, h, label, orientation, kind, combined, can_recompose, missing}, formats {fmt:
+    {label, resolutions: [{id, label, W, H, enabled, reason, recompose}]}}, qualities, defaults
+    {res, quality, shorts, fmt} (lo ultimo que se eligio, ajustado a lo habilitado), folder {path,
+    label, name, writable, free_bytes, error, default}, shorts_available, picker (hay selector
+    nativo de carpetas), reveal_label ("Mostrar en Finder" / "Mostrar en el Explorador" / ...)}."""
+    plan = _export_job_plan(job)
+    from motion import render as R
+    src = _source_info(job, plan)
+    last = EXPORT_STORE.load().get("last") or {}
+    if fmt:
+        pfmt = _check_fmt(fmt)
+    else:
+        cand = (plan.get("studio") or {}).get("fmt") or last.get("fmt") or "9:16"
+        pfmt = cand if cand in R.FORMAT_NAMES else "9:16"
+    formats = {}
+    for f in R.FORMAT_NAMES:
+        rows = _export_rows(src, f)
+        for r in rows:
+            r.pop("recompose_size", None)
+        formats[f] = {"label": EK.FORMAT_LABELS.get(f, f), "resolutions": rows}
+    res = EK.clamp_res(str(last.get("res") or EK.DEFAULT_RES), formats[pfmt]["resolutions"])
+    topic = (jobstore.plan_meta(plan) or {}).get("topic")
+    n_short = sum(1 for h in plan.get("highlights") or [] if isinstance(h, dict) and h.get("enabled", True))
+    fst = _folder_choice()
+    _sweep_parts([fst["path"]] + ([fst["fallback_from"]["path"]] if fst.get("fallback_from") else []))
+    return {"job": job, "name": EK.default_name(topic), "ext": ".mp4", "fmt": pfmt,
+            "source": {"w": src["native"][0], "h": src["native"][1], "label": src["label"],
+                       "orientation": src["orientation"], "kind": src["kind"],
+                       "combined": src["combined"], "can_recompose": src["can_recompose"],
+                       "missing": src["missing"], "lossy": src["lossy"], "legacy": src["legacy"]},
+            "formats": formats,
+            "qualities": [{"id": q["id"], "label": q["label"], "hint": q["hint"],
+                           "default": q["id"] == EK.DEFAULT_QUALITY} for q in EK.QUALITY.values()],
+            "defaults": {"res": res, "quality": last.get("quality") if last.get("quality") in EK.QUALITY_IDS
+                         else EK.DEFAULT_QUALITY, "shorts": bool(last.get("shorts", True)), "fmt": pfmt},
+            "folder": _folder_out(fst), "shorts_available": n_short,
+            "picker": EK.picker_cmd() is not None, "reveal_label": EK.reveal_label()}
+
+
+@app.get("/export/estimate")
+def export_estimate(job: str, res: str = EK.DEFAULT_RES, fmt: str | None = None,
+                    quality: str = EK.DEFAULT_QUALITY, shorts: int = 1, folder: str | None = None):
+    """Estimacion del export con el rendimiento MEDIDO en esta maquina (segundos por cuadro por
+    megapixel de los exports anteriores; valores por defecto si aun no hay) -> {seconds, bytes,
+    bytes_main, bytes_shorts, text ("Tardará ~X min · ~Y MB"), parts {render, base, recompose,
+    shorts, save}, basis (medido|estimado), W, H, res, label, recompose, recompose_cached,
+    base_cached, enabled, reason, frames, duration, need_bytes, free_bytes, space_ok,
+    folder_space_ok, max_res (la mas alta habilitada en este formato), source_res ("WxH" real)}."""
+    plan = _export_job_plan(job)
+    fmt = _check_fmt(fmt or (plan.get("studio") or {}).get("fmt") or "9:16")
+    res = str(res or EK.DEFAULT_RES).lower()
+    if res not in EK.RES_IDS:
+        raise HTTPException(400, f"Resolución desconocida: {res}")
+    quality = str(quality or EK.DEFAULT_QUALITY).lower()
+    if quality not in EK.QUALITY_IDS:
+        raise HTTPException(400, "Calidad desconocida: usa Estándar, Alta o Máxima.")
+    f = EK.norm_folder(folder) if folder else None
+    if f and f not in EXPORT_STORE.allowed_folders():
+        f = None
+    return _export_estimate(job, plan, fmt, res, quality, bool(shorts), folder=f or _folder_choice()["path"])
+
+
+def _settings_out():
+    last = EXPORT_STORE.load().get("last") or {}
+    return {"last": {k: last.get(k) for k in ("res", "quality", "shorts", "fmt", "folder")},
+            "folder": _folder_out(_folder_choice()),
+            "default_folder": {"path": str(EK.default_folder()), "label": EK.home_label(EK.default_folder())}}
+
+
+@app.get("/export/settings")
+@app.get("/settings/export")
+def export_settings():
+    """Ultimas elecciones de la hoja (se recuerdan por usuario: DATA/export.json). /settings/export
+    es un alias."""
+    return _settings_out()
+
+
+@app.post("/export/settings")
+def export_settings_save(body: dict = Body(default={})):
+    """Recuerda elecciones sin exportar: {res?, quality?, shorts?, fmt?, folder?} (la carpeta solo si
+    vino del selector, es la recordada o la de siempre)."""
+    b = body if isinstance(body, dict) else {}
+    kw = {}
+    if b.get("res") is not None:
+        if str(b["res"]).lower() not in EK.RES_IDS:
+            raise HTTPException(400, "Resolución desconocida.")
+        kw["res"] = str(b["res"]).lower()
+    if b.get("quality") is not None:
+        if str(b["quality"]).lower() not in EK.QUALITY_IDS:
+            raise HTTPException(400, "Calidad desconocida.")
+        kw["quality"] = str(b["quality"]).lower()
+    if b.get("shorts") is not None:
+        kw["shorts"] = bool(b["shorts"])
+    if b.get("fmt") is not None:
+        kw["fmt"] = _check_fmt(b["fmt"])
+    if b.get("folder") is not None:
+        kw["folder"] = _folder_choice(b["folder"])["path"]
+    if kw:
+        EXPORT_STORE.remember(**kw)
+    return _settings_out()
+
+
+@app.post("/pick-folder")
+def pick_folder(body: dict = Body(default={})):
+    """Selector NATIVO de carpetas (macOS osascript `choose folder`; Windows FolderBrowserDialog;
+    Linux zenity/kdialog). Espera a que el usuario elija. -> {ok: true, path, label, name,
+    free_bytes, writable: true} | {ok: false, canceled: true, path: null}. 400 si no se puede
+    escribir ahi; 409 si ya hay un selector abierto; 501 sin selector en este equipo. La carpeta
+    elegida queda recordada y PERMITIDA para exportar (ninguna otra ruta del cliente se acepta)."""
+    if not _PICK_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "Ya hay una ventana para elegir carpeta abierta.")
+    try:
+        b = body if isinstance(body, dict) else {}
+        start = EK.norm_folder(b.get("start")) if b.get("start") else None
+        if start and start not in EXPORT_STORE.allowed_folders():
+            start = None
+        start = start or _folder_choice()["path"]
+        r = EK.run_picker(start if start and os.path.isdir(start) else None)
+    finally:
+        _PICK_LOCK.release()
+    if r.get("error"):
+        raise HTTPException(501, r["error"])
+    if r.get("canceled") or not r.get("path"):
+        return {"ok": False, "canceled": True, "path": None}
+    st = EK.folder_status(r["path"], paths.DATA)
+    if st["error"]:
+        raise HTTPException(400, st["error"])
+    EXPORT_STORE.add_picked(st["path"])
+    _sweep_parts([st["path"]])
+    return {"ok": True, "canceled": False, **_folder_out(st)}
+
+
+@app.post("/reveal")
+def reveal(body: dict = Body(...)):
+    """"Mostrar en Finder" (action "reveal", default) o "Abrir" (action "open") de un archivo que
+    ESTA app exporto (cualquier otra ruta: 403). macOS `open -R`, Windows `explorer /select`, Linux
+    xdg-open de su carpeta."""
+    b = body if isinstance(body, dict) else {}
+    action = b.get("action") or "reveal"
+    if action not in ("reveal", "open"):
+        raise HTTPException(400, "action debe ser reveal u open")
+    raw = str(b.get("path") or "")
+    p = os.path.abspath(raw) if raw and "\x00" not in raw and os.path.isabs(raw) else None
+    if not p or not EXPORT_STORE.is_exported(p):
+        raise HTTPException(403, "Solo se pueden mostrar videos que exportó Reelfy.")
+    if not os.path.isfile(p):
+        raise HTTPException(404, "Ese video ya no está ahí (lo moviste o lo borraste).")
+    if not EK.run_reveal(p, action):
+        raise HTTPException(501, EK.reveal_fail_msg(action))
+    return {"ok": True, "path": p, "action": action}
+
+
+@app.post("/open")
+def open_export(body: dict = Body(...)):
+    """"Abrir" un video exportado: alias de POST /reveal {path, action: "open"}."""
+    b = dict(body) if isinstance(body, dict) else {}
+    b["action"] = "open"
+    return reveal(b)
+
+
+@app.post("/export/save")
+def export_save(body: dict = Body(...)):
+    """Guarda DE NUEVO un export ya hecho (p. ej. tras "no hay espacio" en la carpeta): {job, file?
+    (default: el ultimo), name?, folder?} -> lo mismo que clips[0] (saved, path, bytes...)."""
+    b = body if isinstance(body, dict) else {}
+    job_id = str(b.get("job") or "")
+    j = _job_or_404(job_id)
+    clips = j.get("clips") or []
+    fname = str(b.get("file") or (clips[0].get("file") if clips and isinstance(clips[0], dict) else "") or "")
+    if not re.fullmatch(rf"{re.escape(job_id)}_[0-9a-f]{{6}}\.mp4", fname) or not (OUTPUT / fname).is_file():
+        raise HTTPException(404, "Ese export ya no está en Reelfy; vuelve a exportar.")
+    plan = jobstore.get_plan(job_id)[0] or {}
+    topic = (jobstore.plan_meta(plan) or {}).get("topic") if plan else None
+    name = EK.sanitize_name(b.get("name"), EK.default_name(topic)) if b.get("name") else \
+        (Path(str((clips[0] or {}).get("file_name") or "")).stem if clips and clips[0].get("file_name")
+         else EK.default_name(topic))
+    fst = _folder_choice(b.get("folder"))
+    stem = fname[:-len(".mp4")]
+    shorts = sorted(OUTPUT.glob(f"{stem}_short*.mp4"),
+                    key=lambda q: int(re.sub(r"\D", "", q.stem.rsplit("_short", 1)[-1]) or 0))
+    saved = _save_export(job_id, OUTPUT / fname, shorts, {"folder": fst["path"], "name": name})
+    if saved.get("saved") and clips and clips[0].get("file") == fname:
+        ex = {"res": clips[0].get("res"), "quality": clips[0].get("quality")}
+        _apply_saved(clips, saved, ex)
+        clips[0].pop("save_error", None)
+        jobstore.update(job_id, clips=clips)
+    return saved
 
 
 # ================================================================ disco (recoleccion de basura)
@@ -3216,10 +4520,13 @@ def disk_gc(reason=""):
         res = {"reason": reason}
         res["orphans"] = _gc_orphans()
         res["sources"] = _gc_sources()
+        res["parts"] = _sweep_parts()
         free = _disk_free_gb()
         if not _busy():
             cap = CACHE_CAP_GB if free >= MIN_FREE_GB else max(0.5, min(CACHE_CAP_GB, free * 0.25))
             res["caches"] = _cap_caches(cap)
+            # tomas recompuestas para 4K: las mas recientes (con poco disco, ninguna)
+            res["hires_freed"] = _prune_hires(keep=HIRES_KEEP if free >= MIN_FREE_GB else 0)
         free = _disk_free_gb()
         res["free_gb"] = round(free, 1)
         res["low_space"] = free < MIN_FREE_GB
@@ -3257,7 +4564,8 @@ STORAGE_TTL_S = float(os.environ.get("REELFY_STORAGE_TTL", "60"))
 TRASH_DIR = paths.DATA / ".trash"            # Papelera de respaldo (fuera de macOS)
 _STAGE = paths.DATA / ".eliminando"          # el proyecto se junta aqui antes de ir a la Papelera
 _OUT_CACHE_RE = re.compile(r"_(?:draft_[0-9a-f]+(?:\.part)?\.mp4|proxy\.mp4|preview\.mp4|win\.mp4)$")
-_WORK_CACHE_SUF = ("_src720.mp4", "_src720.json", "_src720.part.mp4")
+_WORK_CACHE_SUF = ("_src720.mp4", "_src720.json", "_src720.part.mp4",
+                   "_hires.mp4", "_hires.json", "_hires.part.mp4")     # tomas recompuestas (export 4K)
 _STORE = {"data": None, "t": 0.0, "dirty": True}
 _STORE_LOCK = threading.Lock()
 _DISK = {"t": 0.0, "free": None}
@@ -5009,7 +6317,11 @@ def montage_set_asset(job_id: str, body: dict = Body(...)):
 
 @app.post("/render/{job_id}")
 def render(job_id: str, body: dict = Body(...)):
-    """`def`: importa el motor (skia/cv2) y escribe sqlite en el threadpool."""
+    """`def`: importa el motor (skia/cv2) y escribe sqlite en el threadpool. Plan v2: {plan?, fmt,
+    shorts, engine..., export?: {res: 720p|1080p|1440p|4k, quality: estandar|alta|maxima, name,
+    folder, shorts}} (la hoja "Exportar"; ver la seccion export) -> {ok, pro, plan_rev, export?:
+    {res, label, W, H, quality, name, file_name, folder, folder_label, shorts, recompose,
+    estimate}}. 400 opcion invalida/carpeta no permitida; 507 sin espacio."""
     job = _job_or_404(job_id)
     plan = body.get("plan") or _sym_stored(job_id, *jobstore.get_plan(job_id))[0]
     if not plan:
@@ -5025,9 +6337,13 @@ def render(job_id: str, body: dict = Body(...)):
         if fmt not in R.FORMAT_NAMES:
             raise HTTPException(400, f"Formato desconocido: {fmt}. Usa {', '.join(R.FORMAT_NAMES)}.")
         eo = _eff_engine(plan, fmt, _engine_opts(body))
-        _set_engine(job_id, eo, plan, fmt)
         params = {"pro": True, "fmt": fmt, "shorts": bool(body.get("shorts", True)),
                   "engine": eo}
+        if isinstance(body.get("export"), dict):
+            # la hoja "Exportar": resolucion, calidad, nombre y carpeta (validados ANTES de encolar)
+            ex = _export_params(job_id, plan, fmt, body["export"], params["shorts"])
+            params["export"], params["shorts"] = ex, ex["shorts"]
+        _set_engine(job_id, eo, plan, fmt)
         if body.get("workers"):
             params["workers"] = int(body["workers"])
     else:
@@ -5043,7 +6359,10 @@ def render(job_id: str, body: dict = Body(...)):
                       broll=bool(body.get("broll", False)), custom=_custom(body))
     jobstore.requeue(job_id, kind="render", params=params, plan=plan,
                      message="Preparando el render…")
-    return {"ok": True, "pro": bool(params.get("pro")), "plan_rev": jobstore.get_light(job_id)["plan_rev"]}
+    out = {"ok": True, "pro": bool(params.get("pro")), "plan_rev": jobstore.get_light(job_id)["plan_rev"]}
+    if params.get("export"):
+        out["export"] = _export_public(params["export"])
+    return out
 
 
 CANCEL_ONLY = ("preview", "analysis", "direct", "music", "job")
@@ -6814,7 +8133,7 @@ def profile_put(job_id: str, body: dict = Body(...)):
 # capacidades de la API que el Studio puede consultar antes de usarlas
 API_FEATURES = ("captions", "source_proxy", "jobs_meta", "music_beats", "translate_texts",
                 "translate_titles", "preview_music_refresh", "music_sync", "air_optin", "media",
-                "profile", "profile_media", "takes", "storage")
+                "profile", "profile_media", "takes", "storage", "export_options")
 
 
 @app.get("/settings")

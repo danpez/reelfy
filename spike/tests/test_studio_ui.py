@@ -1271,3 +1271,157 @@ def test_revision_ui_cableado():
     assert "top:0" in rule and "top:50%" not in rule and "height:16px" in rule
     # el ajuste que alenta un video no dice "acelerado"
     assert "más lento" in js and "más lento" in fx
+
+
+# ================================================================ hoja "Exportar"
+@needs_node
+def test_exportar_unitarias_node():
+    """Logica pura de la hoja "Exportar" (tests/js/export.test.js): matriz de resoluciones por
+    formato (nunca por encima de la fuente), nombre por defecto y saneado, preferencias recordadas,
+    estimacion, rutas y errores en espanol."""
+    r = subprocess.run([NODE, "--test", str(SPIKE / "tests" / "js" / "export.test.js")],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+
+
+def test_exportar_hoja_cableada():
+    """"Exportar" abre la hoja (no exporta directo); la hoja tiene formato, resolucion, calidad,
+    nombre, carpeta (SOLO lectura: se cambia con el selector nativo) y shorts; el export manda
+    resolution/quality/name/folder; el error ofrece "Exportar en 1080p"; la etapa "recompose"."""
+    html = (STATIC / "index.html").read_text()
+    js = _inline_script()
+    fx = (STATIC / "fx.js").read_text()
+    render = js[js.index('$("#render").onclick'):]
+    assert render[:render.index("\n")].count("FX.openExport()") == 1
+    sheet = html[html.index('id="xpSheet"'):]
+    sheet = sheet[:sheet.index("</div>\n</div>")]
+    for i in ("xpFmt", "xpRes", "xpQual", "xpName", "xpDir", "xpPick", "xpShorts", "xpEst", "xpGo", "xpCancel"):
+        assert f'id="{i}"' in sheet, i
+    # la carpeta no se escribe: ningun <input> para la ruta, solo el boton del selector nativo
+    assert len(re.findall(r"<input", sheet)) == 2          # el nombre y el interruptor de shorts
+    assert 'class="xp-path"' in sheet and "Cambiar…" in sheet
+    assert '"/pick-folder"' in fx and '"/export/estimate?"' in fx and '"/settings/export"' in fx
+    assert '"/export/options?"' in fx and '"/export/settings"' in fx and '"/export/save"' in fx
+    assert '"/reveal"' in fx and '"/open"' in fx
+    body = fx[fx.index("FX.exportBody = function"):]
+    body = body[:body.index("\n  };")]
+    for k in ("resolution:", "quality:", "name:", "folder:", "b.shorts =", "b.export = { res:", "b.export.shorts", "b.export.folder"):
+        assert k in body, k
+    assert "C.sanitizeFileName(" in body and "xpSrvQ(" in body      # calidad en el idioma del servidor
+    start = js[js.index("async function startExport("):]
+    start = start[:start.index("\n}")]
+    assert "FX.exportBody(xo)" in start and "FXCore.exportError(" in start
+    assert 'id="retry1080"' in html and "failExport(j.error" in js
+    assert '["recompose", "Alta resolución"]' in fx and "Preparando el video en ${hiLbl}" in fx
+    # el teclado de la hoja no llega al editor (Espacio reproducia el video detras)
+    wire = fx[fx.index("function xpWire()"):]
+    assert 'sh.addEventListener("keydown"' in wire and "e.stopPropagation()" in wire
+
+
+def _plan_export(dur=24.0):
+    """Plan v2 sintetico corto (vertical, dos shorts) para la hoja "Exportar"."""
+    from motion import schema
+    words, t = [], 0.6
+    texto = ("Hoy les traigo la bicicleta que uso todos los días para ir al trabajo. Es una bici urbana "
+             "sencilla y ya tengo una opinión clara. Los frenos de disco responden bien con lluvia. "
+             "La cadena casi no suena y el asiento es cómodo para trayectos de media hora.").split()
+    while t < dur - 1.5:
+        for tok in texto:
+            if t >= dur - 1.5:
+                break
+            d = 0.18 + 0.03 * len(tok)
+            words.append({"text": tok, "start": round(t, 3), "end": round(t + d, 3)})
+            t += d + 0.08
+    phrases, cur = [], []
+    for w in words:
+        cur.append(w)
+        if len(cur) == 4 or w["text"][-1] in ".,":
+            phrases.append(cur)
+            cur = []
+    if cur:
+        phrases.append(cur)
+    plan = schema.normalize({"version": 2, "duration": dur, "dims": [1080, 1920], "phrases": phrases, "camera": [], "beats": [],
+                             "broll": [], "cuts": [],
+                             "highlights": [{"start": 1.0, "end": 9.0, "title": "Frenos con lluvia", "enabled": True},
+                                            {"start": 11.0, "end": 19.0, "title": "La cadena", "enabled": True}],
+                             "shots": [{"start": 0, "end": dur, "src": "bici.mov"}], "fx": {}})
+    plan["fx"]["music"] = {"enabled": False, "source": "none"}
+    plan["fx"]["grade"]["enabled"] = False
+    plan["topic"] = "Reseña de una bici urbana"
+    plan["studio"] = {"fmt": "9:16", "lang": "es"}
+    return plan
+
+
+def test_plan_sintetico_de_exportar_es_valido():
+    from motion import schema
+    p = _plan_export()
+    assert p["version"] == 2 and isinstance(p["fx"], dict)
+    assert schema.normalize(json.loads(json.dumps(p)))["duration"] == p["duration"]
+    assert len([h for h in p["highlights"] if h["enabled"]]) == 2
+
+
+def test_exportar_e2e_en_navegador(tmp_path):
+    """E2E de la hoja "Exportar" en un navegador real (tests/js/export_e2e.mjs) contra un servidor
+    AISLADO (tests/devserver.sh) con un proyecto sintetico. El render y los endpoints del export se
+    simulan en el navegador (page.route), en la forma de app/server.py (GET /export/options, `export`
+    en POST /render...) y en la minima del contrato: prueba la UI (formato, resolucion, calidad,
+    nombre, carpeta con el selector nativo, estimacion, errores, resultados con Mostrar/Abrir,
+    "Guardar de nuevo"), simetria, texto >= 11 px y contraste AA. Se activa con REELFY_PLAYWRIGHT=ruta a playwright-core;
+    REELFY_E2E_SHOTS guarda las capturas."""
+    import os
+    import signal
+    import socket
+    import sys
+    import time
+    import urllib.request
+    pw = os.environ.get("REELFY_PLAYWRIGHT")
+    if not (pw and NODE):
+        pytest.skip("E2E de la hoja Exportar desactivado (define REELFY_PLAYWRIGHT)")
+    import paths
+    data = tmp_path / "data"
+    (data / "input").mkdir(parents=True)
+    plan = _plan_export()
+    dur = plan["duration"]
+    vid = data / "input" / "xp_demo.mp4"
+    subprocess.run([str(paths.FFMPEG), "-y", "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size=360x640:rate=30:duration={dur}",
+                    "-f", "lavfi", "-i", f"sine=frequency=330:sample_rate=48000:duration={dur}", "-c:v", "libx264",
+                    "-preset", "ultrafast", "-crf", "34", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "48k", "-shortest",
+                    "-movflags", "+faststart", str(vid)], check=True, timeout=300)
+    plan["video"] = str(vid)
+    code = ("import json,sys; sys.path[:0]=[%r,%r]; import jobstore; jobstore.init(); d=json.load(sys.stdin)\n"
+            "for jid,p in d.items():\n"
+            "    jobstore.create(jid, kind='analyze', ext='.mp4', plan=p, phase='review', message='Análisis listo')\n"
+            "    jobstore.update(jid, state='review', pct=100)\n") % (str(SPIKE / "app"), str(SPIKE / "scripts"))
+    subprocess.run([sys.executable, "-c", code], input=json.dumps({"xp_demo": plan}), text=True, check=True,
+                   env={**os.environ, "REELFY_DATA": str(data)}, timeout=120)
+    port = None
+    for p in range(8800, 8900):
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", p)) != 0:
+                port = p
+                break
+    assert port, "sin puerto libre en 8800-8899"
+    # la carpeta de siempre de los exports, aislada (nunca ~/Movies/Reelfy en una prueba)
+    srv = subprocess.Popen([str(SPIKE / "tests" / "devserver.sh"), str(port), str(data)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, start_new_session=True,
+                           env={**os.environ, "REELFY_EXPORT_DIR": str(tmp_path / "exports")})
+    try:
+        for _ in range(120):
+            try:
+                if urllib.request.urlopen(f"http://127.0.0.1:{port}/setup", timeout=2).status == 200:
+                    break
+            except Exception:  # noqa: aun arrancando
+                time.sleep(0.5)
+        out = os.environ.get("REELFY_E2E_SHOTS") or str(tmp_path / "shots")
+        # "live": la hoja con los endpoints REALES de app/server.py (sin exportar); "server" y
+        # "contract": el flujo completo con el servidor simulado en sus dos formas
+        for mode in ("live", "server", "contract"):
+            r = subprocess.run([NODE, str(SPIKE / "tests" / "js" / "export_e2e.mjs"), f"http://127.0.0.1:{port}", "xp_demo", out, mode],
+                               capture_output=True, text=True, timeout=900, env={**os.environ})
+            assert r.returncode == 0, mode + ": " + r.stdout[-6000:] + r.stderr[-3000:]
+    finally:
+        try:
+            os.killpg(srv.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        srv.wait(timeout=30)

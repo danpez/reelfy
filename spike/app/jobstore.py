@@ -31,6 +31,10 @@ Motor pro (v0.5):
     saben cuales son suyos (la voz no dice de que fuente salio).
   - Los proyectos NUNCA se purgan solos (antes: los 50 mas recientes, o 5 con poco disco). Solo
     se borran con delete() (DELETE /jobs/{id}: sus archivos van a la Papelera).
+  - `compose_spec`: lo que se compuso (compose.spec_record: clips con sus volumenes resueltos,
+    lienzo, lienzo nativo y tomas) para RECOMPONER las mismas tomas a mas resolucion (export en
+    4K). Sobrevive al export (requeue reemplaza `params`, donde vivia el spec) y sus fuentes no se
+    borran mientras el proyecto exista (referenced_sids).
 
 Carriles (`lanes`): un tipo de trabajo con carril propio (el montaje "Armar con IA": kind
 "montage", fase "assembly") lo toma SOLO su worker; los workers generales no lo tocan. Asi un
@@ -61,13 +65,14 @@ _LANE_KINDS = frozenset()       # kinds que los workers generales NO toman (star
 REQUEUE_ON_RECOVER = ("montage",)   # kinds que al arrancar se re-encolan en vez de fallar
 _side_lock = threading.Lock()   # lectura-modificacion-escritura atomica de `side`
 
-_JSON_COLS = ("params", "plan", "clips", "warnings", "side", "meta", "cache_files")
+_JSON_COLS = ("params", "plan", "clips", "warnings", "side", "meta", "cache_files", "compose_spec")
 _COLS = ("id", "kind", "state", "phase", "pct", "message", "eta", "elapsed",
          "ext", "params", "plan", "clips", "error", "created", "updated",
-         "stage", "warnings", "plan_rev", "side", "plan_hash", "meta", "cache_files")
+         "stage", "warnings", "plan_rev", "side", "plan_hash", "meta", "cache_files", "compose_spec")
 # columnas agregadas despues de v0.4 (migracion en caliente de un jobs.db existente)
 _NEW_COLS = {"stage": "TEXT", "warnings": "TEXT", "plan_rev": "INTEGER DEFAULT 0",
-             "side": "TEXT", "plan_hash": "TEXT", "meta": "TEXT", "cache_files": "TEXT"}
+             "side": "TEXT", "plan_hash": "TEXT", "meta": "TEXT", "cache_files": "TEXT",
+             "compose_spec": "TEXT"}
 CANCELED_EXPORT_MSG = "Export cancelado. Tu edición sigue aquí."
 MONTAGE_CANCELED_MSG = "Cancelado. Tu montaje sigue aquí."
 # claves de las tareas laterales que /status aplana como <tarea>_<clave>
@@ -318,13 +323,14 @@ def cache_claims():
 
 def sids_by_job():
     """{id: set(sids)} de las fuentes subidas (/sources) que cada trabajo usa como medio propio o
-    en el perfil ({"sid": ...} en su plan o en sus parametros). Las del montaje (spec.main/overlays)
-    salen de all_params()."""
+    en el perfil ({"sid": ...} en su plan o en sus parametros) o en su registro de composicion
+    (compose_spec). Las del montaje (spec.main/overlays) salen de all_params()."""
     out = {}
-    for r in _cx().execute("SELECT id, params, plan FROM jobs WHERE plan LIKE '%\"sid\"%' "
-                           "OR params LIKE '%\"sid\"%' OR params LIKE '%\"sids\"%'").fetchall():
+    for r in _cx().execute("SELECT id, params, plan, compose_spec FROM jobs WHERE plan LIKE '%\"sid\"%' "
+                           "OR params LIKE '%\"sid\"%' OR params LIKE '%\"sids\"%' "
+                           "OR compose_spec IS NOT NULL").fetchall():
         s = set(_SID_RE.findall(r["plan"] or "")) | set(_SID_RE.findall(r["params"] or "")) | \
-            params_sids(r["params"])
+            params_sids(r["params"]) | compose_pins(r["compose_spec"])
         if s:
             out[r["id"]] = s
     return out
@@ -595,13 +601,64 @@ _SID_RE = re.compile(r'"sid"\s*:\s*"([0-9a-f]{12})"')
 _SID_OK = re.compile(r"^[0-9a-f]{12}$")
 
 
+def compose_pins(raw):
+    """Fuentes que un registro de composicion (compose_spec, JSON) DEBE conservar: solo si
+    recomponer puede servir, es decir, si sus originales tienen MAS resolucion que el video
+    combinado (un ensamble de clips 1080p que quedo en 1080p no gana nada con sus originales: se
+    pueden borrar como siempre tras exportar) y el registro se puede recomponer (no `lossy` ni
+    con la verificacion fallida). Sin poder leerlo (o sin tamanos), se conservan."""
+    if not raw:
+        return set()
+    sids = set(_SID_RE.findall(raw))
+    if not sids:
+        return sids
+    try:
+        rec = json.loads(raw)
+    except Exception:  # noqa
+        return sids
+    if not isinstance(rec, dict):
+        return sids
+    if rec.get("lossy") or rec.get("verify_fail"):
+        return set()
+    nat, W, H = rec.get("native"), rec.get("W"), rec.get("H")
+    try:
+        if nat and W and H and int(nat[0]) * int(nat[1]) <= int(W) * int(H) * 1.02:
+            return set()
+    except (TypeError, ValueError, IndexError):
+        return sids
+    return sids
+
+
 def referenced_sids():
-    """Fuentes subidas (/sources) que algun PLAN referencia como medio propio ({sid, ...}):
-    la limpieza del disco no debe borrarlas."""
+    """Fuentes subidas (/sources) que algun PLAN referencia como medio propio ({sid, ...}) o que
+    algun registro de composicion (compose_spec: los clips para recomponer en alta resolucion)
+    necesita (compose_pins): la limpieza del disco no debe borrarlas."""
     out = set()
-    for r in _cx().execute("SELECT plan FROM jobs WHERE plan LIKE '%\"sid\"%'").fetchall():
+    for r in _cx().execute("SELECT plan, compose_spec FROM jobs WHERE plan LIKE '%\"sid\"%' "
+                           "OR compose_spec IS NOT NULL").fetchall():
         out.update(_SID_RE.findall(r["plan"] or ""))
+        out.update(compose_pins(r["compose_spec"]))
     return out
+
+
+def set_compose_spec(job_id, rec):
+    """Guarda el registro de composicion del trabajo (compose.spec_record) o lo borra (None)."""
+    cx = _cx()
+    cx.execute("UPDATE jobs SET compose_spec=? WHERE id=?",
+               (json.dumps(rec) if rec is not None else None, job_id))
+    cx.commit()
+
+
+def get_compose_spec(job_id):
+    """Registro de composicion del trabajo (dict) o None."""
+    row = _cx().execute("SELECT compose_spec FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not row or not row["compose_spec"]:
+        return None
+    try:
+        d = json.loads(row["compose_spec"])
+    except Exception:  # noqa
+        return None
+    return d if isinstance(d, dict) else None
 
 
 # ---- cancelación cooperativa ----
@@ -769,7 +826,8 @@ def _worker_loop(idx, lane=None, stop=None):
             print(f"[worker{idx}] {job_id} cancelado")
         except Exception as e:  # noqa
             traceback.print_exc()
-            err = f"{_error_label(kind)} falló: {e}"
+            # un error con mensaje para el usuario (`public`: p. ej. el export en 4K) va tal cual
+            err = str(e) if getattr(e, "public", False) else f"{_error_label(kind)} falló: {e}"
             if not back_to_assembly(job_id, err, error=err):
                 update(job_id, state="error", phase="error", error=err)
 

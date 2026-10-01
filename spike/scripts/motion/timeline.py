@@ -13,6 +13,10 @@ Convenciones (docs/MOTION-ENGINE.md, secciones 1 y 2):
     un flash de 1-2 cuadros con un "blip" de audio; se absorbe en el corte.
   - `shots`: si una union queda a <= `snap_s` s (min. 2 cuadros) de un cambio de toma, el
     limite del keep se mueve al cambio de toma (sin cuadros sueltos de otra toma).
+  - Primer cuadro de una toma que empieza en t: shot_frame(t) = round(t * fps) (lo que hace el
+    filtro fps con round=near). Un limite de keep en un cambio de toma (pegado, o que ya caia en
+    el, o a menos de un cuadro) va a ese cuadro: el keep que empieza en la toma nueva no muestra el
+    ultimo cuadro de la anterior ni el que termina en ella el primero de la siguiente.
 
 Semantica de remap:
   - remap(t)          -> tiempo final, o None si t cae dentro de un corte.
@@ -32,7 +36,52 @@ MIN_FRAG = 0.15     # s: keeps mas cortos se absorben en el corte (flash frame d
 SNAP_S = 0.12       # s: union tan cerca de un cambio de toma -> se pega al cambio (min 2 cuadros)
 EPS = 1e-9
 Q_EPS = 1e-6        # tolerancia (en cuadros) para limites que ya caen en la reticula
-SHOT_EPS = 0.1      # tolerancia (en cuadros) de tiempos de toma redondeados a ms
+# cuadros: un item que empieza/termina tan cerca de una union o cambio de toma se pega a ella (un
+# cuadro de la cuantizacion + el redondeo a ms de sus tiempos: 22/30 s se guarda como 0.7333)
+FX_SNAP = 1.5
+
+
+def shot_frame(t: float, fps: float) -> int:
+    """Primer cuadro de la reticula de salida (k / fps) que muestra la toma que empieza en `t` s.
+
+    El filtro fps (round=near) pone en el cuadro k el ultimo cuadro de la fuente cuyo pts
+    redondeado es <= k: la toma nueva aparece en round(t * fps), con los empates hacia arriba (como
+    av_rescale NEAR_INF). Vale a cualquier fps de la fuente y tolera los tiempos de toma redondeados
+    a ms (< medio cuadro). (Antes: ceil(t * fps - 0.1), que con una toma de 30 fps redondeada 4 ms
+    hacia arriba daba un cuadro de mas, y con otros fps se equivocaba de cuadro.)"""
+    return int(math.floor(float(t) * float(fps) + 0.5 + Q_EPS))
+
+
+def snap_window(fs: float, fe: float, frames: Iterable[int], fps: float,
+                tol: float = FX_SNAP) -> tuple[float, float]:
+    """Ventana FINAL (fs, fe) de un item con cada limite a <= `tol` cuadros de un limite de
+    contenido (`frames`: cuadros finales de las uniones y cambios de toma, y 0 / n) pegado a el.
+
+    Los tiempos de un item van a ms y los keeps a cuadros enteros: un zoom que termina en el inicio
+    de un corte (60.93 s, el keep llega a 60.9333) o un cuadro antes quedaba fuera del ultimo cuadro
+    del keep (un cuadro sin zoom justo antes del salto) y uno que empieza en un cambio de toma
+    redondeado hacia arriba no cubria el primer cuadro de la toma. Asi el item cubre exactamente los
+    cuadros de su tramo, sin un cuadro suelto de mas o de menos junto a la union. Si pegarlo lo
+    dejaria con menos de un cuadro, se queda como estaba."""
+    f = float(fps)
+    fr = sorted(frames or [])
+    if not fr or f <= 0:
+        return fs, fe
+
+    def near(t):
+        k = t * f
+        i = bisect.bisect_left(fr, k)
+        best = None
+        for j in (i - 1, i):
+            if 0 <= j < len(fr) and abs(fr[j] - k) <= tol + 1e-6 and \
+                    (best is None or abs(fr[j] - k) < abs(best - k)):
+                best = fr[j]
+        return t if best is None else best / f
+
+    a, b = near(float(fs)), near(float(fe))
+    if b - a < 1.0 / f - 1e-9:
+        return fs, fe
+    return a, b
 
 
 def keeps_from_cuts(cuts: Iterable[dict] | None, duration: float,
@@ -268,8 +317,17 @@ class Timeline:
             f = self.fps
             q = []
             for a, b, sa, sb in snapped:
-                fa = math.ceil(a * f - SHOT_EPS) if sa else math.floor(a * f + Q_EPS)
-                fb = math.ceil(b * f - SHOT_EPS) if sb else math.ceil(b * f - Q_EPS)
+                fa = shot_frame(a, f) if sa else math.floor(a * f + Q_EPS)
+                fb = shot_frame(b, f) if sb else math.ceil(b * f - Q_EPS)
+                # un limite que ya caia en un cambio de toma (o a menos de un cuadro de el, del lado
+                # de su toma) tampoco toma un cuadro de la otra: la expansion a la reticula se
+                # detiene en el primer cuadro de la toma (solo mueve el limite si estaba a < 1 cuadro)
+                i = bisect.bisect_right(changes, a + EPS) - 1      # ultimo cambio <= a
+                if i >= 0:
+                    fa = max(fa, shot_frame(changes[i], f))
+                j = bisect.bisect_left(changes, b - EPS)            # primer cambio >= b
+                if j < len(changes):
+                    fb = min(fb, shot_frame(changes[j], f))
                 if duration is not None:
                     fb = min(fb, max(fa, math.ceil(float(duration) * f - Q_EPS)))
                 if fb > fa:
@@ -403,11 +461,19 @@ class Timeline:
         return [int(round(j["t"] * f)) for j in self.joins]
 
     def shot_change_frames(self, shots: Iterable[dict] | None, fps: float | None = None) -> list[int]:
-        """Primer cuadro FINAL de cada toma nueva (tolera tiempos de toma redondeados a ms)."""
+        """Primer cuadro FINAL de cada toma nueva (shot_frame: tolera tiempos de toma a ms)."""
         f = float(fps or self.fps or 30.0)
         n = self.n_frames(f)
-        out = sorted({math.ceil(t * f - SHOT_EPS) for t in self.shot_changes(shots)})
+        out = sorted({shot_frame(t, f) for t in self.shot_changes(shots)})
         return [k for k in out if 0 < k < n]
+
+    def content_frames(self, shots: Iterable[dict] | None = None,
+                       fps: float | None = None) -> list[int]:
+        """Cuadros FINALES donde cambia el contenido: 0, cada union, cada cambio de toma y el final
+        (los limites a los que snap_window pega los items)."""
+        f = float(fps or self.fps or 30.0)
+        n = self.n_frames(f)
+        return sorted({0, n} | set(self.join_frames(f)) | set(self.shot_change_frames(shots, f)))
 
     def map_range(self, start: float, end: float, min_len: float = 1e-6) -> tuple[float, float] | None:
         """[start, end] original -> (fs, fe) final, recortando lo que caiga en cortes.

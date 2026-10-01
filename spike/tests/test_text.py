@@ -1101,6 +1101,70 @@ def test_accent_word_on_light_background_gets_a_plate():
         assert (T._accent_plate(ctx, ln) > 0) == want, bg
 
 
+DEEP_GREEN = "#08794D"     # acento de marca oscuro (verde profundo)
+
+
+def _title_on(bg, accent, text="la idea verde", word="verde"):
+    item = _item("title_pop", text=text, accent_words=[word], color="#FFFFFF", accent=accent,
+                 shadow=0.7, anim_in="pop", anim_out="none", y=0.45)
+    arr, cv = _canvas()
+    cv.clear(skia.Color(*bg, 255))
+    T.RENDERERS["title_pop"](cv, item, 1.6, 2.0, _ctx(1.6))
+    return arr
+
+
+def _ring_contrast(arr, hexcol):
+    """Contraste WCAG entre la tinta `hexcol` (mediana) y el anillo de 1-4 px a su alrededor."""
+    import cv2
+    m = _near(arr, hexcol, 60, 200).astype(np.uint8)
+    assert m.sum() > 500
+    k1 = cv2.dilate(m, np.ones((3, 3), np.uint8))
+    k2 = cv2.dilate(m, np.ones((9, 9), np.uint8))
+    ring = arr[(k2 > 0) & (k1 == 0)][..., :3]
+    g = tuple(int(v) for v in np.median(arr[m > 0][..., :3], 0))
+    r = tuple(int(v) for v in np.median(ring, 0))
+    return T._wcag(g, r)
+
+
+def test_dark_accent_word_in_light_title_gets_a_light_rim():
+    """Un acento de marca OSCURO (verde profundo) en un titulo blanco con sombra negra: la sombra
+    pegada al glifo lo apagaba (~2:1 contra su entorno inmediato, se perdia sobre una playera
+    oscura). Lleva un contorno fino de la tinta clara del bloque: el verde se lee (>= 3:1 contra su
+    anillo) y sigue siendo el verde de la marca; las palabras blancas no cambian ni un pixel."""
+    dark_bg = (38, 52, 45)
+    green = _title_on(dark_bg, DEEP_GREEN)
+    assert _ring_contrast(green, DEEP_GREEN) >= 3.0
+    assert T._wcag(DEEP_GREEN, dark_bg) < 3.0          # sin el contorno no se leeria
+    # la tinta del acento sigue siendo el verde de la marca
+    assert _near(green, DEEP_GREEN, 30, 240).sum() > 500
+    # un acento claro (amarillo) no lleva contorno: su anillo es la sombra oscura de siempre
+    yel = _title_on(dark_bg, YELLOW)
+    assert T._rim_look(T._Look(), "#FFFFFF", 100).stroke > 0
+    ring_y = _ring_contrast(yel, YELLOW)
+    assert ring_y >= 3.0
+    # las palabras blancas son identicas con un acento verde o amarillo (mismo layout, mismo look)
+    x0 = int(np.nonzero(_near(green, DEEP_GREEN, 60, 200))[1].min()) - 12
+    assert x0 > 100
+    assert np.array_equal(green[:, :x0], yel[:, :x0])
+
+
+def test_dark_accent_rim_not_on_boxes_or_dark_blocks():
+    """Sin contorno cuando el bloque ya es oscuro (tinta oscura con sombra clara) ni con caja por
+    linea (la tinta sobre la caja ya tiene su propio contraste WCAG)."""
+    for kw in ({"color": "#111111", "accent": DEEP_GREEN}, {"box": "#FFFFFF", "color": "#111111", "accent": DEEP_GREEN}):
+        item = _item("title_pop", text="la idea verde", accent_words=["verde"], shadow=0.7, anim_in="pop",
+                     anim_out="none", y=0.45, **kw)
+        seen = []
+        orig = T._rim_look
+        T._rim_look = lambda *a, **k: seen.append(1) or orig(*a, **k)
+        try:
+            arr, cv = _canvas()
+            T.RENDERERS["title_pop"](cv, item, 1.6, 2.0, _ctx(1.6))
+        finally:
+            T._rim_look = orig
+        assert not seen, kw
+
+
 def test_captions_y_ranges_move_by_segment():
     """captions.y_ranges [{start, end, y}] (tiempo original): los subtitulos de ese tramo suben
     (p. ej. al pecho en una toma de cuerpo completo); fuera del tramo, la y global."""

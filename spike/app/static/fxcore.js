@@ -13,7 +13,7 @@
   const MIN_KEEP = 0.05;   // s: tramo minimo que vale la pena conservar
   const MIN_FRAG = 0.15;   // s: keeps mas cortos se absorben en el corte
   const SNAP_S = 0.12;     // s: union tan cerca de un cambio de toma -> se pega
-  const EPS = 1e-9, Q_EPS = 1e-6, SHOT_EPS = 0.1;
+  const EPS = 1e-9, Q_EPS = 1e-6;
   const TRACKS = ["text", "graphics", "cutaways", "effects", "transitions", "sfx", "media"];
   const EVENT_TRACKS = { transitions: 1, sfx: 1 };
   const RULER_STEPS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
@@ -60,6 +60,12 @@
 
   function bisectRight(arr, x) { let lo = 0, hi = arr.length;
     while (lo < hi) { const m = (lo + hi) >> 1; if (x < arr[m]) hi = m; else lo = m + 1; } return lo; }
+  function bisectLeft(arr, x) { let lo = 0, hi = arr.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; } return lo; }
+
+  /** Primer cuadro (k / fps) de la toma que empieza en t: round(t*fps), empates hacia arriba
+   *  (timeline.shot_frame: lo que hace el filtro fps con round=near). */
+  function shotFrame(t, fps) { return Math.floor(+t * +fps + 0.5 + Q_EPS); }
 
   /** Mapa tiempo original <-> tiempo final (port de motion.timeline.Timeline). */
   function Timeline(keeps, duration, fps, minFrag, shots, snapS) {
@@ -91,8 +97,13 @@
     if (this.fps) {
       const f = this.fps, q = [];
       snapped.forEach(([a, b, sa, sb]) => {
-        const fa = sa ? Math.ceil(a * f - SHOT_EPS) : Math.floor(a * f + Q_EPS);
-        let fb = sb ? Math.ceil(b * f - SHOT_EPS) : Math.ceil(b * f - Q_EPS);
+        let fa = sa ? shotFrame(a, f) : Math.floor(a * f + Q_EPS);
+        let fb = sb ? shotFrame(b, f) : Math.ceil(b * f - Q_EPS);
+        // un limite en (o a < 1 cuadro de) un cambio de toma no toma un cuadro de la otra toma
+        const i = bisectRight(changes, a + EPS) - 1;
+        if (i >= 0) fa = Math.max(fa, shotFrame(changes[i], f));
+        const j = bisectLeft(changes, b - EPS);
+        if (j < changes.length) fb = Math.min(fb, shotFrame(changes[j], f));
         if (duration != null) fb = Math.min(fb, Math.max(fa, Math.ceil(+duration * f - Q_EPS)));
         if (fb > fa) q.push([fa / f, fb / f]);
       });
@@ -2800,7 +2811,8 @@
       ACCENT_KEYS.forEach(k => { if (typeof x[k] === "string" && olds.has(normHex(x[k]))) { x[k] = a; n++; } });
       ["lines", "text", "card", "graphics", "items"].forEach(k => { if (x[k] && typeof x[k] === "object") walk(x[k], depth + 1); });
     };
-    ["text", "graphics", "cutaways"].forEach(tk => (fx[tk] || []).forEach(it => walk(it, 0)));
+    // tambien transiciones (el glitch se tine del acento) y efectos (= server._accent_apply)
+    ["text", "graphics", "cutaways", "transitions", "effects"].forEach(tk => (fx[tk] || []).forEach(it => walk(it, 0)));
     // los titulos con palabras de acento sin color propio lo toman del proyecto
     (fx.text || []).forEach(it => { if (it && (it.accent_words || []).length && !it.accent) { it.accent = a; n++; } });
     fx.captions = fx.captions || {};
@@ -2810,7 +2822,329 @@
     return n;
   }
 
+  // ------------------------------------------------------------------ exportar (hoja "Exportar")
+  /* La hoja de exportacion: formato (el del proyecto), resolucion, calidad, nombre del archivo y
+     carpeta. POST /render recibe {resolution, quality, name, folder}; el servidor renderiza en
+     DATA/output y copia a <carpeta>/<nombre>.mp4 sin sobrescribir. Aqui solo lo puro: la matriz de
+     resoluciones por formato (nunca por encima de la resolucion real de las fuentes; 720p y 1080p
+     siempre, 1080p es el export de siempre), el nombre por defecto y saneado, los textos de la
+     estimacion y del resultado, y los errores en espanol. */
+  const EXPORT_RES = ["720p", "1080p", "1440p", "4k"];
+  const EXPORT_RES_LABEL = { "720p": "720p", "1080p": "1080p", "1440p": "1440p", "4k": "4K" };
+  const EXPORT_RES_SHORT = { "720p": 720, "1080p": 1080, "1440p": 1440, "4k": 2160 };   // lado corto (px)
+  const EXPORT_QUALITY = ["standard", "high", "max"];
+  const EXPORT_QUALITY_LABEL = { standard: "Estándar", high: "Alta", max: "Máxima" };
+  const EXPORT_QUALITY_HINT = {
+    standard: "Archivo más ligero: ideal para subir rápido a redes.",
+    high: "La calidad recomendada (la de siempre).",
+    max: "Máximo detalle para editar o archivar; el archivo pesa más.",
+  };
+  const EXPORT_DEFAULTS = { resolution: "1080p", quality: "high", shorts: true, name_pattern: "{proyecto} - {fecha}" };
+  const FMT_RATIO = { "9:16": [9, 16], "1:1": [1, 1], "4:5": [4, 5], "16:9": [16, 9] };
+  const evenPx = v => Math.max(2, Math.round(v / 2) * 2);
+
+  /** Dimensiones de salida [W, H] de `fmt` a la resolucion `res` (lado corto = 720/1080/1440/2160).
+      "original" sigue el aspecto de la fuente `src` {w, h} (sin ella, vertical 9:16). */
+  function exportDims(fmt, res, src) {
+    const s = EXPORT_RES_SHORT[res] || EXPORT_RES_SHORT["1080p"];
+    let r = FMT_RATIO[fmt];
+    if (!r) {
+      const w = src ? +src.w : 0, h = src ? +src.h : 0;
+      r = w > 0 && h > 0 ? [w, h] : [9, 16];
+    }
+    return r[0] <= r[1] ? [evenPx(s), evenPx(s * r[1] / r[0])] : [evenPx(s * r[0] / r[1]), evenPx(s)];
+  }
+  /** Clase de resolucion de un video de w x h por su lado corto (5 % de tolerancia: 1076 x 1916
+      sigue siendo 1080p). Menos de 720p -> "sd"; sin medidas -> null. */
+  function resClass(w, h) {
+    const s = Math.min(+w || 0, +h || 0);
+    if (!(s > 0)) return null;
+    for (let i = EXPORT_RES.length - 1; i >= 0; i--) if (s >= EXPORT_RES_SHORT[EXPORT_RES[i]] * 0.95) return EXPORT_RES[i];
+    return "sd";
+  }
+  /** "1920x1080" / "1920 x 1080" / [1920, 1080] / {w, h} / {W, H} -> {w, h} o null. */
+  function parseDims(v) {
+    if (!v) return null;
+    let w, h;
+    if (Array.isArray(v)) { w = +v[0]; h = +v[1]; }
+    else if (typeof v === "object") { w = +(v.w != null ? v.w : v.W); h = +(v.h != null ? v.h : v.H); }
+    else { const m = /^\s*(\d+)\s*[x×]\s*(\d+)\s*$/i.exec(String(v)); if (m) { w = +m[1]; h = +m[2]; } }
+    return w > 0 && h > 0 ? { w, h } : null;
+  }
+  /** La resolucion mas alta que tiene sentido: la del servidor (`max_res`, calculada con las fuentes
+      ORIGINALES) o, sin ella, la clase de `src`. Nunca menos de 1080p (el export de siempre). */
+  function exportMaxRes(maxRes, src) {
+    const i1080 = EXPORT_RES.indexOf("1080p");
+    let i = EXPORT_RES.indexOf(maxRes);
+    if (i < 0) { const d = parseDims(src); i = d ? EXPORT_RES.indexOf(resClass(d.w, d.h)) : -1; }
+    return EXPORT_RES[Math.max(i1080, i)];
+  }
+  /** Opciones de resolucion del formato: [{id, label, W, H, enabled}]. */
+  function exportResOptions(fmt, maxRes, src) {
+    const mi = EXPORT_RES.indexOf(exportMaxRes(maxRes, src));
+    const d = parseDims(src);
+    return EXPORT_RES.map((id, i) => {
+      const [W, H] = exportDims(fmt, id, d);
+      return { id, label: EXPORT_RES_LABEL[id], W, H, enabled: i <= mi };
+    });
+  }
+  /** La resolucion a usar: la pedida si esta disponible; si no, la mas alta disponible por debajo. */
+  function pickExportRes(want, opts) {
+    const ok = (opts || []).filter(o => o.enabled).map(o => o.id);
+    if (ok.includes(want)) return want;
+    const wi = EXPORT_RES.indexOf(want);
+    const below = ok.filter(id => EXPORT_RES.indexOf(id) <= wi);
+    if (wi >= 0 && below.length) return below[below.length - 1];
+    return ok.includes("1080p") ? "1080p" : ok[0] || "1080p";
+  }
+  /** Por que no se ofrecen las resoluciones altas: "Tu video original es 1080p; 4K no agregaría
+      calidad." `srcCls` = clase real de la fuente (resClass); `multi` = varias fuentes (montaje). */
+  function exportResNote(srcCls, opts, multi) {
+    const off = (opts || []).filter(o => !o.enabled).map(o => o.label);
+    if (!off.length) return "";
+    const lbl = EXPORT_RES_LABEL[srcCls];
+    const who = multi ? (lbl ? `Tus clips originales son ${lbl}` : "Tus clips originales tienen menos resolución")
+      : (lbl ? `Tu video original es ${lbl}` : srcCls === "sd" ? "Tu video original es de menos de 720p" : "Tu video original no tiene más resolución");
+    const list = off.length === 1 ? off[0] : `${off.slice(0, -1).join(", ")} y ${off[off.length - 1]}`;
+    return `${who}; ${list} no ${off.length === 1 ? "agregaría" : "agregarían"} calidad.`;
+  }
+  /** Etiqueta de un resultado: "2160 × 3840 · 4K". */
+  function resLabel(W, H) {
+    const w = +W || 0, h = +H || 0;
+    if (!(w > 0 && h > 0)) return "";
+    const c = resClass(w, h);
+    return `${w} × ${h}` + (EXPORT_RES_LABEL[c] ? ` · ${EXPORT_RES_LABEL[c]}` : "");
+  }
+
+  // nombre del archivo: sin caracteres prohibidos en macOS/Windows/Linux, sin rutas ni ocultos,
+  // sin nombres reservados de Windows y con un largo seguro (bytes UTF-8)
+  const NAME_MAX_BYTES = 180;          // deja lugar a " (2)", " - Short 3" y ".mp4" bajo los 255 bytes
+  const WIN_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+  const utf8Len = s => { let n = 0; for (const ch of s) { const c = ch.codePointAt(0); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4; } return n; };
+  /** Nombre de archivo seguro SIN extension (la agrega el servidor): quita / \ : * ? " < > | y los
+      caracteres de control, los puntos y espacios de los extremos (nada de ".." ni ocultos) y un
+      ".mp4" final. Vacio -> `fallback` (o "Reelfy"). */
+  function sanitizeFileName(s, fallback) {
+    let t = String(s == null ? "" : s).normalize("NFC")
+      .replace(/[\t\n\r\v\f\u2028\u2029]+/g, " ")
+      // invisibles que no son parte de ningun texto: control, espacio de ancho cero (U+200B),
+      // marcas de direccion (U+200E/F), controles bidi (U+202A-E, U+2066-9: "video\u202Ekcod" se ve
+      // como otro nombre) y el BOM. Se CONSERVAN ZWNJ/ZWJ (U+200C/D: emoji compuestos como hombre+ZWJ+laptop y
+      // escrituras como el persa) y los selectores de variante (U+FE0F) (= exportkit.sanitize_name)
+      .replace(/[\u0000-\u001f\u007f-\u009f\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
+      .replace(/[/\\:*?"<>|]+/g, " ")
+      .replace(/\s+/g, " ");
+    for (let k = 0; k < 3; k++) t = t.replace(/^[\s.]+|[\s.]+$/g, "").replace(/\.mp4$/i, "");
+    t = t.replace(/^[\s.]+|[\s.]+$/g, "");
+    if (utf8Len(t) > NAME_MAX_BYTES) {
+      let out = "";
+      for (const ch of t) { if (utf8Len(out + ch) > NAME_MAX_BYTES) break; out += ch; }
+      t = out.replace(/[\s.\u200c\u200d]+$/g, "");      // sin un ZWJ colgando del emoji cortado
+    }
+    const dot = t.indexOf("."), stem = dot < 0 ? t : t.slice(0, dot);
+    if (WIN_RESERVED.test(stem.trim())) t = stem.trim() + "_" + (dot < 0 ? "" : t.slice(dot));
+    if (!t) return fallback != null ? sanitizeFileName(fallback, "Reelfy") : "Reelfy";
+    return t;
+  }
+  /** "2026-09-30" (se ordena bien en el Finder y no lleva diagonales). */
+  function exportDate(d) {
+    const x = d instanceof Date ? d : new Date(d == null ? Date.now() : d);
+    const z = n => String(n).padStart(2, "0");
+    return `${x.getFullYear()}-${z(x.getMonth() + 1)}-${z(x.getDate())}`;
+  }
+  /** Nombre del proyecto: su tema (plan.topic o plan.takes.topic) o "Proyecto <id>"; un tema largo
+      se corta en una palabra (maximo 60 caracteres). */
+  function projectTitle(plan, job) {
+    const id = String(job || "").slice(0, 6);
+    let t = plan && (plan.topic || (plan.takes && plan.takes.topic) || (plan.studio && plan.studio.title));
+    t = typeof t === "string" ? t.replace(/\s+/g, " ").trim() : "";
+    if (t.length > 60) { const cut = t.slice(0, 61); const sp = cut.lastIndexOf(" "); t = (sp > 30 ? cut.slice(0, sp) : cut.slice(0, 60)).replace(/[\s,.;:\-–—]+$/, ""); }
+    if (t) return t;
+    if (plan && plan.montage) return id ? `Armado con IA ${id}` : "Armado con IA";
+    return id ? `Proyecto ${id}` : "Proyecto";
+  }
+  /** Nombre por defecto: "<proyecto> - <fecha>" (o el patron guardado: {proyecto}, {fecha}, {hora}). */
+  function defaultExportName(title, date, pattern) {
+    const d = date instanceof Date ? date : new Date(date == null ? Date.now() : date);
+    const z = n => String(n).padStart(2, "0");
+    const p = typeof pattern === "string" && /\{(proyecto|fecha|hora)\}/.test(pattern) ? pattern : EXPORT_DEFAULTS.name_pattern;
+    const s = p.replace(/\{proyecto\}/g, () => title || "Reelfy").replace(/\{fecha\}/g, exportDate(d)).replace(/\{hora\}/g, `${z(d.getHours())}.${z(d.getMinutes())}`);
+    return sanitizeFileName(s, `Reelfy - ${exportDate(d)}`);
+  }
+  /** Ultimas elecciones: las de este navegador (`local`) y luego las del servidor (GET
+      /settings/export). La carpeta SOLO viene del servidor (la recordada) o del selector nativo. */
+  function mergeExportPrefs(server, local) {
+    const s = server && typeof server === "object" ? server : {}, l = local && typeof local === "object" ? local : {};
+    const pick = (k, ok, def) => ok(l[k]) ? l[k] : ok(s[k]) ? s[k] : def;
+    return {
+      resolution: pick("resolution", v => EXPORT_RES.includes(v), EXPORT_DEFAULTS.resolution),
+      quality: pick("quality", v => EXPORT_QUALITY.includes(v), EXPORT_DEFAULTS.quality),
+      shorts: typeof l.shorts === "boolean" ? l.shorts : typeof s.shorts === "boolean" ? s.shorts : EXPORT_DEFAULTS.shorts,
+      folder: typeof s.folder === "string" && s.folder.trim() ? s.folder : null,
+      name_pattern: typeof s.name_pattern === "string" && s.name_pattern.trim() ? s.name_pattern : EXPORT_DEFAULTS.name_pattern,
+    };
+  }
+
+  /** Tamano exacto legible (decimal, como el Finder): "498 MB", "1.25 GB", "812 KB". */
+  function fmtSize(n) {
+    const b = +n || 0;
+    if (!(b > 0)) return "";
+    if (b < 1e6) return `${Math.max(1, Math.round(b / 1e3))} KB`;
+    if (b < 1e9) { const mb = b / 1e6; return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`; }
+    return `${(b / 1e9).toFixed(2)} GB`;
+  }
+  /** Tamano aproximado (2 cifras significativas): "~500 MB", "~1.2 GB", "~62 MB". */
+  function approxSize(n) {
+    const b = +n || 0;
+    if (!(b > 0)) return "";
+    if (b < 1e6) return "~1 MB";
+    if (b < 1e9) { const mb = b / 1e6; const r = mb < 10 ? +mb.toFixed(1) : +mb.toPrecision(2); return `~${r} MB`; }
+    return `~${+(b / 1e9).toFixed(1)} GB`;
+  }
+  /** Tiempo aproximado: "menos de 1 min", "~3 min", "~1 h 10 min". */
+  function approxTime(s) {
+    const v = +s;
+    if (!isFinite(v) || v < 0) return "";
+    if (v < 60) return "menos de 1 min";
+    const m = Math.round(v / 60);
+    if (m < 60) return `~${m} min`;
+    const h = Math.floor(m / 60), r = m % 60;
+    return r ? `~${h} h ${r} min` : `~${h} h`;
+  }
+  /** Linea de la estimacion: "Tardará ~3 min · ~180 MB" ("" sin datos). */
+  function estimateText(est) {
+    if (!est) return "";
+    const t = approxTime(est.seconds), b = approxSize(est.bytes);
+    if (!t && !b) return "";
+    return [t && `Tardará ${t}`, b].filter(Boolean).join(" · ");
+  }
+  /** Duracion de un resultado: "1:14", "12:05", "1:02:09". */
+  function fmtDuration(s) {
+    const v = Math.max(0, Math.round(+s || 0));
+    const h = Math.floor(v / 3600), m = Math.floor(v % 3600 / 60), x = v % 60;
+    return h ? `${h}:${String(m).padStart(2, "0")}:${String(x).padStart(2, "0")}` : `${m}:${String(x).padStart(2, "0")}`;
+  }
+  /** Ruta para mostrar: la carpeta personal como "~" (macOS, Linux y Windows). */
+  function prettyPath(p) {
+    const s = String(p || "");
+    let m = /^\/(?:Users|home)\/[^/]+(\/.*)?$/.exec(s);
+    if (m) return "~" + (m[1] || "");
+    m = /^[A-Za-z]:\\Users\\[^\\]+(\\.*)?$/i.exec(s);
+    if (m) return "~" + (m[1] || "");
+    return s;
+  }
+  /** Ruta corta para mostrar en una linea: "~/…/Clientes/Reelfy" cuando no cabe en `max`
+      caracteres (conserva el inicio y los ultimos segmentos completos). */
+  function shortPath(p, max) {
+    const s = prettyPath(p), m = Math.max(8, max || 44);
+    if (s.length <= m) return s;
+    const sep = s.includes("\\") && !s.includes("/") ? "\\" : "/";
+    const segs = s.split(sep).filter((x, i) => x || i === 0);
+    const head = segs[0], rest = segs.slice(1);
+    const fit = tail => `${head}${sep}\u2026${sep}${tail.join(sep)}`;
+    let tail = [];
+    for (let i = rest.length - 1; i >= 1; i--) {
+      if (fit([rest[i]].concat(tail)).length > m) break;
+      tail.unshift(rest[i]);
+    }
+    if (!tail.length) { const last = rest[rest.length - 1] || s; return "\u2026" + last.slice(-(m - 1)); }
+    return fit(tail);
+  }
+  /** Ultimo segmento de una ruta (/ o \). */
+  function pathBase(p) { const s = String(p || "").replace(/[/\\]+$/, ""); return s.slice(Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\")) + 1); }
+  /** Carpeta de una ruta (/ o \). */
+  function pathDir(p) { const s = String(p || "").replace(/[/\\]+$/, ""); const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\")); return i > 0 ? s.slice(0, i) : i === 0 ? s.slice(0, 1) : ""; }
+  /** "Mostrar en Finder" / "Mostrar en el Explorador" / "Mostrar en la carpeta" segun el sistema. */
+  function revealLabel(platform) {
+    const p = String(platform || "");
+    if (/mac|darwin|iphone|ipad/i.test(p)) return "Mostrar en Finder";
+    if (/win/i.test(p)) return "Mostrar en el Explorador";
+    return "Mostrar en la carpeta";
+  }
+  /** Error de un export en espanol -> {code: "space"|"folder"|"recompose"|null, text}. El `code`
+      del servidor manda (no_space, recompose_failed, folder; o los del contrato); si no, se reconoce
+      el mensaje (ENOSPC, permisos, recomponer). Un mensaje del servidor que ya esta en espanol y es
+      para el usuario (sin rastros tecnicos) se respeta: suele decir cuanto falta o que carpeta. */
+  const EXPORT_ERR = {
+    space: "No hay espacio suficiente en el disco para exportar. Libera espacio o elige una carpeta en otro disco.",
+    folder: "No se puede guardar en la carpeta elegida. Elige otra carpeta con «Cambiar…».",
+    recompose: "No se pudo preparar el video en alta resolución desde tus clips originales. Puedes exportarlo en 1080p.",
+  };
+  const ERR_CODE = { space: "space", no_space: "space", folder: "folder", folder_error: "folder", recompose: "recompose", recompose_failed: "recompose" };
+  const TECH_RE = /errno|traceback|exception|\berror:|permission denied|no space left|ENOSPC|EACCES|EPERM|read-only file system|not writable|ffmpeg|\.py\b|0x[0-9a-f]{4,}/i;
+  const ES_RE = /[áéíóúñ¿¡«»]|\b(no|el|la|los|las|de|del|que|para|tu|tus|en|hay)\b/i;
+  function exportError(msg, code) {
+    const m = String(msg || "").trim();
+    let c = ERR_CODE[code] || null;
+    if (!c) {
+      if (/no space left|ENOSPC|errno 28|disk (is )?full|espacio (suficiente|insuficiente)|sin espacio|no hay espacio/i.test(m)) c = "space";
+      else if (/permission denied|EACCES|EPERM|read-only file system|not writable|no se puede (escribir|guardar)|sin permiso/i.test(m)) c = "folder";
+      else if (/recompo|alta resoluci|preparar el video en|preparando el video en/i.test(m)) c = "recompose";
+    }
+    const own = m && ES_RE.test(m) && !TECH_RE.test(m);
+    return { code: c, text: c ? (own ? m : EXPORT_ERR[c]) : (m || "Ocurrió un error al exportar.") };
+  }
+  /** Calidad: ids del contrato (standard/high/max) y del servidor (estandar/alta/maxima). */
+  const QUALITY_ALIAS = { standard: "standard", estandar: "standard", "estándar": "standard", high: "high", alta: "high",
+    max: "max", maxima: "max", "máxima": "max" };
+  function normQuality(q) { return QUALITY_ALIAS[String(q == null ? "" : q).toLowerCase()] || null; }
+  /** El id que entiende el servidor para la calidad `q`: el de su lista (GET /export/options) o, sin
+      lista, el del servidor de Reelfy (estandar/alta/maxima). */
+  function serverQuality(q, ids) {
+    const c = normQuality(q) || "high";
+    const list = (ids || []).map(x => (x && typeof x === "object" ? x.id : x)).filter(Boolean);
+    const hit = list.find(x => normQuality(x) === c);
+    return hit || { standard: "estandar", high: "alta", max: "maxima" }[c];
+  }
+  /** Filas de resolucion del servidor (GET /export/options: formats[fmt].resolutions) -> el mismo
+      formato que exportResOptions (+ reason, recompose); null si no sirven. */
+  function serverResRows(rows) {
+    if (!Array.isArray(rows)) return null;
+    const out = rows.filter(r => r && EXPORT_RES.includes(String(r.id).toLowerCase()) && +r.W > 0 && +r.H > 0).map(r => ({
+      id: String(r.id).toLowerCase(), label: r.label || EXPORT_RES_LABEL[String(r.id).toLowerCase()], W: +r.W, H: +r.H,
+      enabled: r.enabled !== false, reason: r.reason || "", recompose: !!r.recompose,
+      warn: typeof r.warn === "string" ? r.warn : "" }));
+    out.sort((a, b) => EXPORT_RES.indexOf(a.id) - EXPORT_RES.indexOf(b.id));
+    return out.length ? out : null;
+  }
+  /** Un aviso para las resoluciones apagadas a partir de sus motivos: los que solo cambian en la
+      resolucion se juntan ("…; 1440p y 4K no agregarían calidad."); si no, el primero. */
+  function combineReasons(rows) {
+    const off = (rows || []).filter(r => !r.enabled && r.reason);
+    if (!off.length) return "";
+    const tpl = off.map(r => r.reason.split(r.label).join("{r}"));
+    const dot = t => /[.!?…]$/.test(t) ? t : t + ".";
+    if (off.length > 1 && tpl.every(t => t === tpl[0]) && tpl[0].split("{r}").length === 2) {
+      const list = `${off.slice(0, -1).map(r => r.label).join(", ")} y ${off[off.length - 1].label}`;
+      return dot(tpl[0].replace("{r}", list).replace(/agregaría\b/, "agregarían").replace(/\bes posible\b/, "son posibles"));
+    }
+    return dot(off[0].reason);
+  }
+  /** Ultimas elecciones del servidor en cualquiera de sus formas: GET /export/settings ({last,
+      folder}), GET /settings/export (plano) u options.defaults -> {resolution, quality, shorts,
+      folder, folder_label, name_pattern}. */
+  function normSettings(s) {
+    if (!s || typeof s !== "object") return {};
+    const last = s.last && typeof s.last === "object" ? s.last : s.defaults && typeof s.defaults === "object" ? s.defaults : s;
+    const f = s.folder;
+    const out = {};
+    const r = String(last.resolution || last.res || "").toLowerCase();
+    if (EXPORT_RES.includes(r)) out.resolution = r;
+    const q = normQuality(last.quality); if (q) out.quality = q;
+    if (typeof last.shorts === "boolean") out.shorts = last.shorts;
+    if (f && typeof f === "object") { if (typeof f.path === "string" && f.path) { out.folder = f.path; out.folder_label = f.label || null; } }
+    else if (typeof f === "string" && f) out.folder = f;
+    else if (typeof last.folder === "string" && last.folder) out.folder = last.folder;
+    if (typeof s.name_pattern === "string") out.name_pattern = s.name_pattern;
+    return out;
+  }
+
   return {
+    EXPORT_RES, EXPORT_RES_LABEL, EXPORT_RES_SHORT, EXPORT_QUALITY, EXPORT_QUALITY_LABEL, EXPORT_QUALITY_HINT, EXPORT_DEFAULTS, EXPORT_ERR,
+    exportDims, resClass, parseDims, exportMaxRes, exportResOptions, pickExportRes, exportResNote, resLabel,
+    sanitizeFileName, exportDate, projectTitle, defaultExportName, mergeExportPrefs,
+    fmtSize, approxSize, approxTime, estimateText, fmtDuration, prettyPath, shortPath, pathBase, pathDir, revealLabel, exportError,
+    normQuality, serverQuality, serverResRows, combineReasons, normSettings,
     CONF_LABEL, DISCARD_LABEL, JOIN_KINDS, createdMs, recordedMs, natCmp, recordingOrder, montageConf, findCand, slotNumbers, candVol, candVolKnown, montageClips,
     slotItems, shiftAfter, slotClipIdx, currentCand, swapTake, extraInVideo, addExtra, removeClip, removeSlot, isExtraSlot, itemConf, candConf, usedReason, montageRows, montageSummary, scriptText, composeMain, composeBody,
     montageStatus, wordsProgress, uploadPct, projectState, fmtSrc,
@@ -2819,7 +3153,7 @@
     DEFAULT_ACCENT, normHex, projectAccent, applyAccent,
     MIN_KEEP, MIN_FRAG, SNAP_S, TRACKS, EVENT_TRACKS, RULER_STEPS, SAFE, XC, SYM_W, SNAP_X, PRO_LANGS, MIXERS,
     symDefaults, ltCentered, setLowerThirdAlign, snapCenterX, lowerThirdReveal, lowerThirdX,
-    keepsFromCuts, Timeline, timelineFromPlan,
+    keepsFromCuts, Timeline, timelineFromPlan, shotFrame,
     getPath, setPath, clone, isEvent, kindKey, itemKind, kindParams, commonParams, kinds, kindLabel,
     fillDefaults, newId, allIds, newItem, duplicateItem, changeKind, itemStart, itemEnd, eventSpan,
     activeAt, lockedIds, findItem, itemLabel,

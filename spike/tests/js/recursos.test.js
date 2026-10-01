@@ -296,6 +296,13 @@ test("color de acento: amarillo por defecto; uno propio pasa a subtitulos, titul
   const p2 = { version: 2, fx: { captions: { accent: "#FFFFFF" }, graphics: [{ id: "g", color: "#FFFFFF" }] } };
   C.applyAccent(p2, "#FF0000", { palette: "#FFFFFF" });
   assert.equal(p2.fx.graphics[0].color, "#FFFFFF"); assert.equal(p2.fx.captions.accent, "#FF0000");
+  // el glitch de las transiciones y los efectos tenidos con el acento tambien cambian (= servidor)
+  const p3 = { version: 2, fx: { captions: { accent: "#FFD23F" },
+    transitions: [{ id: "tr1", kind: "glitch", color: "#FFD23F" }, { id: "tr2", kind: "flash", color: "white" }],
+    effects: [{ id: "fx1", kind: "subject_outline", color: "#ffd23f" }] } };
+  C.applyAccent(p3, "#08794d", { palette: "#FFD23F" });
+  assert.equal(p3.fx.transitions[0].color, "#08794D"); assert.equal(p3.fx.transitions[1].color, "white");
+  assert.equal(p3.fx.effects[0].color, "#08794D");
 });
 
 test("pista media: ids propios, etiqueta del recurso y dentro de las pistas del plan", () => {
