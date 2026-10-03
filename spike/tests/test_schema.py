@@ -372,7 +372,8 @@ def test_schema_expone_parametros_de_los_modulos():
         for spec in t["items"].values():
             for p in spec["params"]:
                 assert p["label"] and p["label"] != p["k"] or p["k"] in ("x", "y"), p
-                assert all(ord(ch) < 0x2000 for ch in p["label"]), p
+                # sin emojis; la copy de ui_copy.json usa flechas tipograficas (Izquierda ↔ Derecha)
+                assert all(ord(ch) < 0x2000 or 0x2190 <= ord(ch) <= 0x21FF for ch in p["label"]), p
 
 
 def test_normalize_conserva_parametros_nuevos():
@@ -486,7 +487,8 @@ def test_etiquetas_con_acentos_utf8():
     sin = sorted({w for s in labels for w in re.findall(r"[A-Za-z]+", s) if w.lower() in S._ACCENTS})
     assert sin == [], sin
     common = {p["k"]: p["label"] for p in S.item_params("text", "title_pop")}
-    assert common["size"] == "Tamaño" and common["x"] == "Posición X"
+    # etiquetas de ui_copy.json (es-MX, sin jerga): "Posición X" ahora es "Posición horizontal"
+    assert common["size"] == "Tamaño" and common["x"] == "Posición horizontal"
     assert S.KINDS["tracks"]["graphics"]["label"] == "Gráficos"
     assert S.KINDS["tracks"]["transitions"]["items"]["circle"]["label"] == "Círculo"
     # accent_es es idempotente y respeta mayusculas

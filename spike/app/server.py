@@ -49,7 +49,7 @@ SPIKE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SPIKE / "scripts"))
 import paths  # noqa: E402
 
-ENGINE_VERSION = "0.5.5"
+ENGINE_VERSION = "0.6.0"
 
 # ---- LLM embebido: si el binario de ollama viene en el bundle, corre en un
 # puerto propio con modelos en DATA. El pipeline (highlights/translate) y el director
@@ -65,7 +65,7 @@ os.environ.setdefault("REELFY_LLM_MODEL", TARGET_LLM)
 
 import pipeline  # noqa: E402  (lee REELFY_OLLAMA_URL ya definido)
 
-from fastapi import Body, FastAPI, UploadFile, Form, HTTPException  # noqa: E402
+from fastapi import Body, FastAPI, UploadFile, Form, HTTPException, Request  # noqa: E402
 from fastapi.responses import (HTMLResponse, FileResponse, JSONResponse,  # noqa: E402
                                PlainTextResponse, Response)
 from starlette.concurrency import run_in_threadpool  # noqa: E402
@@ -1190,6 +1190,21 @@ def _music_keep(plan):
     if m.get("source", "ai") != "ai" or m.get("enabled") is False:
         return {k: m[k] for k in ("source", "enabled", "track", "file", "gain_db") if k in m}
     return None
+
+
+def _user_music_prompt(plan):
+    """Texto que el usuario escribio para la musica con IA (plan.studio.musicPrompt) si sigue siendo
+    el de su plan (fuente IA, prendida, sin candado): re-dirigir lo conserva en vez de cambiarlo por
+    el texto en ingles del director (que nunca se muestra). None si no hay."""
+    if not isinstance(plan, dict):
+        return None
+    up = (plan.get("studio") or {}).get("musicPrompt") if isinstance(plan.get("studio"), dict) else None
+    m = ((plan.get("fx") or {}).get("music") if isinstance(plan.get("fx"), dict) else None) or {}
+    if not isinstance(up, str) or not up.strip() or not isinstance(m, dict) or m.get("prompt") != up:
+        return None
+    if m.get("source", "ai") != "ai" or m.get("enabled") is False:
+        return None
+    return up
 
 
 def _direct_plan(plan, d, on_step=None, use_llm=True):
@@ -4390,13 +4405,27 @@ def _trim_exports(job_id, keep=KEEP_EXPORTS, protect=None):
     return n
 
 
+def _gc_dir_ok(d):
+    """La limpieza solo borra dentro de SU carpeta de datos: una carpeta enlazada (symlink) o que
+    resuelve fuera de REELFY_DATA es de otro (p. ej. una copia de pruebas que enlaza
+    input/sources al proyecto real) y no se toca. Los archivos enlazados uno por uno si se pueden
+    quitar: se borra el enlace, nunca el archivo de origen."""
+    try:
+        if d.is_symlink():
+            return False
+        d.resolve().relative_to(paths.DATA.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _gc_orphans(now=None):
     """Archivos de trabajos que ya no estan en la base (purgados antes de v0.5 o a mano)."""
     now = now or time.time()
     ids = set(jobstore.all_ids())
     n = 0
     for d in (INPUT, OUTPUT, paths.WORK, MUSIC_OUT):
-        if not d.exists():
+        if not d.exists() or not _gc_dir_ok(d):
             continue
         for p in d.iterdir():
             name = p.name[len("music_"):] if d == MUSIC_OUT and p.name.startswith("music_") else p.name
@@ -4420,6 +4449,9 @@ def _gc_sources(now=None):
     /compose o su item de medio propio)."""
     now = now or time.time()
     if not SOURCES.exists():
+        return 0
+    if not _gc_dir_ok(SOURCES):
+        print(f"   limpieza: {SOURCES} es una carpeta enlazada o fuera de los datos; no se toca")
         return 0
     used = set()
     for params in jobstore.all_params().values():
@@ -6871,6 +6903,224 @@ def captions(job_id: str, body: dict = Body(default={})):
                                          "X-Captions-Key": key})
 
 
+# ---- color del video en el Studio: el color del motor en el cliente (Estilo y reproductor) ----
+# /fx/look_luts: tablas de build_lut (+ saturacion o B/N + vinieta) para lookgl.js, con la
+#   correccion de cada toma que YA midio el analisis del export (nunca se calcula aqui).
+# /fx/look_thumbs: miniaturas del cuadro del usuario hechas con el motor (grade_array) para los seis
+#   estilos de color y los ejemplos de los ajustes finos. Sin licencia y sin tocar el estado del
+#   motor (/frame si lo toca): solo lee que el trabajo exista.
+_LOOK_LOCK = threading.Lock()
+_LOOK_PAY = {}          # sha(color + correcciones) -> payload (32)
+_LOOK_SHOTS = {}        # job -> tomas del analisis {key, bv, shots, size, fps, cache_dir, ranges, corr}
+_LOOK_THUMBS = {}       # sha(jpeg + consulta) -> respuesta (16)
+LOOK_THUMB_MAX = 6 * 1024 * 1024
+LOOK_VARIANT_KEYS = ("exposure", "temperature", "tint", "saturation", "contrast", "strength", "clarity",
+                     "vignette", "grain", "sharpen")
+
+
+def _grade_cfg(g):
+    """fx.grade del cuerpo -> solo las claves del color (nada mas entra a la cache ni al motor)."""
+    from motion import grade as G
+    g = g if isinstance(g, dict) else {}
+    return {k: g[k] for k in G.GRADE_KEYS if k in g}
+
+
+def _corr_of(cr):
+    """Correccion de una toma ({gains, black, white}, de /fx/look_luts) validada, o None."""
+    if cr is None:
+        return None
+    g3 = cr.get("gains") if isinstance(cr, dict) else None
+    if not (isinstance(g3, list) and len(g3) == 3):
+        raise HTTPException(400, "Corrección de toma inválida.")
+    return {"gains": [_num(v, 0.2, 5.0, 1.0) for v in g3], "black": _num(cr.get("black"), 0.0, 0.5, 0.0),
+            "white": _num(cr.get("white"), 0.5, 1.0, 1.0)}
+
+
+def _lru_put(d, key, val, n):
+    with _LOOK_LOCK:
+        d[key] = val
+        while len(d) > n:
+            d.pop(next(iter(d)))
+
+
+def _look_shots(job_id, plan, fmt):
+    """Correccion de cada toma del analisis del export (el .json del Grader en la cache del motor) en
+    tiempo ORIGINAL -> ("ready" | "pending", [{start, end, corr}]). "pending": el analisis todavia no
+    la midio; se vuelve a mirar en el siguiente pedido (un stat), nunca se mide aqui."""
+    from motion import grade as G
+    from motion import render as R
+    eo = _base_part(_eff_engine(plan, fmt, _get_engine(job_id)))
+    key = _sha(json.dumps([plan.get("video"), plan.get("duration"), plan.get("cuts"),
+                           [(s_.get("start"), s_.get("end")) for s_ in plan.get("shots") or [] if isinstance(s_, dict)],
+                           _sha(json.dumps(plan.get("camera") or [], default=str)), fmt, eo], sort_keys=True, default=str))
+    with _LOOK_LOCK:
+        ent = _LOOK_SHOTS.get(job_id)
+    if not ent or ent["key"] != key:
+        pr = R.prepare(plan, {"fmt": fmt, "workers": 0, **eo})
+        job, tl = pr["job"], pr["timeline"]
+        bv, _ = R._base_files(pr)
+        src = pr["plan"].get("shots") or []
+        ranges = []
+        for s_ in job.get("shots") or []:
+            i = s_.get("index")
+            o = src[i] if isinstance(i, int) and 0 <= i < len(src) else None
+            a, b = (float(o["start"]), float(o["end"])) if o else (tl.inverse(float(s_["start"])), tl.inverse(float(s_["end"])))
+            ranges.append([round(a, 3), round(b, 3)])
+        ent = {"key": key, "bv": str(bv), "shots": job.get("shots") or [], "size": R._grade_size(job), "fps": job["fps"],
+               "cache_dir": pr["opts"]["cache_dir"], "ranges": ranges, "corr": None}
+        _lru_put(_LOOK_SHOTS, job_id, ent, 64)
+    if ent["corr"] is None and ent["ranges"] and Path(ent["bv"]).exists():
+        cf = G.Grader(ent["bv"], ent["shots"], *ent["size"], ent["fps"], cache_dir=ent["cache_dir"])._cache_file()
+        if cf is not None and cf.exists():
+            try:
+                corr = json.loads(cf.read_text()).get("corr") or []
+                if len(corr) == len(ent["ranges"]) and all(isinstance(c, dict) for c in corr):
+                    ent["corr"] = [{"gains": [round(float(v), 5) for v in c.get("gains") or (1, 1, 1)],
+                                    "black": round(float(c.get("black", 0.0)), 5),
+                                    "white": round(float(c.get("white", 1.0)), 5)} for c in corr]
+            except Exception:  # noqa: un json a medio escribir: el siguiente pedido lo vuelve a leer
+                pass
+    if ent["corr"] is None:
+        return "pending", []
+    return "ready", [{"start": a, "end": b, "corr": c} for (a, b), c in zip(ent["ranges"], ent["corr"])]
+
+
+@app.post("/fx/look_luts/{job_id}")
+def fx_look_luts(job_id: str, body: dict = Body(default={})):
+    """Color del export para la vista en vivo (lookgl.js): body {grade, shots?, plan?, fmt?} ->
+    grade.lut_payload + per_shot [{start, end, r, g, b, corr}] (tiempo original) + shots_state
+    ("ready" | "pending" | "off"). Sin `plan` usa el guardado. Cacheado; < 20 ms en caliente."""
+    from motion import grade as G
+    _job_or_404(job_id)
+    t0 = time.perf_counter()
+    b = body if isinstance(body, dict) else {}
+    cfg = _grade_cfg(b.get("grade"))
+    if isinstance(b.get("looks"), list):
+        # varios estilos de color con los mismos ajustes finos (vista previa al pasar el mouse en Estilo)
+        # (con `corr`, la correccion de la toma de muestra: igual que las miniaturas)
+        names = [n for n in b["looks"] if isinstance(n, str) and n in G.LOOKS][:len(G.LOOKS)]
+        cr = _corr_of(b.get("corr"))
+        out = {}
+        for n in names:
+            c = dict(cfg, look=n, enabled=True)
+            key = _sha(json.dumps([c, cr, "set"], sort_keys=True, default=str))
+            with _LOOK_LOCK:
+                p = _LOOK_PAY.get(key)
+            if p is None:
+                p = dict(G.lut_payload(c, cr), per_shot=[])
+                _lru_put(_LOOK_PAY, key, p, 32)
+            out[n] = p
+        ms = round((time.perf_counter() - t0) * 1000, 1)
+        return JSONResponse({"looks": out, "ms": ms}, headers={"X-Look-Ms": str(ms), "Cache-Control": "no-store"})
+    state, shots = "off", []
+    if b.get("shots") and cfg.get("match_shots", True) is not False and cfg.get("enabled", True) is not False:
+        try:
+            plan = b.get("plan") if isinstance(b.get("plan"), dict) else None
+            if not plan:
+                plan, _ = jobstore.get_plan(job_id)
+            if plan and _is_v2(plan) and plan.get("video") and not jobstore.montage_only(plan):
+                state, shots = _look_shots(job_id, plan, _fmt_of(b))
+        except Exception as e:  # noqa: sin igualar tomas en vivo (video ilegible...); el export igual las iguala
+            print(f"   look_luts {job_id}: sin tomas en vivo ({e})")
+            state, shots = "off", []
+    key = _sha(json.dumps([cfg, [(s_["start"], s_["end"], s_["corr"]) for s_ in shots]], sort_keys=True, default=str))
+    with _LOOK_LOCK:
+        out = _LOOK_PAY.get(key)
+    if out is None:
+        out = G.lut_payload(cfg)
+        out["per_shot"] = [dict(start=s_["start"], end=s_["end"], corr=s_["corr"], **G.lut_tables(cfg, s_["corr"])) for s_ in shots]
+        _lru_put(_LOOK_PAY, key, out, 32)
+    ms = round((time.perf_counter() - t0) * 1000, 1)
+    return JSONResponse(dict(out, shots_state=state, ms=ms), headers={"X-Look-Ms": str(ms), "Cache-Control": "no-store"})
+
+
+def _floats(s, n):
+    """'a,b,c,d' -> n floats finitos o None."""
+    try:
+        v = [float(x) for x in str(s or "").split(",")]
+    except ValueError:
+        return None
+    return v if len(v) == n and all(math.isfinite(x) for x in v) else None
+
+
+def _look_thumbs(data, w, h, grade, variants, corr, face, crop, looks=1):
+    import base64
+    import cv2
+    import numpy as np
+    from motion import grade as G
+    t0 = time.perf_counter()
+    if not data or len(data) > LOOK_THUMB_MAX:
+        raise HTTPException(400, "Manda el cuadro como JPEG (máximo 6 MB).")
+    try:
+        cfg = _grade_cfg(json.loads(grade) if grade else {})
+        cr = json.loads(corr) if corr else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Parámetros de color inválidos.")
+    cr = _corr_of(cr)
+    fc = _floats(face, 4) if face else None
+    cp = _floats(crop, 4) if crop else None
+    vars_ = []
+    for tok in [x for x in str(variants or "").split(",") if x.strip()][:24]:
+        k, _, v = tok.partition(":")
+        k = k.strip()
+        try:
+            fv = float(v)
+        except ValueError:
+            raise HTTPException(400, f"Variante inválida: {tok}")
+        if k not in LOOK_VARIANT_KEYS or not math.isfinite(fv):
+            raise HTTPException(400, f"Variante inválida: {tok}")
+        vars_.append((k, fv, f"{k}:{v.strip()}"))
+    key = hashlib.sha1(data).hexdigest() + _sha(json.dumps([w, h, cfg, [x[2] for x in vars_], cr, fc, cp, bool(looks)], sort_keys=True))
+    with _LOOK_LOCK:
+        hit = _LOOK_THUMBS.get(key)
+    if hit is not None:
+        return dict(hit, server_ms=round((time.perf_counter() - t0) * 1000, 1), cached=True)
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(400, "No se pudo leer el cuadro (JPEG).")
+    if max(img.shape[:2]) > 1920:
+        raise HTTPException(400, "Cuadro demasiado grande (hasta 1080 x 1920).")
+    arr = cv2.cvtColor(img, cv2.COLOR_BGR2RGBA)
+    if w and h and (int(w), int(h)) != (arr.shape[1], arr.shape[0]):
+        if not (8 <= int(w) <= 1080 and 8 <= int(h) <= 1920):
+            raise HTTPException(400, "Tamaño fuera de rango (hasta 1080 x 1920).")
+        arr = cv2.resize(arr, (int(w), int(h)), interpolation=cv2.INTER_AREA)
+    H, W = arr.shape[:2]
+    if cp:
+        x0, y0 = int(round(max(0.0, min(1.0, cp[0])) * W)), int(round(max(0.0, min(1.0, cp[1])) * H))
+        x1, y1 = int(round(max(0.0, min(1.0, cp[2])) * W)), int(round(max(0.0, min(1.0, cp[3])) * H))
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            raise HTTPException(400, "Recorte inválido.")
+
+    def enc(a):
+        if cp:
+            a = a[y0:y1, x0:x1]
+        ok, jpg = cv2.imencode(".jpg", cv2.cvtColor(a, cv2.COLOR_RGBA2BGR), [cv2.IMWRITE_JPEG_QUALITY, 88])
+        return "data:image/jpeg;base64," + base64.b64encode(jpg.tobytes()).decode()
+
+    base = dict(cfg, enabled=True)
+    thumbs = {name: enc(G.grade_image(arr.copy(), dict(base, look=name), cr, fc)) for name in G.LOOKS} if looks else {}
+    out_v = {lbl: enc(G.grade_image(arr.copy(), dict(base, **{k: v}), cr, fc)) for k, v, lbl in vars_}
+    res = {"thumbs": thumbs, "variants": out_v, "size": [W, H]}
+    _lru_put(_LOOK_THUMBS, key, res, 16)
+    return dict(res, server_ms=round((time.perf_counter() - t0) * 1000, 1), cached=False)
+
+
+@app.post("/fx/look_thumbs/{job_id}")
+async def fx_look_thumbs(job_id: str, request: Request, w: int = 0, h: int = 0, grade: str = "", variants: str = "",
+                         corr: str = "", face: str = "", crop: str = "", looks: int = 1):
+    """Miniaturas del cuadro del usuario con el motor: cuerpo = JPEG (image/jpeg); consulta w, h,
+    grade (JSON de fx.grade), variants ("exposure:-0.5,grain:0.12,..." con el estilo de color
+    actual), corr (correccion de la toma, de /fx/look_luts), face ("cx,cy,w,h") y crop
+    ("x0,y0,x1,y1" normalizado, despues de colorear: ejemplos al 200 %); looks=0 omite las seis
+    miniaturas (solo variantes) -> {thumbs: {look: dataURL x6}, variants: {"k:v": dataURL}, size,
+    server_ms}."""
+    _job_or_404(job_id)
+    data = await request.body()
+    res = await run_in_threadpool(_look_thumbs, data, w, h, grade, variants, corr, face, crop, looks)
+    return JSONResponse(res, headers={"Cache-Control": "no-store", "X-Look-Ms": str(res["server_ms"])})
+
+
 def _keep_src_names(before, out):
     """El director reescribe shots[].src con el video compuesto: se conserva el nombre del
     clip original (compose) cuando las tomas son las mismas."""
@@ -6973,6 +7223,12 @@ def direct(job_id: str, body: dict = Body(...)):
             d["music"] = keep
         else:
             d.pop("music", None)
+        # el texto que escribio el usuario para la musica con IA se queda (como si lo mandara: sin
+        # sincronia a la pista del director, que seria otra cancion)
+        up = _user_music_prompt(plan)
+        if up and not (keep and "prompt" in keep):
+            d["music"] = dict(d.get("music") or {}, prompt=up)
+            body = dict(body, music=d["music"])
     style = body.get("style") if body.get("style") in director.STYLES else None
     intensity = d["intensity"] if body.get("intensity") is not None else None
     seed = d["seed"] if body.get("seed") is not None else None
@@ -7367,6 +7623,59 @@ def fx_sfx_file(name: str, variant: int = 0):
     media = {".flac": "audio/flac", ".ogg": "audio/ogg", ".m4a": "audio/mp4",
              ".wav": "audio/wav"}.get(Path(f).suffix.lower(), "application/octet-stream")
     return FileResponse(f, media_type=media, headers={"Cache-Control": "public, max-age=86400"})
+
+
+MOOD_CACHE = paths.DATA / "cache" / "mood"
+_MOOD_LOCK = threading.Lock()
+
+
+@app.get("/fx/mood_sample/{mood}")
+def fx_mood_sample(mood: str, style: str = "dinamico"):
+    """Muestra de 6 s de un ambiente de la musica para «Escuchar» antes de elegirlo (Estilo ›
+    Música): el generador rapido (sin IA, music.mood_sample) a -16 LUFS con 0.5 s de desvanecido,
+    en AAC (WAV si no hay codificador). Se guarda en DATA/cache/mood/<estilo>_<animo>.m4a: la
+    segunda vez sale del disco. `auto` = el animo del estilo. Animo desconocido -> 404; estilo
+    desconocido -> dinamico. No necesita licencia ni toca ningun proyecto."""
+    from motion import audio as A
+    from motion import music
+    m = str(mood or "").strip().lower()
+    if m != "auto" and m not in music.MOOD_MUSIC:
+        raise HTTPException(404, "Ambiente no encontrado")
+    st = style if style in music.STYLE_MUSIC else "dinamico"
+    hdr = {"Cache-Control": "public, max-age=86400"}
+
+    def cached():
+        for ext, media in ((".m4a", "audio/mp4"), (".wav", "audio/wav")):
+            f = MOOD_CACHE / f"{st}_{m}{ext}"
+            if f.exists() and f.stat().st_size > 1000:
+                return FileResponse(f, media_type=media, headers=hdr)
+        return None
+    hit = cached()
+    if hit:
+        return hit
+    with _MOOD_LOCK:                     # dos pedidos del mismo ambiente: se genera una sola vez
+        hit = cached()
+        if hit:
+            return hit
+        MOOD_CACHE.mkdir(parents=True, exist_ok=True)
+        y = music.mood_sample(st, None if m == "auto" else m)
+        tmp = MOOD_CACHE / f".{st}_{m}_{uuid.uuid4().hex[:6]}.wav"
+        A.write_wav(tmp, y, music.SR, subtype="PCM_16")
+        out = MOOD_CACHE / f"{st}_{m}.m4a"
+        part = MOOD_CACHE / f".{st}_{m}_{uuid.uuid4().hex[:6]}.m4a"
+        try:
+            r = subprocess.run([str(paths.FFMPEG), "-y", "-v", "error", "-i", str(tmp), "-c:a", "aac", "-b:a", "128k",
+                                "-movflags", "+faststart", str(part)], capture_output=True, timeout=60)
+            ok = r.returncode == 0 and part.exists() and part.stat().st_size > 1000
+        except Exception:  # noqa: sin ffmpeg -> WAV
+            ok = False
+        if ok:
+            part.replace(out)
+            tmp.unlink(missing_ok=True)
+        else:
+            part.unlink(missing_ok=True)
+            tmp.replace(MOOD_CACHE / f"{st}_{m}.wav")
+    return cached()
 
 
 def music_for_plan(plan, seed=None, fmt="9:16", on_pct=None):

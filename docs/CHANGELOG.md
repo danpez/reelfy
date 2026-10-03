@@ -2,6 +2,45 @@
 
 Formato: cada versión = un tag `reelfy-v*` que dispara el build de los 3 instaladores.
 
+## v0.6.0 — 2026-10-03
+
+**Cada ajuste dice qué hace y lo muestra con tu propio video.**
+
+### Estilo (nueva pestaña con todo el look del video)
+- Subtítulos: galería de estilos con ejemplo en vivo sobre tu cuadro y tus palabras. «Pastilla de
+  color» queda a un clic, con su color justo debajo; la vista previa desliza la pastilla con el mismo
+  resorte y sombra que el export.
+- Cada color muestra dónde se usa («ya está en…»), y «Color de tu marca» se ve en vivo en títulos,
+  tarjetas y botones. La pastilla puede seguir tu marca o tener su propio color.
+- Color del video: los seis estilos con antes/después real de tu cuadro (hecho por el motor), línea
+  para comparar y ajustes finos con ejemplos. «Recomendado» en Natural (el estilo por defecto no cambia).
+- Edición con IA: cuatro tarjetas de estilo con vista previa, «Qué cambia» y «Cantidad de efectos» con
+  tu conteo real («tu video lleva 2 títulos, 3 gráficos…»).
+- Música: «Escuchar» en cada fuente y ambiente, volumen con muestra de 5 s, y la descripción que
+  escribes se respeta al cambiar de estilo.
+- Quién sale y tu logo: tarjeta del perfil, «Dónde aparece» y logo con ejemplo de la esquina.
+- Básico y Avanzado: Básico usa opciones en palabras (Chico · Mediano · Grande); los números y
+  unidades quedan en Avanzado, siempre en español.
+
+### Elementos del video
+- Cada ajuste del panel es una fila con nombre, para qué sirve y ejemplo.
+- Tipos de título, gráficos, escenas, efectos y transiciones en galerías animadas con tu cuadro; un
+  clic cambia el tipo. Animaciones, figuras y fondos se animan al pasar el mouse.
+- «Agregar» con miniaturas animadas; los sonidos se escuchan antes de agregarlos.
+
+### Otras pantallas
+- Inicio, Montar clips y Limpieza explican cada opción con tus números («Normal · quita 4 tomas
+  repetidas · queda 2:54») y cada tipo de corte se puede escuchar.
+- «¿Cuántos shorts sugerir?» admite «Ninguno».
+
+### Correcciones
+- Se quitaron controles que no hacían nada («Caja de fondo», «Posición X», colores que el motor no
+  usa); los que no aplican a un estilo se desactivan con la razón.
+- En la app de escritorio las vistas previas ya no salen negras.
+- La limpieza de disco nunca borra dentro de una carpeta enlazada.
+
+---
+
 ## v0.5.5 — 2026-10-01
 
 **Exportar como tú quieras (hasta 4K), lo negativo se ve negativo e imágenes con vida.**

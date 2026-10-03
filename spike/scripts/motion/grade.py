@@ -996,6 +996,89 @@ def _mono(arr: np.ndarray, contrast: float = 1.2, tone: str = "neutral") -> np.n
     return bw_array(arr, contrast, tone, None, 0.0, 0.05)
 
 
+# ---------------------------------------------------------------- el color del motor en el cliente
+# El Studio aplica el color EXACTO del export en su vista en vivo (lookgl.js, una pasada WebGL) con
+# lo que devuelve lut_payload: las tablas por canal de build_lut (correccion de toma + look + ajustes
+# finos), la matriz de saturacion (o la mezcla y la curva de B/N) y la vinieta. Lo unico que no
+# replica es el contraste local (claridad) y, en B/N, la difusion: la halacion de altas luces se
+# hornea en la tabla de B/N. La ganancia de B/N depende del cuadro (la cara): el cliente la mide con
+# bw_gain (fxcore.bwGain) y arma la tabla con bw_table (fxcore.bwTable).
+BW_LIFT = 0.05
+BW_SCENE = 0.46       # luma objetivo de la escena sin cara (_bw_face_gain)
+GRADE_KEYS = ("enabled", "look", "match_shots", "strength", "exposure", "temperature", "tint", "saturation",
+              "contrast", "clarity", "vignette", "grain", "sharpen")
+
+
+def _mono_contrast(L: dict, cfg: dict) -> float:
+    """Contraste de la curva de B/N (grade_array -> bw_array), ya acotado y redondeado."""
+    st = num(cfg, "strength", 1.0, 0.0, 1.5)
+    c = 1.0 + (L.get("contrast", 0.5) * st + num(cfg, "contrast", 0.0, -0.5, 0.5)) * 0.9
+    return round(float(np.clip(c, 0.5, 2.0)), 2)
+
+
+def bw_table(contrast: float, lift: float, gain: float) -> np.ndarray:
+    """Tabla gris uint8 de B/N con la halacion de altas luces horneada (la difusion se omite: en
+    zonas lisas el promedio difuso es el mismo valor)."""
+    g = _bw_lut(round(float(contrast), 2), round(float(lift), 3), round(float(gain), 2)).astype(np.int32)
+    return np.clip(g + _bw_glow_lut()[g].astype(np.int32), 0, 255).astype(np.uint8)
+
+
+def lut_payload(cfg: dict | None, corr: dict | None = None) -> dict:
+    """Lo que necesita el cliente para dibujar el color del export (POST /fx/look_luts):
+    {look, enabled, lut: {r, g, b}, sat (3x3) | None, mono, mix, bw, vig, base}. `base` = contraste,
+    vinieta y claridad propios del look (por la fuerza), para "Total con el estilo"."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    name, L = _look(cfg)
+    st = num(cfg, "strength", 1.0, 0.0, 1.5)
+    lut = build_lut(L, corr, cfg)
+    vig = num(cfg, "vignette", 0.0, 0.0, 1.0) + L.get("vig", 0.0) * st
+    out = {"look": name, "enabled": cfg.get("enabled", True) is not False,
+           "lut": {k: lut[:, 0, c].tolist() for c, k in enumerate("rgb")},
+           "sat": None, "mono": False, "mix": None, "bw": None,
+           "vig": {"amount": round(min(1.0, vig), 4), "cx": 0.5, "cy": 0.46, "shape": "ellipse"},
+           "base": {"contrast": round(L.get("contrast", 0.0) * st, 4), "vig": round(L.get("vig", 0.0) * st, 4),
+                    "clarity": round(L.get("clarity", 0.0) * st, 4)}}
+    if L.get("mono"):
+        cc = _mono_contrast(L, cfg)
+        out.update(mono=True, mix=list(BW_MIX),
+                   bw={"shape": [round(float(v), 5) for v in _bw_shape(cc, BW_LIFT)], "contrast": cc,
+                       "lift": BW_LIFT, "face": _BW_FACE, "scene": BW_SCENE, "face_k": 0.85, "scene_k": 0.5,
+                       "glow": _bw_glow_lut().tolist(), "table": bw_table(cc, BW_LIFT, 1.0).tolist()})
+        # bw_array: vinieta radial fuerte centrada en la cara (sin cara, en 0.5, 0.45)
+        out["vig"] = {"amount": round(float(np.clip(min(1.0, vig * 1.6 + 0.2), 0.0, 1.0)), 2), "cx": 0.5, "cy": 0.45,
+                      "shape": "bw", "face_dy": 0.12, "max_cy": 0.8}
+    else:
+        sat = L.get("sat", 1.0) ** st * num(cfg, "saturation", 1.0, 0.0, 2.0)
+        skin = L.get("skin_sat", 1.0) ** st * num(cfg, "saturation", 1.0, 0.0, 2.0)
+        M = sat_matrix(round(sat, 3), round(skin, 3))
+        out["sat"] = None if M is None else [[round(float(v), 6) for v in M[r, :3]] for r in range(3)]
+    return out
+
+
+def lut_tables(cfg: dict | None, corr: dict | None = None) -> dict:
+    """Solo las tablas por canal (r, g, b) de build_lut: las de cada toma en lut_payload.per_shot."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    lut = build_lut(_look(cfg)[1], corr, cfg)
+    return {k: lut[:, 0, c].tolist() for c, k in enumerate("rgb")}
+
+
+class ArrCtx:
+    """Lo minimo del FrameCtx que leen grade_array/bw_array (miniaturas y ejemplos del Studio)."""
+
+    def __init__(self, W: int, face=None):
+        self.W, self.draft, self.n, self.seed, self.face = int(W), False, 0, 0, face
+
+    def px(self, v: float) -> float:
+        return v * self.W / 1080.0
+
+
+def grade_image(arr: np.ndarray, cfg: dict, corr: dict | None = None, face=None) -> np.ndarray:
+    """Un cuadro RGBA uint8 con el color del export (look + ajustes finos + correccion de toma
+    opcional), como Grader.apply pero sin estado: lo usan las miniaturas de POST /fx/look_thumbs."""
+    _, L = _look(cfg)
+    return grade_array(arr, cfg, build_lut(L, corr, cfg), ArrCtx(arr.shape[1], face))
+
+
 def composite_masked(bottom, top, mask: np.ndarray) -> skia.Image:
     """top sobre bottom a traves de la mascara float HxW (0..1). skia.Image o RGBA uint8."""
     b = bottom if isinstance(bottom, np.ndarray) else C.image_to_rgba(bottom)

@@ -103,7 +103,7 @@ test("newItem: id unico, tiempos dentro del video, defaults del kind y src user"
   assert.equal(ev.start, undefined);
   const cw = C.newItem(SCHEMA, "cutaways", "title_card", 1, 10, fx);
   assert.equal(C.getPath(cw, "text.preset"), "title_pop");
-  assert.equal(C.getPath(cw, "text.text"), "Titulo");
+  assert.equal(C.getPath(cw, "text.text"), "Título");
   const tr = C.newItem(SCHEMA, "transitions", "flash", 2, 10, fx);
   assert.equal(tr.dur, 0.4);
 });

@@ -239,11 +239,11 @@
     if (acc && acc !== DEFAULT_ACCENT) ACCENT_KEYS.forEach(k => { if (typeof it[k] === "string" && normHex(it[k]) === DEFAULT_ACCENT) it[k] = acc; });
     if (track === "text" && !it.text && !(it.lines && it.lines.length)) it.text = "Tu texto";
     if (track === "graphics" && it.kind === "sticker_text" && !it.text) it.text = "NUEVO";
-    if (track === "graphics" && it.kind === "cta" && !it.label) it.label = "Sigueme";
-    if (track === "graphics" && it.kind === "card" && !it.title) { it.title = "Titulo"; it.value = "Valor"; }
-    if (track === "graphics" && it.kind === "lower_third" && !it.title) { it.title = "Nombre"; it.subtitle = "Descripcion"; }
+    if (track === "graphics" && it.kind === "cta" && !it.label) it.label = "Sígueme";
+    if (track === "graphics" && it.kind === "card" && !it.title) { it.title = "Título"; it.value = "Valor"; }
+    if (track === "graphics" && it.kind === "lower_third" && !it.title) { it.title = "Nombre"; it.subtitle = "Descripción"; }
     if (track === "graphics" && it.kind === "icon" && !it.name) it.name = "star";
-    if (track === "cutaways" && !getPath(it, "text.text")) setPath(it, "text.text", "Titulo");
+    if (track === "cutaways" && !getPath(it, "text.text")) setPath(it, "text.text", "Título");
     if (track === "transitions" && !it.dur) it.dur = 0.4;
     return it;
   }
@@ -405,8 +405,8 @@
 
   // ------------------------------------------------------------------ subtitulos (aprox. de vista previa)
   /** Grupos de subtitulos aproximados: <= maxWords, corte duro en . ! ? o pausa > 0.45 s. */
-  function captionGroups(phrases, maxWords) {
-    const mw = Math.max(1, +maxWords || 4);
+  function captionGroups(phrases, maxWords, hardMax) {
+    const mw = Math.max(1, +maxWords || 4), cap = +hardMax > 0 ? +hardMax : mw + 1;
     const words = []; (phrases || []).forEach(p => (p || []).forEach(w => w && words.push(w)));
     const groups = []; let cur = [];
     const flush = () => { if (cur.length) groups.push(cur); cur = []; };
@@ -419,11 +419,18 @@
     flush();
     // evita grupos de una sola palabra pegandolos al anterior si cabe
     for (let i = groups.length - 1; i > 0; i--) {
-      if (groups[i].length === 1 && groups[i - 1].length < mw + 1 && (+groups[i][0].start - +groups[i - 1][groups[i - 1].length - 1].end) < 0.45) {
+      if (groups[i].length === 1 && groups[i - 1].length < Math.min(mw + 1, cap) && (+groups[i][0].start - +groups[i - 1][groups[i - 1].length - 1].end) < 0.45) {
         groups[i - 1] = groups[i - 1].concat(groups[i]); groups.splice(i, 1);
       }
     }
     return groups.map(g => ({ words: g, start: +g[0].start, end: +g[g.length - 1].end }));
+  }
+
+  /** Grupos aproximados con el max_words EFECTIVO del estilo (captionCfg) y el tope duro de
+      "Impacto en mayusculas" (text.CAPTION_PRESETS.bold_caps.max_words_cap = 3). */
+  function captionGroupsFor(phrases, cfg, titleFont) {
+    const D = captionCfg(cfg, titleFont);
+    return captionGroups(phrases, D.max_words, D.preset === "bold_caps" ? 3 : null);
   }
 
   // ------------------------------------------------------------------ subtitulos: geometria del render
@@ -444,12 +451,15 @@
   /** Configuracion efectiva de los subtitulos (text._cap_cfg): preset, fuente, tamano (size*scale),
       espacio, lineas, mayusculas, contorno y sombra. `titleFont` = fuente de titulo del estilo
       (bold_caps la usa si el plan no fija otra). */
-  function captionCfg(cfg, titleFont) {
+  function captionCfg(cfg, fonts) {
     const c = cfg || {}, preset = CAPTION_PRESETS[c.preset] ? c.preset : "clean_bold", P = CAPTION_PRESETS[preset];
+    // fonts: las letras del estilo de edicion ({title, caption}: captionFonts(plan)); un texto = solo
+    // la de titulo (llamadas de antes). Sin letra elegida («La del estilo»), la de su estilo, como el motor
+    const F = fonts && typeof fonts === "object" ? fonts : { title: fonts || null, caption: null };
     let font = c.font;
     if (preset === "minimal_small" && (!font || font === "Poppins-ExtraBold")) font = P.font;
-    else if (preset === "bold_caps" && (!font || font === "Poppins-ExtraBold")) font = titleFont || "Poppins-Black";
-    else font = font || "Poppins-ExtraBold";
+    else if (preset === "bold_caps" && (!font || font === "Poppins-ExtraBold")) font = F.title || "Poppins-Black";
+    else font = font || F.caption || "Poppins-ExtraBold";
     const cs = c.case && c.case !== "none" ? c.case : (P.case || "none");
     const mw = Math.min(+c.max_words || P.max_words, preset === "bold_caps" ? 3 : 99);
     return Object.assign({}, P, { preset, font, case: cs, max_words: mw,
@@ -458,6 +468,20 @@
       stroke: c.stroke != null ? +c.stroke : P.stroke, shadow: c.shadow != null ? +c.shadow : P.shadow,
       kw_accent: c.kw_accent != null ? !!c.kw_accent : preset === "clean_bold",
       recenter: c.recenter != null ? !!c.recenter : ["clean_bold", "minimal_small", "bold_caps"].includes(preset) });
+  }
+  /** Letras de la paleta de cada estilo de edicion (assets.PALETTES[estilo].fonts): sin letra elegida,
+      los subtitulos usan la `caption` de su estilo e «Impacto en mayúsculas» la `title`
+      (text._cap_cfg con ctx.palette). Paridad: test_estilo.py. */
+  const STYLE_FONTS = {
+    dinamico: { title: "Poppins-Black", caption: "Poppins-ExtraBold" },
+    elegante: { title: "DMSerifDisplay", caption: "Poppins-SemiBold" },
+    minimal: { title: "Montserrat-ExtraBold", caption: "Montserrat-Bold" },
+    energetico: { title: "Anton", caption: "Poppins-Black" },
+  };
+  /** Las letras de los subtitulos del plan (las del estilo con que se dirigio; dinamico si ninguno). */
+  function captionFonts(plan) {
+    const st = ((plan && plan.director) || {}).style;
+    return Object.assign({}, STYLE_FONTS[st] || STYLE_FONTS.dinamico);
   }
   /** Ancho util (fraccion de W) de un bloque centrado en x (text._usable con width 0.96). */
   function captionUsable(x) {
@@ -1491,11 +1515,11 @@
      perder una palabra (ningun nivel lo enciende solo). */
   const TAKE_KINDS = ["retoma", "arranque_fallido", "autocorreccion", "tartamudeo", "error", "digresion"];
   const TAKE_LABEL = { retoma: "Toma repetida", arranque_fallido: "Arranque en falso", autocorreccion: "Corrección",
-    tartamudeo: "Tartamudeo", error: "Error", digresion: "Fuera de tema", silencio: "Silencio", manual: "Manual", ai: "Recorte IA" };
+    tartamudeo: "Tartamudeo", error: "Comentario fuera de toma", digresion: "Fuera de tema", silencio: "Silencio", manual: "Manual", ai: "Recorte IA" };
   const TAKE_PLURAL = { retoma: "Tomas repetidas", arranque_fallido: "Arranques en falso", autocorreccion: "Correcciones",
-    tartamudeo: "Tartamudeos", error: "Errores", digresion: "Fuera de tema", silencio: "Silencios", manual: "Cortes manuales", ai: "Recortes IA" };
+    tartamudeo: "Tartamudeos", error: "Comentarios fuera de toma", digresion: "Fuera de tema", silencio: "Silencios", manual: "Cortes manuales", ai: "Recortes IA" };
   const TAKE_CHIP = { retoma: "Tomas repetidas", arranque_fallido: "Arranques", autocorreccion: "Correcciones",
-    tartamudeo: "Tartamudeos", error: "Errores", digresion: "Fuera de tema" };
+    tartamudeo: "Tartamudeos", error: "Comentarios", digresion: "Fuera de tema" };
   /** Niveles de limpieza: que seguridades quedan cortadas por defecto (lo demas, sugerencia). */
   const TAKE_LEVELS = { suave: ["alta"], normal: ["alta", "media"], a_fondo: ["alta", "media", "baja"] };
   const LEVEL_LABEL = { suave: "Suave", normal: "Normal", a_fondo: "A fondo" };
@@ -2286,6 +2310,12 @@
       return base;
     });
   }
+  /** «¿Cuántos shorts sugerir?»: 0 (Ninguno) a 5; vacio o invalido -> 2 (lo de siempre). «Ninguno»
+      viaja como 0: el servidor no le pide shorts a la IA (highlights.select_highlights). */
+  function shortsWanted(v) {
+    const n = parseInt(v, 10);
+    return Number.isFinite(n) ? Math.max(0, Math.min(5, n)) : 2;
+  }
   /** Cuerpo de POST /compose. o = {clips, overlays, glossary, highlights, director, montageJob, script}:
       desde un montaje manda montage_job (el servidor re-encola ESE trabajo como compose y conserva
       plan.montage) y el guion. */
@@ -2297,7 +2327,7 @@
         if (v.x != null && v.y != null) { x.x = v.x; x.y = v.y; }
         return x;
       }),
-      glossary: o.glossary || "", highlights: Math.max(1, Math.min(5, parseInt(o.highlights, 10) || 2)),
+      glossary: o.glossary || "", highlights: shortsWanted(o.highlights),
       director: o.director === undefined ? false : o.director,
     };
     if (o.montageJob) {
@@ -2816,7 +2846,8 @@
     // los titulos con palabras de acento sin color propio lo toman del proyecto
     (fx.text || []).forEach(it => { if (it && (it.accent_words || []).length && !it.accent) { it.accent = a; n++; } });
     fx.captions = fx.captions || {};
-    if (fx.captions.highlight && olds.has(normHex(fx.captions.highlight))) fx.captions.highlight = a;
+    // la pastilla propia (aunque sea del color de la marca de antes) no se recolorea
+    if (fx.captions.highlight && olds.has(normHex(fx.captions.highlight)) && !pillOwn(plan)) fx.captions.highlight = a;
     fx.captions.accent = a;
     fx.accent = a;
     return n;
@@ -3139,6 +3170,762 @@
     return out;
   }
 
+  // ------------------------------------------------------------------ Estilo: claridad de ajustes
+  /* Logica pura de la pestana Estilo: el resorte y la pastilla del motor (text._boxed_rrect), la
+     letra en contraste dentro de la pastilla (text._contrast), que filas de color usa cada estilo de
+     subtitulos (text.CAPTION_PRESETS[*].active), el cuadro y las palabras de muestra, y la copy de
+     cada ajuste (scripts/motion/ui_copy.json, que llega en /fx/schema como `ui`). */
+
+  /** ease.spring del motor: resorte subamortiguado a un escalon (0 -> 1); t en segundos. */
+  function spring(t, freq, damping) {
+    t = +t;
+    if (!(t > 0)) return 0;
+    const f = freq == null ? 3.2 : +freq;
+    const z = Math.min(0.999, Math.max(0.01, damping == null ? 0.42 : +damping));
+    const w = 2 * Math.PI * f, wd = w * Math.sqrt(1 - z * z);
+    return 1 - Math.exp(-z * w * t) * (Math.cos(wd * t) + (z * w / wd) * Math.sin(wd * t));
+  }
+  /** text._word_rect: caja de la pastilla de una palabra [l, t, r, b] (px). ink = tinta {l, r}
+      relativa al origen de la palabra; (ox, oy) = origen y linea base; cap = altura de la tinta sobre
+      la base sin acentos; fs = tamano de la letra. */
+  function pillWordRect(ink, ox, oy, cap, fs) {
+    return [ox + ink.l - 0.2 * fs, oy - cap - 0.19 * fs, ox + ink.r + 0.2 * fs, oy + 0.24 * fs];
+  }
+  /** text._pill_word + text._boxed_rrect: la pastilla en t -> {x, y, w, h, r, i} o null. Entre
+      palabras se DESLIZA con resorte (4.0 / 0.78); la primera crece de 0.6 a 1 (3.6 / 0.62); radio
+      0.22 * fs * escala. rects = pillWordRect de cada palabra; starts = inicio de cada palabra;
+      gdy = desplazamiento vertical del grupo (entrada). */
+  function pillAt(rects, starts, t, fs, gdy) {
+    let i = -1;
+    for (let k = 0; k < (starts || []).length; k++) if (t >= +starts[k] - 0.03) i = k;
+    if (i < 0 || !rects || !rects[i]) return null;
+    const cur = rects[i], u = t - (+starts[i] - 0.03);
+    let r = cur, s = 1;
+    if (i > 0 && rects[i - 1]) { const pv = rects[i - 1], k = spring(u, 4.0, 0.78); r = pv.map((v, j) => v + (cur[j] - v) * k); }
+    else s = 0.6 + 0.4 * spring(u, 3.6, 0.62);
+    const cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2 + (+gdy || 0), w = (r[2] - r[0]) * s, h = (r[3] - r[1]) * s;
+    return { x: cx - w / 2, y: cy - h / 2, w, h, r: 0.22 * fs * s, i };
+  }
+  /** text._contrast: letra legible sobre `hex` (luminancia del motor sobre sRGB, umbral 0.55). */
+  function contrastOn(hex) {
+    const h = normHex(hex) || "#FFFFFF", n = parseInt(h.slice(1), 16);
+    const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.55 ? "#141414" : "#FFFFFF";
+  }
+  /** Filas de color de cada estilo de subtitulos, en orden (de CAPTION_PRESETS[*].active):
+      k = clave en fx.captions, role = que pinta (dibujo de "donde va"), mode = control. */
+  const CAPTION_ROLES = {
+    color: [{ k: "color", role: "text", mode: "swatches" }, { k: "accent", role: "active", mode: "linked" }],
+    wipe: [{ k: "color", role: "text", mode: "swatches" }, { k: "accent", role: "fill", mode: "linked" }],
+    pill: [{ k: "highlight", role: "pill", mode: "pill" }, { k: "color", role: "text", mode: "swatches" }],
+    none: [{ k: "color", role: "text", mode: "swatches" }],
+  };
+  function captionColorRoles(preset) {
+    if (preset === "none") return [];
+    const P = CAPTION_PRESETS[preset] || CAPTION_PRESETS.clean_bold;
+    return (CAPTION_ROLES[P.active] || CAPTION_ROLES.none).map(r => Object.assign({}, r));
+  }
+  /** Nota de regla de un estilo de subtitulos (ui.notes["captions.<preset>"]) o null. */
+  function captionStyleNote(ui, preset) {
+    const n = ui && ui.notes && ui.notes["captions." + preset];
+    return typeof n === "string" && n ? n : null;
+  }
+  /** Que palabras de «ya está en» pinta cada fila de color (el dibujito de la fila): el texto, las que
+      no estas diciendo (1 y 3), salvo en un estilo sin palabra resaltada («Discreto»: las tres); la
+      palabra que dices y la pastilla, la 2; el relleno del karaoke, la 1 y media 2. */
+  function colorWhereWords(role, preset) {
+    const P = CAPTION_PRESETS[preset];
+    if (role === "text") return P && P.active === "none" ? [0, 1, 2] : [0, 2];
+    if (role === "active" || role === "pill") return [1];
+    if (role === "fill") return [0, 1];
+    return [];
+  }
+  /** Ajustes de los subtitulos que el motor ignora con un estilo (text._draw_group_body): «Centrar la
+      frase» solo cuenta cuando las palabras salen una por una; la palabra clave no se ve en Karaoke
+      (el relleno la pinta encima). -> false = no hace nada con ese estilo (la fila se apaga y dice por que). */
+  function captionOptionApplies(preset, k) {
+    const P = CAPTION_PRESETS[preset];
+    if (!P) return true;
+    if (k === "recenter") return P.reveal === "word";
+    if (k === "kw_accent") return P.active !== "wipe";
+    return true;
+  }
+  /** Tarjeta de la galeria que corresponde a la configuracion: "none" si estan apagados. */
+  function captionCardOf(cfg) {
+    const c = cfg || {};
+    if (c.enabled === false || c.preset === "none") return "none";
+    return CAPTION_PRESETS[c.preset] ? c.preset : "clean_bold";
+  }
+  /** La pastilla sigue al color de la marca: highlight vacio, o igual a la marca SIN que el usuario la
+      haya separado (`own` = pillOwn(plan): quito «Igual al color de tu marca» o eligio su color). */
+  function highlightLinked(cfg, brand, own) {
+    const h = cfg && cfg.highlight;
+    return !h || (!own && normHex(h) === normHex(brand));
+  }
+  /** El usuario separo la pastilla de la marca (plan.studio.pillOwn): vive en el plan, asi que se
+      guarda con el proyecto, se deshace con ⌘Z y no pasa a otro proyecto. */
+  const pillOwn = plan => !!(plan && plan.studio && plan.studio.pillOwn);
+  /** Marca o desmarca la pastilla como propia (dentro del mismo paso de deshacer que el color). */
+  function setPillOwn(plan, on) {
+    if (!plan) return;
+    const st = Object.assign({}, plan.studio);
+    if (on) st.pillOwn = true; else delete st.pillOwn;
+    plan.studio = st;
+  }
+  /** El elemento se pinta con el color de la marca `acc` (lo que applyAccent recolorea): un titulo
+      con palabras destacadas (o marcador / antetitulo) sin color propio o con el de la marca; un
+      grafico con algun color igual al de la marca. Un elemento con su propio color no lo muestra:
+      los ejemplos de «Color de tu marca» no deben usarlo. */
+  function paintsAccent(track, it, acc) {
+    const a = normHex(acc); if (!it || !a) return false;
+    if (track === "text") {
+      if (!((it.accent_words || []).length || ["highlight_marker", "kicker"].includes(it.preset))) return false;
+      return !it.accent || normHex(it.accent) === a;
+    }
+    return ACCENT_KEYS.some(k => typeof it[k] === "string" && normHex(it[k]) === a);
+  }
+  /** Luminancia como el motor (ctx.luminance: pesos 709 sobre sRGB, sin linealizar). */
+  function engineLum(hex) {
+    const n = parseInt((normHex(hex) || "#FFFFFF").slice(1), 16);
+    return 0.2126 * ((n >> 16) & 255) / 255 + 0.7152 * ((n >> 8) & 255) / 255 + 0.0722 * (n & 255) / 255;
+  }
+  /** Color del boton «Seguir» de la invitacion (graphics._cta_follow): button_color, si no `color`,
+      si no rojo; uno casi blanco (> 0.85) no se ve sobre la pastilla blanca y el motor lo pinta rojo. */
+  const CTA_BTN_FALLBACK = "#FF3B5C";
+  function ctaButtonColor(it) {
+    const c = normHex(it && it.button_color) || normHex(it && it.color) || CTA_BTN_FALLBACK;
+    return engineLum(c) > 0.85 ? CTA_BTN_FALLBACK : c;
+  }
+  /** Palabras dichas (orden de tiempo) que NO caen en un corte habilitado. */
+  function spokenWords(phrases, cuts) {
+    const ws = [];
+    (phrases || []).forEach(p => (p || []).forEach(w => {
+      if (w && isFinite(+w.start) && isFinite(+w.end) && String(w.text == null ? "" : w.text).trim()) ws.push(w);
+    }));
+    ws.sort((a, b) => +a.start - +b.start);
+    const on = (cuts || []).filter(c => c && cutOn(c));
+    const rm = on.length ? wordsInCuts(ws.map(w => ({ start: +w.start, end: +w.end })), on).removed : [];
+    return ws.filter((w, i) => !rm[i]);
+  }
+  function sampleRows(rows) {
+    let r = rows;
+    if (typeof r === "string") { try { r = JSON.parse(r); } catch (e) { return null; } }
+    return Array.isArray(r) && r.length ? r : null;
+  }
+  const rowLuma = v => (Array.isArray(v) ? 0.2126 * +v[0] + 0.7152 * +v[1] + 0.0722 * +v[2] : +v);
+  /** Toma para los ejemplos: >= 1 s, >= 6 palabras dichas fuera de cortes y, entre esas, la de
+      fondo mas oscuro en la franja de los subtitulos (shots[i].rows en floor(capY * 16) +- 1), para
+      que la letra blanca se lea. Empate: la primera. Sin `rows`: la primera con palabras.
+      -> {index, t0} (t0 = primera palabra dicha de la toma, tiempo original). */
+  function pickSampleShot(plan, capY) {
+    const p = plan || {}, words = spokenWords(p.phrases, p.cuts);
+    const dur = +p.duration || (words.length ? +words[words.length - 1].end : 0);
+    let shots = (p.shots || []).filter(s => s && isFinite(+s.start));
+    if (!shots.length) shots = [{ start: 0, end: dur }];
+    const y = capY == null || !isFinite(+capY) ? 0.72 : Math.min(1, Math.max(0, +capY));
+    let best = null, bestL = Infinity, first = null;
+    shots.forEach((s, i) => {
+      const a = +s.start, b = s.end != null && isFinite(+s.end) ? +s.end : (shots[i + 1] ? +shots[i + 1].start : dur);
+      if (b - a < 1) return;
+      const inside = words.filter(w => +w.start >= a && +w.start < b);
+      if (inside.length < 6) return;
+      const cand = { index: i, t0: +inside[0].start };
+      if (!first) first = cand;
+      const rows = sampleRows(s.rows);
+      if (!rows) return;
+      const k = Math.min(rows.length - 1, Math.floor(y * rows.length));
+      let sum = 0, n = 0;
+      for (let j = k - 1; j <= k + 1; j++) { const v = rowLuma(rows[Math.max(0, Math.min(rows.length - 1, j))]); if (isFinite(v)) { sum += v; n++; } }
+      if (!n) return;
+      const L = sum / n;
+      if (L < bestL - 1e-9) { bestL = L; best = cand; }
+    });
+    return best || first || { index: 0, t0: words.length ? +words[0].start : 0 };
+  }
+  /** Otra toma para comparar con la de muestra (igualar tomas): la siguiente de >= 1 s con un
+      instante fuera de los cortes habilitados (si no hay, la anterior). -> {index, t} o null. */
+  function otherShot(plan, index) {
+    const p = plan || {}, dur = +p.duration || 0;
+    const shots = (p.shots || []).filter(s => s && isFinite(+s.start));
+    const cuts = (p.cuts || []).filter(c => c && c.enabled !== false);
+    const inCut = t => cuts.some(c => t >= +c.start && t < +c.end);
+    const at = i => {
+      const s = shots[i], a = +s.start, b = s.end != null && isFinite(+s.end) ? +s.end : (shots[i + 1] ? +shots[i + 1].start : dur);
+      if (b - a < 1) return null;
+      for (let j = 0; ; j++) {
+        const t = Math.round((a + 0.3 + j * 0.1) * 1000) / 1000;
+        if (t >= b - 0.1) return null;
+        if (!inCut(t)) return { index: i, t };
+      }
+    };
+    for (let i = index + 1; i < shots.length; i++) { const r = at(i); if (r) return r; }
+    for (let i = Math.min(index, shots.length) - 1; i >= 0; i--) { const r = at(i); if (r) return r; }
+    return null;
+  }
+  /** Palabras de muestra: las dichas en [t0, t0 + len] fuera de cortes habilitados; si son menos
+      de 6, la ventana crece hasta 4 s. -> {words (tiempos originales), t0, t1, len}. */
+  function sampleWindow(phrases, cuts, t0, len) {
+    const ws = spokenWords(phrases, cuts), a = +t0 || 0;
+    const pick = L => ws.filter(w => +w.start >= a - 1e-6 && +w.start < a + L);
+    let L = len == null ? 2.6 : Math.max(0.2, +len), out = pick(L);
+    while (out.length < 6 && L < 4 - 1e-9) { L = Math.min(4, L + 0.2); out = pick(L); }
+    const words = out.map(w => Object.assign({}, w, { start: +w.start, end: +w.end }));
+    return { words, t0: words.length ? words[0].start : a, t1: words.length ? words[words.length - 1].end : a + L, len: L };
+  }
+  /** Opcion de una lista [[valor, etiqueta], ...] mas cercana a v (null solo coincide con null). */
+  function nearestChoice(choices, v) {
+    const cs = (choices || []).filter(c => Array.isArray(c));
+    if (v == null) return cs.find(c => c[0] == null) || null;
+    if (typeof v !== "number") return cs.find(c => c[0] === v) || null;
+    let best = null, bd = Infinity;
+    cs.forEach(c => { if (typeof c[0] !== "number") return; const d = Math.abs(c[0] - v); if (d < bd - 1e-12) { bd = d; best = c; } });
+    return best;
+  }
+  /** Ejemplo escrito con los datos reales del usuario: llena {nombre} de un ex_tpl; si falta un
+      valor devuelve `fallback` (el ex_ui fijo). Nunca deja llaves. */
+  function fillExample(tpl, values, fallback) {
+    const fb = fallback == null ? "" : String(fallback);
+    if (typeof tpl !== "string" || !tpl) return fb;
+    let miss = false;
+    const out = tpl.replace(/\{(\w+)\}/g, (m, k) => {
+      const v = values ? values[k] : null;
+      if (v == null || v === "" || (typeof v === "number" && !isFinite(v))) { miss = true; return m; }
+      return String(v);
+    });
+    return miss || /[{}]/.test(out) ? fb : out;
+  }
+  /** Numero para leer: entero, o un decimal si es menor que 10 (6.4). */
+  function humanNum(x) {
+    const a = Math.abs(x);
+    if (a >= 10 || Math.abs(a - Math.round(a)) < 0.05) return String(Math.round(a));
+    return (Math.round(a * 10) / 10).toFixed(1);
+  }
+  /** Valor de Avanzado en unidades humanas: adv = {scale, fmt, min, effective?, zero?}.
+      0.73 con {scale: 100, fmt: "{v} % desde arriba"} -> "73 % desde arriba". effective
+      "size*scale" multiplica por la escala del estilo (ctx.scale o la de ctx.preset). */
+  function humanValue(adv, v, ctx) {
+    if (!adv || v == null || v === "" || !isFinite(+v)) return "";
+    const c = ctx || {};
+    let x = +v * (adv.scale != null ? +adv.scale : 1);
+    if (adv.effective === "size*scale") {
+      const P = CAPTION_PRESETS[c.preset];
+      x *= c.scale != null ? +c.scale : P ? P.scale : 1;
+    }
+    if (adv.zero && Math.abs(x) < 1e-9) return String(adv.zero);
+    let s = humanNum(x);
+    if (s !== "0" && x < 0) s = "−" + s;
+    else if (s !== "0" && x > 0 && adv.min != null && +adv.min < 0) s = "+" + s;
+    return String(adv.fmt || "{v}").replace("{v}", s);
+  }
+  /** Copy de un ajuste (ui_copy.json) resuelta para el contexto (preset, kind o pista): etiqueta,
+      que hace, nota, nivel y ejemplo. Sin entrada: {missing: true} con la etiqueta de respaldo. */
+  function copyFor(ui, id, ctx) {
+    const U = ui || {}, c = ctx || {};
+    let e = (U.params && U.params[id]) || (U.ui && U.ui[id]) || null;
+    if (!e && U.aliases && U.aliases[id] && U.params) e = U.params[U.aliases[id]] || null;
+    if (!e) return { id, label: c.fallback || id, help: "", note: null, level: "basic", ex: "ninguno", ex_ui: "", ex_tpl: null, missing: true };
+    const keys = [c.preset, c.kind, c.track].filter(k => k != null && k !== "");
+    const by = (m, d) => { if (m && typeof m === "object") for (const k of keys) if (Object.prototype.hasOwnProperty.call(m, k)) return m[k]; return d; };
+    return {
+      id, label: by(e.label_by, e.label), help: by(e.help_by, e.help || ""), note: by(e.note_by, null),
+      level: by(e.level_by, e.level || "basic"), ex: e.ex || "ninguno", ex_ui: e.ex_ui || "", ex_tpl: e.ex_tpl || null,
+      units: e.units || "", basic_choices: e.basic_choices || null, relative_choices: e.relative_choices || null,
+      adv: e.adv || null, adv_label: e.adv_label || null, missing: false,
+    };
+  }
+  const CAPTION_COLOR_IDS = ["captions.color", "captions.accent", "captions.highlight"];
+  /** Filas que se dibujan: sin las ocultas, sin las avanzadas en Basico y, en subtitulos, solo las
+      filas de color que usa el estilo (en su orden) en el lugar de la primera fila de color. */
+  function visibleRows(ui, ids, level, ctx) {
+    const c = ctx || {}, adv = level === "advanced";
+    let list = (ids || []).slice();
+    const at = list.findIndex(i => CAPTION_COLOR_IDS.includes(i));
+    if (c.preset != null && at >= 0) {
+      const roles = captionColorRoles(c.preset).map(r => "captions." + r.k);
+      list = list.filter(i => !CAPTION_COLOR_IDS.includes(i));
+      list.splice(at, 0, ...roles);
+    }
+    return list.filter(i => { const cp = copyFor(ui, i, c); return cp.level !== "hidden" && (adv || cp.level !== "advanced"); });
+  }
+  /** Nombre de un color en palabras (resumen del estilo, nombres de las muestras). */
+  function colorName(hex) {
+    const h = normHex(hex); if (!h) return "";
+    const n = parseInt(h.slice(1), 16), r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+    const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+    if (l >= 0.93) return "blanco";
+    if (l <= 0.1) return "negro";
+    if (s < 0.18) return l > 0.62 ? "gris claro" : l < 0.3 ? "gris oscuro" : "gris";
+    let hue = 0;
+    if (mx === r) hue = 60 * (((g - b) / d) % 6); else if (mx === g) hue = 60 * ((b - r) / d + 2); else hue = 60 * ((r - g) / d + 4);
+    if (hue < 0) hue += 360;
+    if (hue < 14 || hue >= 340) return "rojo";
+    if (hue < 40) return l < 0.35 ? "café" : "naranja";
+    if (hue < 66) return "amarillo";
+    if (hue < 160) return "verde";
+    if (hue < 196) return "turquesa";
+    if (hue < 245) return "azul";
+    if (hue < 292) return "morado";
+    return "rosa";
+  }
+  /** Plantilla de marca (POST /presets) con lo que define el estilo del video, incluido el color
+      de la marca (antes se perdia al aplicarla en otro video). */
+  function presetFromPlan(plan, o) {
+    const f = (plan && plan.fx) || {}, m = f.music || {}, x = o || {};
+    return { style: x.style, intensity: x.intensity, captions: clone(f.captions || {}), grade: clone(f.grade || {}),
+      music: { source: m.source, mood: m.mood, gain_db: m.gain_db, duck_db: m.duck_db, prompt: m.prompt },
+      accent: projectAccent(plan) };
+  }
+
+  // ------------------------------------------------------------------ Estilo: edicion con IA, musica, quien sale, formato
+  /** Lo que muestra la tarjeta de cada estilo de edicion (director.STYLES): sus subtitulos, su primer
+      estilo de titulo con su letra (TYPE_KIT por PRESET_ROLE) y su color. Paridad: test_estilo.py. */
+  const DIRECTOR_CARDS = {
+    dinamico: { captions: { preset: "clean_bold", y: 0.73, size: 0.064, font: "Poppins-ExtraBold", case: "none", max_words: 3 }, title: "stack", titleFont: "Anton", look: "warm_clean",
+      grade: { look: "warm_clean", vignette: 0.15, grain: 0.022, sharpen: 0.15 } },
+    elegante: { captions: { preset: "clean_bold", y: 0.73, size: 0.058, font: "Poppins-Bold", case: "none", max_words: 3 }, title: "serif_elegant", titleFont: "DMSerifDisplay", look: "cinematic",
+      grade: { look: "cinematic", vignette: 0.24, grain: 0.03, sharpen: 0.1 } },
+    minimal: { captions: { preset: "clean_bold", y: 0.73, size: 0.06, font: "Montserrat-ExtraBold", case: "none", max_words: 3 }, title: "title_pop", titleFont: "Montserrat-ExtraBold", look: "natural",
+      grade: { look: "natural", vignette: 0.08, grain: 0.0, sharpen: 0.1 } },
+    energetico: { captions: { preset: "bold_caps", y: 0.725, size: 0.056, font: "Poppins-Black", case: "upper", max_words: 3 }, title: "stack", titleFont: "Anton", look: "bright_pop",
+      grade: { look: "bright_pop", vignette: 0.12, grain: 0.02, sharpen: 0.2 } },
+  };
+  const DIRECTOR_ORDER = ["dinamico", "elegante", "minimal", "energetico"];
+  /* Lo que el director CONSERVA del usuario al dirigir o re-dirigir con otro estilo (director.py:
+     _keep_captions, _grade_tuned / _keep_grade): cada campo de los subtitulos que el usuario cambio
+     respecto al estilo con que se dirigio, y todo el color si lo ajusto. Las tarjetas de «Estilo de
+     edición» y «Qué cambia» muestran ESO (no el estilo puro). Paridad: test_estilo.py. */
+  const GRADE_NEUTRAL = { strength: 1.0, exposure: 0.0, temperature: 0.0, tint: 0.0, saturation: 1.0, contrast: 0.0, clarity: null };
+  const CAP_LOOK = ["enabled", "preset", "font", "color", "case", "max_words", "highlight", "stroke", "shadow", "box", "kw_accent", "recenter", "max_lines"];
+  const dirStyleOf = st => (DIRECTOR_CARDS[st] ? st : "dinamico");
+  const sameKeep = (a, b) => (a !== null && b !== null && typeof a === "object" && typeof b === "object" ? JSON.stringify(a) === JSON.stringify(b) : a === b);
+  /** El color del plan lo ajusto el usuario (algun valor difiere del color del estilo `style`). */
+  function gradeTuned(g, style) {
+    if (!g || typeof g !== "object" || Array.isArray(g)) return false;
+    const gc = DIRECTOR_CARDS[dirStyleOf(style)].grade;
+    const base = Object.assign({}, GRADE_NEUTRAL, { enabled: true, look: gc.look, match_shots: true, vignette: gc.vignette, grain: gc.grain, sharpen: gc.sharpen });
+    return Object.keys(g).some(k => {
+      if (!Object.prototype.hasOwnProperty.call(base, k)) return false;
+      const d = base[k], v = g[k];
+      if (typeof d === "number" && typeof v === "number") return Math.abs(v - d) > 1e-4;
+      return !sameKeep(v, d);
+    });
+  }
+  /** Subtitulos y color que deja el director al dirigir `plan` con `style`:
+      {captions, capsKept: [campos del usuario], grade, gradeKept}. */
+  function directorOutcome(plan, style) {
+    const d = (plan && plan.director) || {}, f = (plan && plan.fx) || {}, old = dirStyleOf(d.style), st = dirStyleOf(style);
+    const locked = new Set(Array.isArray(d.locked) ? d.locked : []);
+    const oc = f.captions && typeof f.captions === "object" ? f.captions : {};
+    let captions, capsKept;
+    if (locked.has("captions")) { captions = clone(oc); capsKept = CAP_LOOK.filter(k => oc[k] != null); }
+    else {
+      const c0 = DIRECTOR_CARDS[old].captions;
+      const base = { enabled: true, preset: c0.preset, font: c0.font, color: "#FFFFFF", case: c0.case, max_words: c0.max_words };
+      captions = Object.assign({ enabled: true }, clone(DIRECTOR_CARDS[st].captions));
+      capsKept = [];
+      CAP_LOOK.forEach(k => { if (oc[k] != null && !sameKeep(oc[k], base[k])) { captions[k] = clone(oc[k]); capsKept.push(k); } });
+    }
+    const gc = DIRECTOR_CARDS[st].grade;
+    const gradeKept = locked.has("grade") || gradeTuned(f.grade, old);
+    const grade = gradeKept ? clone(f.grade || {}) : { enabled: true, look: gc.look, match_shots: true, vignette: gc.vignette, grain: gc.grain, sharpen: gc.sharpen };
+    return { captions, capsKept, grade, gradeKept };
+  }
+  /** «Qué cambia con …» con lo que se conserva: el renglon de los subtitulos y el del color cambian
+      por «Tus subtítulos se quedan en …» / «tu color se queda en …». opt = la opcion de la copy
+      (que_cambia, qc_caps, qc_look); names = {preset(k), look(k)}; T = textos de la copy. */
+  function directorQueCambia(opt, outcome, names, T) {
+    const o = opt || {}, parts = String(o.que_cambia || "").split(" · ").filter(Boolean), out = outcome || {};
+    return parts.map(p => {
+      if (p === o.qc_caps && (out.capsKept || []).includes("preset")) return T("dir.keep.caps", { estilo: names.preset(out.captions.preset) });
+      if (p === o.qc_look && out.gradeKept) return T("dir.keep.look", { color: out.grade && out.grade.enabled === false ? T("summary.look.off") : names.look(out.grade.look || "warm_clean") });
+      return p;
+    }).join(" · ");
+  }
+  /** Cuantos titulos, graficos y efectos visibles lleva el plan (el ejemplo de «Cantidad de efectos»). */
+  function directorCounts(plan) {
+    const f = (plan && plan.fx) || {}, n = t => (f[t] || []).filter(i => i && i.enabled !== false).length;
+    return { titulos: n("text"), graficos: n("graphics"), efectos: n("effects") };
+  }
+  /** El ejemplo escrito de la cantidad de efectos con los numeros del plan (en singular cuando es 1). */
+  function directorExample(tpl, values, fallback) {
+    return fillExample(tpl, values, fallback).replace(/(^|[^\d.,])1 (título|gráfico|efecto)s(?=[\s,.]|$)/g, (m, a, w) => `${a}1 ${w}`);
+  }
+  /** Origen de la musica que se oye: "none" si esta apagada (music._coerce_cfg). */
+  function musicSourceOf(m) {
+    const x = m || {};
+    if (x.enabled === false || x.source === "none") return "none";
+    return ["ai", "procedural", "library", "file"].includes(x.source) ? x.source : "ai";
+  }
+  /** Ritmo que usa el motor (pulsos por minuto; 0 = automatico): 110 sin bpm_lock cuenta como automatico. */
+  function musicBpmOf(m) {
+    const x = m || {}, b = +x.bpm || 0;
+    return b > 0 && (x.bpm_lock || b !== 110) ? b : 0;
+  }
+  /** El texto para la musica con IA que escribio el usuario (plan.studio.musicPrompt), solo si sigue
+      siendo el de la musica del plan; si no (lo eligio la IA: texto en ingles del director), "". */
+  function musicPromptShown(plan) {
+    const up = plan && plan.studio && plan.studio.musicPrompt, m = (plan && plan.fx && plan.fx.music) || {};
+    return typeof up === "string" && (m.prompt || "") === up ? up : "";
+  }
+  /** Escribe el texto del usuario en la musica y lo recuerda en el plan (dentro del paso de deshacer). */
+  function setMusicPrompt(plan, text) {
+    const t = String(text == null ? "" : text);
+    plan.fx = plan.fx || {};
+    plan.fx.music = plan.fx.music || { enabled: true, source: "ai" };
+    plan.fx.music.prompt = t;
+    const st = Object.assign({}, plan.studio, { musicPrompt: t });
+    delete st.musicPromptByUser;
+    plan.studio = st;
+  }
+  /** El margen desenfocado («aire») solo cambia un video MAS ANCHO que el formato de salida
+      (video_io.reframe_mode: "+air" solo con src_ar > out_ar * 1.05). Sin medidas todavia: se asume
+      que si (no se apaga a ciegas). "Como el original" nunca: el video llena su cuadro. */
+  function airApplies(src, fmt) {
+    if (fmt === "original") return false;
+    const r = FMT_RATIO[fmt] || FMT_RATIO["9:16"];
+    if (!src || !(+src.w > 0) || !(+src.h > 0)) return true;
+    return +src.w / +src.h > (r[0] / r[1]) * 1.05;
+  }
+  /** La linea de «La música de tu video» ya creada: en Basico solo «Lista.»; en Avanzado con el ritmo y
+      el golpe principal (sus controles son de Avanzado). `T(clave, vars)` = textos de la copy. */
+  function musicReadyText(st, level, T) {
+    const s = st || {};
+    if (level !== "advanced") return T("mus.ready.plain");
+    return [s.bpm ? T("mus.ready", { n: s.bpm }) : T("mus.ready.plain"), s.drop ? T("mus.drop", { t: s.drop }) : ""].filter(Boolean).join(" ");
+  }
+  /** El cambio del plan para un ritmo elegido (0 = automatico): fijo siempre con bpm_lock. */
+  const musicBpmSet = v => (+v > 0 ? { bpm: +v, bpm_lock: true } : { bpm: 0, bpm_lock: false });
+  /** Tonalidades que entiende el motor (music.valid_keyscale) y su nombre en espanol. */
+  const KEY_ROOTS = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+  const KEYSCALES = KEY_ROOTS.flatMap(r => [`${r} major`, `${r} minor`]);
+  const SOLFEO = { C: "Do", D: "Re", E: "Mi", F: "Fa", G: "Sol", A: "La", B: "Si" };
+  /** "Bb major" -> "Si bemol mayor"; "f#-min" -> "Fa sostenido menor"; invalida -> "". */
+  function keyscaleEs(k) {
+    if (typeof k !== "string") return "";
+    const p = k.replace(/-/g, " ").replace(/\u266F/g, "#").replace(/\u266D/g, "b").trim().split(/\s+/);
+    if (p.length !== 2) return "";
+    const r = p[0], m = p[1].toLowerCase(), base = SOLFEO[(r[0] || "").toUpperCase()];
+    if (!base || r.length > 2 || (r.length === 2 && !"#b".includes(r[1]))) return "";
+    const acc = r.length === 2 ? (r[1] === "#" ? " sostenido" : " bemol") : "";
+    const mode = ["major", "maj", "mayor"].includes(m) ? "mayor" : ["minor", "min", "menor"].includes(m) ? "menor" : "";
+    return mode ? `${base}${acc} ${mode}` : "";
+  }
+  /** Muestra de 6 s de un ambiente (GET /fx/mood_sample): null/"" = automatico (el del estilo). */
+  const moodSampleUrl = (mood, style) => `/fx/mood_sample/${encodeURIComponent(mood || "auto")}?style=${encodeURIComponent(style || "dinamico")}`;
+  /** Donde aparecen los datos de la persona: [clave en profile.use, id de la copy]. */
+  const PROFILE_USE = [["lower_third", "profile.use.lower_third"], ["follow_cta", "profile.use.follow"], ["booking_cta", "profile.use.booking"],
+    ["end_card", "profile.use.end_card"], ["handle_watermark", "profile.use.watermark"]];
+  const PROFILE_USE_DEF = { lower_third: true, follow_cta: true, booking_cta: true, end_card: true, handle_watermark: false };
+  /** profile.use con sus valores por defecto (los del panel del perfil). */
+  const profileUseOf = p => Object.assign({}, PROFILE_USE_DEF, (p && p.use) || {});
+  /** Logo del proyecto en un cuadro W x H (index.html drawLogo, opts.logo del motor): pos tl|tr|bl|br,
+      size = fraccion del ancho, margen 3 % del ancho. -> {x, y, w, h}. */
+  function logoRect(pos, size, W, H, iw, ih) {
+    const w = W * (+size > 0 ? +size : 0.14), h = w * ((+ih || 1) / (+iw || 1)), m = W * 0.03;
+    const left = pos === "tl" || pos === "bl", top = pos === "tl" || pos === "tr";
+    return { x: left ? m : W - w - m, y: top ? m : H - h - m, w, h };
+  }
+  /** Formatos de salida en el orden de Estilo › Formato y su proporcion (ancho, alto); "original" = la del video. */
+  const FORMAT_ORDER = ["9:16", "4:5", "1:1", "16:9", "original"];
+  const FORMAT_SHAPE = { "9:16": [9, 16], "4:5": [4, 5], "1:1": [1, 1], "16:9": [16, 9] };
+
+  // ------------------------------------------------------------------ color del video (estilos de color)
+  /* El color del export en el cliente: lo que manda POST /fx/look_luts (grade.lut_payload) aplicado
+     con la misma aritmetica que grade_array (tablas por canal -> saturacion o B/N -> vinieta).
+     lookgl.js hace lo mismo en la GPU; applyLook es la version de referencia (pruebas contra el
+     motor) y el respaldo sin WebGL para cuadros quietos. */
+  const LOOK_ORDER = ["natural", "warm_clean", "cinematic", "bright_pop", "moody", "bw_contrast"];
+  /** Estilos de color sin color (grade.LOOKS[*].mono): el motor ignora en ellos la calidez y el tinte
+      (build_lut usa 1.0 en vez de tg) y la intensidad de los colores (grade_array sale antes de la
+      matriz de saturacion). Paridad: test_estilo.py. */
+  const MONO_LOOKS = ["bw_contrast"];
+  const GRADE_COLOR_KEYS = ["temperature", "tint", "saturation"];
+  /** El ajuste fino `k` cambia algo con el estilo de color `look`. -> false = la fila se apaga y dice por que. */
+  const gradeOptionApplies = (look, k) => !(MONO_LOOKS.includes(look) && GRADE_COLOR_KEYS.includes(k));
+  const lk01 = v => (v < 0 ? 0 : v > 1 ? 1 : v);
+  const srgbToLin = x => (x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4));
+  const linToSrgb = x => { x = Math.max(0, x); return x <= 0.0031308 ? x * 12.92 : 1.055 * Math.pow(x, 1 / 2.4) - 0.055; };
+  /** grade._vignette_gray en (u, v) del cuadro (0..1) -> multiplicador 0..1 (orillas oscuras). */
+  function vignetteAt(u, v, amount, cx, cy) {
+    const x = (u - (cx == null ? 0.5 : cx)) * 2, y = (v - (cy == null ? 0.46 : cy)) * 2 / 1.04;
+    let t = lk01((Math.sqrt(x * x * 0.85 + y * y) - 0.45) / 1.0);
+    t = t * t * (3 - 2 * t);
+    return lk01(1 - lk01(+amount || 0) * 1.6 * Math.pow(t, 1.15));
+  }
+  /** grade._bw_vig_big: vinieta radial del B/N centrada en (fx, fy) -> multiplicador 0..1. */
+  function vignetteBwAt(u, v, amount, fx, fy) {
+    const x = (u - fx) / 0.62, y = (v - fy) / 0.5;
+    let t = lk01(Math.sqrt(x * x + y * y) - 0.28);
+    t = t * t * (3 - 2 * t);
+    return lk01(1 - lk01(+amount || 0) * t);
+  }
+  /** Centro de la vinieta: el B/N la centra en la cara (un poco abajo), los demas en 0.5, 0.46. */
+  function lookVigCenter(p, face) {
+    const v = (p && p.vig) || {};
+    if (v.shape === "bw") return face ? [+face[0], Math.min(v.max_cy == null ? 0.8 : +v.max_cy, +face[1] + (v.face_dy == null ? 0.12 : +v.face_dy))] : [v.cx == null ? 0.5 : +v.cx, v.cy == null ? 0.45 : +v.cy];
+    return [v.cx == null ? 0.5 : +v.cx, v.cy == null ? 0.46 : +v.cy];
+  }
+  /** np.interp(x, linspace(0, 1, n), shape). */
+  function shapeAt(x, sh) {
+    const n = sh.length - 1;
+    if (x <= 0) return sh[0];
+    if (x >= 1) return sh[n];
+    const f = x * n, i = Math.floor(f);
+    return sh[i] + (sh[Math.min(n, i + 1)] - sh[i]) * (f - i);
+  }
+  /** Inversa de la curva (np.interp(y, shape, linspace(0, 1, n))): la curva es monotona. */
+  function shapeInv(y, sh) {
+    const n = sh.length - 1;
+    if (y <= sh[0]) return 0;
+    if (y >= sh[n]) return 1;
+    let lo = 0, hi = n;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (sh[m] <= y) lo = m; else hi = m; }
+    const d = sh[hi] - sh[lo];
+    return (lo + (d > 0 ? (y - sh[lo]) / d : 0)) / n;
+  }
+  /** np.percentile (interpolacion lineal) de una lista. */
+  function percentileOf(vals, q) {
+    if (!vals.length) return 0;
+    const a = Float64Array.from(vals).sort(), i = (a.length - 1) * q / 100, lo = Math.floor(i), hi = Math.ceil(i);
+    return a[lo] + (a[hi] - a[lo]) * (i - lo);
+  }
+  /** grade._bw_face_gain: ganancia de exposicion del B/N para que la cara (o la escena) quede en su
+      luma objetivo. gray = luma 0..255 (W x H, ya con las tablas por canal); face = [cx, cy, w, h];
+      step = paso del muestreo (el motor: 8 en la escena y 2 en la cara; una muestra chica: 1). */
+  function bwGain(gray, W, H, face, bw, step) {
+    const s8 = step || 8, s2 = step || 2;
+    let val = null, target = bw.scene, k = bw.scene_k;
+    if (face) {
+      const [cx, cy, fw, fh] = face.map(Number);
+      const x0 = Math.max(0, Math.trunc((cx - 0.28 * fw) * W)), x1 = Math.min(W, Math.trunc((cx + 0.28 * fw) * W));
+      const y0 = Math.max(0, Math.trunc((cy - 0.10 * fh) * H)), y1 = Math.min(H, Math.trunc((cy + 0.32 * fh) * H));
+      if (x1 - x0 >= 4 && y1 - y0 >= 4) {
+        const v = [];
+        for (let y = y0; y < y1; y += s2) for (let x = x0; x < x1; x += s2) v.push(gray[y * W + x]);
+        val = percentileOf(v, 60) / 255; target = bw.face; k = bw.face_k;
+      }
+    }
+    if (val == null) {
+      const v = [];
+      for (let y = 0; y < H; y += s8) for (let x = 0; x < W; x += s8) v.push(gray[y * W + x]);
+      val = percentileOf(v, 50) / 255;
+    }
+    return bwGainOf(val, target === bw.face, bw);
+  }
+  /** La ganancia del B/N para una luma medida (0..1) de la cara (face) o de la escena. */
+  function bwGainOf(val, face, bw) {
+    const target = face ? bw.face : bw.scene, k = face ? bw.face_k : bw.scene_k;
+    const g = srgbToLin(shapeInv(target, bw.shape)) / Math.max(1e-3, srgbToLin(Math.max(0.02, val)));
+    return Math.round(Math.pow(Math.min(1.8, Math.max(0.55, g)), k) * 100) / 100;
+  }
+  /** grade.bw_table: tabla gris del B/N con esa ganancia y la halacion de altas luces. */
+  function bwTable(bw, gain) {
+    const out = new Uint8Array(256), sh = bw.shape, glow = bw.glow;
+    for (let i = 0; i < 256; i++) {
+      const xl = srgbToLin(i / 255) * gain;
+      const xe = gain <= 1 ? linToSrgb(Math.min(xl, 1)) : linToSrgb(xl > 0.8 ? 0.8 + 0.2 * Math.tanh((xl - 0.8) / 0.2) : xl);
+      const v = Math.min(255, Math.max(0, Math.round(shapeAt(xe, sh) * 255)));
+      out[i] = Math.min(255, v + (glow ? +glow[v] : 0));
+    }
+    return out;
+  }
+  /** Espera (ms) antes de volver a preguntar por las tablas de cada toma mientras el analisis de
+      fondo no termina (shots_state "pending"): 8 s las primeras 40 veces (~5 min) y luego cada 30 s,
+      sin rendirse nunca (un video largo o 4K puede tardar mas; antes se dejaba de preguntar y la
+      vista nunca igualaba las tomas aunque el export si). */
+  const LOOK_POLL = { fast: 8000, slow: 30000, fastN: 40 };
+  const lookPollDelay = n => ((+n || 0) < LOOK_POLL.fastN ? LOOK_POLL.fast : LOOK_POLL.slow);
+  /** Tablas por canal en el tiempo ORIGINAL t: las de su toma (igualar tomas) o las generales. */
+  function lookShotAt(p, t) {
+    const ps = (p && p.per_shot) || [];
+    if (t == null || !ps.length) return -1;
+    for (let i = 0; i < ps.length; i++) if (t >= ps[i].start && t < ps[i].end) return i;
+    return -1;
+  }
+  function lookTablesAt(p, t) { const i = lookShotAt(p, t); return i >= 0 ? p.per_shot[i] : p.lut; }
+  /** Luma de B/N (mezcla de canales de grade.BW_MIX) de un RGBA ya con las tablas de su toma. */
+  function lookGray(p, data, W, H, T) {
+    const m = p.mix || [0.4, 0.49, 0.11], gray = new Uint8Array(W * H);
+    for (let i = 0, k = 0; i < gray.length; i++, k += 4) gray[i] = Math.min(255, Math.round(m[0] * T.r[data[k]] + m[1] * T.g[data[k + 1]] + m[2] * T.b[data[k + 2]]));
+    return gray;
+  }
+  /** El color del export sobre un RGBA (W x H) EN SITIO. o = {t (tiempo original: tablas de la
+      toma), face ([cx, cy, w, h] del cuadro), gain (B/N; si falta se mide como el motor)}. */
+  function applyLook(p, data, W, H, o) {
+    if (!p || p.enabled === false || !p.lut) return data;
+    const x = o || {}, T = lookTablesAt(p, x.t), amt = lk01(+((p.vig || {}).amount) || 0), [cx, cy] = lookVigCenter(p, x.face);
+    const bwv = p.mono && (p.vig || {}).shape === "bw";
+    const vig = (px, py) => {
+      if (amt <= 0.002) return 255;
+      const m = bwv ? vignetteBwAt(px / W, py / H, amt, cx, cy) : vignetteAt(px / W, py / H, amt, cx, cy);
+      return Math.floor(m * 255 + 0.5);
+    };
+    if (p.mono) {
+      const gray = lookGray(p, data, W, H, T);
+      const tb = bwTable(p.bw, x.gain != null ? +x.gain : bwGain(gray, W, H, x.face, p.bw));
+      for (let y = 0, i = 0; y < H; y++) for (let xx = 0; xx < W; xx++, i++) {
+        const v8 = vig(xx, y), v = Math.round(tb[gray[i]] * v8 / 255), k = i * 4;
+        data[k] = data[k + 1] = data[k + 2] = v;
+      }
+      return data;
+    }
+    const M = p.sat;
+    for (let y = 0, i = 0; y < H; y++) {
+      for (let xx = 0; xx < W; xx++, i++) {
+        const k = i * 4;
+        let r = T.r[data[k]], g = T.g[data[k + 1]], b = T.b[data[k + 2]];
+        if (M) {
+          const r2 = Math.round(M[0][0] * r + M[0][1] * g + M[0][2] * b), g2 = Math.round(M[1][0] * r + M[1][1] * g + M[1][2] * b), b2 = Math.round(M[2][0] * r + M[2][1] * g + M[2][2] * b);
+          r = Math.min(255, Math.max(0, r2)); g = Math.min(255, Math.max(0, g2)); b = Math.min(255, Math.max(0, b2));
+        }
+        const v8 = vig(xx, y);
+        if (v8 !== 255) { r = Math.round(r * v8 / 255); g = Math.round(g * v8 / 255); b = Math.round(b * v8 / 255); }
+        data[k] = r; data[k + 1] = g; data[k + 2] = b;
+      }
+    }
+    return data;
+  }
+  /** "Total con el estilo": lo del estilo de color (ya por su intensidad) + lo que el usuario suma.
+      base = payload.base; key: contrast | vignette | clarity. */
+  function lookTotal(base, user, key) {
+    const b = base || {}, u = user || {};
+    if (key === "contrast") return Math.max(-0.6, Math.min(0.95, (+b.contrast || 0) + (+u.contrast || 0)));
+    if (key === "vignette") return Math.min(1, (+b.vig || 0) + (+u.vignette || 0));
+    if (key === "clarity") return u.clarity != null && u.clarity !== "" ? +u.clarity : +b.clarity || 0;
+    return 0;
+  }
+  /** Ejemplos de los ajustes finos ("Menos · Así · Más"): valores absolutos alrededor del actual,
+      dentro del rango del control. -> {clave: [menos, mas]} (redondeados a 3 decimales). */
+  const LOOK_STEPS = { exposure: [0.5, -1, 1, 0], temperature: [0.7, -1, 1, 0], tint: [0.6, -1, 1, 0], saturation: [0.5, 0, 2, 1],
+    contrast: [0.25, -0.5, 0.5, 0], strength: [0.5, 0, 1.5, 1] };
+  function lookVariants(g, base) {
+    const out = {}, u = g || {}, r3 = v => Math.round(v * 1000) / 1000;
+    Object.entries(LOOK_STEPS).forEach(([k, [d, lo, hi, def]]) => {
+      const cur = u[k] == null || u[k] === "" || !isFinite(+u[k]) ? def : +u[k];
+      out[k] = [r3(Math.max(lo, cur - d)), r3(Math.min(hi, cur + d))];
+    });
+    const cl = lookTotal(base, u, "clarity");
+    out.clarity = [r3(Math.max(0, cl - 0.3)), r3(Math.min(1, cl + 0.3))];
+    return out;
+  }
+
+  // ------------------------------------------------------------------ inspector con claridad (fase 4)
+  /** Tiempo para leer y escribir en el inspector: «m:ss.d» (0:05.2, 1:02.0). */
+  function fmtTime(s) {
+    const d = Math.round(Math.max(0, +s || 0) * 10) / 10, m = Math.floor(d / 60 + 1e-9), sec = d - m * 60;
+    return `${m}:${sec.toFixed(1).padStart(4, "0")}`;
+  }
+  /** Lo que escribe el usuario -> segundos: «1:02.5», «62.5», «62,5», «0:05»; null si no se entiende. */
+  function parseTime(str) {
+    const s = String(str == null ? "" : str).trim().replace(",", ".").replace(/\s*s$/i, "");
+    if (!s) return null;
+    let m = /^(\d+):(\d{1,2}(?:\.\d+)?)$/.exec(s);
+    if (m) { const sec = +m[2]; return sec < 60 ? +m[1] * 60 + sec : null; }
+    m = /^\d+(?:\.\d+)?$/.exec(s);
+    return m ? +s : null;
+  }
+  /** Id de la copy (ui_copy.json) de un parametro del inspector. o = {k, track, kind} | {k, group}
+      (subtitulos, musica) | {k, parent} (campo de una lista). Orden: <pista>.<tipo>.<k>, <pista>.<k>,
+      common.<k> (el contador usa text.counter.<k>). Sin entrada: el ultimo id (copyFor la marca missing). */
+  function paramCopyId(ui, o) {
+    const U = ui || {}, P = U.params || {}, A = U.aliases || {}, k = o.k;
+    const ids = o.parent ? [`${o.parent}.${k}`] : o.group ? [`${o.group}.${k}`] : [`${o.track}.${o.kind}.${k}`, `${o.track}.${k}`, `common.${k}`];
+    for (const i of ids) if (P[i] || (U.ui && U.ui[i]) || (A[i] && P[A[i]])) return i;
+    return ids[ids.length - 1];
+  }
+  /** Campos que de verdad usa cada tipo de tarjeta y de invitacion (graphics.py: _card_rows y los
+      _cta_*). Los campos de la lista que su tipo no usa no se muestran. */
+  const VARIANT_ONLY = {
+    card: ["value", "items", "label", "platform", "display", "logo", "icon"],
+    cta: ["title", "label", "handle", "platform", "display", "subtitle", "icon", "button", "button_done", "button_color", "avatar", "initials", "media", "logo", "width"],
+  };
+  const VARIANT_FIELDS = {
+    card: {
+      generic: ["value", "items", "icon", "logo"], price: ["value", "items", "icon", "logo"], location: ["value", "icon", "logo"],
+      schedule: ["items", "label", "icon", "logo"], link: ["label", "platform", "display", "icon", "logo"],
+      booking: ["label", "platform", "display", "items", "icon", "logo"], phone: ["value", "icon", "logo"],
+      rating: ["value", "icon", "logo"], checklist: ["items"], stat: ["value"],
+    },
+    cta: {
+      follow: ["title", "label", "handle", "platform", "subtitle", "button", "button_done", "button_color", "avatar", "initials", "media", "width"],
+      link_below: ["label", "platform", "display", "icon", "media", "logo", "width"],
+      comment: ["label"], save: ["label"], share: ["label"],
+    },
+  };
+  /** ¿Se muestra el campo `k` en un grafico `kind` con su `variant`? (solo tarjeta e invitacion filtran) */
+  function variantShows(kind, variant, k) {
+    const only = VARIANT_ONLY[kind]; if (!only || !only.includes(k)) return true;
+    const def = kind === "card" ? "generic" : "follow";
+    const f = VARIANT_FIELDS[kind][variant] || VARIANT_FIELDS[kind][def];
+    return f.includes(k);
+  }
+  /** Campos que el inspector no muestra para este elemento: los que su tipo de tarjeta o invitacion no
+      usa, y la duracion y fuerza de un corte (un corte no dura: es instantaneo). */
+  function paramHidden(track, kind, it, k) {
+    if (track === "graphics" && it && !variantShows(it.kind || kind, it.variant, k)) return true;
+    if (track === "transitions" && kind === "cut" && (k === "dur" || k === "intensity")) return true;
+    // colores que el motor no lee en ese tipo (graphics.py): la tarjeta pinta con `accent` (card_theme),
+    // el rotulo con `color` (siempre trae uno: su `accent` nunca se ve), el sticker con bg/fg y la foto
+    // encima no tiene color: esos controles no harian nada
+    // la invitacion «Seguir» solo usa `color` como respaldo del boton (graphics._cta_follow): su
+    // control es «Color del botón» (con el color que de verdad se pinta), no dos filas para lo mismo
+    if (track === "graphics" && it && ((it.kind === "card" && k === "color") || (it.kind === "lower_third" && k === "accent")
+      || ((it.kind === "sticker_text" || it.kind === "media") && k === "color")
+      || (it.kind === "cta" && (it.variant || "follow") === "follow" && k === "color"))) return true;
+    return false;
+  }
+  /** Colores que, vacios, el motor pinta con el color de tu marca (graphics.py: pal["accent"]). */
+  const BRAND_COLOR_KEYS = new Set(["accent", "badge_color", "bg", "button_color"]);
+  function colorFromBrand(track, kind, k) {
+    if (BRAND_COLOR_KEYS.has(k)) return true;
+    return track === "graphics" && k === "color" && ["progress", "doodle"].includes(kind);
+  }
+  /** Opciones relativas del tamaño (×0.8 · ×1 · ×1.25 del tamaño del estilo) en valores del motor. */
+  function relChoices(rel, base) {
+    const b = +base;
+    if (!isFinite(b) || b <= 0) return [];
+    return (rel || []).map(([m, l]) => [Math.round(b * +m * 10000) / 10000, l]);
+  }
+  /** «Traer al frente» (+1) y «Enviar atrás» (-1): z por encima o por debajo de los demas
+      elementos de la pista que se enciman con este. -> z nuevo. */
+  function zStep(list, it, dir) {
+    const a = +it.start, b = +it.end, z0 = +it.z || 0;
+    const zs = (list || []).filter(x => x && x !== it && x.id !== it.id && +x.start < b && +x.end > a).map(x => +x.z || 0);
+    if (!zs.length) return dir > 0 ? z0 + 1 : z0 - 1;
+    return dir > 0 ? Math.max(z0, Math.max(...zs) + 1) : Math.min(z0, Math.min(...zs) - 1);
+  }
+  /** Secciones del inspector para los parametros de un tipo. La «Fuerza» (intensity) va en
+      Animación, no en Tiempo. -> {cont, pos, style, anim} (listas de parametros). */
+  const CONT_KEYS = new Set(["text", "lines", "title", "subtitle", "value", "items", "label", "handle", "text.text", "prefix", "suffix", "from", "to",
+    "decimals", "accent_words", "name", "icon", "variant", "text.preset", "links", "media", "caption", "display", "platform", "button", "button_done",
+    "initials", "avatar", "sep", "src_t"]);
+  const POS_KEYS = new Set(["x", "y", "size", "rotation", "align", "path_to", "anchor", "width", "bar_y", "margin", "tilt", "aspect", "fit", "focus", "zoom", "bend"]);
+  function inspectorGroups(params) {
+    const g = { cont: [], pos: [], style: [], anim: [] };
+    (params || []).forEach(p => {
+      const k = p.k;
+      if (CONT_KEYS.has(k)) g.cont.push(p);
+      else if (POS_KEYS.has(k)) g.pos.push(p);
+      else if (/^anim_|easing|_dur$|^stagger$|^draw_time$|^intensity$/.test(k)) g.anim.push(p);
+      else g.style.push(p);
+    });
+    return g;
+  }
+  /** Unidades de Avanzado en español (nunca Hz ni st). */
+  const UNIT_ES = { Hz: "veces por segundo", st: "semitonos", grados: "°", x: "×", EV: "pasos" };
+  const unitEs = u => (u in UNIT_ES ? UNIT_ES[u] : (u || ""));
+  /** Valor de Avanzado sin formato propio en la copy: con su unidad en español, en % si va de 0 a 1. */
+  function plainValue(p, v) {
+    if (v == null || v === "" || !isFinite(+v)) return "";
+    const x = +v, u = unitEs(p && p.unit);
+    const num = n => { const a = Math.abs(n); const s = a >= 10 || Math.abs(a - Math.round(a)) < 0.005 ? String(Math.round(a)) : (Math.round(a * 100) / 100).toString(); return (n < 0 && s !== "0" ? "−" : "") + s; };
+    if (!u && p && +p.min === 0 && +p.max === 1) return `${num(x * 100)} %`;
+    if (u === "×") return `×${num(x)}`;
+    if (u === "°") return `${num(x)}°`;
+    return u ? `${num(x)} ${u}` : num(x);
+  }
+
   return {
     EXPORT_RES, EXPORT_RES_LABEL, EXPORT_RES_SHORT, EXPORT_QUALITY, EXPORT_QUALITY_LABEL, EXPORT_QUALITY_HINT, EXPORT_DEFAULTS, EXPORT_ERR,
     exportDims, resClass, parseDims, exportMaxRes, exportResOptions, pickExportRes, exportResNote, resLabel,
@@ -3176,5 +3963,14 @@
     keptMarks, unionLen, takeStats, removedByCategory, kindCounts, levelOn, applyLevel, levelFinal,
     setCutEnabled, toggleCut, setCutsEnabled, kindOn, setKindEnabled, reviewItems, cleanSections, scriptParagraphs, listenRange, fmtLen,
     markEdges, adoptTakeCuts, takeReason, isLongLandscape, defaultFormat, projectFormat, shortsFor,
+    spring, pillWordRect, pillAt, contrastOn, CAPTION_ROLES, captionColorRoles, captionStyleNote, captionCardOf, highlightLinked, paintsAccent, engineLum, ctaButtonColor, CTA_BTN_FALLBACK,
+    spokenWords, pickSampleShot, otherShot, sampleWindow, nearestChoice, fillExample, humanNum, humanValue, copyFor, visibleRows,
+    CAPTION_COLOR_IDS, colorName, presetFromPlan, captionGroupsFor,
+    LOOK_ORDER, srgbToLin, linToSrgb, vignetteAt, vignetteBwAt, lookVigCenter, shapeAt, shapeInv, percentileOf, bwGain, bwGainOf, bwTable,
+    lookShotAt, lookTablesAt, lookGray, applyLook, lookTotal, LOOK_STEPS, lookVariants,
+    DIRECTOR_CARDS, DIRECTOR_ORDER, directorCounts, directorExample, musicSourceOf, musicBpmOf, musicBpmSet, KEYSCALES, keyscaleEs,
+    moodSampleUrl, PROFILE_USE, profileUseOf, logoRect, FORMAT_ORDER, FORMAT_SHAPE,
+    fmtTime, parseTime, paramCopyId, VARIANT_FIELDS, variantShows, paramHidden, colorFromBrand, relChoices, zStep, inspectorGroups, unitEs, plainValue,
+    shortsWanted, LOOK_POLL, lookPollDelay, STYLE_FONTS, captionFonts, pillOwn, setPillOwn, colorWhereWords, captionOptionApplies, MONO_LOOKS, GRADE_COLOR_KEYS, gradeOptionApplies, musicReadyText, musicPromptShown, setMusicPrompt, airApplies, GRADE_NEUTRAL, CAP_LOOK, gradeTuned, directorOutcome, directorQueCambia,
   };
 });

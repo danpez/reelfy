@@ -1,0 +1,5821 @@
+{
+ "version": 1,
+ "params": {
+  "captions.preset": {
+   "label": "Estilo de los subtítulos",
+   "help": "Cómo aparecen las palabras y cómo se marca la que estás diciendo.",
+   "level": "basic",
+   "units": "Palabra en color · Karaoke · Pastilla de color · Discreto · Impacto en mayúsculas · Sin subtítulos",
+   "ex": "vivo",
+   "ex_ui": "Galería 3 × 2: cada tarjeta anima tus palabras sobre tu cuadro",
+   "where": "Estilo › Subtítulos"
+  },
+  "captions.enabled": {
+   "label": "Mostrar subtítulos",
+   "help": "Lo reemplaza la tarjeta «Sin subtítulos» de la galería.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Estilo › Subtítulos",
+   "dev": "La tarjeta Sin subtítulos pone enabled=false y conserva preset (volver a un estilo lo restaura)."
+  },
+  "captions.color": {
+   "label": "Color del texto",
+   "help": "Las palabras que no estás diciendo.",
+   "level": "basic",
+   "units": "Muestras de color + «Otro color»",
+   "ex": "vivo",
+   "ex_ui": "Dibujito: «ya está en» con las palabras que pinta este color subrayadas",
+   "where": "Estilo › Subtítulos",
+   "help_by": {
+    "karaoke": "Las palabras que todavía no dices.",
+    "boxed": "Las palabras que quedan fuera de la pastilla.",
+    "minimal_small": "Todas las palabras. Este estilo no resalta ninguna."
+   }
+  },
+  "captions.accent": {
+   "label": "Color de la palabra que dices",
+   "help": "Es el color de tu marca. Cámbialo en «Color de tu marca».",
+   "level": "basic",
+   "units": "Chip «Es el color de tu marca» + botón «Cambiar» (lleva a Color de tu marca)",
+   "ex": "vivo",
+   "ex_ui": "Dibujito con la palabra dicha en este color",
+   "where": "Estilo › Subtítulos (solo estilos que lo usan)",
+   "label_by": {
+    "karaoke": "Color de relleno"
+   },
+   "help_by": {
+    "karaoke": "Cada palabra se llena de este color mientras la dices y así se queda. Es el color de tu marca.",
+    "clean_bold": "La palabra que estás diciendo y una palabra importante por frase. Es el color de tu marca.",
+    "bold_caps": "La palabra que estás diciendo. Es el color de tu marca."
+   }
+  },
+  "captions.highlight": {
+   "label": "Color de la pastilla",
+   "help": "La pastilla que se mueve detrás de la palabra que dices.",
+   "level": "basic",
+   "units": "Casilla «Igual al color de tu marca» (marcada = null) + muestras + «Otro color»",
+   "ex": "vivo",
+   "ex_ui": "Dibujito con la pastilla en este color y la letra en contraste",
+   "where": "Estilo › Subtítulos (solo «Pastilla de color», primera fila)"
+  },
+  "captions.box": {
+   "label": "Caja de fondo",
+   "help": "No se dibuja en ningún lado: se quita de la interfaz.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "—",
+   "dev": "text._cap_cfg guarda D['box'] y nadie lo lee. Si se quiere, futuro estilo «Franja»."
+  },
+  "captions.y": {
+   "label": "Altura",
+   "help": "Dónde van los subtítulos en el video.",
+   "level": "basic",
+   "units": "Básico: Arriba · Centro · Abajo; Avanzado: «73 % desde arriba» (10-90 %)",
+   "ex": "vivo",
+   "ex_ui": "Teléfono con una barra en la altura; al pasar el mouse, una guía en la vista grande",
+   "where": "Estilo › Subtítulos",
+   "basic_choices": [
+    [
+     0.2,
+     "Arriba"
+    ],
+    [
+     0.5,
+     "Centro"
+    ],
+    [
+     0.72,
+     "Abajo"
+    ]
+   ],
+   "adv": {
+    "scale": 100,
+    "fmt": "{v} % desde arriba",
+    "min": 10,
+    "max": 90,
+    "step": 1
+   },
+   "adv_label": "Altura exacta"
+  },
+  "captions.size": {
+   "label": "Tamaño",
+   "help": "Qué tan grandes se ven las letras.",
+   "level": "basic",
+   "units": "Básico: Chico · Mediano · Grande; Avanzado: «6.4 % del ancho» (efectivo, ya con la escala del estilo)",
+   "ex": "vivo",
+   "ex_ui": "«Aa» en tres tamaños",
+   "where": "Estilo › Subtítulos",
+   "basic_choices": [
+    [
+     0.044,
+     "Chico"
+    ],
+    [
+     0.052,
+     "Mediano"
+    ],
+    [
+     0.064,
+     "Grande"
+    ]
+   ],
+   "adv": {
+    "scale": 100,
+    "fmt": "{v} % del ancho",
+    "min": 2,
+    "max": 12,
+    "step": 0.2,
+    "effective": "size*scale"
+   },
+   "adv_label": "Tamaño exacto",
+   "note_by": {
+    "minimal_small": "En «Discreto» se ven 26 % más chicas.",
+    "bold_caps": "En «Impacto en mayúsculas» se ven 28 % más grandes."
+   }
+  },
+  "captions.case": {
+   "label": "Letras",
+   "help": "Cómo se escriben las palabras.",
+   "level": "basic",
+   "units": "Básico: Como lo dices · MAYÚSCULAS · minúsculas; Avanzado agrega: Cada Palabra Con Mayúscula",
+   "ex": "vivo",
+   "ex_ui": "Cada botón escrito en su forma: «Ya está · YA ESTÁ · ya está»",
+   "where": "Estilo › Subtítulos",
+   "note_by": {
+    "bold_caps": "Este estilo siempre usa MAYÚSCULAS (control desactivado)."
+   }
+  },
+  "captions.font": {
+   "label": "Tipo de letra",
+   "help": "La letra de los subtítulos.",
+   "level": "advanced",
+   "units": "",
+   "ex": "vivo",
+   "ex_ui": "Cada opción escrita en su letra: «Ya está»",
+   "where": "Estilo › Subtítulos",
+   "note_by": {
+    "minimal_small": "Este estilo usa su propia letra si dejas la de siempre.",
+    "bold_caps": "Este estilo usa la letra de títulos si dejas la de siempre."
+   }
+  },
+  "captions.max_words": {
+   "label": "Palabras en pantalla",
+   "help": "Cuántas palabras se ven a la vez.",
+   "level": "advanced",
+   "units": "2 · 3 · 4 · 5 · 6",
+   "ex": "texto",
+   "ex_ui": "Ej. con tu guion: «Hoy te muestro · cómo cuidar tus · dientes en casa»",
+   "where": "Estilo › Subtítulos",
+   "ex_tpl": "Ej. con tu guion: «{grupos}»",
+   "dev": "{grupos} = los 3 primeros grupos de FXCore.captionGroups con el max_words efectivo del estilo, unidos con « · ».",
+   "note_by": {
+    "bold_caps": "Este estilo muestra máximo 3."
+   }
+  },
+  "captions.max_lines": {
+   "label": "Renglones",
+   "help": "Cuántos renglones puede ocupar una frase.",
+   "level": "advanced",
+   "units": "Según el estilo · 1 · 2",
+   "ex": "vivo",
+   "ex_ui": "",
+   "where": "Estilo › Subtítulos"
+  },
+  "captions.kw_accent": {
+   "label": "Resaltar una palabra clave",
+   "help": "Una palabra importante de cada frase se queda en tu color.",
+   "level": "advanced",
+   "units": "Según el estilo · Sí · No (tres opciones; nunca un interruptor que se ve apagado cuando está activo)",
+   "ex": "vivo",
+   "ex_ui": "Tus palabras, con la palabra clave de cada frase en tu color",
+   "where": "Estilo › Subtítulos",
+   "note_by": {
+    "clean_bold": "«Palabra en color» ya lo hace.",
+    "karaoke": "En «Karaoke» cada palabra se llena de tu color: la palabra clave no se distingue."
+   }
+  },
+  "captions.recenter": {
+   "label": "Centrar la frase mientras aparece",
+   "help": "Mientras salen las palabras, la frase se mantiene centrada.",
+   "level": "advanced",
+   "units": "Según el estilo · Sí · No",
+   "ex": "loop",
+   "ex_ui": "Antes y después en bucle",
+   "where": "Estilo › Subtítulos",
+   "note_by": {
+    "karaoke": "En «Karaoke» la frase sale completa: no hay nada que centrar.",
+    "boxed": "En «Pastilla de color» la frase sale completa: no hay nada que centrar."
+   }
+  },
+  "captions.stroke": {
+   "label": "Borde negro",
+   "help": "Una orilla negra alrededor de cada letra; ayuda sobre fondos claros.",
+   "level": "advanced",
+   "units": "Según el estilo · Sin · Delgado · Grueso",
+   "ex": "vivo",
+   "ex_ui": "",
+   "where": "Estilo › Subtítulos",
+   "basic_choices": [
+    [
+     null,
+     "Según el estilo"
+    ],
+    [
+     0,
+     "Sin"
+    ],
+    [
+     3,
+     "Delgado"
+    ],
+    [
+     6,
+     "Grueso"
+    ]
+   ]
+  },
+  "captions.shadow": {
+   "label": "Sombra",
+   "help": "Sombra suave detrás de las letras para que se lean mejor.",
+   "level": "advanced",
+   "units": "Según el estilo · Sin · Suave · Fuerte",
+   "ex": "vivo",
+   "ex_ui": "",
+   "where": "Estilo › Subtítulos",
+   "basic_choices": [
+    [
+     null,
+     "Según el estilo"
+    ],
+    [
+     0,
+     "Sin"
+    ],
+    [
+     0.5,
+     "Suave"
+    ],
+    [
+     1.0,
+     "Fuerte"
+    ]
+   ]
+  },
+  "captions.hide_during_titles": {
+   "label": "Esconder subtítulos cuando hay un título",
+   "help": "Para que no se encimen con los títulos grandes.",
+   "level": "advanced",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Estilo › Subtítulos"
+  },
+  "captions.x": {
+   "label": "Posición horizontal",
+   "help": "Se quita: los subtítulos siempre van centrados (regla de simetría).",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "—",
+   "dev": "Planes viejos con x≠0.5 se dejan como están; el control desaparece."
+  },
+  "captions.y_ranges": {
+   "label": "Mover los subtítulos en una parte del video",
+   "help": "Súbelos o bájalos solo en un tramo, por ejemplo cuando sales de cuerpo completo.",
+   "level": "advanced",
+   "units": "Desde · Hasta (botón «Aquí» con el cursor, m:ss del video final) · Arriba / Centro / Abajo",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Subtítulos (depende del tiempo)"
+  },
+  "captions.y_ranges.start": {
+   "label": "Desde",
+   "help": "Cuándo empieza el tramo.",
+   "level": "advanced",
+   "units": "m:ss + «Aquí»",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Subtítulos"
+  },
+  "captions.y_ranges.end": {
+   "label": "Hasta",
+   "help": "Cuándo termina el tramo.",
+   "level": "advanced",
+   "units": "m:ss + «Aquí»",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Subtítulos"
+  },
+  "captions.y_ranges.y": {
+   "label": "Altura en ese tramo",
+   "help": "Dónde van los subtítulos solo en ese tramo.",
+   "level": "advanced",
+   "units": "Arriba · Centro · Abajo · %",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Subtítulos"
+  },
+  "grade.enabled": {
+   "label": "Ajustar el color",
+   "help": "Apágalo para dejar el color tal como salió de la cámara.",
+   "level": "advanced",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Estilo › Color del video"
+  },
+  "grade.look": {
+   "label": "Estilo de color",
+   "help": "El tono de toda la imagen. Cada foto es tu video con ese estilo.",
+   "level": "basic",
+   "units": "Natural · Cálido · Cine · Vivo · Oscuro dramático · Blanco y negro",
+   "ex": "antes_despues",
+   "ex_ui": "Rejilla 3 × 2 con tu cuadro hecho por el motor; «Comparar con el original» en la vista grande",
+   "where": "Estilo › Color del video"
+  },
+  "grade.match_shots": {
+   "label": "Igualar el color entre tomas",
+   "help": "Que todas las tomas se vean con la misma luz y el mismo tono de piel.",
+   "level": "basic",
+   "units": "",
+   "ex": "antes_despues",
+   "ex_ui": "Dos tomas lado a lado, sin y con",
+   "where": "Estilo › Color del video"
+  },
+  "grade.strength": {
+   "label": "Intensidad del estilo de color",
+   "help": "Qué tanto se nota el estilo elegido. 0 % es como salió de la cámara.",
+   "level": "advanced",
+   "units": "0-150 %",
+   "ex": "antes_despues",
+   "ex_ui": "",
+   "where": "Estilo › Color del video",
+   "adv": {
+    "scale": 100,
+    "fmt": "{v} %",
+    "min": 0,
+    "max": 150,
+    "step": 5
+   }
+  },
+  "grade.exposure": {
+   "label": "Brillo",
+   "help": "Más oscuro o más claro.",
+   "level": "basic",
+   "units": "Más oscuro ↔ Más claro (−100 a +100; 0 = Normal)",
+   "ex": "antes_despues",
+   "ex_ui": "Tres miniaturas del motor: Menos · Así · Más",
+   "where": "Estilo › Color del video",
+   "adv": {
+    "scale": 100,
+    "fmt": "{v}",
+    "min": -100,
+    "max": 100,
+    "step": 5,
+    "zero": "Normal"
+   }
+  },
+  "grade.temperature": {
+   "label": "Calidez",
+   "help": "Tono más azul (frío) o más naranja (cálido).",
+   "level": "basic",
+   "units": "Frío ↔ Cálido (−100 a +100; 0 = Normal)",
+   "ex": "antes_despues",
+   "ex_ui": "Tres miniaturas del motor: Frío · Así · Cálido",
+   "where": "Estilo › Color del video",
+   "adv": {
+    "scale": 100,
+    "fmt": "{v}",
+    "min": -100,
+    "max": 100,
+    "step": 5,
+    "zero": "Normal"
+   },
+   "note_by": {
+    "bw_contrast": "En «Blanco y negro» no hay color que calentar o enfriar."
+   }
+  },
+  "grade.tint": {
+   "label": "Tinte",
+   "help": "Corrige un tono verdoso o rosado de la luz.",
+   "level": "advanced",
+   "units": "Verde ↔ Rosado (−100 a +100)",
+   "ex": "antes_despues",
+   "ex_ui": "Tres miniaturas: Verde · Así · Rosado",
+   "where": "Estilo › Color del video",
+   "adv": {
+    "scale": 100,
+    "fmt": "{v}",
+    "min": -100,
+    "max": 100,
+    "step": 5,
+    "zero": "Normal"
+   },
+   "note_by": {
+    "bw_contrast": "En «Blanco y negro» no hay tono verde o rosado que corregir."
+   }
+  },
+  "grade.saturation": {
+   "label": "Intensidad de los colores",
+   "help": "Colores más apagados o más fuertes. La piel se protege.",
+   "level": "advanced",
+   "units": "0-200 % (100 % = Normal)",
+   "ex": "antes_despues",
+   "ex_ui": "Tres miniaturas: Menos · Así · Más",
+   "where": "Estilo › Color del video",
+   "adv": {
+    "scale": 100,
+    "fmt": "{v} %",
+    "min": 0,
+    "max": 200,
+    "step": 5
+   },
+   "note_by": {
+    "bw_contrast": "En «Blanco y negro» no hay colores que avivar o apagar."
+   }
+  },
+  "grade.contrast": {
+   "label": "Contraste",
+   "help": "Diferencia entre lo claro y lo oscuro. Se suma al contraste del estilo.",
+   "level": "advanced",
+   "units": "−100 a +100 % + «Total con el estilo: +18 %»",
+   "ex": "antes_despues",
+   "ex_ui": "",
+   "where": "Estilo › Color del video",
+   "adv": {
+    "scale": 200,
+    "fmt": "{v} %",
+    "min": -100,
+    "max": 100,
+    "step": 5,
+    "total": "look.contrast"
+   }
+  },
+  "grade.clarity": {
+   "label": "Definición",
+   "help": "Marca más los detalles y la textura de la piel y la ropa.",
+   "level": "advanced",
+   "units": "Según el estilo · % (0-100)",
+   "ex": "antes_despues",
+   "ex_ui": "",
+   "where": "Estilo › Color del video"
+  },
+  "grade.vignette": {
+   "label": "Orillas oscuras",
+   "help": "Oscurece un poco las orillas para centrar la mirada. Se suma a la del estilo.",
+   "level": "advanced",
+   "units": "Sin · Suave · Fuerte + «Total con el estilo»",
+   "ex": "antes_despues",
+   "ex_ui": "",
+   "where": "Estilo › Color del video",
+   "basic_choices": [
+    [
+     0,
+     "Sin"
+    ],
+    [
+     0.12,
+     "Suave"
+    ],
+    [
+     0.3,
+     "Fuerte"
+    ]
+   ]
+  },
+  "grade.grain": {
+   "label": "Grano de película",
+   "help": "Textura fina tipo película. En miniatura casi no se nota.",
+   "level": "advanced",
+   "units": "Sin · Fino · Marcado",
+   "ex": "antes_despues",
+   "ex_ui": "Recorte al 200 %: Sin · Con",
+   "where": "Estilo › Color del video",
+   "basic_choices": [
+    [
+     0,
+     "Sin"
+    ],
+    [
+     0.02,
+     "Fino"
+    ],
+    [
+     0.06,
+     "Marcado"
+    ]
+   ]
+  },
+  "grade.sharpen": {
+   "label": "Nitidez",
+   "help": "Marca más los bordes. Mucha nitidez hace que la imagen se vea artificial.",
+   "level": "advanced",
+   "units": "Sin · Suave · Fuerte",
+   "ex": "antes_despues",
+   "ex_ui": "Recorte al 200 %",
+   "where": "Estilo › Color del video",
+   "basic_choices": [
+    [
+     0,
+     "Sin"
+    ],
+    [
+     0.15,
+     "Suave"
+    ],
+    [
+     0.4,
+     "Fuerte"
+    ]
+   ]
+  },
+  "director.style": {
+   "label": "Estilo de edición",
+   "help": "Cambia títulos, efectos, color y música de todo el video. Lo que protegiste no se toca.",
+   "level": "basic",
+   "units": "Dinámico · Elegante · Minimal · Energético",
+   "ex": "loop",
+   "ex_ui": "Tarjeta con bucle de 3 s (subtítulo, título, transición y color del estilo) + lista «Qué cambia»",
+   "where": "Estilo › Edición con IA"
+  },
+  "director.intensity": {
+   "label": "Cantidad de efectos",
+   "help": "Cuántos títulos, zooms, efectos y sonidos pone la IA.",
+   "level": "basic",
+   "units": "Básico: Poca · Media · Mucha; Avanzado: %",
+   "ex": "texto",
+   "ex_ui": "Ej.: Con «Media», tu video de 1:30 lleva 20 títulos, 12 gráficos y 40 efectos",
+   "where": "Estilo › Edición con IA",
+   "ex_tpl": "Ej.: Con «{nivel}», tu video de {dur} lleva {titulos} títulos, {graficos} gráficos y {efectos} efectos",
+   "dev": "Conteo real del plan abierto: items de fx.text, fx.graphics y fx.effects; {dur} = duración final en m:ss.",
+   "basic_choices": [
+    [
+     0.4,
+     "Poca"
+    ],
+    [
+     0.75,
+     "Media"
+    ],
+    [
+     0.95,
+     "Mucha"
+    ]
+   ],
+   "adv": {
+    "scale": 100,
+    "fmt": "{v} %",
+    "min": 0,
+    "max": 100,
+    "step": 5
+   }
+  },
+  "director.seed": {
+   "label": "Variación",
+   "help": "Lo maneja el botón «Probar otra versión».",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Estilo › Edición con IA"
+  },
+  "music.enabled": {
+   "label": "Música activa",
+   "help": "Lo reemplaza la opción «Sin música».",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Estilo › Música"
+  },
+  "music.source": {
+   "label": "Música de fondo",
+   "help": "De dónde sale la música del video.",
+   "level": "basic",
+   "units": "Creada con IA · Rápida (sin IA) · De la biblioteca · Tu canción · Sin música",
+   "ex": "audio",
+   "ex_ui": "Escuchar en cada opción",
+   "where": "Estilo › Música"
+  },
+  "music.track": {
+   "label": "Canción de la biblioteca",
+   "help": "Elige una; toca Escuchar para oírla antes.",
+   "level": "basic",
+   "units": "",
+   "ex": "audio",
+   "ex_ui": "Escuchar en cada fila (ya existe)",
+   "where": "Estilo › Música (solo «De la biblioteca»)"
+  },
+  "music.file": {
+   "label": "Tu canción",
+   "help": "Un archivo de música tuyo (MP3, M4A o WAV).",
+   "level": "basic",
+   "units": "",
+   "ex": "audio",
+   "ex_ui": "",
+   "where": "Estilo › Música (solo «Tu canción»)",
+   "dev": "El motor ya lo soporta; el build agrega el selector con /sources. Si no se alcanza, la opción no se muestra."
+  },
+  "music.prompt": {
+   "label": "Describe la música (opcional)",
+   "help": "Género y energía, en tus palabras. Siempre sale sin voz.",
+   "level": "advanced",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: pop alegre · piano elegante · electrónica tranquila",
+   "where": "Estilo › Música (solo «Creada con IA»)",
+   "dev": "Los tres ejemplos son botones que llenan el campo. El prompt en inglés que escribe el director nunca se muestra; si viene de la IA, el campo queda vacío con «La eligió la IA según el estilo»."
+  },
+  "music.mood": {
+   "label": "Ambiente de la música",
+   "help": "El tipo de música de fondo. Toca Escuchar para oír una muestra antes de elegir.",
+   "level": "basic",
+   "units": "Automático · Alegre · Tranquila · Inspiradora · Seria · Divertida · Dramática",
+   "ex": "audio",
+   "ex_ui": "Muestra de 6 s por ambiente (rápida, sin IA; aviso: la final puede variar)",
+   "where": "Estilo › Música"
+  },
+  "music.bpm": {
+   "label": "Ritmo",
+   "help": "Qué tan rápida va la música.",
+   "level": "advanced",
+   "units": "Automático · Lento · Medio · Rápido (85 / 110 / 128 pulsos por minuto)",
+   "ex": "audio",
+   "ex_ui": "",
+   "where": "Estilo › Música",
+   "basic_choices": [
+    [
+     0,
+     "Automático"
+    ],
+    [
+     85,
+     "Lento"
+    ],
+    [
+     110,
+     "Medio"
+    ],
+    [
+     128,
+     "Rápido"
+    ]
+   ],
+   "dev": "Elegir Medio pone bpm_lock=true (si no, 110 cuenta como automático)."
+  },
+  "music.bpm_lock": {
+   "label": "Forzar ritmo",
+   "help": "Lo maneja el control Ritmo.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Estilo › Música"
+  },
+  "music.keyscale": {
+   "label": "Tonalidad",
+   "help": "La nota base de la canción. Déjalo en automático si no sabes.",
+   "level": "advanced",
+   "units": "Automático · Do mayor … Si menor",
+   "ex": "texto",
+   "ex_ui": "Ej.: La mayor",
+   "where": "Estilo › Música",
+   "dev": "El motor recibe la tonalidad en inglés (p. ej. La mayor = A major); la UI nunca la muestra así."
+  },
+  "music.seed": {
+   "label": "Otra variación",
+   "help": "Otra canción con el mismo pedido.",
+   "level": "advanced",
+   "units": "Botón (no un número)",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Estilo › Música"
+  },
+  "music.ending": {
+   "label": "Final de la música",
+   "help": "Cómo termina la canción al final del video.",
+   "level": "advanced",
+   "units": "Automático · Natural · Con golpe · Desvanecido",
+   "ex": "audio",
+   "ex_ui": "Escuchar los últimos 3 s",
+   "where": "Estilo › Música"
+  },
+  "music.drop_at": {
+   "label": "Golpe principal aquí",
+   "help": "El momento en que la música entra con fuerza.",
+   "level": "advanced",
+   "units": "m:ss del video final + botón «Aquí»",
+   "ex": "audio",
+   "ex_ui": "Escuchar ±2 s",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "music.gain_db": {
+   "label": "Volumen de la música",
+   "help": "Qué tan fuerte suena bajo tu voz. Sube sola en las pausas.",
+   "level": "basic",
+   "units": "Básico: Baja · Media · Alta; Avanzado: dB",
+   "ex": "audio",
+   "ex_ui": "Escuchar 5 s con tu voz",
+   "where": "Estilo › Música",
+   "basic_choices": [
+    [
+     -22,
+     "Baja"
+    ],
+    [
+     -17,
+     "Media"
+    ],
+    [
+     -12,
+     "Alta"
+    ]
+   ]
+  },
+  "music.duck_db": {
+   "label": "Cuánto sube en las pausas",
+   "help": "Cuando dejas de hablar, la música sube este tanto.",
+   "level": "advanced",
+   "units": "Poco · Normal · Mucho",
+   "ex": "audio",
+   "ex_ui": "",
+   "where": "Estilo › Música",
+   "basic_choices": [
+    [
+     -5,
+     "Poco"
+    ],
+    [
+     -9,
+     "Normal"
+    ],
+    [
+     -14,
+     "Mucho"
+    ]
+   ]
+  },
+  "music.voice_carve_db": {
+   "label": "Dejar espacio a la voz",
+   "help": "Baja un poco la música justo en los tonos de la voz para que se entienda mejor.",
+   "level": "advanced",
+   "units": "Poco · Normal · Mucho",
+   "ex": "audio",
+   "ex_ui": "",
+   "where": "Estilo › Música",
+   "basic_choices": [
+    [
+     -1.5,
+     "Poco"
+    ],
+    [
+     -3,
+     "Normal"
+    ],
+    [
+     -6,
+     "Mucho"
+    ]
+   ]
+  },
+  "music.intro_fade": {
+   "label": "Cómo empieza",
+   "help": "Con su golpe inicial o subiendo poco a poco.",
+   "level": "advanced",
+   "units": "Con golpe · Suave (1 s) · Lento (3 s)",
+   "ex": "audio",
+   "ex_ui": "Escuchar el inicio",
+   "where": "Estilo › Música",
+   "basic_choices": [
+    [
+     0,
+     "Con golpe"
+    ],
+    [
+     1.0,
+     "Suave"
+    ],
+    [
+     3.0,
+     "Lento"
+    ]
+   ]
+  },
+  "music.fade_out": {
+   "label": "Final antes del último cuadro",
+   "help": "Cuánto antes del final cae el último golpe o se desvanece.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "audio",
+   "ex_ui": "Escuchar el final",
+   "where": "Estilo › Música"
+  },
+  "music.stops": {
+   "label": "Pausa dramática",
+   "help": "La música se detiene un momento para dar énfasis.",
+   "level": "advanced",
+   "units": "Momento (m:ss) · Duración (s) · Cómo para: Frenado / Corte seco · Regreso: Suave / De golpe",
+   "ex": "audio",
+   "ex_ui": "Escuchar ±2 s",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "music.stops.at": {
+   "label": "Momento",
+   "help": "Cuándo se detiene la música, en el tiempo de tu video.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "music.stops.dur": {
+   "label": "Cuánto dura",
+   "help": "Cuánto tiempo se queda la música en silencio.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "music.stops.mode": {
+   "label": "Cómo para",
+   "help": "Frenado: la canción se frena poco a poco. Corte seco: se calla de golpe.",
+   "level": "advanced",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "music.stops.fade": {
+   "label": "Frenado",
+   "help": "Cuánto tarda la música en frenarse antes del silencio.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "music.stops.fade_back": {
+   "label": "Regreso",
+   "help": "Cuánto tarda la música en volver después del silencio.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "music.swells": {
+   "label": "Subir la música aquí",
+   "help": "Sube el volumen en un tramo, por ejemplo al final.",
+   "level": "advanced",
+   "units": "Desde · Hasta (m:ss) · Cuánto: Poco / Mucho",
+   "ex": "audio",
+   "ex_ui": "Escuchar ±2 s",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "music.swells.start": {
+   "label": "Desde",
+   "help": "Dónde empieza a subir la música, en el tiempo de tu video.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "music.swells.end": {
+   "label": "Hasta",
+   "help": "Dónde vuelve la música a su volumen normal.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "music.swells.db": {
+   "label": "Cuánto sube",
+   "help": "Cuánto más fuerte suena la música en este tramo.",
+   "level": "advanced",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "music.swells.ramp": {
+   "label": "Entrada",
+   "help": "Qué tan rápido sube y baja el volumen en las orillas del tramo.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Música (depende del tiempo)"
+  },
+  "common.start": {
+   "label": "Empieza",
+   "help": "Cuándo aparece, en el tiempo del video final.",
+   "level": "basic",
+   "units": "m:ss + botón «Aquí» (cursor)",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › (cualquier pista)"
+  },
+  "common.end": {
+   "label": "Termina",
+   "help": "Cuándo se va, en el tiempo del video final.",
+   "level": "basic",
+   "units": "m:ss + botón «Aquí» (cursor)",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › (cualquier pista)"
+  },
+  "common.at": {
+   "label": "Momento",
+   "help": "Cuándo ocurre, en el tiempo del video final.",
+   "level": "basic",
+   "units": "m:ss + botón «Aquí»",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › (cualquier pista) (transiciones y sonidos)"
+  },
+  "common.enabled": {
+   "label": "Visible",
+   "help": "Apágalo para esconderlo sin borrarlo.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › encabezado"
+  },
+  "common.locked": {
+   "label": "Proteger de la IA",
+   "help": "La IA no lo cambia ni lo borra cuando rehaces la edición.",
+   "level": "basic",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › encabezado"
+  },
+  "common.intensity": {
+   "label": "Fuerza",
+   "help": "Qué tanto se nota la animación de entrada o el efecto.",
+   "level": "advanced",
+   "units": "Suave · Media · Fuerte (Avanzado: %)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Animación",
+   "basic_choices": [
+    [
+     0.5,
+     "Suave"
+    ],
+    [
+     0.75,
+     "Media"
+    ],
+    [
+     1.0,
+     "Fuerte"
+    ]
+   ],
+   "level_by": {
+    "effects": "basic"
+   },
+   "dev": "Se muda de la sección «Tiempo» a «Animación». En efectos es Básico (tipo + fuerza)."
+  },
+  "common.z": {
+   "label": "Delante / Detrás",
+   "help": "Qué elemento queda encima cuando se enciman.",
+   "level": "advanced",
+   "units": "Traer al frente · Enviar atrás",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Avanzado"
+  },
+  "text.text": {
+   "label": "Texto",
+   "help": "Lo que dice el título. Enter hace un renglón nuevo.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título"
+  },
+  "text.lines": {
+   "label": "Renglones con estilo propio",
+   "help": "Cambia tamaño, letra o color de un renglón sin tocar los demás.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título"
+  },
+  "text.lines.text": {
+   "label": "Texto del renglón",
+   "help": "Lo que dice ese renglón.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título"
+  },
+  "text.lines.scale": {
+   "label": "Tamaño del renglón",
+   "help": "Más grande o más chico que los demás.",
+   "level": "advanced",
+   "units": "× (1 = igual que los demás)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título"
+  },
+  "text.lines.font": {
+   "label": "Letra del renglón",
+   "help": "Si no eliges una, usa la del título.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título"
+  },
+  "text.lines.color": {
+   "label": "Color del renglón",
+   "help": "Si no eliges uno, usa el del título.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título"
+  },
+  "text.lines.italic": {
+   "label": "Cursiva",
+   "help": "Inclina las letras de ese renglón.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título"
+  },
+  "text.accent_words": {
+   "label": "Palabras destacadas",
+   "help": "Toca las palabras que quieres en tu color.",
+   "level": "basic",
+   "units": "",
+   "ex": "vivo",
+   "ex_ui": "Las palabras del título como botones",
+   "where": "Elemento › Título"
+  },
+  "text.accent": {
+   "label": "Color de las palabras destacadas",
+   "help": "Si no eliges uno, usa el color de tu marca.",
+   "level": "basic",
+   "units": "Muestras con «Color de tu marca» (muestra el color real, nunca un blanco falso)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título",
+   "label_by": {
+    "highlight_marker": "Color del marcador",
+    "kicker": "Color de la etiqueta",
+    "typewriter": "Color del cursor"
+   },
+   "help_by": {
+    "serif_elegant": "En «Elegante» lo destacado va en cursiva; elige un color solo si lo quieres de color."
+   }
+  },
+  "text.box": {
+   "label": "Fondo detrás del texto",
+   "help": "Una franja de color detrás de cada renglón.",
+   "level": "basic",
+   "units": "Sin fondo · color",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título",
+   "label_by": {
+    "highlight_marker": "Franja del marcatextos"
+   }
+  },
+  "text.color": {
+   "label": "Color del texto",
+   "help": "El color de las letras.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título"
+  },
+  "text.x": {
+   "label": "Posición horizontal",
+   "help": "Se quita del panel: los títulos van centrados (simetría). Arrastrar en el video se pega al centro.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "—"
+  },
+  "text.y": {
+   "label": "Altura",
+   "help": "Dónde va el título en el video.",
+   "level": "basic",
+   "units": "Básico: Arriba · Centro · Abajo; Avanzado: % desde arriba (también se arrastra en el video)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título",
+   "basic_choices": [
+    [
+     0.22,
+     "Arriba"
+    ],
+    [
+     0.45,
+     "Centro"
+    ],
+    [
+     0.66,
+     "Abajo"
+    ]
+   ],
+   "adv": {
+    "scale": 100,
+    "fmt": "{v} % desde arriba",
+    "min": 0,
+    "max": 100,
+    "step": 1
+   },
+   "adv_label": "Altura exacta"
+  },
+  "text.size": {
+   "label": "Tamaño",
+   "help": "Qué tan grande se ve.",
+   "level": "basic",
+   "units": "Básico: Chico · Mediano · Grande (×0.8 · ×1 · ×1.25 del tamaño del estilo); Avanzado: % del ancho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título",
+   "adv": {
+    "scale": 100,
+    "fmt": "{v} % del ancho",
+    "min": 2,
+    "max": 45,
+    "step": 0.5
+   },
+   "adv_label": "Tamaño exacto",
+   "relative_choices": [
+    [
+     0.8,
+     "Chico"
+    ],
+    [
+     1.0,
+     "Mediano"
+    ],
+    [
+     1.25,
+     "Grande"
+    ]
+   ]
+  },
+  "text.font": {
+   "label": "Tipo de letra",
+   "help": "La letra del título.",
+   "level": "advanced",
+   "units": "",
+   "ex": "vivo",
+   "ex_ui": "Cada opción escrita en su letra",
+   "where": "Elemento › Título"
+  },
+  "text.align": {
+   "label": "Alinear renglones",
+   "help": "Cómo se alinean los renglones entre sí; el bloque siempre va centrado.",
+   "level": "advanced",
+   "units": "Izquierda · Centro · Derecha",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título"
+  },
+  "text.stroke": {
+   "label": "Borde",
+   "help": "Una orilla alrededor de las letras.",
+   "level": "advanced",
+   "units": "Sin · Delgado · Grueso",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título",
+   "basic_choices": [
+    [
+     0,
+     "Sin"
+    ],
+    [
+     4,
+     "Delgado"
+    ],
+    [
+     10,
+     "Grueso"
+    ]
+   ]
+  },
+  "text.shadow": {
+   "label": "Sombra",
+   "help": "Sombra suave para que se lea sobre fondos claros.",
+   "level": "advanced",
+   "units": "Sin · Suave · Fuerte",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título",
+   "basic_choices": [
+    [
+     0,
+     "Sin"
+    ],
+    [
+     0.35,
+     "Suave"
+    ],
+    [
+     0.8,
+     "Fuerte"
+    ]
+   ]
+  },
+  "text.anim_in": {
+   "label": "Cómo entra",
+   "help": "La animación con que aparece.",
+   "level": "basic",
+   "units": "",
+   "ex": "loop",
+   "ex_ui": "Bucle de 1 s al pasar el mouse por cada opción",
+   "where": "Elemento › Título › Animación"
+  },
+  "text.anim_out": {
+   "label": "Cómo sale",
+   "help": "La animación con que se va.",
+   "level": "basic",
+   "units": "",
+   "ex": "loop",
+   "ex_ui": "",
+   "where": "Elemento › Título › Animación"
+  },
+  "text.behind": {
+   "label": "Detrás de la persona",
+   "help": "El texto queda detrás de ti, como si estuviera en el fondo.",
+   "level": "basic",
+   "units": "",
+   "ex": "antes_despues",
+   "ex_ui": "Antes y después con tu cuadro (exacto al pausar)",
+   "where": "Elemento › Título"
+  },
+  "text.counter.from": {
+   "label": "Número inicial",
+   "help": "Desde dónde empieza a contar.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título (Contador)"
+  },
+  "text.counter.to": {
+   "label": "Número final",
+   "help": "Dónde termina la cuenta.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título (Contador)"
+  },
+  "text.counter.prefix": {
+   "label": "Antes del número",
+   "help": "Texto pegado antes del número.",
+   "level": "basic",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: $",
+   "where": "Elemento › Título (Contador)"
+  },
+  "text.counter.suffix": {
+   "label": "Después del número",
+   "help": "Texto pegado después del número.",
+   "level": "basic",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: %, mil, clientes",
+   "where": "Elemento › Título (Contador)"
+  },
+  "text.counter.decimals": {
+   "label": "Decimales",
+   "help": "Cuántos decimales se ven.",
+   "level": "advanced",
+   "units": "0 · 1 · 2 · 3",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título (Contador)"
+  },
+  "text.counter.sep": {
+   "label": "Separador de miles",
+   "help": "El signo entre miles.",
+   "level": "advanced",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: 1,000 o 1.000",
+   "where": "Elemento › Título (Contador)"
+  },
+  "text.counter.anchor": {
+   "label": "Crece desde",
+   "help": "Hacia dónde crece el número mientras cuenta. Al centro queda simétrico.",
+   "level": "advanced",
+   "units": "Centro · Izquierda · Derecha",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título (Contador)"
+  },
+  "text.counter.count_dur": {
+   "label": "Duración del conteo",
+   "help": "Cuánto tarda en contar. Si lo dejas vacío, se calcula solo.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Título (Contador)"
+  },
+  "graphics.x": {
+   "label": "Posición horizontal",
+   "help": "Mueve el gráfico a los lados. Fuera del centro no queda simétrico.",
+   "level": "advanced",
+   "units": "% desde la izquierda (50 % = centro, con imán al centro)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.y": {
+   "label": "Altura",
+   "help": "Dónde va en el video.",
+   "level": "basic",
+   "units": "Arriba · Centro · Abajo (Avanzado: %)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico",
+   "basic_choices": [
+    [
+     0.22,
+     "Arriba"
+    ],
+    [
+     0.45,
+     "Centro"
+    ],
+    [
+     0.66,
+     "Abajo"
+    ]
+   ]
+  },
+  "graphics.size": {
+   "label": "Tamaño",
+   "help": "Qué tan grande se ve.",
+   "level": "basic",
+   "units": "Chico · Mediano · Grande (Avanzado: % del ancho)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico",
+   "relative_choices": [
+    [
+     0.75,
+     "Chico"
+    ],
+    [
+     1.0,
+     "Mediano"
+    ],
+    [
+     1.3,
+     "Grande"
+    ]
+   ]
+  },
+  "graphics.color": {
+   "label": "Color",
+   "help": "El color principal del gráfico.",
+   "level": "basic",
+   "units": "Muestras con «Color de tu marca» (muestra el color real)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.anim_in": {
+   "label": "Cómo entra",
+   "help": "La animación con que aparece.",
+   "level": "basic",
+   "units": "",
+   "ex": "loop",
+   "ex_ui": "Bucle de 1 s por opción",
+   "where": "Elemento › Gráfico › Animación"
+  },
+  "graphics.anim_out": {
+   "label": "Cómo sale",
+   "help": "La animación con que se va.",
+   "level": "basic",
+   "units": "",
+   "ex": "loop",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico › Animación"
+  },
+  "graphics.rotation": {
+   "label": "Inclinación",
+   "help": "Gira el gráfico.",
+   "level": "advanced",
+   "units": "grados",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.in_dur": {
+   "label": "Duración de la entrada",
+   "help": "Cuánto tarda en aparecer. Si lo dejas vacío, se calcula solo.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico › Animación"
+  },
+  "graphics.out_dur": {
+   "label": "Duración de la salida",
+   "help": "Cuánto tarda en irse. Si lo dejas vacío, se calcula solo.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico › Animación"
+  },
+  "graphics.name": {
+   "label": "Figura",
+   "help": "Qué trazo se dibuja.",
+   "level": "basic",
+   "units": "",
+   "ex": "loop",
+   "ex_ui": "Rejilla de figuras, cada una dibujándose",
+   "where": "Elemento › Gráfico (Trazo a mano)",
+   "label_by": {
+    "icon": "Ícono"
+   },
+   "help_by": {
+    "icon": "Busca un ícono por nombre."
+   }
+  },
+  "graphics.stroke": {
+   "label": "Grosor del trazo",
+   "help": "Qué tan grueso es el trazo.",
+   "level": "advanced",
+   "units": "Delgado · Medio · Grueso",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Trazo a mano)",
+   "basic_choices": [
+    [
+     6,
+     "Delgado"
+    ],
+    [
+     12,
+     "Medio"
+    ],
+    [
+     20,
+     "Grueso"
+    ]
+   ]
+  },
+  "graphics.draw": {
+   "label": "Se dibuja solo",
+   "help": "El trazo aparece como si lo dibujaran.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.wiggle": {
+   "label": "Temblor a mano",
+   "help": "Qué tan imperfecto se ve el trazo, como hecho a mano.",
+   "level": "advanced",
+   "units": "Sin · Poco · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Trazo a mano)",
+   "basic_choices": [
+    [
+     0,
+     "Sin"
+    ],
+    [
+     0.5,
+     "Poco"
+    ],
+    [
+     1.0,
+     "Mucho"
+    ]
+   ]
+  },
+  "graphics.path_to": {
+   "label": "Hacia dónde apunta",
+   "help": "El punto al que llega la flecha.",
+   "level": "advanced",
+   "units": "Se elige con clic en el video",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (flechas)"
+  },
+  "graphics.style": {
+   "label": "Tipo de trazo",
+   "help": "El estilo de la línea.",
+   "level": "advanced",
+   "units": "Pincel · Limpio · Boceto",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.anchor": {
+   "label": "Junto a la cara",
+   "help": "Sigue a tu cara aunque te muevas.",
+   "level": "advanced",
+   "units": "Sobre la cara · Izquierda de la cara · Derecha de la cara · Cara",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.bend": {
+   "label": "Curva de la flecha",
+   "help": "Qué tan curva es la flecha.",
+   "level": "advanced",
+   "units": "Recta ↔ Muy curva",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (flechas)"
+  },
+  "graphics.glow": {
+   "label": "Brillo alrededor",
+   "help": "Un halo de luz alrededor del trazo.",
+   "level": "advanced",
+   "units": "Sin · Suave · Fuerte",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.shadow": {
+   "label": "Sombra",
+   "help": "Sombra suave debajo.",
+   "level": "advanced",
+   "units": "Sin · Suave · Fuerte",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.draw_time": {
+   "label": "Tiempo para dibujarse",
+   "help": "Cuánto tarda en dibujarse. Si lo dejas vacío, se calcula solo.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.variant": {
+   "label": "Tipo",
+   "help": "La variante del gráfico.",
+   "level": "basic",
+   "units": "",
+   "ex": "vivo",
+   "ex_ui": "Miniatura de cada tipo; solo se muestran los campos que ese tipo usa",
+   "where": "Elemento › Gráfico",
+   "label_by": {
+    "icon": "Estilo del ícono",
+    "card": "Tipo de tarjeta",
+    "cta": "Tipo de invitación",
+    "socials": "Cómo se ven"
+   },
+   "help_by": {
+    "icon": "Solo línea o relleno.",
+    "card": "Qué dato muestra la tarjeta.",
+    "cta": "Qué le pides al que ve el video.",
+    "socials": "Botones con tus redes o una marca de agua discreta."
+   },
+   "level_by": {
+    "icon": "advanced"
+   }
+  },
+  "graphics.badge": {
+   "label": "Fondo del ícono",
+   "help": "Un círculo o cuadro suave detrás del ícono.",
+   "level": "basic",
+   "units": "Ninguno · Círculo · Esquinas suaves",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Ícono)"
+  },
+  "graphics.badge_color": {
+   "label": "Color del fondo del ícono",
+   "help": "Si no eliges, usa el color de tu marca.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Ícono)"
+  },
+  "graphics.title": {
+   "label": "Título",
+   "help": "El texto principal.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico",
+   "label_by": {
+    "lower_third": "Nombre",
+    "cta": "Nombre",
+    "socials": "Encabezado"
+   },
+   "help_by": {
+    "socials": "Texto arriba de tus redes. Ej.: Encuéntrame en"
+   }
+  },
+  "graphics.subtitle": {
+   "label": "Texto de abajo",
+   "help": "Una segunda línea más chica.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico",
+   "label_by": {
+    "lower_third": "Profesión o título"
+   }
+  },
+  "graphics.value": {
+   "label": "Valor",
+   "help": "El dato grande.",
+   "level": "basic",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: $450",
+   "where": "Elemento › Gráfico (Tarjeta: Precio, Dato)"
+  },
+  "graphics.items": {
+   "label": "Elementos",
+   "help": "Uno por renglón.",
+   "level": "basic",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: Lunes a viernes 9 a 18 h",
+   "where": "Elemento › Gráfico (Tarjeta: Lista, Horario)"
+  },
+  "graphics.icon": {
+   "label": "Ícono",
+   "help": "El ícono de la tarjeta o invitación.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.theme": {
+   "label": "Colores de la tarjeta",
+   "help": "Fondo claro, oscuro o con el color de tu marca.",
+   "level": "basic",
+   "units": "Claro · Oscuro · Color de tu marca",
+   "ex": "vivo",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.accent": {
+   "label": "Color de los detalles",
+   "help": "Si no eliges, usa el color de tu marca.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.label": {
+   "label": "Texto del botón",
+   "help": "Lo que dice el botón.",
+   "level": "basic",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: Agenda tu cita",
+   "where": "Elemento › Gráfico (Enlace, Reservas, Invitación)"
+  },
+  "graphics.platform": {
+   "label": "Red o página",
+   "help": "Pone el ícono de la red o de tu página de reservas.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.display": {
+   "label": "Enlace corto",
+   "help": "La dirección que se lee en pantalla.",
+   "level": "basic",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: tupagina.com/agenda",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.logo": {
+   "label": "Logo",
+   "help": "Reemplaza al ícono, por ejemplo con el logo de tu página de reservas.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.align": {
+   "label": "Alineación",
+   "help": "Centrado queda simétrico (recomendado).",
+   "level": "advanced",
+   "units": "Centrado · A la izquierda (no queda simétrico)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Rótulo)"
+  },
+  "graphics.handle": {
+   "label": "Usuario",
+   "help": "Tu usuario en esa red.",
+   "level": "basic",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: @tu.usuario",
+   "where": "Elemento › Gráfico (Sígueme)"
+  },
+  "graphics.button": {
+   "label": "Texto del botón",
+   "help": "Lo que dice el botón antes de pulsarlo.",
+   "level": "basic",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: Seguir",
+   "where": "Elemento › Gráfico (Sígueme)"
+  },
+  "graphics.button_done": {
+   "label": "Texto al pulsarlo",
+   "help": "Lo que dice el botón después de la animación.",
+   "level": "advanced",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: Siguiendo",
+   "where": "Elemento › Gráfico (Sígueme)"
+  },
+  "graphics.button_color": {
+   "label": "Color del botón",
+   "help": "Si no eliges, usa el color de tu marca.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Invitación)"
+  },
+  "graphics.avatar": {
+   "label": "Foto",
+   "help": "Qué se ve en el círculo.",
+   "level": "basic",
+   "units": "Iniciales · Tu cara del video · Foto propia",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Invitación)"
+  },
+  "graphics.initials": {
+   "label": "Iniciales",
+   "help": "Si lo dejas vacío, usa las de tu nombre.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Invitación)"
+  },
+  "graphics.media": {
+   "label": "Foto",
+   "help": "Sube una foto (de perfil o del lugar).",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico",
+   "label_by": {
+    "media": "Archivo"
+   },
+   "help_by": {
+    "media": "La foto o el clip que va encima del video."
+   }
+  },
+  "graphics.width": {
+   "label": "Ancho",
+   "help": "Si lo dejas vacío, se calcula solo: centrado y con el mismo margen a los lados.",
+   "level": "advanced",
+   "units": "% del ancho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico"
+  },
+  "graphics.thickness": {
+   "label": "Grosor de la barra",
+   "help": "Qué tan gruesa es la barra.",
+   "level": "basic",
+   "units": "Delgada · Media · Gruesa",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Barra de avance)",
+   "basic_choices": [
+    [
+     4,
+     "Delgada"
+    ],
+    [
+     8,
+     "Media"
+    ],
+    [
+     14,
+     "Gruesa"
+    ]
+   ]
+  },
+  "graphics.bar_y": {
+   "label": "Posición",
+   "help": "Arriba o abajo del video.",
+   "level": "basic",
+   "units": "Arriba · Abajo",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Barra de avance)",
+   "basic_choices": [
+    [
+     0.0,
+     "Arriba"
+    ],
+    [
+     1.0,
+     "Abajo"
+    ]
+   ]
+  },
+  "graphics.margin": {
+   "label": "Separación de la orilla",
+   "help": "Qué tan lejos de la orilla va la barra.",
+   "level": "advanced",
+   "units": "px del video final (1080)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Barra de avance)"
+  },
+  "graphics.text": {
+   "label": "Texto",
+   "help": "Lo que dice el sticker.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Sticker de texto)"
+  },
+  "graphics.bg": {
+   "label": "Color de fondo",
+   "help": "Si no eliges, usa el color de tu marca.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Sticker de texto)"
+  },
+  "graphics.fg": {
+   "label": "Color de la letra",
+   "help": "El color de las letras del sticker.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Sticker de texto)"
+  },
+  "graphics.font": {
+   "label": "Tipo de letra",
+   "help": "La letra del sticker.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Sticker de texto)"
+  },
+  "graphics.border": {
+   "label": "Orilla",
+   "help": "Una orilla alrededor del sticker.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Sticker de texto)"
+  },
+  "graphics.links": {
+   "label": "Redes",
+   "help": "Se toman de tu perfil; quita o agrega las que quieras.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Tus redes)"
+  },
+  "graphics.layout": {
+   "label": "Acomodo",
+   "help": "Cómo se ordenan los botones.",
+   "level": "basic",
+   "units": "Columna · Fila · Rejilla",
+   "ex": "vivo",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Tus redes)"
+  },
+  "graphics.cols": {
+   "label": "Columnas de la rejilla",
+   "help": "Cuántos botones por fila.",
+   "level": "advanced",
+   "units": "1 · 2 · 3 · 4",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Tus redes)"
+  },
+  "graphics.icon_style": {
+   "label": "Color de los íconos",
+   "help": "Con los colores de cada red o de un solo color.",
+   "level": "advanced",
+   "units": "Colores de cada red · Un solo color",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Tus redes)"
+  },
+  "graphics.stagger": {
+   "label": "Entrada escalonada",
+   "help": "Cada botón entra un poco después del anterior.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Tus redes)"
+  },
+  "graphics.opacity": {
+   "label": "Transparencia",
+   "help": "Qué tan visible es la marca de agua.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Tus redes, marca de agua)"
+  },
+  "graphics.backdrop": {
+   "label": "Fondo detrás de la marca de agua",
+   "help": "Una franja oscura que ayuda a leerla sobre fondos claros.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Tus redes, marca de agua)"
+  },
+  "graphics.aspect": {
+   "label": "Proporción",
+   "help": "Si lo dejas vacío, usa la del archivo.",
+   "level": "advanced",
+   "units": "ancho:alto",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Foto o video encima)"
+  },
+  "graphics.fit": {
+   "label": "Cómo se acomoda",
+   "help": "Llenar recorta para ocupar todo el espacio; Completo deja ver todo el archivo.",
+   "level": "basic",
+   "units": "Llenar (recorta) · Completo (sin recortar)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Foto o video encima)"
+  },
+  "graphics.focus": {
+   "label": "Qué parte se ve",
+   "help": "Al recortar, qué parte de la foto queda a la vista.",
+   "level": "advanced",
+   "units": "Clic en la miniatura",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Foto o video encima)"
+  },
+  "graphics.zoom": {
+   "label": "Acercamiento",
+   "help": "Acerca la foto dentro de su marco.",
+   "level": "advanced",
+   "units": "×",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Foto o video encima)"
+  },
+  "graphics.frame": {
+   "label": "Marco blanco",
+   "help": "Un marco blanco alrededor, como foto impresa.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Foto o video encima)"
+  },
+  "graphics.radius": {
+   "label": "Esquinas redondeadas",
+   "help": "Qué tan redondas son las esquinas.",
+   "level": "advanced",
+   "units": "Sin · Suaves · Muy redondas",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Foto o video encima)"
+  },
+  "graphics.media_in": {
+   "label": "Desde qué segundo del clip",
+   "help": "Dónde empieza a verse tu clip.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Foto o video encima)"
+  },
+  "graphics.loop": {
+   "label": "Repetir el clip",
+   "help": "Si el clip es más corto, vuelve a empezar; si no, se queda en su último cuadro.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Gráfico (Foto o video encima)"
+  },
+  "cutaways.background": {
+   "label": "Fondo",
+   "help": "Lo que se ve detrás del texto o la tarjeta.",
+   "level": "basic",
+   "units": "",
+   "ex": "vivo",
+   "ex_ui": "Rejilla de fondos con miniatura animada",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.bg_colors": {
+   "label": "Colores del fondo",
+   "help": "Si no eliges, usa el color de tu marca.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.text.text": {
+   "label": "Texto",
+   "help": "Lo que dice la pantalla.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.text.preset": {
+   "label": "Estilo del texto",
+   "help": "Cómo se ve el texto (los mismos estilos de los títulos).",
+   "level": "basic",
+   "units": "",
+   "ex": "loop",
+   "ex_ui": "Misma galería de estilos de título",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.in_dur": {
+   "label": "Duración de la entrada",
+   "help": "Cuánto tarda en aparecer.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.out_dur": {
+   "label": "Duración de la salida",
+   "help": "Cuánto tarda en irse.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.anim_in": {
+   "label": "Cómo entra la pantalla",
+   "help": "La transición al aparecer.",
+   "level": "basic",
+   "units": "Corte · Fundido · Desliza · Sube · Entra barriendo · Zoom · Círculo",
+   "ex": "loop",
+   "ex_ui": "",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.anim_out": {
+   "label": "Cómo sale la pantalla",
+   "help": "La transición al irse.",
+   "level": "basic",
+   "units": "Corte · Fundido · Desliza abajo · Sube · Zoom · Círculo",
+   "ex": "loop",
+   "ex_ui": "",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.variant": {
+   "label": "Tipo de tarjeta",
+   "help": "Qué dato muestra la tarjeta.",
+   "level": "basic",
+   "units": "",
+   "ex": "vivo",
+   "ex_ui": "",
+   "where": "Elemento › Escena (Pantalla de información)"
+  },
+  "cutaways.title": {
+   "label": "Título",
+   "help": "El texto principal de la tarjeta.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena (Pantalla de información)"
+  },
+  "cutaways.subtitle": {
+   "label": "Texto de abajo",
+   "help": "Una segunda línea más chica.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena (Pantalla de información)"
+  },
+  "cutaways.value": {
+   "label": "Valor",
+   "help": "El dato grande.",
+   "level": "basic",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: 4.9",
+   "where": "Elemento › Escena (Pantalla de información)"
+  },
+  "cutaways.items": {
+   "label": "Elementos",
+   "help": "Uno por renglón.",
+   "level": "basic",
+   "units": "",
+   "ex": "texto",
+   "ex_ui": "Ej.: Limpieza · Blanqueamiento · Ortodoncia",
+   "where": "Elemento › Escena (Pantalla de información)"
+  },
+  "cutaways.media": {
+   "label": "Foto o clip",
+   "help": "Si no eliges uno, se usa un cuadro congelado de tu video.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena (Foto, Otro momento)"
+  },
+  "cutaways.caption": {
+   "label": "Pie de foto",
+   "help": "Texto chico debajo de la foto.",
+   "level": "basic",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena (Foto)"
+  },
+  "cutaways.tilt": {
+   "label": "Inclinación",
+   "help": "Gira un poco la foto, como si estuviera sobre una mesa.",
+   "level": "advanced",
+   "units": "grados",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena (Foto)"
+  },
+  "cutaways.size": {
+   "label": "Tamaño de la foto",
+   "help": "Qué tan grande se ve la foto.",
+   "level": "basic",
+   "units": "Chica · Mediana · Grande",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena (Foto)",
+   "basic_choices": [
+    [
+     0.5,
+     "Chica"
+    ],
+    [
+     0.62,
+     "Mediana"
+    ],
+    [
+     0.72,
+     "Grande"
+    ]
+   ]
+  },
+  "cutaways.fit": {
+   "label": "Cómo se acomoda",
+   "help": "Llenar recorta para ocupar todo el espacio; Completo deja ver todo el archivo.",
+   "level": "basic",
+   "units": "Llenar (recorta) · Completo (sin recortar)",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.focus": {
+   "label": "Qué parte se ve",
+   "help": "Al recortar, qué parte queda a la vista.",
+   "level": "advanced",
+   "units": "Clic en la miniatura",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.zoom": {
+   "label": "Acercamiento",
+   "help": "Acerca la foto dentro de su marco.",
+   "level": "advanced",
+   "units": "×",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.media_in": {
+   "label": "Desde qué segundo del clip",
+   "help": "Dónde empieza a verse tu clip.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.loop": {
+   "label": "Repetir el clip",
+   "help": "Si el clip es más corto, vuelve a empezar; si no, se queda en su último cuadro.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena"
+  },
+  "cutaways.src_t": {
+   "label": "Momento de tu video que se muestra",
+   "help": "Qué parte de tu propio video se ve en esta pantalla.",
+   "level": "basic",
+   "units": "m:ss + botón «Aquí»",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena (Otro momento de tu video)"
+  },
+  "cutaways.zoom_from": {
+   "label": "Acercamiento al inicio",
+   "help": "Qué tan cerca empieza.",
+   "level": "advanced",
+   "units": "×",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena (Otro momento de tu video)"
+  },
+  "cutaways.zoom_to": {
+   "label": "Acercamiento al final",
+   "help": "Qué tan cerca termina.",
+   "level": "advanced",
+   "units": "×",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena (Otro momento de tu video)"
+  },
+  "cutaways.pan": {
+   "label": "Movimiento",
+   "help": "Hacia dónde se desplaza la imagen.",
+   "level": "advanced",
+   "units": "flechas",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Escena (Otro momento de tu video)"
+  },
+  "effects.from": {
+   "label": "Acercamiento inicial",
+   "help": "Qué tan cerca empieza.",
+   "level": "advanced",
+   "units": "×",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.to": {
+   "label": "Acercamiento final",
+   "help": "Qué tan cerca termina.",
+   "level": "advanced",
+   "units": "×",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.easing": {
+   "label": "Curva del movimiento",
+   "help": "Si el movimiento acelera, frena o rebota.",
+   "level": "advanced",
+   "units": "Lineal · Acelera · Frena · Suave · Rebote …",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.target": {
+   "label": "A dónde llega la cara",
+   "help": "Dónde queda tu cara en el acercamiento máximo.",
+   "level": "advanced",
+   "units": "clic en el video",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.center": {
+   "label": "Centro del acercamiento",
+   "help": "Si no lo eliges, se centra en tu cara.",
+   "level": "advanced",
+   "units": "clic en el video",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.amount": {
+   "label": "Cantidad",
+   "help": "Qué tanto se nota.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.hold": {
+   "label": "Duración del golpe",
+   "help": "Cuánto se queda el acercamiento. Si lo dejas vacío, dura hasta el final del efecto.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.mode": {
+   "label": "Entrada",
+   "help": "Con rebote o de golpe.",
+   "level": "advanced",
+   "units": "Con rebote · Golpe seco",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.release": {
+   "label": "Salida",
+   "help": "Cómo regresa al terminar.",
+   "level": "advanced",
+   "units": "Suave · Seca",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.attack": {
+   "label": "Arranque",
+   "help": "Cuánto tarda en llegar. En 0 llega a su ritmo natural.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.freq": {
+   "label": "Rapidez del rebote",
+   "help": "Qué tan rápido rebota.",
+   "level": "advanced",
+   "units": "veces por segundo",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.damping": {
+   "label": "Freno del rebote",
+   "help": "Qué tan pronto deja de rebotar.",
+   "level": "advanced",
+   "units": "Poco · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.amp": {
+   "label": "Qué tanto tiembla",
+   "help": "Qué tan fuerte es la sacudida.",
+   "level": "advanced",
+   "units": "Poco · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.decay": {
+   "label": "Se calma",
+   "help": "Con Poco tiembla igual todo el tiempo; con Mucho se calma rápido.",
+   "level": "advanced",
+   "units": "Poco · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.rot": {
+   "label": "Giro máximo",
+   "help": "Cuánto gira al temblar.",
+   "level": "advanced",
+   "units": "grados",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.pan": {
+   "label": "Desplazamiento",
+   "help": "Hacia dónde se mueve la imagen.",
+   "level": "advanced",
+   "units": "flechas",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.contrast": {
+   "label": "Contraste",
+   "help": "Qué tan marcado es el blanco y negro.",
+   "level": "advanced",
+   "units": "×",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.subject_color": {
+   "label": "Tú a color",
+   "help": "Solo el fondo queda en blanco y negro. Depende del recorte: revisa las orillas.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.tone": {
+   "label": "Tono",
+   "help": "Un ligero color sobre el blanco y negro.",
+   "level": "advanced",
+   "units": "Neutro · Cálido · Frío · Sepia",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.vignette": {
+   "label": "Orillas oscuras",
+   "help": "Oscurece las orillas.",
+   "level": "advanced",
+   "units": "Sin · Suave · Fuerte",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.lift": {
+   "label": "Negros más suaves",
+   "help": "Aclara un poco los negros, como foto vieja.",
+   "level": "advanced",
+   "units": "Sin · Poco · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.fade": {
+   "label": "Fundido de entrada y salida",
+   "help": "Cuánto tarda en aparecer y quitarse.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.bg_desat": {
+   "label": "Qué tan gris queda el fondo",
+   "help": "Al 100 % el fondo queda totalmente gris.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.bg_dark": {
+   "label": "Qué tan oscuro queda el fondo",
+   "help": "Oscurece el fondo para que resaltes.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.fade_in": {
+   "label": "Entrada",
+   "help": "Cuánto tarda en aparecer.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.fade_out": {
+   "label": "Salida",
+   "help": "Cuánto tarda en quitarse.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.radius": {
+   "label": "Cuánto desenfoca",
+   "help": "Qué tan borroso queda el fondo.",
+   "level": "advanced",
+   "units": "Poco · Medio · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.background": {
+   "label": "Fondo nuevo",
+   "help": "Lo que se pone detrás de ti. Revisa las orillas del cabello.",
+   "level": "advanced",
+   "units": "rejilla de fondos",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.bg_colors": {
+   "label": "Colores del fondo",
+   "help": "Si no eliges, usa el color de tu marca.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.grain": {
+   "label": "Grano del fondo",
+   "help": "Textura fina sobre el fondo nuevo.",
+   "level": "advanced",
+   "units": "Sin · Fino · Marcado",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.color": {
+   "label": "Color",
+   "help": "El color del efecto.",
+   "level": "advanced",
+   "units": "muestras",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto",
+   "label_by": {
+    "subject_outline": "Color de la silueta",
+    "flash_frame": "Color del fogonazo"
+   },
+   "level_by": {
+    "subject_outline": "basic"
+   }
+  },
+  "effects.width": {
+   "label": "Grosor de la silueta",
+   "help": "Qué tan gruesa es la orilla de color.",
+   "level": "advanced",
+   "units": "Delgada · Media · Gruesa",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.glow": {
+   "label": "Brillo",
+   "help": "Un halo de luz en la silueta.",
+   "level": "advanced",
+   "units": "Sin · Suave · Fuerte",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.angle": {
+   "label": "Dirección",
+   "help": "Hacia dónde se separan los colores.",
+   "level": "advanced",
+   "units": "grados",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.radial": {
+   "label": "Desde el centro",
+   "help": "Los colores se separan más en las orillas.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.jitter": {
+   "label": "Variación",
+   "help": "Cambia un poco en cada cuadro, como falla digital.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.peak": {
+   "label": "Intensidad máxima",
+   "help": "Qué tan blanco llega a ponerse.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "effects.bloom": {
+   "label": "Sobreexposición",
+   "help": "Cuánto se queman las luces.",
+   "level": "advanced",
+   "units": "Poco · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Efecto"
+  },
+  "transitions.dur": {
+   "label": "Duración",
+   "help": "Cuánto dura la transición.",
+   "level": "basic",
+   "units": "Rápida · Normal · Lenta, relativas a la duración propia de cada tipo (Avanzado: s)",
+   "ex": "loop",
+   "ex_ui": "",
+   "where": "Elemento › Transición",
+   "relative_choices": [
+    [
+     0.7,
+     "Rápida"
+    ],
+    [
+     1.0,
+     "Normal"
+    ],
+    [
+     1.6,
+     "Lenta"
+    ]
+   ],
+   "dev": "Base = default del tipo (transitions.DEFAULTS[kind].dur, adoptado en el esquema). Nunca escribir 0: en el motor 0 es corte directo."
+  },
+  "transitions.align": {
+   "label": "Cuándo ocurre",
+   "help": "Respecto al corte entre las dos tomas.",
+   "level": "advanced",
+   "units": "Automático · Centrada en el corte · Empieza en el corte · Termina en el corte",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Transición"
+  },
+  "transitions.intensity": {
+   "label": "Fuerza",
+   "help": "Qué tanto se nota. En 0 % es un corte directo.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Transición"
+  },
+  "transitions.color": {
+   "label": "Color",
+   "help": "El color de la luz o del destello.",
+   "level": "advanced",
+   "units": "Blanco · Cálido · Dorado · Rosa · Color de tu marca",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Transición"
+  },
+  "transitions.peak": {
+   "label": "Qué tan blanco",
+   "help": "Si la pantalla llega a blanco total o solo se aclara.",
+   "level": "advanced",
+   "units": "Blanco total · Parcial",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Transición (Luz cálida)"
+  },
+  "transitions.gate": {
+   "label": "Barra del marco de película",
+   "help": "Una barra negra como de película vieja.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Transición (Luz cálida)"
+  },
+  "transitions.dir": {
+   "label": "Dirección",
+   "help": "Hacia dónde se mueve.",
+   "level": "basic",
+   "units": "Flechas: izquierda · derecha · arriba · abajo (íconos)",
+   "ex": "loop",
+   "ex_ui": "",
+   "where": "Elemento › Transición"
+  },
+  "transitions.x": {
+   "label": "Centro horizontal",
+   "help": "Si no lo eliges, se centra en tu cara.",
+   "level": "advanced",
+   "units": "clic en el video",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Transición"
+  },
+  "transitions.y": {
+   "label": "Centro vertical",
+   "help": "Si no lo eliges, se centra en tu cara.",
+   "level": "advanced",
+   "units": "clic en el video",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Transición"
+  },
+  "transitions.mode": {
+   "label": "Cómo se rompe",
+   "help": "Se parte en dos o barre la pantalla.",
+   "level": "advanced",
+   "units": "Se parte en dos · Barre",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Transición (Papel rasgado)"
+  },
+  "transitions.ring": {
+   "label": "Aro en la orilla",
+   "help": "Un aro de color en la orilla del círculo.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Transición (Círculo)"
+  },
+  "sfx.gain_db": {
+   "label": "Volumen",
+   "help": "Qué tan fuerte suena junto a tu voz.",
+   "level": "basic",
+   "units": "Básico: Bajo · Medio · Alto; Avanzado: dB (0 dB = tan fuerte como tu voz)",
+   "ex": "audio",
+   "ex_ui": "Escuchar",
+   "where": "Elemento › Sonido",
+   "basic_choices": [
+    [
+     -14,
+     "Bajo"
+    ],
+    [
+     -6,
+     "Medio"
+    ],
+    [
+     0,
+     "Alto"
+    ]
+   ]
+  },
+  "sfx.pan": {
+   "label": "Izquierda ↔ Derecha",
+   "help": "De qué lado se oye.",
+   "level": "advanced",
+   "units": "Izquierda · Centro · Derecha",
+   "ex": "audio",
+   "ex_ui": "",
+   "where": "Elemento › Sonido"
+  },
+  "sfx.variant": {
+   "label": "Otra versión",
+   "help": "El mismo sonido, otra toma.",
+   "level": "advanced",
+   "units": "Botón",
+   "ex": "audio",
+   "ex_ui": "",
+   "where": "Elemento › Sonido"
+  },
+  "sfx.pitch": {
+   "label": "Más grave ↔ Más agudo",
+   "help": "Si lo dejas vacío, se afina con la música.",
+   "level": "advanced",
+   "units": "semitonos (−12 a +12)",
+   "ex": "audio",
+   "ex_ui": "",
+   "where": "Elemento › Sonido"
+  },
+  "sfx.dur": {
+   "label": "Duración",
+   "help": "En las subidas, cuánto dura la anticipación; en sonidos largos, recorta o repite.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "audio",
+   "ex_ui": "",
+   "where": "Elemento › Sonido"
+  },
+  "media.sid": {
+   "label": "Archivo",
+   "help": "Dato interno del motor; no se muestra como control.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "—"
+  },
+  "media.path": {
+   "label": "Ruta",
+   "help": "Dato interno del motor; no se muestra como control.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "—"
+  },
+  "media.name": {
+   "label": "Nombre en el guion",
+   "help": "Dato interno del motor; no se muestra como control.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "—"
+  },
+  "media.kind": {
+   "label": "Tipo de archivo",
+   "help": "Dato interno del motor; no se muestra como control.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "—"
+  },
+  "media.fit": {
+   "label": "Cómo llena su tiempo",
+   "help": "Qué pasa si el clip dura distinto que la línea del guion.",
+   "level": "basic",
+   "units": "Completo (se queda en su último cuadro) · Ajustar la velocidad · Recortar: se ve lo que cabe",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.speed": {
+   "label": "Velocidad del clip",
+   "help": "Solo con «Ajustar la velocidad».",
+   "level": "advanced",
+   "units": "×",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.src_in": {
+   "label": "Desde qué segundo del clip",
+   "help": "Dónde empieza a verse tu clip.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.width": {
+   "label": "Ancho de la tarjeta",
+   "help": "Si lo dejas vacío, se calcula solo: centrada y con el mismo margen a los lados.",
+   "level": "advanced",
+   "units": "% del ancho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.aspect": {
+   "label": "Proporción",
+   "help": "Si lo dejas vacío, usa 4:5, o más vertical si el archivo lo es y cabe.",
+   "level": "advanced",
+   "units": "ancho:alto",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.y": {
+   "label": "Altura",
+   "help": "Si lo dejas vacío, va arriba de los subtítulos.",
+   "level": "advanced",
+   "units": "% desde arriba",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.blur": {
+   "label": "Desenfoque del fondo",
+   "help": "Qué tan borroso se ve tu video detrás de la tarjeta.",
+   "level": "basic",
+   "units": "Poco · Medio · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso",
+   "basic_choices": [
+    [
+     0.3,
+     "Poco"
+    ],
+    [
+     0.55,
+     "Medio"
+    ],
+    [
+     0.8,
+     "Mucho"
+    ]
+   ]
+  },
+  "media.dim": {
+   "label": "Oscurecer el fondo",
+   "help": "Oscurece tu video detrás de la tarjeta para que resalte.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.radius": {
+   "label": "Esquinas redondeadas",
+   "help": "Qué tan redondas son las esquinas.",
+   "level": "advanced",
+   "units": "Sin · Suaves · Muy redondas",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.shadow": {
+   "label": "Sombra",
+   "help": "Sombra debajo de la tarjeta.",
+   "level": "advanced",
+   "units": "Sin · Suave · Fuerte",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.border": {
+   "label": "Borde claro",
+   "help": "Una orilla clara alrededor de la tarjeta.",
+   "level": "advanced",
+   "units": "",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.kenburns": {
+   "label": "Acercamiento lento (fotos)",
+   "help": "Las fotos se acercan despacio mientras se ven.",
+   "level": "advanced",
+   "units": "Sin · Poco · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.float": {
+   "label": "Flotación",
+   "help": "Cuánto se mece la tarjeta.",
+   "level": "advanced",
+   "units": "Sin · Poco · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.sheen": {
+   "label": "Destello de luz",
+   "help": "Una franja de luz que cruza la tarjeta. Si lo dejas vacío, sale en fotos y no en clips.",
+   "level": "advanced",
+   "units": "Sin · Suave · Fuerte",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.holo": {
+   "label": "Irisado",
+   "help": "Color tornasol en las orillas del destello.",
+   "level": "advanced",
+   "units": "Sin · Suave · Fuerte",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.in_dur": {
+   "label": "Duración de la entrada",
+   "help": "Cuánto tarda en aparecer.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  },
+  "media.out_dur": {
+   "label": "Duración de la salida",
+   "help": "Cuánto tarda en irse.",
+   "level": "advanced",
+   "units": "s",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  }
+ },
+ "options": {
+  "captions.preset": {
+   "clean_bold": {
+    "label": "Palabra en color",
+    "help": "Las palabras aparecen una por una y la que dices se pinta con tu color.",
+    "ex": "vivo"
+   },
+   "karaoke": {
+    "label": "Karaoke",
+    "help": "La frase sale completa y cada palabra se llena de color mientras la dices.",
+    "ex": "vivo"
+   },
+   "boxed": {
+    "label": "Pastilla de color",
+    "help": "Una pastilla de color se desliza detrás de la palabra que dices.",
+    "ex": "vivo"
+   },
+   "minimal_small": {
+    "label": "Discreto",
+    "help": "Letra chica y tranquila, sin resaltar palabras. Para videos largos o serios.",
+    "ex": "vivo"
+   },
+   "bold_caps": {
+    "label": "Impacto en mayúsculas",
+    "help": "Pocas palabras, grandes y en MAYÚSCULAS; la que dices se pinta con tu color.",
+    "ex": "vivo"
+   },
+   "none": {
+    "label": "Sin subtítulos",
+    "help": "El video sale sin texto de lo que dices.",
+    "ex": "vivo"
+   }
+  },
+  "captions.case": {
+   "none": {
+    "label": "Como lo dices",
+    "help": "",
+    "ex": "",
+    "level": "basic"
+   },
+   "upper": {
+    "label": "MAYÚSCULAS",
+    "help": "",
+    "ex": "",
+    "level": "basic"
+   },
+   "lower": {
+    "label": "minúsculas",
+    "help": "",
+    "ex": "",
+    "level": "basic"
+   },
+   "title": {
+    "label": "Cada Palabra Con Mayúscula",
+    "help": "",
+    "ex": "",
+    "level": "advanced"
+   }
+  },
+  "grade.look": {
+   "natural": {
+    "label": "Natural",
+    "help": "Como salió de la cámara, apenas más vivo.",
+    "ex": "antes_despues",
+    "badge": "Recomendado"
+   },
+   "warm_clean": {
+    "label": "Cálido",
+    "help": "Más color y contraste, piel cálida y orillas un poco oscuras.",
+    "ex": "antes_despues"
+   },
+   "cinematic": {
+    "label": "Cine",
+    "help": "Sombras frías, luces cálidas y un poco más oscuro.",
+    "ex": "antes_despues"
+   },
+   "bright_pop": {
+    "label": "Vivo",
+    "help": "Más brillo y colores fuertes, para un tono alegre.",
+    "ex": "antes_despues"
+   },
+   "moody": {
+    "label": "Oscuro dramático",
+    "help": "Más oscuro y con menos color, para un tono serio.",
+    "ex": "antes_despues"
+   },
+   "bw_contrast": {
+    "label": "Blanco y negro",
+    "help": "Sin color y con contraste fuerte.",
+    "ex": "antes_despues"
+   }
+  },
+  "director.style": {
+   "dinamico": {
+    "label": "Dinámico",
+    "help": "Ritmo ágil para redes: títulos grandes, zooms y cortes marcados.",
+    "ex": "loop",
+    "que_cambia": "Subtítulos «Palabra en color» grandes · títulos apilados, en escalera y marcatextos · barrido rápido, zoom borroso y fogonazo · color Cálido · música pop · efectos frecuentes",
+    "qc_caps": "Subtítulos «Palabra en color» grandes",
+    "qc_look": "color Cálido"
+   },
+   "elegante": {
+    "label": "Elegante",
+    "help": "Letra elegante, movimientos suaves y color de cine.",
+    "ex": "loop",
+    "que_cambia": "Subtítulos «Palabra en color» medianos · títulos elegantes · luz cálida y película quemada, más lentas · color Cine · piano y cuerdas · pocos efectos",
+    "qc_caps": "Subtítulos «Palabra en color» medianos",
+    "qc_look": "color Cine"
+   },
+   "minimal": {
+    "label": "Minimal",
+    "help": "Poco texto, cortes limpios y color natural.",
+    "ex": "loop",
+    "que_cambia": "Subtítulos «Palabra en color» · títulos simples y marcatextos · fogonazo y empuje · color Natural sin grano · electrónica tranquila · muy pocos efectos",
+    "qc_caps": "Subtítulos «Palabra en color»",
+    "qc_look": "color Natural sin grano"
+   },
+   "energetico": {
+    "label": "Energético",
+    "help": "Máxima energía: mayúsculas, sacudidas y golpes de sonido.",
+    "ex": "loop",
+    "que_cambia": "Subtítulos «Impacto en mayúsculas» · muchos títulos · barridos y fallas digitales · color Vivo · música con golpes · sacudidas, desdoble de color y barra de avance",
+    "qc_caps": "Subtítulos «Impacto en mayúsculas»",
+    "qc_look": "color Vivo"
+   },
+   "none": {
+    "label": "Solo subtítulos y cortes",
+    "help": "Sin títulos, efectos ni música: solo limpia y subtitula.",
+    "ex": "loop",
+    "where": "Montar clips › Estilo de edición"
+   }
+  },
+  "music.source": {
+   "ai": {
+    "label": "Creada con IA",
+    "help": "Una canción nueva hecha para tu video (tarda 10 a 40 s).",
+    "ex": "audio"
+   },
+   "procedural": {
+    "label": "Rápida (sin IA)",
+    "help": "Música sencilla que se arma al momento.",
+    "ex": "audio"
+   },
+   "library": {
+    "label": "De la biblioteca",
+    "help": "Canciones incluidas en Reelfy.",
+    "ex": "audio"
+   },
+   "file": {
+    "label": "Tu canción",
+    "help": "Usa un archivo de música tuyo.",
+    "ex": "audio"
+   },
+   "none": {
+    "label": "Sin música",
+    "help": "El video sale solo con tu voz.",
+    "ex": "audio"
+   }
+  },
+  "music.mood": {
+   "auto": {
+    "label": "Automático",
+    "help": "Según el estilo de edición.",
+    "ex": "audio"
+   },
+   "upbeat": {
+    "label": "Alegre",
+    "help": "Con energía y buen ánimo.",
+    "ex": "audio"
+   },
+   "chill": {
+    "label": "Tranquila",
+    "help": "Suave, para no distraer.",
+    "ex": "audio"
+   },
+   "inspiring": {
+    "label": "Inspiradora",
+    "help": "Crece poco a poco, motiva.",
+    "ex": "audio"
+   },
+   "corporate": {
+    "label": "Seria",
+    "help": "Profesional y discreta.",
+    "ex": "audio"
+   },
+   "playful": {
+    "label": "Divertida",
+    "help": "Juguetona y ligera.",
+    "ex": "audio"
+   },
+   "dramatic": {
+    "label": "Dramática",
+    "help": "Intensa, para momentos fuertes.",
+    "ex": "audio"
+   }
+  },
+  "music.ending": {
+   "auto": {
+    "label": "Automático",
+    "help": "",
+    "ex": "audio"
+   },
+   "natural": {
+    "label": "Natural",
+    "help": "",
+    "ex": "audio"
+   },
+   "hit": {
+    "label": "Con golpe",
+    "help": "",
+    "ex": "audio"
+   },
+   "fade": {
+    "label": "Desvanecido",
+    "help": "",
+    "ex": "audio"
+   }
+  },
+  "text.preset": {
+   "title_pop": {
+    "label": "Título que rebota",
+    "help": "Letra gruesa que entra con un rebote.",
+    "ex": "loop"
+   },
+   "stack": {
+    "label": "Bloque apilado",
+    "help": "Palabras apiladas y justificadas; la importante, más grande.",
+    "ex": "loop"
+   },
+   "cascade": {
+    "label": "Escalera",
+    "help": "Renglones en escalera que entran deslizándose.",
+    "ex": "loop"
+   },
+   "serif_elegant": {
+    "label": "Elegante",
+    "help": "Letra con remates y entrada suave; lo destacado va en cursiva.",
+    "ex": "loop"
+   },
+   "script_accent": {
+    "label": "Escrito a mano",
+    "help": "Letra manuscrita que se escribe sola.",
+    "ex": "loop"
+   },
+   "behind_giant": {
+    "label": "Gigante detrás de ti",
+    "help": "Una palabra enorme detrás de la persona, letra por letra.",
+    "ex": "loop"
+   },
+   "highlight_marker": {
+    "label": "Marcatextos",
+    "help": "Texto con una franja de marcatextos de tu color detrás.",
+    "ex": "loop"
+   },
+   "typewriter": {
+    "label": "Máquina de escribir",
+    "help": "Letras que se teclean una por una, con cursor.",
+    "ex": "loop"
+   },
+   "counter": {
+    "label": "Contador",
+    "help": "Un número que cuenta, por ejemplo de $0 a $1,000.",
+    "ex": "loop"
+   },
+   "kicker": {
+    "label": "Etiqueta + título",
+    "help": "Una etiqueta chica en pastilla arriba del título.",
+    "ex": "loop"
+   }
+  },
+  "graphics.kind": {
+   "doodle": {
+    "label": "Trazo a mano",
+    "help": "Flechas, círculos, estrellas y más, dibujados a mano.",
+    "ex": "vivo"
+   },
+   "icon": {
+    "label": "Ícono",
+    "help": "Un ícono simple, con o sin fondo.",
+    "ex": "vivo"
+   },
+   "card": {
+    "label": "Tarjeta",
+    "help": "Precio, ubicación, horario, enlace y otros datos en una tarjeta.",
+    "ex": "vivo"
+   },
+   "lower_third": {
+    "label": "Rótulo con nombre",
+    "help": "Tu nombre y profesión en una barra.",
+    "ex": "vivo"
+   },
+   "cta": {
+    "label": "Invitación",
+    "help": "Sígueme, Link abajo, Comenta, Guárdalo o Compártelo.",
+    "ex": "vivo"
+   },
+   "progress": {
+    "label": "Barra de avance",
+    "help": "Una barra que se llena mientras avanza el video.",
+    "ex": "vivo"
+   },
+   "sticker_text": {
+    "label": "Sticker de texto",
+    "help": "Una palabra o frase corta en una etiqueta de color.",
+    "ex": "vivo"
+   },
+   "socials": {
+    "label": "Tus redes",
+    "help": "Tus redes sociales en botones o como marca de agua.",
+    "ex": "vivo"
+   },
+   "media": {
+    "label": "Foto o video encima",
+    "help": "Una foto o clip tuyo encima del video.",
+    "ex": "vivo"
+   }
+  },
+  "cutaways.kind": {
+   "title_card": {
+    "label": "Pantalla de título",
+    "help": "Pantalla completa con un título grande.",
+    "ex": "vivo"
+   },
+   "info_card": {
+    "label": "Pantalla de información",
+    "help": "Pantalla completa con una tarjeta de datos.",
+    "ex": "vivo"
+   },
+   "photo": {
+    "label": "Foto en pantalla completa",
+    "help": "Una foto o un cuadro congelado de tu video, como en un álbum.",
+    "ex": "vivo"
+   },
+   "self_broll": {
+    "label": "Otro momento de tu video",
+    "help": "Muestra otra parte de tu propio video mientras sigues hablando.",
+    "ex": "vivo"
+   }
+  },
+  "effects.kind": {
+   "zoom": {
+    "label": "Acercamiento suave",
+    "help": "La cámara se acerca despacio.",
+    "ex": "loop"
+   },
+   "punch": {
+    "label": "Golpe de zoom",
+    "help": "Un acercamiento rápido para dar énfasis.",
+    "ex": "loop"
+   },
+   "shake": {
+    "label": "Sacudida",
+    "help": "La imagen tiembla un momento.",
+    "ex": "loop"
+   },
+   "kenburns": {
+    "label": "Movimiento lento",
+    "help": "Acercamiento y desplazamiento lentos, como en documental.",
+    "ex": "loop"
+   },
+   "bw": {
+    "label": "Blanco y negro",
+    "help": "Quita el color por un momento.",
+    "ex": "loop"
+   },
+   "color_pop": {
+    "label": "Solo tú a color",
+    "help": "El fondo se pone gris y tú sigues a color.",
+    "ex": "loop",
+    "warn": "Depende del recorte: revisa las orillas."
+   },
+   "bg_blur": {
+    "label": "Fondo desenfocado",
+    "help": "Desenfoca lo que está detrás de ti.",
+    "ex": "loop"
+   },
+   "bg_replace": {
+    "label": "Cambiar el fondo",
+    "help": "Pone otro fondo detrás de ti.",
+    "ex": "loop",
+    "warn": "Depende del recorte: úsalo solo si las orillas del cabello quedan perfectas."
+   },
+   "subject_outline": {
+    "label": "Silueta de color",
+    "help": "Una orilla de color alrededor de ti.",
+    "ex": "loop",
+    "warn": "Depende del recorte: revisa las orillas."
+   },
+   "rgb_split": {
+    "label": "Desdoble de color",
+    "help": "Los colores se separan un instante, efecto digital.",
+    "ex": "loop"
+   },
+   "flash_frame": {
+    "label": "Fogonazo blanco",
+    "help": "Un destello de luz que llena la pantalla.",
+    "ex": "loop"
+   }
+  },
+  "transitions.kind": {
+   "cut": {
+    "label": "Corte",
+    "help": "Cambio directo, sin efecto.",
+    "ex": "loop",
+    "ex_ui": "Bucle de 1 s entre dos tomas de tu video"
+   },
+   "flash": {
+    "label": "Fogonazo",
+    "help": "Un destello blanco rápido entre dos tomas.",
+    "ex": "loop",
+    "ex_ui": "Bucle de 1 s entre dos tomas de tu video"
+   },
+   "light_leak": {
+    "label": "Luz cálida",
+    "help": "Una luz naranja cruza la pantalla.",
+    "ex": "loop",
+    "ex_ui": "Bucle de 1 s entre dos tomas de tu video"
+   },
+   "whip": {
+    "label": "Barrido rápido",
+    "help": "La imagen se barre de lado hacia la siguiente toma.",
+    "ex": "loop",
+    "ex_ui": "Bucle de 1 s entre dos tomas de tu video"
+   },
+   "zoom_blur": {
+    "label": "Zoom borroso",
+    "help": "Acercamiento rápido y borroso hacia la siguiente toma.",
+    "ex": "loop",
+    "ex_ui": "Bucle de 1 s entre dos tomas de tu video"
+   },
+   "glitch": {
+    "label": "Falla digital",
+    "help": "Un parpadeo digital entre tomas.",
+    "ex": "loop",
+    "ex_ui": "Bucle de 1 s entre dos tomas de tu video"
+   },
+   "film_burn": {
+    "label": "Película quemada",
+    "help": "Una quemadura de película antigua.",
+    "ex": "loop",
+    "ex_ui": "Bucle de 1 s entre dos tomas de tu video"
+   },
+   "torn_paper": {
+    "label": "Papel rasgado",
+    "help": "La toma se rompe como papel.",
+    "ex": "loop",
+    "ex_ui": "Bucle de 1 s entre dos tomas de tu video"
+   },
+   "circle": {
+    "label": "Círculo",
+    "help": "La siguiente toma aparece en un círculo que crece.",
+    "ex": "loop",
+    "ex_ui": "Bucle de 1 s entre dos tomas de tu video"
+   },
+   "slide": {
+    "label": "Empuje",
+    "help": "La nueva toma empuja a la anterior fuera de la pantalla.",
+    "ex": "loop",
+    "ex_ui": "Bucle de 1 s entre dos tomas de tu video"
+   }
+  },
+  "sfx.name": {
+   "whoosh_soft": {
+    "label": "Barrido de aire suave",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "whoosh"
+   },
+   "whoosh_fast": {
+    "label": "Barrido de aire rápido",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "whoosh"
+   },
+   "swoosh_up": {
+    "label": "Barrido que sube",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "whoosh"
+   },
+   "swoosh_down": {
+    "label": "Barrido que baja",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "whoosh"
+   },
+   "whip": {
+    "label": "Latigazo",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "whoosh"
+   },
+   "pop": {
+    "label": "Pop (aparece algo)",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "ui"
+   },
+   "pop_soft": {
+    "label": "Pop suave",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "ui"
+   },
+   "bubble": {
+    "label": "Burbuja",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "ui"
+   },
+   "click": {
+    "label": "Clic",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "ui"
+   },
+   "tick": {
+    "label": "Tic de reloj",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "ui"
+   },
+   "typing": {
+    "label": "Tecleo",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "ui"
+   },
+   "ding": {
+    "label": "Ding (idea)",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "tonal"
+   },
+   "bell": {
+    "label": "Campana",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "tonal"
+   },
+   "chime": {
+    "label": "Campanitas mágicas",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "tonal"
+   },
+   "sparkle": {
+    "label": "Brillitos",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "tonal"
+   },
+   "cash": {
+    "label": "Caja registradora",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "tonal"
+   },
+   "coin": {
+    "label": "Moneda",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "tonal"
+   },
+   "riser_short": {
+    "label": "Subida corta (1.6 s)",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "riser"
+   },
+   "riser_long": {
+    "label": "Subida larga (4 s)",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "riser"
+   },
+   "impact_soft": {
+    "label": "Golpe suave",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "impact"
+   },
+   "impact_boom": {
+    "label": "Golpe de cine",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "impact"
+   },
+   "sub_drop": {
+    "label": "Golpe grave",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "impact"
+   },
+   "glitch": {
+    "label": "Falla digital",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "texture"
+   },
+   "shutter": {
+    "label": "Foto (obturador)",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "ui"
+   },
+   "notification": {
+    "label": "Notificación",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "ui"
+   },
+   "success": {
+    "label": "Éxito",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "tonal"
+   },
+   "swipe": {
+    "label": "Deslizar tarjeta",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "ui"
+   },
+   "scratch": {
+    "label": "Rayón de disco",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "texture"
+   },
+   "paper_rip": {
+    "label": "Papel que se rompe",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "texture"
+   },
+   "pen_scribble": {
+    "label": "Trazo de pluma",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "texture"
+   },
+   "heartbeat": {
+    "label": "Latido",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "impact"
+   },
+   "record_stop": {
+    "label": "Disco que frena",
+    "help": "",
+    "ex": "audio",
+    "group_hint": "texture"
+   }
+  },
+  "sfx.group": {
+   "whoosh": {
+    "label": "Movimiento (barridos)",
+    "help": "",
+    "ex": ""
+   },
+   "ui": {
+    "label": "Interfaz y pop",
+    "help": "",
+    "ex": ""
+   },
+   "tonal": {
+    "label": "Campanas y tonos",
+    "help": "",
+    "ex": ""
+   },
+   "riser": {
+    "label": "Subidas (anticipación)",
+    "help": "",
+    "ex": ""
+   },
+   "impact": {
+    "label": "Golpes",
+    "help": "",
+    "ex": ""
+   },
+   "texture": {
+    "label": "Texturas",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "graphics.name": {
+   "arrow_curve": {
+    "label": "Flecha curva",
+    "help": "",
+    "ex": "loop"
+   },
+   "arrow_down": {
+    "label": "Flecha hacia abajo",
+    "help": "",
+    "ex": "loop"
+   },
+   "arrow_straight": {
+    "label": "Flecha recta",
+    "help": "",
+    "ex": "loop"
+   },
+   "burst": {
+    "label": "Estallido",
+    "help": "",
+    "ex": "loop"
+   },
+   "check": {
+    "label": "Palomita",
+    "help": "",
+    "ex": "loop"
+   },
+   "circle_scribble": {
+    "label": "Círculo a mano",
+    "help": "",
+    "ex": "loop"
+   },
+   "cross": {
+    "label": "Tache",
+    "help": "",
+    "ex": "loop"
+   },
+   "dotted_path": {
+    "label": "Camino punteado",
+    "help": "",
+    "ex": "loop"
+   },
+   "exclaim": {
+    "label": "Signo de exclamación",
+    "help": "",
+    "ex": "loop"
+   },
+   "heart": {
+    "label": "Corazón",
+    "help": "",
+    "ex": "loop"
+   },
+   "lightning": {
+    "label": "Rayo",
+    "help": "",
+    "ex": "loop"
+   },
+   "loop": {
+    "label": "Rizo",
+    "help": "",
+    "ex": "loop"
+   },
+   "question": {
+    "label": "Signo de pregunta",
+    "help": "",
+    "ex": "loop"
+   },
+   "rays": {
+    "label": "Rayos de luz",
+    "help": "",
+    "ex": "loop"
+   },
+   "sparkle": {
+    "label": "Chispa",
+    "help": "",
+    "ex": "loop"
+   },
+   "squiggle": {
+    "label": "Zigzag",
+    "help": "",
+    "ex": "loop"
+   },
+   "star4": {
+    "label": "Estrella de 4 puntas",
+    "help": "",
+    "ex": "loop"
+   },
+   "star5": {
+    "label": "Estrella de 5 puntas",
+    "help": "",
+    "ex": "loop"
+   },
+   "swirl": {
+    "label": "Espiral",
+    "help": "",
+    "ex": "loop"
+   },
+   "underline": {
+    "label": "Subrayado",
+    "help": "",
+    "ex": "loop"
+   }
+  },
+  "graphics.variant": {
+   "generic": {
+    "label": "Genérica",
+    "help": "",
+    "ex": "vivo"
+   },
+   "price": {
+    "label": "Precio",
+    "help": "",
+    "ex": "vivo"
+   },
+   "location": {
+    "label": "Ubicación",
+    "help": "",
+    "ex": "vivo"
+   },
+   "schedule": {
+    "label": "Horario",
+    "help": "",
+    "ex": "vivo"
+   },
+   "link": {
+    "label": "Enlace",
+    "help": "",
+    "ex": "vivo"
+   },
+   "phone": {
+    "label": "Teléfono",
+    "help": "",
+    "ex": "vivo"
+   },
+   "rating": {
+    "label": "Calificación",
+    "help": "",
+    "ex": "vivo"
+   },
+   "checklist": {
+    "label": "Lista",
+    "help": "",
+    "ex": "vivo"
+   },
+   "stat": {
+    "label": "Dato",
+    "help": "",
+    "ex": "vivo"
+   },
+   "booking": {
+    "label": "Reservas",
+    "help": "",
+    "ex": "vivo"
+   },
+   "follow": {
+    "label": "Sígueme",
+    "help": "",
+    "ex": "vivo"
+   },
+   "link_below": {
+    "label": "Link abajo",
+    "help": "",
+    "ex": "vivo"
+   },
+   "comment": {
+    "label": "Comenta",
+    "help": "",
+    "ex": "vivo"
+   },
+   "save": {
+    "label": "Guárdalo",
+    "help": "",
+    "ex": "vivo"
+   },
+   "share": {
+    "label": "Compártelo",
+    "help": "",
+    "ex": "vivo"
+   },
+   "outline": {
+    "label": "Solo línea",
+    "help": "",
+    "ex": "vivo"
+   },
+   "filled": {
+    "label": "Relleno",
+    "help": "",
+    "ex": "vivo"
+   },
+   "chips": {
+    "label": "Botones",
+    "help": "",
+    "ex": "vivo"
+   },
+   "watermark": {
+    "label": "Marca de agua",
+    "help": "",
+    "ex": "vivo"
+   }
+  },
+  "graphics.badge": {
+   "none": {
+    "label": "Ninguno",
+    "help": "",
+    "ex": ""
+   },
+   "circle": {
+    "label": "Círculo",
+    "help": "",
+    "ex": ""
+   },
+   "squircle": {
+    "label": "Esquinas suaves",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "graphics.theme": {
+   "light": {
+    "label": "Claro",
+    "help": "",
+    "ex": ""
+   },
+   "dark": {
+    "label": "Oscuro",
+    "help": "",
+    "ex": ""
+   },
+   "brand": {
+    "label": "Color de tu marca",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "graphics.layout": {
+   "column": {
+    "label": "Columna",
+    "help": "",
+    "ex": ""
+   },
+   "row": {
+    "label": "Fila",
+    "help": "",
+    "ex": ""
+   },
+   "grid": {
+    "label": "Rejilla",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "graphics.icon_style": {
+   "brand": {
+    "label": "Colores de cada red",
+    "help": "",
+    "ex": ""
+   },
+   "mono": {
+    "label": "Un solo color",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "graphics.fit": {
+   "cover": {
+    "label": "Llenar (recorta)",
+    "help": "",
+    "ex": ""
+   },
+   "contain": {
+    "label": "Completo (sin recortar)",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "cutaways.fit": {
+   "cover": {
+    "label": "Llenar (recorta)",
+    "help": "",
+    "ex": ""
+   },
+   "contain": {
+    "label": "Completo (sin recortar)",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "graphics.avatar": {
+   "initial": {
+    "label": "Iniciales",
+    "help": "",
+    "ex": ""
+   },
+   "face": {
+    "label": "Tu cara del video",
+    "help": "",
+    "ex": ""
+   },
+   "image": {
+    "label": "Foto propia",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "graphics.style": {
+   "brush": {
+    "label": "Pincel",
+    "help": "",
+    "ex": ""
+   },
+   "clean": {
+    "label": "Limpio",
+    "help": "",
+    "ex": ""
+   },
+   "sketch": {
+    "label": "Boceto",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "graphics.align": {
+   "center": {
+    "label": "Centrado",
+    "help": "",
+    "ex": ""
+   },
+   "left": {
+    "label": "A la izquierda",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "graphics.anchor": {
+   "face": {
+    "label": "Cara",
+    "help": "",
+    "ex": ""
+   },
+   "face_left": {
+    "label": "Izquierda de la cara",
+    "help": "",
+    "ex": ""
+   },
+   "face_right": {
+    "label": "Derecha de la cara",
+    "help": "",
+    "ex": ""
+   },
+   "face_top": {
+    "label": "Sobre la cara",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "text.align": {
+   "left": {
+    "label": "Izquierda",
+    "help": "",
+    "ex": ""
+   },
+   "center": {
+    "label": "Centro",
+    "help": "",
+    "ex": ""
+   },
+   "right": {
+    "label": "Derecha",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "text.counter.anchor": {
+   "center": {
+    "label": "Centro",
+    "help": "",
+    "ex": ""
+   },
+   "left": {
+    "label": "Izquierda",
+    "help": "",
+    "ex": ""
+   },
+   "right": {
+    "label": "Derecha",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "media.fit": {
+   "hold": {
+    "label": "Completo (se queda en su último cuadro)",
+    "help": "",
+    "ex": ""
+   },
+   "speed": {
+    "label": "Ajustar la velocidad para llenar su tiempo",
+    "help": "",
+    "ex": ""
+   },
+   "trim": {
+    "label": "Recortar: se ve lo que cabe",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "effects.mode": {
+   "spring": {
+    "label": "Con rebote",
+    "help": "",
+    "ex": ""
+   },
+   "cut": {
+    "label": "Golpe seco",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "effects.release": {
+   "smooth": {
+    "label": "Suave",
+    "help": "",
+    "ex": ""
+   },
+   "cut": {
+    "label": "Seca",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "effects.tone": {
+   "neutral": {
+    "label": "Neutro",
+    "help": "",
+    "ex": ""
+   },
+   "warm": {
+    "label": "Cálido",
+    "help": "",
+    "ex": ""
+   },
+   "cool": {
+    "label": "Frío",
+    "help": "",
+    "ex": ""
+   },
+   "sepia": {
+    "label": "Sepia",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "transitions.align": {
+   "auto": {
+    "label": "Automático",
+    "help": "",
+    "ex": ""
+   },
+   "center": {
+    "label": "Centrada en el corte",
+    "help": "",
+    "ex": ""
+   },
+   "start": {
+    "label": "Empieza en el corte",
+    "help": "",
+    "ex": ""
+   },
+   "end": {
+    "label": "Termina en el corte",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "transitions.peak": {
+   "whiteout": {
+    "label": "Blanco total",
+    "help": "",
+    "ex": ""
+   },
+   "partial": {
+    "label": "Parcial",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "transitions.dir": {
+   "left": {
+    "label": "Izquierda",
+    "help": "",
+    "ex": ""
+   },
+   "right": {
+    "label": "Derecha",
+    "help": "",
+    "ex": ""
+   },
+   "up": {
+    "label": "Arriba",
+    "help": "",
+    "ex": ""
+   },
+   "down": {
+    "label": "Abajo",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "transitions.mode": {
+   "split": {
+    "label": "Se parte en dos",
+    "help": "",
+    "ex": ""
+   },
+   "sweep": {
+    "label": "Barre",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "transitions.color": {
+   "white": {
+    "label": "Blanco",
+    "help": "",
+    "ex": ""
+   },
+   "warm": {
+    "label": "Cálido",
+    "help": "",
+    "ex": ""
+   },
+   "gold": {
+    "label": "Dorado",
+    "help": "",
+    "ex": ""
+   },
+   "rose": {
+    "label": "Rosa",
+    "help": "",
+    "ex": ""
+   },
+   "accent": {
+    "label": "Color de tu marca",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "cutaways.background": {
+   "blur_self": {
+    "label": "Tu video desenfocado",
+    "help": "",
+    "ex": "vivo"
+   },
+   "color": {
+    "label": "Color sólido",
+    "help": "",
+    "ex": "vivo"
+   },
+   "dark_stars": {
+    "label": "Estrellas",
+    "help": "",
+    "ex": "vivo"
+   },
+   "gradient": {
+    "label": "Degradado",
+    "help": "",
+    "ex": "vivo"
+   },
+   "grid_warp": {
+    "label": "Cuadrícula",
+    "help": "",
+    "ex": "vivo"
+   },
+   "halftone": {
+    "label": "Puntos (semitono)",
+    "help": "",
+    "ex": "vivo"
+   },
+   "paper": {
+    "label": "Papel",
+    "help": "",
+    "ex": "vivo"
+   },
+   "rays": {
+    "label": "Rayos",
+    "help": "",
+    "ex": "vivo"
+   }
+  },
+  "effects.background": {
+   "blur_self": {
+    "label": "Tu video desenfocado",
+    "help": "",
+    "ex": "vivo"
+   },
+   "color": {
+    "label": "Color sólido",
+    "help": "",
+    "ex": "vivo"
+   },
+   "dark_stars": {
+    "label": "Estrellas",
+    "help": "",
+    "ex": "vivo"
+   },
+   "gradient": {
+    "label": "Degradado",
+    "help": "",
+    "ex": "vivo"
+   },
+   "grid_warp": {
+    "label": "Cuadrícula",
+    "help": "",
+    "ex": "vivo"
+   },
+   "halftone": {
+    "label": "Puntos (semitono)",
+    "help": "",
+    "ex": "vivo"
+   },
+   "paper": {
+    "label": "Papel",
+    "help": "",
+    "ex": "vivo"
+   },
+   "rays": {
+    "label": "Rayos",
+    "help": "",
+    "ex": "vivo"
+   }
+  },
+  "text.anim_in": {
+   "pop": {
+    "label": "Rebota",
+    "help": "",
+    "ex": "loop"
+   },
+   "rise": {
+    "label": "Sube",
+    "help": "",
+    "ex": "loop"
+   },
+   "fade": {
+    "label": "Aparece suave",
+    "help": "",
+    "ex": "loop"
+   },
+   "mask": {
+    "label": "Se descubre",
+    "help": "",
+    "ex": "loop"
+   },
+   "scale_down": {
+    "label": "Se encoge al entrar",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_left": {
+    "label": "Desliza a la izquierda",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_right": {
+    "label": "Desliza a la derecha",
+    "help": "",
+    "ex": "loop"
+   },
+   "type": {
+    "label": "Se teclea",
+    "help": "",
+    "ex": "loop"
+   },
+   "word_stagger": {
+    "label": "Palabra por palabra",
+    "help": "",
+    "ex": "loop"
+   },
+   "letter_stagger": {
+    "label": "Letra por letra",
+    "help": "",
+    "ex": "loop"
+   }
+  },
+  "text.anim_out": {
+   "fade": {
+    "label": "Se desvanece",
+    "help": "",
+    "ex": "loop"
+   },
+   "pop_out": {
+    "label": "Se encoge y sale",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_up": {
+    "label": "Sube y sale",
+    "help": "",
+    "ex": "loop"
+   },
+   "none": {
+    "label": "Sin animación",
+    "help": "",
+    "ex": "loop"
+   }
+  },
+  "graphics.anim_in": {
+   "draw": {
+    "label": "Se dibuja",
+    "help": "",
+    "ex": "loop"
+   },
+   "drop": {
+    "label": "Cae",
+    "help": "",
+    "ex": "loop"
+   },
+   "fade": {
+    "label": "Aparece suave",
+    "help": "",
+    "ex": "loop"
+   },
+   "flip": {
+    "label": "Gira",
+    "help": "",
+    "ex": "loop"
+   },
+   "none": {
+    "label": "Sin animación",
+    "help": "",
+    "ex": "loop"
+   },
+   "pop": {
+    "label": "Rebota",
+    "help": "",
+    "ex": "loop"
+   },
+   "rise": {
+    "label": "Sube",
+    "help": "",
+    "ex": "loop"
+   },
+   "scale": {
+    "label": "Crece",
+    "help": "",
+    "ex": "loop"
+   },
+   "scale_down": {
+    "label": "Se encoge al entrar",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_down": {
+    "label": "Desliza hacia abajo",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_left": {
+    "label": "Desliza a la izquierda",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_right": {
+    "label": "Desliza a la derecha",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_up": {
+    "label": "Desliza hacia arriba",
+    "help": "",
+    "ex": "loop"
+   }
+  },
+  "graphics.anim_out": {
+   "fade": {
+    "label": "Se desvanece",
+    "help": "",
+    "ex": "loop"
+   },
+   "none": {
+    "label": "Sin animación",
+    "help": "",
+    "ex": "loop"
+   },
+   "pop_out": {
+    "label": "Se encoge y sale",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_down": {
+    "label": "Baja y sale",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_up": {
+    "label": "Sube y sale",
+    "help": "",
+    "ex": "loop"
+   },
+   "undraw": {
+    "label": "Se borra",
+    "help": "",
+    "ex": "loop"
+   }
+  },
+  "cutaways.anim_in": {
+   "circle": {
+    "label": "Círculo",
+    "help": "",
+    "ex": "loop"
+   },
+   "cut": {
+    "label": "Corte",
+    "help": "",
+    "ex": "loop"
+   },
+   "fade": {
+    "label": "Fundido",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_left": {
+    "label": "Desliza",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_up": {
+    "label": "Sube",
+    "help": "",
+    "ex": "loop"
+   },
+   "wipe": {
+    "label": "Entra barriendo",
+    "help": "",
+    "ex": "loop"
+   },
+   "zoom": {
+    "label": "Zoom",
+    "help": "",
+    "ex": "loop"
+   }
+  },
+  "cutaways.anim_out": {
+   "circle": {
+    "label": "Círculo",
+    "help": "",
+    "ex": "loop"
+   },
+   "cut": {
+    "label": "Corte",
+    "help": "",
+    "ex": "loop"
+   },
+   "fade": {
+    "label": "Fundido",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_down": {
+    "label": "Desliza abajo",
+    "help": "",
+    "ex": "loop"
+   },
+   "slide_up": {
+    "label": "Sube",
+    "help": "",
+    "ex": "loop"
+   },
+   "zoom": {
+    "label": "Zoom",
+    "help": "",
+    "ex": "loop"
+   }
+  },
+  "effects.easing": {
+   "linear": {
+    "label": "Constante",
+    "help": "",
+    "ex": ""
+   },
+   "in_quad": {
+    "label": "Acelera suave",
+    "help": "",
+    "ex": ""
+   },
+   "in_cubic": {
+    "label": "Acelera",
+    "help": "",
+    "ex": ""
+   },
+   "in_expo": {
+    "label": "Acelera fuerte",
+    "help": "",
+    "ex": ""
+   },
+   "out_quad": {
+    "label": "Frena suave",
+    "help": "",
+    "ex": ""
+   },
+   "out_cubic": {
+    "label": "Frena",
+    "help": "",
+    "ex": ""
+   },
+   "out_quart": {
+    "label": "Frena marcado",
+    "help": "",
+    "ex": ""
+   },
+   "out_expo": {
+    "label": "Frena fuerte",
+    "help": "",
+    "ex": ""
+   },
+   "in_out_quad": {
+    "label": "Suave",
+    "help": "",
+    "ex": ""
+   },
+   "in_out_cubic": {
+    "label": "Suave (más marcado)",
+    "help": "",
+    "ex": ""
+   },
+   "in_out_expo": {
+    "label": "Suave fuerte",
+    "help": "",
+    "ex": ""
+   },
+   "smoothstep": {
+    "label": "Suave (paso)",
+    "help": "",
+    "ex": ""
+   },
+   "out_back": {
+    "label": "Rebote al llegar",
+    "help": "",
+    "ex": ""
+   },
+   "in_back": {
+    "label": "Toma impulso",
+    "help": "",
+    "ex": ""
+   },
+   "out_bounce": {
+    "label": "Rebote",
+    "help": "",
+    "ex": ""
+   },
+   "out_elastic": {
+    "label": "Elástico",
+    "help": "",
+    "ex": ""
+   }
+  }
+ },
+ "ui": {
+  "setup.files": {
+   "where": "Inicio",
+   "label": "Sube tu video",
+   "help": "Uno o varios clips de la misma grabación. Reelfy arma el video y quita lo que sobra.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "POST /upload, /sources"
+  },
+  "setup.guion": {
+   "where": "Inicio (con varios clips)",
+   "label": "Tu guion (opcional)",
+   "help": "Una frase por línea. Reelfy elige la mejor toma de cada una.",
+   "ex": "texto",
+   "ex_ui": "Ej.: Hoy te enseño a cuidar tus encías - Agregar consultorio.jpg (la foto sale mientras dices esa línea)",
+   "units": "",
+   "level": "basic",
+   "engine": "compose.script"
+  },
+  "setup.glossary": {
+   "where": "Inicio y Montar clips (un solo campo, mismo nombre)",
+   "label": "Palabras difíciles de tu video",
+   "help": "Escríbelas como deben salir en los subtítulos: nombres, marcas o términos.",
+   "ex": "texto",
+   "ex_ui": "Ej.: Invisalign, Dra. Ruiz, Clínica Sonrisa",
+   "units": "",
+   "level": "basic",
+   "engine": "glossary"
+  },
+  "setup.highlights": {
+   "where": "Inicio",
+   "label": "¿Cuántos shorts sugerir?",
+   "help": "Momentos cortos para redes que la IA saca de tu video. Pueden salir menos si el video es corto.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "Ninguno · 1 · 2 · 3",
+   "level": "basic",
+   "engine": "highlights 0-3"
+  },
+  "setup.profile": {
+   "where": "Inicio (opcional) → Estilo › Quién sale y tu logo",
+   "label": "Quién sale en el video",
+   "help": "Su nombre, profesión y redes. La IA los usa en el rótulo, el botón Seguir y la tarjeta final.",
+   "ex": "vivo",
+   "ex_ui": "Miniaturas del rótulo, el botón Seguir y la tarjeta final con sus datos",
+   "units": "",
+   "level": "basic",
+   "engine": "plan.profile"
+  },
+  "asm.takes": {
+   "where": "Montar clips › Tomas",
+   "label": "Toma elegida para cada línea",
+   "help": "Reelfy escogió la toma más fiel. Escucha las otras y cambia si prefieres una.",
+   "ex": "audio",
+   "ex_ui": "Botón Escuchar en cada toma",
+   "units": "Segura · Probable · Dudosa (con leyenda visible, no solo color)",
+   "level": "basic",
+   "engine": "montage.slots[].take"
+  },
+  "asm.clip.volume": {
+   "where": "Montar clips › Clip",
+   "label": "Volumen del clip",
+   "help": "Automático nivela todos los clips igual. Muévelo solo si un clip suena más bajo.",
+   "ex": "audio",
+   "ex_ui": "Escuchar 3 s del clip",
+   "units": "Automático · % (100 % = como se grabó)",
+   "level": "advanced",
+   "engine": "clips[].vol / volAuto"
+  },
+  "asm.clip.mute": {
+   "where": "Montar clips › Clip",
+   "label": "Quitar el sonido de este clip",
+   "help": "El clip se ve pero no se oye, por ejemplo una toma de apoyo con ruido.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "clips[].mute"
+  },
+  "asm.clip.fades": {
+   "where": "Montar clips › Clip",
+   "label": "Aparece desde negro / Se va a negro",
+   "help": "El clip entra o sale con un fundido a negro.",
+   "ex": "loop",
+   "ex_ui": "Mini fundido de 1 s",
+   "units": "Sin · Suave (0.5 s) · Lento (1.5 s)",
+   "level": "advanced",
+   "engine": "clips[].fadeIn / fadeOut"
+  },
+  "asm.clip.trans": {
+   "where": "Montar clips › Clip (desde el segundo)",
+   "label": "Cómo entra este clip",
+   "help": "Corte directo o fundido con el clip anterior.",
+   "ex": "loop",
+   "ex_ui": "Corte contra fundido con tus dos clips",
+   "units": "Corte · Fundido rápido (0.3 s) · Fundido normal (0.6 s) · Fundido lento (1.2 s)",
+   "level": "basic",
+   "engine": "clips[].trans"
+  },
+  "asm.clip.ramp": {
+   "where": "Montar clips › Clip (en un cambio de cámara)",
+   "label": "Cambio de cámara fluido",
+   "help": "Acelera el video en la pausa para que el cambio de cámara no se vea brusco. El audio no cambia.",
+   "ex": "loop",
+   "ex_ui": "Antes (corte seco) y después (acelerado)",
+   "units": "",
+   "level": "advanced",
+   "engine": "rampMarks[].on"
+  },
+  "asm.image.dur": {
+   "where": "Montar clips › Foto",
+   "label": "Cuánto tiempo se ve",
+   "help": "Segundos que la foto se queda en pantalla.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "s",
+   "level": "basic",
+   "engine": "clips[].dur"
+  },
+  "asm.overlay": {
+   "where": "Montar clips › Capas",
+   "label": "Imagen encima del video",
+   "help": "Una foto o logo que se queda sobre el video.",
+   "ex": "vivo",
+   "ex_ui": "Se ve en el reproductor del montaje",
+   "units": "Básico: Arriba al centro · Centro · Abajo al centro; Avanzado: esquinas (no quedan simétricas) · Tamaño en % del ancho",
+   "level": "basic",
+   "engine": "overlays[].size / pos"
+  },
+  "asm.snap": {
+   "where": "Montar clips › Barra",
+   "label": "Ajuste magnético",
+   "help": "Los clips se pegan a los bordes y al cursor al arrastrar.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "ASM.snap (icono de imán, no de etiqueta)"
+  },
+  "asm.style": {
+   "where": "Montar clips › Barra inferior",
+   "label": "Estilo de edición",
+   "help": "Cómo edita la IA: títulos, efectos, color y música. Todo queda editable.",
+   "ex": "loop",
+   "ex_ui": "Mismas tarjetas que Estilo › Edición con IA",
+   "units": "Dinámico · Elegante · Minimal · Energético · Solo subtítulos y cortes",
+   "level": "basic",
+   "engine": "director.style | false"
+  },
+  "clean.level": {
+   "where": "Limpieza de tomas › Resumen",
+   "label": "Nivel de limpieza",
+   "help": "Suave quita solo lo que la IA tiene seguro; Normal, también lo probable; A fondo, también lo dudoso.",
+   "ex": "texto",
+   "ex_ui": "Ej.: Normal · quita 21 tomas repetidas · queda 12:40",
+   "units": "Suave · Normal · A fondo",
+   "level": "basic",
+   "engine": "takes.sensitivity",
+   "ex_tpl": "Ej.: {nivel} · quita {n} tomas repetidas · queda {dur}",
+   "dev": "Números reales del nivel elegido (FXCore de la limpieza)."
+  },
+  "clean.cats": {
+   "where": "Limpieza de tomas › Qué quitar",
+   "label": "Qué quitar",
+   "help": "Cada tipo de corte se puede prender o apagar; cada uno trae su explicación y un ejemplo para escuchar.",
+   "ex": "audio",
+   "ex_ui": "Escuchar un ejemplo: el primer corte de ese tipo ±1 s",
+   "units": "Conteo · minutos que quita",
+   "level": "basic",
+   "engine": "cuts[].enabled por tipo"
+  },
+  "clean.cat.retoma": {
+   "where": "Limpieza de tomas › Qué quitar",
+   "label": "Tomas repetidas",
+   "help": "Dijiste la misma frase otra vez; se queda la mejor.",
+   "ex": "audio",
+   "ex_ui": "Escuchar un ejemplo",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "clean.cat.arranque_fallido": {
+   "where": "Limpieza de tomas › Qué quitar",
+   "label": "Arranques en falso",
+   "help": "Empezaste una frase, la dejaste a medias y la volviste a empezar.",
+   "ex": "audio",
+   "ex_ui": "Escuchar un ejemplo",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "clean.cat.autocorreccion": {
+   "where": "Limpieza de tomas › Qué quitar",
+   "label": "Correcciones",
+   "help": "Te corregiste enseguida; se queda la versión corregida.",
+   "ex": "audio",
+   "ex_ui": "Escuchar un ejemplo",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "clean.cat.tartamudeo": {
+   "where": "Limpieza de tomas › Qué quitar",
+   "label": "Tartamudeos",
+   "help": "Palabras repetidas de seguido, como «la, la casa».",
+   "ex": "audio",
+   "ex_ui": "Escuchar un ejemplo",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "clean.cat.error": {
+   "where": "Limpieza de tomas › Qué quitar",
+   "label": "Comentarios fuera de toma",
+   "help": "Groserías o comentarios entre tomas que no son para el video.",
+   "ex": "audio",
+   "ex_ui": "Escuchar un ejemplo",
+   "units": "",
+   "level": "basic",
+   "engine": "kind error (blooper); antes «Errores»"
+  },
+  "clean.cat.digresion": {
+   "where": "Limpieza de tomas › Qué quitar",
+   "label": "Fuera de tema",
+   "help": "Partes que se salen del tema. Revísalas: a veces sí quieres dejarlas.",
+   "ex": "audio",
+   "ex_ui": "Escuchar un ejemplo",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "clean.cat.silencio": {
+   "where": "Limpieza de tomas › Qué quitar",
+   "label": "Silencios",
+   "help": "Pausas largas sin voz.",
+   "ex": "audio",
+   "ex_ui": "Escuchar un ejemplo",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "clean.sil": {
+   "where": "Limpieza de tomas › Pie del guion",
+   "label": "Ver los silencios en el guion",
+   "help": "Solo cambia lo que ves aquí; no cambia el video.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "CL.sil (vista)"
+  },
+  "clean.restore": {
+   "where": "Limpieza de tomas",
+   "label": "Restaurar todo… · Restaurar este corte · Volver a buscar con IA",
+   "help": "Restaurar devuelve lo cortado al video; volver a buscar repite la detección de tomas con la IA de lenguaje.",
+   "ex": "audio",
+   "ex_ui": "Escuchar ±1 s alrededor del corte (ya existe)",
+   "units": "",
+   "level": "basic",
+   "engine": "cuts[].enabled · /takes"
+  },
+  "stage.exact": {
+   "where": "Barra del reproductor",
+   "label": "Ver como quedará (al pausar)",
+   "help": "Al pausar muestra el cuadro final exacto. Mientras se reproduce ves una versión rápida.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "advanced",
+   "engine": "FX.exactOn"
+  },
+  "stage.audio": {
+   "where": "Barra del reproductor",
+   "label": "Oír música y efectos",
+   "help": "Tu voz siempre se oye; esto prende o apaga la música y los efectos de sonido en la vista previa.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "FX.sfxOn / musicOn"
+  },
+  "stage.real": {
+   "where": "Barra del reproductor",
+   "label": "Previsualizar con calidad final",
+   "help": "Arma un video de prueba con todo (tarda ~1 min por cada 30 s de video).",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "POST /preview"
+  },
+  "tl.add": {
+   "where": "Timeline › Barra",
+   "label": "Agregar",
+   "help": "Agrega un título, gráfico, escena, efecto, transición o sonido donde está el cursor.",
+   "ex": "loop",
+   "ex_ui": "Menú en rejilla: cada tipo con su miniatura animada; los sonidos con Escuchar",
+   "units": "",
+   "level": "basic",
+   "engine": "menú Agregar"
+  },
+  "tl.short": {
+   "where": "Timeline › Barra",
+   "label": "Nuevo short",
+   "help": "Marca un tramo del video como short.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "tl.cut": {
+   "where": "Timeline › Barra",
+   "label": "Cortar aquí",
+   "help": "Quita del video el tramo que elijas.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "tl.trim": {
+   "where": "Timeline › Barra",
+   "label": "Empezar aquí · Terminar aquí",
+   "help": "El video empieza o termina donde está el cursor.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "tl.snap": {
+   "where": "Timeline › Barra",
+   "label": "Ajuste magnético",
+   "help": "Los elementos se pegan a los cortes, a otros elementos y al cursor al arrastrar.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "tl.fit": {
+   "where": "Timeline › Barra",
+   "label": "Ver todo",
+   "help": "Ajusta el timeline para ver el video completo.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "director.redirect": {
+   "where": "Estilo › Edición con IA",
+   "label": "Rehacer la edición con IA (~1 min)",
+   "help": "Vuelve a leer todo el guion y rehace títulos, efectos y música. Lo que protegiste no se toca.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "POST /direct (llm)"
+  },
+  "director.variation": {
+   "where": "Estilo › Edición con IA",
+   "label": "Probar otra versión",
+   "help": "Cambia el acomodo de títulos y efectos sin volver a analizar (rápido).",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "director.seed"
+  },
+  "director.notes": {
+   "where": "Estilo › Edición con IA › Detalles",
+   "label": "Detalles",
+   "help": "Letras, tiempos y notas técnicas de la edición.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "advanced",
+   "engine": "director.notes/kit"
+  },
+  "profile.fields": {
+   "where": "Estilo › Quién sale y tu logo",
+   "label": "Nombre · Profesión o título · Negocio · Teléfono · WhatsApp · Dirección",
+   "help": "Datos que la IA usa en el rótulo con tu nombre, las tarjetas y la tarjeta final.",
+   "ex": "texto",
+   "ex_ui": "Ej.: Dra. Ana Ruiz · Odontóloga",
+   "units": "",
+   "level": "basic",
+   "engine": "profile.*",
+   "dev": "Los ejemplos van como placeholder de cada campo, nunca como valor."
+  },
+  "profile.links": {
+   "where": "Estilo › Quién sale y tu logo",
+   "label": "Tus redes y enlaces",
+   "help": "Red, usuario y texto visible de cada enlace. El principal sale en el botón Seguir.",
+   "ex": "vivo",
+   "ex_ui": "Chip de cómo se verá el enlace",
+   "units": "Columnas con título: Red · Usuario · Texto visible · Principal",
+   "level": "basic",
+   "engine": "profile.links[]"
+  },
+  "profile.use": {
+   "where": "Estilo › Quién sale y tu logo",
+   "label": "Dónde aparece",
+   "help": "Elige qué gráficos crea la IA con tus datos.",
+   "ex": "vivo",
+   "ex_ui": "Miniatura de cada gráfico con tus datos",
+   "units": "Rótulo con nombre · Botón Seguir · Invitación a reservar · Tarjeta final · Marca de agua con tu usuario",
+   "level": "basic",
+   "engine": "profile.use.*"
+  },
+  "profile.use.lower_third": {
+   "where": "Estilo › Quién sale y tu logo › Dónde aparece",
+   "label": "Rótulo con nombre",
+   "help": "Tu nombre y profesión en una barra cuando apareces.",
+   "ex": "vivo",
+   "ex_ui": "Miniatura del rótulo",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "profile.use.follow": {
+   "where": "Estilo › Quién sale y tu logo › Dónde aparece",
+   "label": "Botón Seguir",
+   "help": "Un botón con tu red principal y tu usuario.",
+   "ex": "vivo",
+   "ex_ui": "Miniatura del botón",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "profile.use.booking": {
+   "where": "Estilo › Quién sale y tu logo › Dónde aparece",
+   "label": "Invitación a reservar",
+   "help": "Una tarjeta con tu página para agendar.",
+   "ex": "vivo",
+   "ex_ui": "Miniatura de la invitación",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "profile.use.end_card": {
+   "where": "Estilo › Quién sale y tu logo › Dónde aparece",
+   "label": "Tarjeta final",
+   "help": "Tus datos y redes al final del video.",
+   "ex": "vivo",
+   "ex_ui": "Miniatura de la tarjeta final",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "profile.use.watermark": {
+   "where": "Estilo › Quién sale y tu logo › Dónde aparece",
+   "label": "Marca de agua con tu usuario",
+   "help": "Tu @usuario discreto durante todo el video.",
+   "ex": "vivo",
+   "ex_ui": "Miniatura de la marca de agua",
+   "units": "",
+   "level": "basic",
+   "engine": ""
+  },
+  "profile.actions": {
+   "where": "Estilo › Quién sale y tu logo",
+   "label": "Guardar y usar",
+   "help": "Guarda tus datos para tus siguientes videos y los aplica a este.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "perfil: guardar + aplicar"
+  },
+  "brand.logo": {
+   "where": "Estilo › Quién sale y tu logo",
+   "label": "Logo",
+   "help": "Tu logo sobre todo el video.",
+   "ex": "vivo",
+   "ex_ui": "Tu cuadro con el logo",
+   "units": "Básico: Arriba al centro · Abajo al centro · Tamaño Chico/Mediano/Grande; Avanzado: esquinas (no quedan simétricas) · % del ancho",
+   "level": "basic",
+   "engine": "engine opts logo {pos,size,opacity}"
+  },
+  "brand.preset": {
+   "where": "Estilo › Quién sale y tu logo",
+   "label": "Plantillas de tu marca",
+   "help": "Guarda tus subtítulos, colores, color de tu marca y música para usarlos en otro video.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "/presets (+ fx.accent, hoy se pierde)"
+  },
+  "project.format": {
+   "where": "Estilo › Formato, idioma y audio",
+   "label": "Formato del video final",
+   "help": "La forma del video según dónde lo vas a publicar.",
+   "ex": "vivo",
+   "ex_ui": "Ícono con la forma del cuadro",
+   "units": "Vertical 9:16 (Reels, TikTok, Shorts) · Vertical 4:5 (Instagram) · Cuadrado 1:1 · Horizontal 16:9 (YouTube) · Como el original",
+   "level": "basic",
+   "engine": "FMT"
+  },
+  "project.lang": {
+   "where": "Estilo › Formato, idioma y audio",
+   "label": "Idioma del texto en pantalla",
+   "help": "Traduce subtítulos y títulos. Tu voz no cambia.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "Español · Inglés · Portugués · Francés · Alemán · Italiano",
+   "level": "basic",
+   "engine": "LANG"
+  },
+  "project.air": {
+   "where": "Estilo › Formato, idioma y audio",
+   "label": "Margen desenfocado",
+   "help": "Solo para videos horizontales en formato vertical: espacio desenfocado alrededor del video.",
+   "ex": "antes_despues",
+   "ex_ui": "Tu cuadro con 0 % y con el margen elegido",
+   "units": "% del alto",
+   "level": "advanced",
+   "engine": "opts air / air_user"
+  },
+  "proc.enhance": {
+   "where": "Estilo › Formato, idioma y audio",
+   "label": "Mejorar el audio de la voz",
+   "help": "Quita ruido y golpes de aire y nivela el volumen para redes.",
+   "ex": "audio",
+   "ex_ui": "Escuchar antes y después (5 s)",
+   "units": "En la edición con IA siempre está activo (se muestra apagado con esa nota)",
+   "level": "basic",
+   "engine": "enhance_audio"
+  },
+  "project.accent": {
+   "where": "Estilo › Color de tu marca",
+   "label": "Elige tu color",
+   "help": "Se usa en la palabra que dices, en los títulos, en las tarjetas y en los botones de todo el video.",
+   "ex": "vivo",
+   "ex_ui": "Cuatro vistas en vivo con tu cuadro: subtítulo, título, tarjeta y botón",
+   "units": "Muestras + «Otro color» + código del color",
+   "level": "basic",
+   "engine": "fx.accent (FXCore.applyAccent)"
+  },
+  "transcript.edit": {
+   "where": "Estilo › Subtítulos",
+   "label": "Corregir el texto de los subtítulos",
+   "help": "Haz clic en una palabra para corregir cómo se escribe. No cambia el audio.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "phrases[].words[].text"
+  },
+  "shorts.list": {
+   "where": "Shorts (pista) › Elemento › Short",
+   "label": "Shorts",
+   "help": "Momentos cortos para redes. Cambia el título o el tramo de cada uno.",
+   "ex": "vivo",
+   "ex_ui": "Tarjeta 9:16 con su miniatura",
+   "units": "m:ss del video final",
+   "level": "basic",
+   "engine": "plan.highlights[]"
+  },
+  "item.actions": {
+   "where": "Elemento › encabezado",
+   "label": "Visible · Proteger de la IA · Duplicar · Eliminar · Otra versión con IA",
+   "help": "Proteger de la IA: la IA no lo cambia ni lo borra cuando rehaces la edición.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "enabled / locked / regenerar"
+  },
+  "media.style": {
+   "where": "Elemento › Recurso",
+   "label": "Estilo de la tarjeta",
+   "help": "Qué tanto se mueve y brilla la tarjeta flotante.",
+   "ex": "en_video",
+   "ex_ui": "",
+   "units": "Suave · Medio · Fuerte (cambia flotación, brillo, irisado y sombra juntos)",
+   "level": "basic",
+   "engine": "macro: float / sheen / holo / shadow"
+  },
+  "export.button": {
+   "where": "Encabezado",
+   "label": "Exportar…",
+   "help": "Guarda el video final en tu Mac.",
+   "ex": "texto",
+   "ex_ui": "Ej.: ~1.2 GB · ~7 min en esta Mac",
+   "units": "",
+   "level": "basic",
+   "engine": "POST /render",
+   "ex_tpl": "Ej.: ~{peso} · ~{min} min en esta Mac",
+   "dev": "La estimación que ya calcula la hoja Exportar."
+  },
+  "music.single_home": {
+   "where": "Estilo › Música (la pista Música abre esta misma sección)",
+   "label": "Un solo lugar para la música",
+   "help": "Los controles de música viven solo en Estilo › Música; en Elemento › Música quedan solo los que dependen del tiempo (golpe, pausas, subidas).",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "hoy duplicados en Proyecto y Elemento"
+  },
+  "music.preview": {
+   "where": "Estilo › Música",
+   "label": "La música de tu video",
+   "help": "Se crea con tus ajustes. Escúchala o vuelve a crearla si cambiaste algo.",
+   "ex": "audio",
+   "ex_ui": "Escuchar la música creada",
+   "units": "",
+   "level": "basic",
+   "engine": "POST /music + FX.music"
+  },
+  "director.music_sync": {
+   "where": "Estilo › Edición con IA",
+   "label": "Ritmo de la edición y la música",
+   "help": "Los cortes y golpes de la edición siguen el ritmo de la música creada con IA.",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "level": "basic",
+   "engine": "FX.musicSide / FX.redirect(false)"
+  },
+  "item.kind.text": {
+   "label": "Estilo de título",
+   "help": "Cómo se ve y cómo entra el título. Cada tarjeta lo muestra con tu propio texto.",
+   "level": "basic",
+   "ex": "loop",
+   "ex_ui": "Galería: cada estilo con tu texto, en bucle de 2 s",
+   "where": "Elemento › Título"
+  },
+  "item.kind.graphics": {
+   "label": "Tipo de gráfico",
+   "help": "Qué gráfico es: un trazo, un ícono, una tarjeta, tu nombre, una invitación y más. Cada tarjeta lo muestra animado.",
+   "level": "basic",
+   "ex": "loop",
+   "ex_ui": "Galería: cada tipo animado sobre tu cuadro",
+   "where": "Elemento › Gráfico"
+  },
+  "item.kind.cutaways": {
+   "label": "Tipo de escena",
+   "help": "Una pantalla completa que tapa tu video un momento: un título, datos, una foto u otro momento de tu video.",
+   "level": "basic",
+   "ex": "loop",
+   "ex_ui": "Galería: cada escena con tu texto",
+   "where": "Elemento › Escena"
+  },
+  "item.kind.effects": {
+   "label": "Tipo de efecto",
+   "help": "Qué le pasa a la imagen en ese tramo. Cada tarjeta lo muestra con tu propio cuadro.",
+   "level": "basic",
+   "ex": "loop",
+   "ex_ui": "Galería: cada efecto en bucle de 1 s con tu cuadro",
+   "where": "Elemento › Efecto"
+  },
+  "item.kind.transitions": {
+   "label": "Transición",
+   "help": "Cómo se pasa de una toma a la siguiente. Cada tarjeta lo muestra con dos de tus tomas.",
+   "level": "basic",
+   "ex": "loop",
+   "ex_ui": "Galería: cada transición entre dos de tus tomas",
+   "where": "Elemento › Transición"
+  },
+  "item.kind.sfx": {
+   "label": "Sonido",
+   "help": "Qué sonido suena en ese momento. Toca Escuchar para oírlo antes de elegirlo.",
+   "level": "basic",
+   "ex": "audio",
+   "ex_ui": "Escuchar en cada sonido",
+   "where": "Elemento › Sonido"
+  },
+  "media.file": {
+   "label": "Archivo",
+   "help": "La foto o el clip que sale en la tarjeta flotante. Puedes cambiarlo por otro.",
+   "level": "basic",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Recurso"
+  }
+ },
+ "sections": {
+  "stCaps": {
+   "title": "Subtítulos",
+   "help": "El texto de lo que dices, palabra por palabra."
+  },
+  "stBrand": {
+   "title": "Color de tu marca",
+   "help": "Un solo color para todo el video. Así se ve en cada lugar donde se usa."
+  },
+  "stLook": {
+   "title": "Color del video",
+   "help": "El tono de la imagen. Cada foto es tu video con ese estilo."
+  },
+  "stDirector": {
+   "title": "Edición con IA",
+   "help": "Cómo edita la IA y cuánto agrega. Todo queda editable."
+  },
+  "stMusic": {
+   "title": "Música",
+   "help": "La música de fondo y qué tan fuerte suena bajo tu voz."
+  },
+  "stWho": {
+   "title": "Quién sale y tu logo",
+   "help": "Tus datos, tus redes, tu logo y tus plantillas."
+  },
+  "stFormat": {
+   "title": "Formato, idioma y audio",
+   "help": "La forma del video, el idioma del texto y el audio de tu voz."
+  }
+ },
+ "notes": {
+  "captions.boxed": "Dentro de la pastilla la letra se pone blanca o negra sola, para que siempre se lea.",
+  "captions.bold_caps": "Este estilo siempre usa MAYÚSCULAS y muestra máximo 3 palabras a la vez.",
+  "captions.minimal_small": "Usa una letra más delgada y 26 % más chica que los demás estilos.",
+  "captions.none": "Sin subtítulos no hay colores que elegir.",
+  "captions.clean_bold": "Una palabra importante de cada frase se queda en tu color.",
+  "grade.paused": "Los ajustes finos se ven al instante en la vista grande y, exactos, al pausar."
+ },
+ "strings": {
+  "mode.style": "Estilo",
+  "mode.style.title": "Estilo del video: subtítulos y colores (tecla 3)",
+  "estilo.title": "Estilo",
+  "estilo.help": "Cómo se ve todo el video. Cada opción muestra un ejemplo con tu propio video.",
+  "level.basic": "Básico",
+  "level.advanced": "Avanzado",
+  "level.aria": "Cuántos ajustes ver",
+  "level.badge": "Avanzado",
+  "section.toggle": "Mostrar u ocultar esta sección",
+  "preview.title": "Así se ve tu video",
+  "preview.note": "Tus palabras reales, en bucle. Pasa el mouse por un estilo para verlo aquí.",
+  "preview.hover": "Vista previa: {estilo} · haz clic para usarlo",
+  "preview.neutral": "Todavía no hay un cuadro de tu video: el ejemplo usa un fondo neutro.",
+  "preview.aria": "Vista previa del estilo con tu video",
+  "gallery.chosen": "Elegido",
+  "gallery.aria": "Estilo de los subtítulos",
+  "color.other": "Otro color",
+  "color.brand": "Color de tu marca",
+  "color.same_brand": "Igual al color de tu marca",
+  "color.linked.note": "Quita la palomita de «Igual al color de tu marca» para elegir otro color.",
+  "color.linked": "Es el color de tu marca",
+  "color.change": "Cambiar",
+  "color.change.aria": "Cambiar el color de tu marca",
+  "color.hex": "Código del color",
+  "color.swatch": "Usar el color {nombre}",
+  "brand.used_in": "Se usa en",
+  "brand.chip.caps": "Subtítulos",
+  "brand.chip.titles": "Títulos",
+  "brand.chip.cards": "Tarjetas y botones",
+  "brand.chip.bg": "Fondos",
+  "brand.pv.cap": "Subtítulo",
+  "brand.pv.cap.sub": "la palabra que dices",
+  "brand.pv.cap.boxed": "la pastilla",
+  "brand.pv.cap.karaoke": "el relleno",
+  "brand.pv.cap.off": "este estilo no usa tu color",
+  "brand.pv.cap.own": "tu pastilla tiene otro color",
+  "brand.pv.title": "Título",
+  "brand.pv.title.sub": "palabras destacadas",
+  "brand.pv.card": "Tarjeta",
+  "brand.pv.card.sub": "tu nombre",
+  "brand.pv.btn": "Botón",
+  "brand.pv.btn.sub": "tus botones",
+  "brand.demo.title1": "Así se ve",
+  "brand.demo.title2": "tu marca",
+  "brand.demo.name": "Tu nombre",
+  "brand.demo.role": "Tu profesión",
+  "brand.demo.follow": "Sígueme",
+  "tri.auto": "Según el estilo",
+  "tri.yes": "Sí",
+  "tri.no": "No",
+  "font.default": "La del estilo",
+  "transcript.open": "Abrir la transcripción",
+  "caps.more": "Más ajustes de subtítulos en Estilo",
+  "caps.off": "Sin subtítulos: elige un estilo arriba para usar este ajuste.",
+  "caps.inspector.title": "Subtítulos",
+  "caps.inspector.sub": "Los mismos ajustes que en Estilo",
+  "summary.title": "Estilo del video",
+  "summary.caps": "Subtítulos",
+  "summary.brand": "Color de tu marca",
+  "summary.change": "Cambiar",
+  "summary.change.caps": "Cambiar los subtítulos en Estilo",
+  "summary.change.brand": "Cambiar el color de tu marca en Estilo",
+  "summary.off": "sin subtítulos",
+  "sample.fallback": "Ya está",
+  "look.aria": "Estilo de color del video",
+  "look.hold": "Mantén presionado para ver el original",
+  "look.orig": "Así salió de la cámara",
+  "look.error": "No se pudo hacer la vista previa del color.",
+  "look.retry": "Reintentar",
+  "look.loading": "Preparando las fotos con tu video…",
+  "compare.on": "Comparar con el original",
+  "compare.aria": "Línea de comparación: a la izquierda, como salió de la cámara; a la derecha, con tu color",
+  "compare.before": "Antes",
+  "compare.after": "Después",
+  "compare.note": "Arrastra la línea: a la izquierda como salió de la cámara, a la derecha con tu color.",
+  "grade.fine": "Ajustes finos",
+  "grade.total": "Total con el estilo: {v}",
+  "grade.auto": "{v} (la del estilo)",
+  "grade.reset": "Volver a la del estilo",
+  "grade.reset.aria": "Volver a la definición del estilo de color",
+  "grade.off": "El color está apagado: elige un estilo de color arriba o prende «Ajustar el color».",
+  "grade.dir.exposure.neg": "{v} % más oscuro",
+  "grade.dir.exposure.pos": "{v} % más claro",
+  "grade.dir.temperature.neg": "{v} % más frío",
+  "grade.dir.temperature.pos": "{v} % más cálido",
+  "grade.dir.tint.neg": "{v} % más verde",
+  "grade.dir.tint.pos": "{v} % más rosado",
+  "ex.less": "Menos",
+  "ex.same": "Así",
+  "ex.more": "Más",
+  "ex.cold": "Frío",
+  "ex.warm": "Cálido",
+  "ex.green": "Verde",
+  "ex.pink": "Rosado",
+  "ex.shot": "Toma {n}",
+  "match.pending": "La vista previa lo muestra en cuanto termine de analizar tus tomas.",
+  "match.single": "Tu video tiene una sola toma: no hay nada que igualar.",
+  "summary.look": "Color del video",
+  "summary.look.off": "como salió de la cámara",
+  "summary.change.look": "Cambiar el color del video en Estilo",
+  "listen.play": "Escuchar",
+  "listen.stop": "Detener",
+  "listen.aria": "Escuchar: {nombre}",
+  "listen.stop.aria": "Detener: {nombre}",
+  "listen.need_music": "Primero crea la música para escucharla.",
+  "listen.stale": "Actualiza la música para oír este cambio.",
+  "listen.before": "Antes",
+  "listen.after": "Después",
+  "listen.voice.before": "tu voz sin mejorar",
+  "listen.voice.after": "tu voz mejorada",
+  "listen.voice_music": "5 s de tu video con la música",
+  "listen.music.start": "el inicio de la música",
+  "listen.music.end": "el final de la música",
+  "listen.music.all": "la música de tu video",
+  "listen.source.ai": "una muestra del ambiente",
+  "listen.source.procedural": "una muestra rápida",
+  "listen.source.library": "la canción elegida",
+  "dir.aria": "Estilo de edición",
+  "dir.que_cambia": "Qué cambia con «{estilo}»",
+  "dir.redirect.btn": "Rehacer la edición",
+  "dir.variation.btn": "Probar otra versión",
+  "dir.busy": "La IA está editando. Espera a que termine.",
+  "dir.fonts": "Letras: {lista}",
+  "dir.tech": "Notas técnicas ({n})",
+  "dir.notes.none": "La IA no dejó notas en esta edición.",
+  "dir.pct": "{v} %",
+  "dir.sync.btn": "Sincronizar con la música",
+  "dir.demo.title": "Tu idea\nen grande",
+  "mus.source.aria": "Música de fondo",
+  "mus.mood.aria": "Ambiente de la música",
+  "mus.track.aria": "Canción de la biblioteca",
+  "mus.mood.note": "Muestra rápida: la música final se crea con IA y puede variar.",
+  "mus.prompt.ph": "La eligió la IA según el estilo",
+  "mus.prompt.ex": "Ej.:",
+  "mus.prompt.ex1": "pop alegre",
+  "mus.prompt.ex2": "piano elegante",
+  "mus.prompt.ex3": "electrónica tranquila",
+  "mus.prompt.use": "Escribir «{texto}»",
+  "mus.key.auto": "Automático",
+  "mus.key.ex": "Ej.: {tono}",
+  "mus.seed.btn": "Otra variación",
+  "mus.gen": "Crear la música",
+  "mus.update": "Actualizar la música",
+  "mus.busy": "Creando la música… con IA tarda de 10 a 40 s.",
+  "mus.none": "Todavía no se crea: se crea sola al exportar.",
+  "mus.ready": "Lista: {n} pulsos por minuto.",
+  "mus.ready.plain": "Lista.",
+  "mus.drop": "El golpe principal cae en {t}.",
+  "mus.stale": "Cambiaste un ajuste: actualízala para oírla así.",
+  "mus.off": "Sin música de fondo: el video sale solo con tu voz.",
+  "mus.lib.loading": "Cargando la biblioteca…",
+  "mus.lib.empty": "No hay canciones en la biblioteca.",
+  "mus.more": "Más ajustes de música en Estilo",
+  "mus.insp.sub": "Lo que depende del momento del video",
+  "mus.fade_out.v": "{v} s antes del final",
+  "mus.gain.v": "{v} dB bajo tu voz",
+  "who.use.need": "Primero agrega tus datos en «Quién sale en el video».",
+  "who.use.aria": "Dónde aparecen tus datos",
+  "who.logo.size": "{v} % del ancho",
+  "who.logo.corners": "Va en la esquina que elijas, a la misma distancia de los dos bordes.",
+  "who.logo.upload": "Subir tu logo",
+  "who.logo.on": "Mostrar el logo",
+  "who.logo.tl": "Arriba a la izquierda",
+  "who.logo.tr": "Arriba a la derecha",
+  "who.logo.bl": "Abajo a la izquierda",
+  "who.logo.br": "Abajo a la derecha",
+  "who.logo.aria": "Esquina del logo",
+  "who.logo.size.aria": "Tamaño del logo",
+  "who.logo.off": "En la edición con IA el logo todavía no sale en el video final: llega en una próxima versión.",
+  "who.preset.none": "Ninguna plantilla",
+  "who.preset.save": "Guardar",
+  "who.preset.del": "Eliminar la plantilla elegida",
+  "who.preset.aria": "Plantilla de tu marca",
+  "fmt.9:16": "Vertical 9:16",
+  "fmt.4:5": "Vertical 4:5",
+  "fmt.1:1": "Cuadrado 1:1",
+  "fmt.16:9": "Horizontal 16:9",
+  "fmt.original": "Como el original",
+  "fmt.9:16.title": "Para Reels, TikTok y Shorts",
+  "fmt.4:5.title": "Para publicaciones de Instagram",
+  "fmt.1:1.title": "Cuadrado para cualquier red",
+  "fmt.16:9.title": "Para YouTube",
+  "fmt.original.title": "Conserva el tamaño y el encuadre de tu video; solo agrega los subtítulos.",
+  "fmt.aria": "Formato del video final",
+  "lang.es": "Español",
+  "lang.en": "Inglés",
+  "lang.pt": "Portugués",
+  "lang.fr": "Francés",
+  "lang.de": "Alemán",
+  "lang.it": "Italiano",
+  "lang.aria": "Idioma del texto en pantalla",
+  "lang.off": "Este idioma aún no está disponible en la edición con IA.",
+  "air.v": "{v} % del alto",
+  "air.aria": "Margen desenfocado",
+  "air.before": "Sin margen",
+  "air.after": "Con margen",
+  "enh.aria": "Mejorar el audio de la voz",
+  "summary.director": "Edición con IA",
+  "summary.music": "Música",
+  "summary.who": "Quién sale",
+  "summary.format": "Formato",
+  "summary.who.none": "sin datos",
+  "summary.change.director": "Cambiar la edición con IA en Estilo",
+  "summary.change.music": "Cambiar la música en Estilo",
+  "summary.change.who": "Cambiar quién sale y tu logo en Estilo",
+  "summary.change.format": "Cambiar el formato, el idioma y el audio en Estilo",
+  "summary.director.sync": "falta seguir el ritmo de la música",
+  "opt.auto": "Automático",
+  "opt.auto.help": "Lo decide el estilo.",
+  "color.none.box": "Sin fondo",
+  "text.list.ph": "Uno por renglón",
+  "time.aria": "{campo}: minutos y segundos del video final",
+  "time.bad": "Escribe el tiempo así: 0:05.2",
+  "time.here": "Aquí",
+  "time.here.title": "Usar el momento donde está el cursor",
+  "time.here.aria": "{campo}: usar el momento donde está el cursor",
+  "insp.sec.time": "Tiempo",
+  "insp.sec.content": "Contenido",
+  "insp.sec.pos": "Ubicación y tamaño",
+  "insp.sec.style": "Estilo",
+  "insp.sec.anim": "Animación",
+  "insp.act.visible": "Visible",
+  "insp.act.hidden": "Oculto",
+  "insp.act.visible.title": "Mostrar u ocultar sin borrarlo (H)",
+  "insp.act.lock": "Proteger de la IA",
+  "insp.act.locked": "Protegido",
+  "insp.act.lock.title": "La IA no lo cambia ni lo borra cuando rehaces la edición (L)",
+  "insp.act.dup": "Duplicar",
+  "insp.act.dup.title": "Duplicar (⌘D)",
+  "insp.act.del": "Eliminar",
+  "insp.act.del.title": "Eliminar (Supr)",
+  "insp.act.regen": "Otra versión con IA",
+  "insp.act.regen.title": "La IA propone otra versión de este elemento",
+  "insp.at": "en",
+  "insp.empty": "Selecciona un elemento de la línea de tiempo o de la vista previa para editarlo.",
+  "insp.lines.note": "Cada renglón es una línea con su propio estilo (abajo).",
+  "insp.lines.clear": "Quitar el estilo por renglón",
+  "insp.multi": "{n} elementos seleccionados",
+  "insp.multi.hint": "Arrastra cualquiera de los bloques seleccionados para moverlos juntos. Alt y las flechas los mueven un cuadro.",
+  "insp.tag.ai": "Lo hizo la IA",
+  "insp.tag.user": "Creado por ti",
+  "insp.tag.locked": "Protegido",
+  "insp.tag.off": "Oculto",
+  "insp.tag.comp": "Composición ({n} piezas)",
+  "insp.tag.comp.btn": "Seleccionar",
+  "insp.tag.comp.select": "Seleccionar todas las piezas de la composición",
+  "insp.tag.comp.title": "La palabra gigante, la frase y el fondo se editan por separado, pero se protegen y se rehacen juntos.",
+  "insp.z.front": "Traer al frente",
+  "insp.z.back": "Enviar atrás",
+  "media.file.video": "Clip sin sonido",
+  "media.file.image": "Foto con acercamiento suave",
+  "media.file.none": "Falta el archivo",
+  "media.file.replace": "Reemplazar",
+  "media.file.add": "Agregar archivo",
+  "media.file.script": "Lo pidió tu guion: aparece mientras dices esa línea.",
+  "media.fit.note": "El clip dura {clip} s y su tramo {tramo} s.",
+  "mus.insp.title": "Música de fondo",
+  "mus.stop.here": "Pausa dramática aquí",
+  "mus.swell.here": "Subir la música aquí",
+  "sfx.group.aria": "Grupo de sonidos",
+  "sfx.pick.aria": "Sonido",
+  "sfx.unknown": "Este sonido no existe en el catálogo: no sonará y el video final lo omite. Elige otro.",
+  "aw.aria": "Palabras del título",
+  "aw.none": "Escribe el texto del título para elegir sus palabras.",
+  "add.title": "Agregar a {pista}",
+  "add.here": "Agregar donde está el cursor",
+  "add.media": "Recurso (foto o video)",
+  "add.own": "Foto o video propio…",
+  "add.own.scene": "Foto o clip propio…",
+  "add.sfx.hint": "Pasa el mouse por un sonido para escucharlo antes de agregarlo.",
+  "icon.current": "Ícono elegido",
+  "icon.none": "Sin ícono",
+  "icon.search": "Buscar ícono: corazón, ubicación, dinero…",
+  "icon.search.aria": "Buscar un ícono",
+  "icon.grid.aria": "Íconos encontrados",
+  "icon.searching": "Buscando…",
+  "icon.empty": "Sin resultados.",
+  "icon.off": "El buscador de íconos no está disponible.",
+  "icon.option": "Ícono {n}",
+  "asm.empty": "Selecciona un clip de la línea de tiempo para ajustarlo.",
+  "asm.part": "Parte {n} del guion · confianza {conf}",
+  "asm.extra": "Extra fuera del guion",
+  "asm.see_takes": "Ver las tomas de esta parte",
+  "asm.listen.clip": "3 s de este clip",
+  "asm.secs": "{v} s",
+  "asm.image.dur.aria": "Cuánto tiempo se ve la foto",
+  "asm.vol.auto": "Automático",
+  "asm.vol.manual": "Elegir",
+  "asm.vol.pct": "{v} % (100 % es como se grabó)",
+  "asm.vol.aria": "Volumen del clip",
+  "asm.trim": "Recorte: de {a} s a {b} s. Arrastra las orillas del clip en la línea de tiempo para cambiarlo.",
+  "asm.fade.in": "Aparece desde negro",
+  "asm.fade.out": "Se va a negro",
+  "asm.fade.none": "Sin",
+  "asm.fade.soft": "Suave (0.5 s)",
+  "asm.fade.slow": "Lento (1.5 s)",
+  "asm.trans.cut": "Corte",
+  "asm.trans.fast": "Fundido rápido (0.3 s)",
+  "asm.trans.normal": "Fundido normal (0.6 s)",
+  "asm.trans.slow": "Fundido lento (1.2 s)",
+  "asm.ramp.on": "El video de la toma que {lado} se acelera ×2 durante {s} s en la pausa; el audio sigue igual.",
+  "asm.ramp.out": "sale",
+  "asm.ramp.in": "entra",
+  "asm.ramp.off": "Ahora es un corte seco. Actívalo para que el cambio de cámara se vea fluido.",
+  "asm.ramp.no": "Aquí no cabe: no hay cuadros de sobra o hay voz en los dos lados del corte.",
+  "asm.ov.tc": "Arriba al centro",
+  "asm.ov.center": "Centro",
+  "asm.ov.bc": "Abajo al centro",
+  "asm.ov.size": "{v} % del ancho",
+  "asm.ov.size.aria": "Tamaño de la imagen",
+  "asm.style.opt": "Edición con IA: {estilo}",
+  "hl.none": "Ninguno",
+  "setup.drop.aria": "Elegir tus clips de video",
+  "setup.drop.big": "Arrastra tu video (o varios)",
+  "setup.drop.sub": "o haz clic para elegirlos · MP4 o MOV · imágenes y videos que pida el guion, también",
+  "insp.sec.sound": "Cómo suena",
+  "demo.handle": "@tu.usuario",
+  "clean.retry": "Volver a buscar con IA",
+  "clean.listen.sel": "Escuchar cómo queda",
+  "clean.listen.sel.name": "cómo queda el corte elegido",
+  "clean.listen.sel.why": "Elige un corte en el guion para escuchar cómo queda.",
+  "clean.listen.cat": "Escuchar un ejemplo",
+  "clean.listen.cat.name": "un ejemplo de {tipo}",
+  "clean.listen.cat.why": "Todavía no hay cortes de este tipo.",
+  "clean.sil.aria": "Ver los silencios en el guion",
+  "media.speed.slow": "Se reproduce más lento: ×{v}.",
+  "media.speed.fast": "Se reproduce acelerado: ×{v}.",
+  "insp.avatar.noface": "«Tu cara del video» necesita que se vea tu cara, y en este video no se encontró.",
+  "insp.avatar.nophoto": "Para «Foto propia», primero sube tu foto en «Foto».",
+  "cmp.lines1": "1 renglón",
+  "cmp.lines2": "2 renglones",
+  "air.note.off": "Sin margen: el video va a sangre completa. Mueve el control para dejar margen (solo cambia un video horizontal).",
+  "air.note.on": "Margen aplicado: {v} % del alto desenfocado (solo cambia un video horizontal).",
+  "air.note.fills": "Tu video ya llena el cuadro: el margen solo cambia un video horizontal.",
+  "who.logo.need": "Sube tu logo para mostrarlo.",
+  "listen.ai.other": "Elige «Creada con IA» y créala para escucharla.",
+  "mus.source.note": "«Creada con IA» se escucha cuando ya la creaste; «Rápida (sin IA)» toca una muestra al momento.",
+  "dir.keep.caps": "Tus subtítulos se quedan en «{estilo}»",
+  "dir.keep.look": "tu color se queda en «{color}»"
+ },
+ "aliases": {
+  "cutaways.text.preset": "text.preset",
+  "cutaways.variant": "graphics.variant",
+  "text.anchor": "text.counter.anchor",
+  "cutaways.kind.text.preset": "text.preset"
+ },
+ "deny": [
+  "punch-in",
+  "punch",
+  "ken burns",
+  "glitch",
+  "whip",
+  "squircle",
+  "whoosh",
+  "swoosh",
+  "drop",
+  "bpm",
+  "kicker",
+  "lower third",
+  "column",
+  "row",
+  "grid",
+  "chips",
+  "watermark",
+  "mono",
+  "cover",
+  "contain",
+  "booking",
+  "preset",
+  "look",
+  "crossfade",
+  "fade in",
+  "fade out",
+  "fade",
+  "procedural",
+  "b-roll",
+  "broll",
+  "sfx",
+  "scratch",
+  "tape",
+  "upbeat",
+  "chill",
+  "playful",
+  "major",
+  "minor",
+  "image",
+  "slide",
+  "spring",
+  "easing",
+  "highlight",
+  "accent",
+  "stroke",
+  "outline",
+  "filled",
+  "sticker_text",
+  "lut",
+  "ev",
+  "hz",
+  "rgb",
+  "en caja",
+  "limpio bold",
+  "mínimo pequeño",
+  "mayúsculas bold",
+  "caja de fondo",
+  "color de resaltado",
+  "color de acento",
+  "posición x",
+  "posición y",
+  "intensidad del look",
+  "re-dirigir",
+  "dirigir"
+ ],
+ "deny_basic_units": [
+  "dB",
+  "Hz",
+  "px",
+  "EV",
+  "st",
+  "BPM"
+ ],
+ "example_kinds": {
+  "vivo": "Vista en vivo dedicada (tu cuadro + tus palabras) en la fila o en la galería",
+  "loop": "Demostración en bucle de 1 a 3 s",
+  "antes_despues": "Antes / después hecho por el motor con tu cuadro",
+  "audio": "Botón Escuchar",
+  "texto": "Ejemplo escrito «Ej.: …»",
+  "en_video": "El cambio se ve al instante en la vista previa grande (prueba de control vivo)",
+  "ninguno": "Sin ejemplo"
+ }
+}

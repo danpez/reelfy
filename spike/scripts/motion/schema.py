@@ -162,16 +162,20 @@ _ACCENTS = {
     "ultima": "última", "ultimo": "último", "union": "unión", "vacia": "vacía", "vacio": "vacío",
     "vacios": "vacíos", "valido": "válido", "variacion": "variación", "vinieta": "viñeta",
 }
-_WORD = re.compile(r"[A-Za-zÀ-ÿ0-9_]+")        # con _ y digitos: los identificadores no cambian
+# con _ y digitos: los identificadores no cambian; {variables} de una plantilla de la copy tampoco
+# ({titulos} en el ejemplo de «Cantidad de efectos» lo llena el Studio con su nombre exacto)
+_WORD = re.compile(r"\{[A-Za-z0-9_]+\}|[A-Za-zÀ-ÿ0-9_]+")
 
 
 def accent_es(s: Any) -> Any:
-    """Etiqueta con su ortografia en espanol (solo palabras del mapa)."""
+    """Etiqueta con su ortografia en espanol (solo palabras del mapa; las {variables} no se tocan)."""
     if not isinstance(s, str):
         return s
 
     def fix(m):
         w = m.group(0)
+        if w[0] == "{":
+            return w
         a = _ACCENTS.get(w.lower()) if w.isalpha() else None
         if a is None:
             return w
@@ -181,18 +185,95 @@ def accent_es(s: Any) -> Any:
     return _WORD.sub(fix, s)
 
 
+_ACCENT_TEXT = ("label", "hint", "desc", "help", "ex_ui", "ex_tpl")
+_ACCENT_BY = ("label_by", "help_by", "note_by")
+
+
 def _accent_catalog(o: Any) -> Any:
-    """Aplica accent_es a label/hint/desc de todo el catalogo (en sitio)."""
+    """Aplica accent_es a los textos visibles de todo el catalogo (en sitio): label/hint/desc, la
+    copy de la UI (help, ex_ui, ex_tpl) y los valores de label_by/help_by/note_by."""
     if isinstance(o, list):
         for x in o:
             _accent_catalog(x)
     elif isinstance(o, dict):
         for k, v in o.items():
-            if k in ("label", "hint", "desc") and isinstance(v, str):
+            if k in _ACCENT_TEXT and isinstance(v, str):
                 o[k] = accent_es(v)
+            elif k in _ACCENT_BY and isinstance(v, dict):
+                for kk, vv in v.items():
+                    if isinstance(vv, str):
+                        v[kk] = accent_es(vv)
             else:
                 _accent_catalog(v)
     return o
+
+
+# ---------------------------------------------------------------- copy de la interfaz
+# ui_copy.json: etiqueta, que hace, ejemplo y nivel (Basico / Avanzado / oculto) de cada ajuste,
+# nombres de las opciones, secciones, notas de reglas y textos fijos del Studio (es-MX). Es la
+# fuente unica de la copy: /fx/schema la publica entera como `ui` y _apply_ui_copy la pone en
+# cada parametro del catalogo.
+try:
+    UI_COPY: dict = json.loads((__import__("pathlib").Path(__file__).with_name("ui_copy.json")).read_text(encoding="utf-8"))
+except Exception:  # pragma: no cover - sin copy el catalogo base sigue sirviendo
+    UI_COPY = {"version": 0, "params": {}, "options": {}, "ui": {}, "sections": {}, "notes": {}, "strings": {},
+               "aliases": {}, "deny": []}
+# campos de la copy que se copian a cada parametro (los demas son notas del build: units, where...)
+_COPY_FIELDS = ("help", "ex", "ex_ui", "ex_tpl", "basic_choices", "relative_choices", "adv", "adv_label",
+                "label_by", "help_by", "note_by", "level_by")
+
+
+def _copy_entry(ids: list) -> dict | None:
+    P_ = UI_COPY.get("params") or {}
+    for i in ids:
+        if i in P_:
+            return P_[i]
+    return None
+
+
+def _apply_copy(prm: dict, ids: list, keys: tuple = ()) -> None:
+    """Pone la copy de `ids` (el primero que exista) en el parametro: label/level resueltos para
+    el kind o la pista (`keys`), help, ejemplo y opciones humanas. `hint` se conserva."""
+    e = _copy_entry(ids)
+    if not e:
+        return
+    by = lambda m, d: next((m[k] for k in keys if isinstance(m, dict) and k in m), d)  # noqa: E731
+    prm["label"] = by(e.get("label_by"), e.get("label") or prm.get("label"))
+    prm["level"] = by(e.get("level_by"), e.get("level") or "basic")
+    for f in _COPY_FIELDS:
+        if f in e:
+            prm[f] = copy.deepcopy(e[f])
+    if prm.get("type") in ("rows", "lines") and prm.get("fields"):
+        for fld in prm["fields"]:
+            _apply_copy(fld, [f"{i}.{fld['k']}" for i in ids], keys)
+
+
+def _apply_copy_params(params: list, group: str) -> None:
+    for prm in params or []:
+        _apply_copy(prm, [f"{group}.{prm['k']}"])
+
+
+def _apply_ui_copy(kinds: dict) -> dict:
+    """Copy de la UI en todo el catalogo (en sitio): grupos del proyecto, campos comunes, cada
+    parametro de cada kind (orden <pista>.<kind>.<k>, <pista>.<k>, common.<k>) y el nombre de
+    cada kind (options["<pista>.kind"], text.preset o sfx.name). Publica la copy entera en `ui`."""
+    for g in ("captions", "music", "grade", "director"):
+        if g in kinds:
+            _apply_copy_params(kinds[g].get("params"), g)
+    for grp in (kinds.get("common") or {}).values():
+        for prm in grp or []:
+            _apply_copy(prm, [f"common.{prm['k']}"])
+    opts = UI_COPY.get("options") or {}
+    for tk, T in (kinds.get("tracks") or {}).items():
+        names = opts.get({"text": "text.preset", "sfx": "sfx.name"}.get(tk, f"{tk}.kind")) or {}
+        for kind, spec in (T.get("items") or {}).items():
+            if kind in names and names[kind].get("label"):
+                spec["label"] = names[kind]["label"]
+            for prm in spec.get("params") or []:
+                k = prm["k"]
+                _apply_copy(prm, [f"{tk}.{kind}.{k}", f"{tk}.{k}", f"common.{k}"], (kind, tk))
+    kinds["ui"] = UI_COPY
+    return kinds
 
 
 def P(k: str, type: str, label: str, default: Any = None, **kw) -> dict:
@@ -983,7 +1064,9 @@ def _adopt_music() -> None:
                         q["max"] = max(q["max"], hi)
         except Exception:  # formato inesperado: catalogo base
             MUSIC_PARAMS[:] = json.loads(snap)
-        KINDS["music"]["params"] = _accent_catalog(json.loads(json.dumps(MUSIC_PARAMS)))
+        mp = json.loads(json.dumps(MUSIC_PARAMS))
+        _apply_copy_params(mp, "music")
+        KINDS["music"]["params"] = _accent_catalog(mp)
         KINDS.setdefault("adopted", []).append("music")
     except Exception:  # pragma: no cover
         return
@@ -1704,8 +1787,9 @@ try:
     KINDS["adopted"] = _adopt_modules(KINDS)
 except Exception:  # pragma: no cover - nunca romper el catalogo base
     KINDS["adopted"] = []
-# ortografia final (tambien de lo que adoptaron los modulos) y marca de mezcla en TODAS las
-# transiciones (el Studio no duplica la lista MIXERS)
+# copy de la interfaz (ui_copy.json) y ortografia final (tambien de lo que adoptaron los modulos)
+# y marca de mezcla en TODAS las transiciones (el Studio no duplica la lista MIXERS)
+_apply_ui_copy(KINDS)
 _accent_catalog(KINDS)
 for _k, _spec in KINDS["tracks"]["transitions"]["items"].items():
     _spec["mixer"] = bool(_spec.get("mixer", _k in TRANSITION_MIXERS))

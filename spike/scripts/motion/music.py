@@ -3541,6 +3541,22 @@ def _coerce_cfg(cfg: dict | None, D: float, seed: int) -> tuple[dict, list[str]]
     return out, warn
 
 
+def mood_sample(style: str = "dinamico", mood: str | None = None, dur: float = 6.0, seed: int = 7,
+                target: float = -16.0, fade: float = 0.5, sr: int = SR) -> np.ndarray:
+    """Muestra corta de un ambiente para «Escuchar» antes de elegirlo (Estilo › Música): el
+    generador rapido (sin IA) con el estilo de edicion y el animo, a `target` LUFS y con `fade` s de
+    desvanecido al final. Estilo desconocido -> dinamico; animo desconocido o None -> el del estilo.
+    -> (n, 2) float32 de largo exacto `dur` s."""
+    st = style if style in STYLE_MUSIC else "dinamico"
+    md = mood if mood in MOOD_MUSIC else None
+    y, _info = synth_procedural(float(dur), st, md, seed=int(seed), sr=sr)
+    y, _lufs = normalize(np.asarray(y, np.float32), sr, target=target)
+    n = min(len(y), max(1, int(round(fade * sr))))
+    y = np.array(y, np.float32, copy=True)
+    y[-n:] *= np.linspace(1.0, 0.0, n, dtype=np.float32)[:, None]
+    return y
+
+
 def get_music(cfg: dict | None, duration: float, style: str = "dinamico", seed: int = 7,
               on_pct: Callable | None = None, cache_dir: str | Path | None = None) -> dict:
     """Musica lista para mezclar, de largo EXACTO `duration` (s, tiempo final del video).

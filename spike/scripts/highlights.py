@@ -178,6 +178,8 @@ def select_highlights(sentences, n=1, cuts=None, duration=None):
     silencios y tomas) entre MIN_SEC y MAX_SEC. `sentences` deben venir de las palabras que se
     quedan (takes.effective_words): un short nunca lleva una toma repetida ni termina dentro de
     una o justo antes de la toma buena."""
+    if int(n or 0) <= 0:   # «¿Cuántos shorts sugerir?» = Ninguno: ni se le pregunta a la IA
+        return []
     iv, take_iv = _cut_iv(cuts), _cut_iv(cuts, takes_only=True, with_off=True)
     system = (
         "Eres un editor de video experto en shorts virales para redes (TikTok, "

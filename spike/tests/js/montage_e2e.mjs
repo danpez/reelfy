@@ -68,6 +68,22 @@ page.on("response", async r => {
   }
 });
 const sidMap = () => Object.fromEntries(CLIPS.map(c => [c.key, sidByName[c.name]]));
+// El montaje simulado no espera al carril de transcripcion REAL del servidor; el de verdad pasa de
+// "Escuchando cada clip" a "Eligiendo" solo con cada clip transcrito. Sin esta espera el ensamble pide
+// GET /sources/{sid}/words de clips aun pendientes (404 = "aun no esta lista") y la prueba depende de
+// que whisper le gane a la prueba.
+async function wordsReady(sids, ms = 180000) {
+  const t0 = Date.now();
+  let last = null;
+  while (Date.now() - t0 < ms) {
+    const r = await fetch(`${BASE}/sources?ids=${encodeURIComponent(sids.join(","))}`);
+    last = r.ok ? (await r.json()).sources.map(s => s.words) : [String(r.status)];
+    if (last.length === sids.length && last.every(w => w === "ready")) return;
+    assert.ok(!last.includes("error"), "una transcripcion por clip fallo: " + JSON.stringify(last));
+    await new Promise(res => setTimeout(res, 500));
+  }
+  assert.fail("las transcripciones por clip no terminaron: " + JSON.stringify(last));
+}
 function status(withPlan) {
   const base = { plan_rev: 1, warnings: [], ext: ".mp4", kind: "montage", pct: 0, eta: null, elapsed: 0, clips: null, error: null };
   if (ST.phase === "words") {
@@ -258,6 +274,7 @@ try {
   await shot("03_armando_escuchando_1440x900");
   await audit("progreso", "#s-montage *", { groups: "#mtBtns", box: "#s-montage .card", cards: ".mtsteps" });
   await size(1200, 760); await shot("04_armando_escuchando_1200x760"); await size(1440, 900);
+  await wordsReady(mb.sids);                          // como el montaje real: "Escuchando" termina con cada clip transcrito
   ST.phase = "montage";
   await page.waitForFunction(() => document.querySelector('.mtstep[data-k="match"]').classList.contains("cur"), null, { timeout: 20000 });
   assert.match(await ev(() => document.querySelector('.mtstep[data-k="words"]').innerText), /8\/8/);

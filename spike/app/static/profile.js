@@ -124,8 +124,8 @@
     const sum = PF.summary(SEL);
     el.innerHTML = compact
       ? `<span class="pfpick c">${ICO("user")}<select class="selinp" aria-label="Perfil de la persona">${opts}</select>${SEL ? `<button class="btn ghost mini" type="button" data-e="1" title="Editar el perfil">${ICO("insp")}</button>` : ""}</span>`
-      : `<label>Perfil de la persona <span class="info" data-tip="Quién sale en el video y sus enlaces: la IA pone su nombre y profesión, el botón Seguir, la invitación a reservar y la tarjeta final.">i</span></label>`
-        + `<div class="pfpick">${ICO("user")}<select class="selinp">${opts}</select><button class="btn ghost mini" type="button" data-e="1">${ICO(SEL ? "insp" : "plus")}${SEL ? "Editar" : "Crear perfil"}</button></div>`
+      // (el nombre y que hace los pone la fila «Quién sale en el video» de Inicio)
+      : `<div class="pfpick">${ICO("user")}<select class="selinp" id="homeProfSel" aria-label="Perfil guardado de quien sale en el video">${opts}</select><button class="btn ghost mini" type="button" data-e="1">${ICO(SEL ? "insp" : "plus")}${SEL ? "Editar" : "Crear perfil"}</button></div>`
         + (sum ? `<div class="hint pfsum">${esc(sum)}</div>` : `<div class="hint pfsum">Opcional. También puedes agregarlo después en el editor.</div>`);
     const sel = el.querySelector("select");
     sel.onchange = () => {
@@ -152,12 +152,22 @@
     box.innerHTML = (sum ? `<div class="pfcard">${face ? `<img class="pfav" src="/tlsource/${encodeURIComponent(face.sid)}" alt="">` : `<span class="pfav ini">${esc(initials(p.name || p.business))}</span>`}<div class="pfcs"><b>${esc(p.name || p.business || "Perfil")}</b><span>${esc([p.title, p.business && p.name ? p.business : ""].filter(Boolean).join(" · "))}</span><span class="pflinks">${(p.links || []).slice(0, 6).map(l => iconSvg(l.platform, "#fff")).join("")}</span></div></div>`
       : `<div class="hint" style="margin-top:0">Sin perfil: la IA usa lo que entiende del video. Con un perfil pone el nombre y la profesión, el botón Seguir con la red, la invitación a reservar y la tarjeta final.</div>`)
       + (notes.length ? `<div class="dirnotes">${notes.map(n => `<div>${ICO("alert")}<span>${esc(String(n).replace(/^perfil:\s*/i, ""))}</span></div>`).join("")}</div>` : "")
-      + `<div class="btnrow" style="margin-top:8px"><button class="btn mini" id="profEdit">${ICO(sum ? "insp" : "plus")}${sum ? "Editar perfil" : "Agregar perfil"}</button>`
+      + `<div class="btnrow" style="margin-top:8px"><button class="btn ghost mini" id="profEdit">${ICO(sum ? "insp" : "plus")}${sum ? "Editar perfil" : "Agregar perfil"}</button>`
       + `<select class="selinp" id="profUse" style="flex:1;min-width:0"><option value="">Usar un perfil guardado…</option>${SAVED.map(x => `<option value="${esc(x.id)}">${esc(x.name || x.business || x.id)}</option>`).join("")}</select></div>`;
     $("#profEdit").onclick = () => PF.open({ mode: "editor", profile: PLAN.profile || null, savedId: (PLAN.profile && PLAN.profile.id) || null });
     const u = $("#profUse");
     u.onchange = () => { const x = SAVED.find(s => s.id === u.value); u.value = ""; if (x) PF.applyToJob(clean(x)); };
     if (!LOADED || !CAT.length) PF.load().then(() => { if ($("#profBody") === box) PF.renderEditorGroup(); });
+  };
+  /** Prende o apaga un uso de los datos en el video abierto (Estilo › Quién sale › Dónde aparece:
+      lower_third, follow_cta, booking_cta, end_card, handle_watermark): re-dirige al instante con el
+      perfil del proyecto (PUT /profile), un paso de deshacer. -> true si se aplico. */
+  PF.setUse = function (key, on) {
+    const p = typeof PLAN !== "undefined" && PLAN ? PLAN.profile : null;
+    if (!p) return Promise.resolve(false);
+    const x = clean(p);
+    x.use = Object.assign({}, window.FXCore ? FXCore.profileUseOf(p) : p.use, { [key]: !!on });
+    return PF.applyToJob(x);
   };
   /** Foto de la persona: la que subio (avatar) o, si no, la de su red principal (Instagram) o la
       del primer enlace con foto (la misma precedencia que el director). */

@@ -242,6 +242,14 @@ test("composeBody: montage_job, guion y montage por item; sin montaje igual que 
   const hand = C.composeBody({ clips: [{ sid: "A", type: "video", in: 0, out: 3, vol: 1, mute: false, start: 0 }], director: false });
   assert.equal("montage_job" in hand, false); assert.equal("script" in hand, false);
   assert.equal(hand.main[0].montage, undefined); assert.equal(hand.director, false); assert.equal(hand.highlights, 2);
+  // «¿Cuántos shorts sugerir?» = Ninguno viaja como 0 (antes se volvia 2); invalido -> 2; tope 5
+  assert.equal(C.composeBody({ clips: cs, overlays: [], highlights: "0" }).highlights, 0);
+  assert.equal(C.composeBody({ clips: cs, overlays: [], highlights: 0 }).highlights, 0);
+  assert.equal(C.composeBody({ clips: cs, overlays: [], highlights: "1" }).highlights, 1);
+  assert.equal(C.composeBody({ clips: cs, overlays: [], highlights: "" }).highlights, 2);
+  assert.equal(C.composeBody({ clips: cs, overlays: [], highlights: "x" }).highlights, 2);
+  assert.equal(C.composeBody({ clips: cs, overlays: [], highlights: "9" }).highlights, 5);
+  assert.equal(C.composeBody({ clips: cs, overlays: [], highlights: "-3" }).highlights, 0);
   // guion vacio -> null
   assert.equal(C.composeBody({ clips: cs, montageJob: "j", script: "  " }).script, null);
   // JSON: `trans: undefined` no viaja

@@ -647,3 +647,77 @@ assert not any(not v["cancel"].is_set() for k, v in S._SIDE.items() if k[0] == J
 print("OK")
 """
     _run(code, tmp_path, {"REELFY_WORKERS": "0", "REELFY_BG_ANALYSIS": "0", "REELFY_SRC_PROXY": "0"})
+
+
+def test_redirigir_conserva_el_texto_de_musica_del_usuario(tmp_path):
+    """El texto que el usuario escribio para la musica con IA (plan.studio.musicPrompt) se queda al
+    cambiar el estilo de edicion: /direct lo trata como si lo mandara (sin sincronia a la pista del
+    director, que seria otra cancion) y el Studio nunca muestra el texto en ingles del director.
+    Si ya no es el de su plan (lo cambio la IA), el director pone el suyo."""
+    code = "import server as S, jobstore\n" + FAKE_MUSIC + """
+TXT = "cumbia alegre con acordeón"
+P = json.loads(json.dumps(PLAN))
+P["fx"]["music"]["prompt"] = TXT
+P["studio"] = {"musicPrompt": TXT}
+assert S._user_music_prompt(P) == TXT
+r = S.direct(JOB, {"plan": P, "style": "elegante"})
+assert r["plan"]["fx"]["music"]["prompt"] == TXT, r["plan"]["fx"]["music"]
+assert r["plan"]["studio"]["musicPrompt"] == TXT
+assert RED[-1]["sync"] is False and len(RED) == 1, RED          # sin segunda pasada sincronizada
+assert "music_grid" not in r["plan"]["director"]
+# sin texto propio vigente: el del director (cambia con el estilo)
+P2 = json.loads(json.dumps(PLAN)); P2["studio"] = {"musicPrompt": "otra cosa"}
+assert S._user_music_prompt(P2) is None
+r2 = S.direct(JOB, {"plan": P2, "style": "minimal"})
+assert r2["plan"]["fx"]["music"]["prompt"] == "p_minimal", r2["plan"]["fx"]["music"]
+# otra fuente, apagada o vacia: no cuenta
+assert S._user_music_prompt(dict(P, fx={"music": dict(P["fx"]["music"], source="procedural")})) is None
+assert S._user_music_prompt(dict(P, fx={"music": dict(P["fx"]["music"], enabled=False)})) is None
+assert S._user_music_prompt(dict(P, studio={"musicPrompt": "  "})) is None
+assert S._user_music_prompt(dict(P, studio={"musicPromptByUser": True})) is None
+S.cancel(JOB, only="music")
+print("OK")
+"""
+    _run(code, tmp_path, {"REELFY_WORKERS": "0", "REELFY_BG_ANALYSIS": "0", "REELFY_SRC_PROXY": "0"})
+
+
+def test_limpieza_del_disco_no_borra_dentro_de_carpetas_enlazadas(tmp_path):
+    """Una copia de datos para pruebas que ENLAZA una carpeta (input/sources, output...) a otro
+    proyecto: la limpieza al arrancar no borra nada a traves del enlace (antes borro fuentes del
+    proyecto real). Con enlaces archivo por archivo se quita el enlace, nunca el archivo de origen;
+    y lo propio sin uso se sigue limpiando."""
+    ext = tmp_path.parent / (tmp_path.name + "_otro")
+    code = """
+import server as S, shutil
+from pathlib import Path
+ext = Path(os.environ["EXT_DIR"]); (ext / "src").mkdir(parents=True, exist_ok=True); (ext / "out").mkdir(exist_ok=True)
+old = time.time() - 10 ** 6
+f = ext / "src" / "aaaaaaaaaaaa.png"; f.write_bytes(b"x"); os.utime(f, (old, old))
+S.SOURCE_AGE_S = 0
+# input/sources enlazada a la carpeta de otro proyecto: no se toca
+if S.SOURCES.exists() and not S.SOURCES.is_symlink():
+    shutil.rmtree(S.SOURCES)
+S.SOURCES.parent.mkdir(parents=True, exist_ok=True)
+os.symlink(ext / "src", S.SOURCES)
+assert S._gc_dir_ok(S.SOURCES) is False
+assert S._gc_sources(now=time.time() + 5) == 0 and f.exists()
+# carpeta propia con un enlace por archivo: se quita el enlace, el archivo de origen se queda
+os.unlink(S.SOURCES); S.SOURCES.mkdir()
+os.symlink(f, S.SOURCES / f.name)
+assert S._gc_dir_ok(S.SOURCES) is True
+assert S._gc_sources(now=time.time() + 5) == 1
+assert not (S.SOURCES / f.name).is_symlink() and f.exists()
+# lo propio sin uso si se limpia
+g = S.SOURCES / "bbbbbbbbbbbb.png"; g.write_bytes(b"y"); os.utime(g, (old, old))
+assert S._gc_sources(now=time.time() + 5) == 1 and not g.exists()
+# huerfanos: tampoco dentro de una carpeta enlazada (output/ de otro proyecto)
+o = ext / "out" / "0123456789ab.mp4"; o.write_bytes(b"z"); os.utime(o, (old, old))
+shutil.rmtree(S.OUTPUT); os.symlink(ext / "out", S.OUTPUT)
+S._gc_orphans(now=time.time() + 10 ** 7)
+assert o.exists()
+print("OK")
+"""
+    try:
+        _run(code, tmp_path, {"EXT_DIR": str(ext), "REELFY_WORKERS": "0", "REELFY_BG_ANALYSIS": "0", "REELFY_SRC_PROXY": "0"})
+    finally:
+        __import__("shutil").rmtree(ext, ignore_errors=True)

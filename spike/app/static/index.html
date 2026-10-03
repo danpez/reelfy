@@ -142,8 +142,8 @@
              letter-spacing:.1em;display:flex;align-items:center;gap:7px}
   .pgroup h4 .ic{width:13px;height:13px;color:var(--faint)}
   /* icono de info con tooltip (feedback para usuarios sin experiencia) */
-  .info{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;
-        border-radius:50%;border:1px solid var(--line2);color:var(--muted);font-size:9px;font-weight:700;
+  .info{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;
+        border-radius:50%;border:1px solid var(--line2);color:var(--muted);font-size:11px;font-weight:700;
         font-style:normal;cursor:help;position:relative;vertical-align:middle;margin-left:2px;line-height:1}
   .info:hover{color:var(--brand2);border-color:var(--brand)}
   /* el tooltip se dibuja con JS como elemento fixed (#tipbox) para NO cortarse en
@@ -420,7 +420,7 @@
   .rdlg .rbtns .rdel{background:#d33c3c;box-shadow:none}
   @media (max-width:480px){ #recent .rrow .ro{display:none} }   /* telefono: la fila entera abre; mas lugar para el nombre */
 </style>
-<link rel="stylesheet" href="/static/fx.css?v=42ad0c24">
+<link rel="stylesheet" href="/static/fx.css?v=e340f4bc">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute">
@@ -430,6 +430,7 @@
     <g id="i-spark"><path d="M12 3.5l1.7 4.8 4.8 1.7-4.8 1.7-1.7 4.8-1.7-4.8-4.8-1.7 4.8-1.7z"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></g>
     <g id="i-play"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor" stroke="none"/></g>
     <g id="i-pause"><path d="M9 5.5v13M15 5.5v13" stroke-width="2.6"/></g>
+    <g id="i-stop"><rect x="7" y="7" width="10" height="10" rx="1.6" fill="currentColor" stroke="none"/></g>
     <g id="i-tag"><path d="M20.6 13.3L12.7 21a2 2 0 0 1-2.8 0L3 14.1V5a2 2 0 0 1 2-2h9.1l6.5 6.5a2 2 0 0 1 0 2.8z"/><circle cx="8" cy="8" r="1.2"/></g>
     <g id="i-save"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-7H7v7M8 3v4h7"/></g>
     <g id="i-trash"><path d="M4 6.5h16M9 6.5V4.5h6v2M6.5 6.5l.8 13h9.4l.8-13"/></g>
@@ -475,7 +476,7 @@
     <g id="i-pointer"><path d="M7 3.5l11 8-5 1.2 3 6-2.4 1.2-3-6L7 17.5z"/></g>
     <g id="i-contrast"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor" stroke="none"/></g>
     <g id="i-drop"><path d="M12 3.5s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/></g>
-    <g id="i-up"><path d="M12 19V5M6.5 10.5L12 5l5.5 5.5"/></g>
+    <g id="i-up"><path d="M12 19V5M6.5 10.5L12 5l5.5 5.5"/></g><g id="i-down"><path d="M12 5v14M6.5 13.5L12 19l5.5-5.5"/></g>
     <g id="i-target"><circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="2.8"/><path d="M12 1.8v3.5M12 18.7v3.5M1.8 12h3.5M18.7 12h3.5"/></g>
     <g id="i-magnet"><path d="M5 4.5h4v7a3 3 0 0 0 6 0v-7h4v7a7 7 0 0 1-14 0z"/><path d="M5 8h4M15 8h4"/></g>
     <g id="i-x"><path d="M6 6l12 12M18 6L6 18"/></g>
@@ -503,10 +504,12 @@
   </header>
 
   <section class="screen on" id="s-setup"><div class="card">
-    <div class="drop" id="drop">
-      <svg class="ic dico" viewBox="0 0 24 24"><use href="#i-film"/></svg>
-      <div class="big">Arrastra tu video (o varios)</div>
-      <div class="sub">o haz clic para elegirlos · MP4 o MOV · todos los clips de una grabación: Reelfy arma el video · imágenes y videos que pida el guion, también</div>
+    <div class="hrow setrow full" data-setting="setup.files" id="setupFilesRow">
+      <div class="hrow-ctl"><div class="drop" id="drop" role="button" tabindex="0" aria-label="Elegir tus clips de video" data-s-aria="setup.drop.aria">
+        <svg class="ic dico" viewBox="0 0 24 24"><use href="#i-film"/></svg>
+        <div class="big" data-s="setup.drop.big">Arrastra tu video (o varios)</div>
+        <div class="sub" data-s="setup.drop.sub">o haz clic para elegirlos · MP4 o MOV · imágenes y videos que pida el guion, también</div>
+      </div></div>
     </div>
     <div class="prevWrap" id="prevWrap">
       <video id="prevVid" muted playsinline controls></video>
@@ -516,16 +519,26 @@
       </div>
     </div>
     <div class="filelist" id="filelist"></div>
-    <div class="opts">
-      <div class="guionwrap" id="guionWrap" hidden><label for="guion">Guion (opcional)</label>
-        <textarea id="guion" class="guion" rows="6" spellcheck="true" placeholder="Pega el guion: una frase por línea y una línea en blanco entre secciones. Si no hay guion, Reelfy lo deduce de las tomas."></textarea>
-        <div class="mnote" id="guionNote">Con guion, Reelfy elige la toma más fiel de cada línea. Sin guion, lo deduce de lo que repites y te lo deja corregir. Para mostrar una imagen o un video mientras dices una línea, termínala con «- Agregar nombre_del_archivo».</div>
-        <div class="grefs" id="guionRefs" hidden></div></div>
-      <div><label>Nombres propios / marcas — mejora los subtítulos (opcional)</label>
-        <input type="text" id="glossary" placeholder="Ej: Keruvin Store, Al Haramain, Oud"></div>
-      <div class="row"><div><label>Shorts por video</label>
-        <input type="number" id="highlights" value="2" min="1" max="5"></div><div></div></div>
-      <div id="homeProfile" class="pfhome"></div>
+    <div class="opts setup-rows" id="setupRows">
+      <div class="hrow setrow full guionwrap" data-setting="setup.guion" id="guionWrap" hidden>
+        <div class="hrow-txt"><p class="hrow-note mnote" id="guionNote">Con guion, Reelfy elige la toma más fiel de cada línea. Sin guion, lo deduce de lo que repites y te lo deja corregir. Para mostrar una imagen o un video mientras dices una línea, termínala con «- Agregar nombre_del_archivo».</p></div>
+        <div class="hrow-ctl"><div class="guion-ctl"><textarea id="guion" class="guion ucontent" rows="6" spellcheck="true" placeholder="Pega el guion: una frase por línea y una línea en blanco entre secciones. Si no hay guion, Reelfy lo deduce de las tomas."></textarea>
+          <div class="grefs" id="guionRefs" hidden></div></div></div>
+        <div class="hrow-ex" data-ex="texto"></div>
+      </div>
+      <div class="hrow setrow full" data-setting="setup.glossary" id="glossRow">
+        <div class="hrow-ctl"><input type="text" id="glossary" class="ucontent" autocomplete="off"></div>
+        <div class="hrow-ex" data-ex="texto"></div>
+      </div>
+      <div class="hrow setrow full" data-setting="setup.highlights" id="hlRow">
+        <div class="hrow-ctl"><div class="seg-h hl-seg" id="hlSeg" role="radiogroup">
+          <button type="button" role="radio" aria-checked="false" data-v="0" data-s="hl.none">Ninguno</button><button type="button" role="radio" aria-checked="false" data-v="1">1</button><button type="button" role="radio" aria-checked="true" data-v="2">2</button><button type="button" role="radio" aria-checked="false" data-v="3">3</button>
+        </div><input type="hidden" id="highlights" value="2"></div>
+      </div>
+      <div class="hrow setrow narrow" data-setting="setup.profile" id="profRow">
+        <div class="hrow-ex" data-ex="vivo" id="homeProfileEx"></div>
+        <div class="hrow-ctl"><div id="homeProfile" class="pfhome"></div></div>
+      </div>
     </div>
     <div id="licGate" style="display:none;margin-top:20px;border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--panel2)">
       <div style="font-size:13px;font-weight:600;margin-bottom:10px"><svg class="ic" viewBox="0 0 24 24"><use href="#i-tag"/></svg> Activa tu licencia</div>
@@ -588,7 +601,7 @@
       <div class="asm-tltools">
         <button class="btn ghost mini" id="asmUndo2" title="Deshacer (⌘Z)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-undo"/></svg></button>
         <button class="btn ghost mini" id="asmRedo2" title="Rehacer (⇧⌘Z)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-redo"/></svg></button>
-        <button class="btn ghost mini sel" id="asmSnapBtn" title="Imán / ajuste magnético"><svg class="ic" viewBox="0 0 24 24"><use href="#i-tag"/></svg>Imán</button>
+        <button class="btn ghost mini sel" id="asmSnapBtn" title="Los clips se pegan a los bordes y al cursor al arrastrar" aria-pressed="true"><svg class="ic" viewBox="0 0 24 24"><use href="#i-magnet"/></svg>Imán</button>
         <button class="btn ghost mini" id="asmSplit" title="Dividir el clip en el playhead (S)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Dividir</button>
         <button class="btn ghost mini" id="asmDelSel" title="Eliminar el clip seleccionado"><svg class="ic" viewBox="0 0 24 24"><use href="#i-trash"/></svg>Eliminar</button>
         <span style="flex:1"></span>
@@ -650,12 +663,73 @@
         <button class="btn ghost mini ico" id="redoBtn2" title="Rehacer (⇧⌘Z)" aria-label="Rehacer"><svg class="ic" viewBox="0 0 24 24"><use href="#i-redo"/></svg></button>
       </div>
       <div class="mseg" id="segMode" role="tablist" aria-label="Modo del Studio">
-        <button data-v="clean" role="tab" aria-selected="false"><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Limpieza de tomas<span class="mbadge" id="cleanCnt"></span></button>
-        <button data-v="edit" role="tab" aria-selected="true" class="sel"><svg class="ic" viewBox="0 0 24 24"><use href="#i-layers"/></svg>Edición</button>
+        <button data-v="clean" role="tab" aria-selected="false" title="Limpieza de tomas (tecla 1)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Limpieza de tomas<span class="mbadge" id="cleanCnt"></span></button>
+        <button data-v="edit" role="tab" aria-selected="true" class="sel" title="Edición (tecla 2)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-layers"/></svg>Edición</button>
+        <button data-v="style" role="tab" aria-selected="false" class="v2only" title="Estilo del video: subtítulos y colores (tecla 3)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-drop"/></svg>Estilo</button>
       </div>
       <div class="mb-r" id="finLbl" title="Duración final del video, ya sin los tramos cortados"></div>
     </div>
     <div class="studio">
+      <div class="stylepane" id="stylePane">
+        <aside class="st-pv" id="stPreview">
+          <div class="st-pvh"><div class="st-pvt"><b id="stPvTitle"></b><span id="stPvState" aria-live="polite"></span></div>
+            <button type="button" class="st-cmp" id="stCompare" aria-pressed="false"></button></div>
+          <div class="st-pvbox" id="stPvBox"><canvas id="stPvCv"></canvas>
+            <div class="ab" id="stAb" hidden><span class="ab-line"></span><span class="ab-chip ab-a" id="stAbA"></span><span class="ab-chip ab-b" id="stAbB"></span>
+              <button type="button" class="ab-handle" id="stAbH" role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></button></div></div>
+          <p class="st-pvnote" id="stPvNote"></p>
+        </aside>
+        <section class="st-col" id="stCol">
+          <div class="st-head"><div class="st-ht"><h2 id="stTitle"></h2><p id="stHelp"></p></div><div id="stLevel"></div></div>
+          <article class="st-sec" id="stCaps"></article>
+          <article class="st-sec" id="stBrand"></article>
+          <article class="st-sec" id="stLook" hidden></article>
+          <article class="st-sec" id="stDirector" hidden></article>
+          <article class="st-sec" id="stMusic" hidden></article>
+          <article class="st-sec" id="stWho" hidden></article>
+          <article class="st-sec" id="stFormat" hidden></article>
+        <div class="st-park" id="stPark" hidden>
+          <div class="hrow wide stack st-static" data-setting="project.format" data-static="stFormat" id="fmtRow">
+            <div class="hrow-ex" data-ex="vivo"><canvas class="fmt-ex" aria-hidden="true"></canvas></div>
+            <div class="hrow-txt"></div>
+            <div class="hrow-ctl"><div class="seg seg-h seg-st" id="segFmt" role="radiogroup" aria-label="Formato del video final" data-s-aria="fmt.aria"><button type="button" role="radio" aria-checked="true" data-v="9:16" class="sel" title="Para Reels, TikTok y Shorts" data-s-title="fmt.9:16.title"><span class="sg-smp" aria-hidden="true"><svg class="fshape" viewBox="0 0 24 24"><rect x="7.5" y="4" width="9" height="16" rx="1.5"/></svg></span><span class="sg-lb" data-s="fmt.9:16">Vertical 9:16</span></button><button type="button" role="radio" aria-checked="false" data-v="4:5" title="Para publicaciones de Instagram" data-s-title="fmt.4:5.title"><span class="sg-smp" aria-hidden="true"><svg class="fshape" viewBox="0 0 24 24"><rect x="6" y="4.5" width="12" height="15" rx="1.5"/></svg></span><span class="sg-lb" data-s="fmt.4:5">Vertical 4:5</span></button><button type="button" role="radio" aria-checked="false" data-v="1:1" title="Cuadrado para cualquier red" data-s-title="fmt.1:1.title"><span class="sg-smp" aria-hidden="true"><svg class="fshape" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg></span><span class="sg-lb" data-s="fmt.1:1">Cuadrado 1:1</span></button><button type="button" role="radio" aria-checked="false" data-v="16:9" title="Para YouTube" data-s-title="fmt.16:9.title"><span class="sg-smp" aria-hidden="true"><svg class="fshape" viewBox="0 0 24 24"><rect x="3" y="6.94" width="18" height="10.12" rx="1.5"/></svg></span><span class="sg-lb" data-s="fmt.16:9">Horizontal 16:9</span></button><button type="button" role="radio" aria-checked="false" data-v="original" title="Conserva el tamaño y el encuadre de tu video; solo agrega los subtítulos." data-s-title="fmt.original.title"><span class="sg-smp" aria-hidden="true"><svg class="fshape" viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="1.5" stroke-dasharray="2.4 2"/></svg></span><span class="sg-lb" data-s="fmt.original">Como el original</span></button></div></div>
+          </div>
+          <div class="hrow wide full noex st-static" data-setting="project.lang" data-static="stFormat" id="langRow">
+            <div class="hrow-txt"></div>
+            <div class="hrow-ctl"><div class="lang-ctl"><div class="seg seg-h seg-st" id="segLang" role="radiogroup" aria-label="Idioma del texto en pantalla" data-s-aria="lang.aria"><button type="button" role="radio" aria-checked="true" data-v="es" class="sel"><span class="sg-lb" data-s="lang.es">Español</span></button><button type="button" role="radio" aria-checked="false" data-v="en"><span class="sg-lb" data-s="lang.en">Inglés</span></button><button type="button" role="radio" aria-checked="false" data-v="pt"><span class="sg-lb" data-s="lang.pt">Portugués</span></button><button type="button" role="radio" aria-checked="false" data-v="fr"><span class="sg-lb" data-s="lang.fr">Francés</span></button><button type="button" role="radio" aria-checked="false" data-v="de"><span class="sg-lb" data-s="lang.de">Alemán</span></button><button type="button" role="radio" aria-checked="false" data-v="it"><span class="sg-lb" data-s="lang.it">Italiano</span></button></div>
+              <div id="langNote" class="langnote" style="display:none"></div></div></div>
+          </div>
+          <div class="hrow wide stack st-static" data-setting="project.air" data-static="stFormat" id="airRow">
+            <div class="hrow-ex" data-ex="antes_despues"><span class="air-ex" aria-hidden="true"></span></div>
+            <div class="hrow-txt"><p class="hrow-note" id="airNote" hidden></p></div>
+            <div class="hrow-ctl"><div class="adv-line st-range"><input type="range" id="air" class="rng" min="0" max="30" value="16" aria-label="Margen desenfocado" data-s-aria="air.aria"><span class="hv" id="airLbl">16 % del alto</span></div></div>
+          </div>
+          <div class="hrow wide st-static" data-setting="proc.enhance" data-static="stFormat" id="enhanceRow">
+            <div class="hrow-ex" data-ex="audio"><span class="ex-listen" id="enhEx"></span></div>
+            <div class="hrow-txt"></div>
+            <div class="hrow-ctl"><input type="checkbox" class="toggle" id="enhance" checked aria-label="Mejorar el audio de la voz" data-s-aria="enh.aria"></div>
+          </div>
+          <div class="hrow wide stack st-static" data-setting="brand.logo" data-static="stWho" id="brandLogoRow">
+            <div class="hrow-ex" data-ex="vivo"><canvas class="logo-ex" aria-hidden="true"></canvas></div>
+            <div class="hrow-txt"><p class="hrow-note" id="logoNeed" data-s="who.logo.need" hidden>Sube tu logo para mostrarlo.</p><p class="hrow-note" data-s="who.logo.corners">Va en la esquina que elijas, a la misma distancia de los dos bordes.</p><p class="hrow-note pronote" id="proNoteBrand" data-s="who.logo.off">En la edición con IA el logo todavía no sale en el video final: llega en una próxima versión.</p></div>
+            <div class="hrow-ctl"><div class="logo-ctl">
+              <label class="swlabel logo-on"><input type="checkbox" class="toggle" id="logoOn"><span data-s="who.logo.on">Mostrar el logo</span></label>
+              <button class="btn ghost mini" type="button" id="logoUp"><svg class="ic" viewBox="0 0 24 24"><use href="#i-upload"/></svg><span data-s="who.logo.upload">Subir tu logo</span></button>
+              <div class="seg seg-h seg-st seg-ico" id="segLogo" role="radiogroup" aria-label="Esquina del logo" data-s-aria="who.logo.aria"><button type="button" role="radio" aria-checked="false" data-v="tl" title="Arriba a la izquierda" aria-label="Arriba a la izquierda" data-s-title="who.logo.tl" data-s-aria="who.logo.tl"><svg class="ic" viewBox="0 0 24 24"><use href="#i-corner-tl"/></svg></button><button type="button" role="radio" aria-checked="false" data-v="tr" title="Arriba a la derecha" aria-label="Arriba a la derecha" data-s-title="who.logo.tr" data-s-aria="who.logo.tr"><svg class="ic" viewBox="0 0 24 24"><use href="#i-corner-tr"/></svg></button><button type="button" role="radio" aria-checked="false" data-v="bl" title="Abajo a la izquierda" aria-label="Abajo a la izquierda" data-s-title="who.logo.bl" data-s-aria="who.logo.bl"><svg class="ic" viewBox="0 0 24 24"><use href="#i-corner-bl"/></svg></button><button type="button" role="radio" aria-checked="true" data-v="br" class="sel" title="Abajo a la derecha" aria-label="Abajo a la derecha" data-s-title="who.logo.br" data-s-aria="who.logo.br"><svg class="ic" viewBox="0 0 24 24"><use href="#i-corner-br"/></svg></button></div>
+              <div class="adv-line st-range"><input type="range" id="logoSize" class="rng" min="6" max="30" value="14" aria-label="Tamaño del logo" data-s-aria="who.logo.size.aria"><span class="hv" id="logoSizeLbl">14 % del ancho</span></div>
+            </div></div>
+          </div>
+          <div class="hrow wide stack noex st-static" data-setting="brand.preset" data-static="stWho" id="presetRow">
+            <div class="hrow-txt"></div>
+            <div class="hrow-ctl"><div class="preset-ctl">
+              <select id="presetSel" class="selinp" aria-label="Plantilla de tu marca" data-s-aria="who.preset.aria"><option value="" data-s="who.preset.none">Ninguna plantilla</option></select>
+              <button class="btn ghost mini" type="button" id="presetSave"><svg class="ic" viewBox="0 0 24 24"><use href="#i-save"/></svg><span data-s="who.preset.save">Guardar</span></button>
+              <button class="btn ghost mini ico" type="button" id="presetDel" title="Eliminar la plantilla elegida" aria-label="Eliminar la plantilla elegida" data-s-title="who.preset.del" data-s-aria="who.preset.del"><svg class="ic" viewBox="0 0 24 24"><use href="#i-trash"/></svg></button>
+            </div></div>
+          </div>
+        </div>
+        </section>
+      </div>
       <div class="cleanpane" id="cleanPane">
         <div class="gsh">
           <div class="gtop"><h2>Guion</h2><span class="gsub">Lo tachado no sale en el video. Haz clic en un corte para escucharlo o restaurarlo.</span></div>
@@ -663,13 +737,13 @@
         </div>
         <div class="gtr" id="gTr" tabindex="0" role="region" aria-label="Guion del video"></div>
         <div class="gfoot">
-          <div class="gf-l"><button class="tgl" id="gSil" role="switch" aria-checked="false" aria-labelledby="gSilLbl"></button><span id="gSilLbl">Mostrar silencios</span></div>
+          <div class="gf-l"></div>
           <div class="gf-c">
             <button class="btn ghost mini ico" id="gPrev" title="Corte anterior (↑)" aria-label="Corte anterior"><svg class="ic" viewBox="0 0 24 24"><use href="#i-left"/></svg></button>
             <span id="gPos" aria-live="polite"></span>
             <button class="btn ghost mini ico" id="gNext" title="Corte siguiente (↓)" aria-label="Corte siguiente"><svg class="ic" viewBox="0 0 24 24"><use href="#i-right"/></svg></button>
           </div>
-          <div class="gf-r"><button class="btn ghost mini" id="gRestAll">Restaurar todo…</button></div>
+          <div class="gf-r"></div>
         </div>
         <div class="gconfirm" id="gConfirm" role="dialog" aria-modal="false"></div>
       </div>
@@ -696,7 +770,7 @@
             <button class="btn ghost mini v2only" id="btnExact" title="Al pausar muestra el cuadro exacto que saldrá en el export"><svg class="ic" viewBox="0 0 24 24"><use href="#i-target"/></svg><span class="lbl">Exacto</span></button>
             <button class="btn ghost mini v2only on" id="btnSfx" title="Escuchar los SFX y la música al reproducir"><svg class="ic" viewBox="0 0 24 24"><use href="#i-speaker"/></svg><span class="lbl">Audio</span></button>
             <button class="btn ghost mini" id="btnReal" title="Vista previa real: render a 540p con audio (mismo motor del export)"><svg class="ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg><span class="lbl">Vista previa real</span></button>
-            <span class="info" data-tip="Clic en un elemento de la vista previa para seleccionarlo y arrástralo para moverlo (la esquina lo escala). Espacio reproduce, flechas ±1 s, coma y punto ±1 cuadro, ⌘Z deshace, Supr borra, ⌘D duplica, L bloquea, H oculta.">?</span>
+            <span class="info" data-tip="Clic en un elemento de la vista previa para seleccionarlo y arrástralo para moverlo (la esquina lo escala). Espacio reproduce, flechas ±1 s, coma y punto ±1 cuadro, ⌘Z deshace, Supr borra, ⌘D duplica, L bloquea, H oculta. 1, 2 y 3 cambian entre Limpieza de tomas, Edición y Estilo.">?</span>
           </span>
         </div>
         <div class="chip" id="chip"><span class="spinner"></span> <span id="chipTxt"></span></div>
@@ -708,34 +782,18 @@
           <button data-tab="elem"><svg class="ic" viewBox="0 0 24 24"><use href="#i-insp"/></svg>Elemento <span class="cnt" id="elemCnt"></span></button>
         </div>
         <div class="ptab on" id="tabProj">
-        <div class="pgroup" id="dirGroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Director IA <span class="info" data-tip="La IA decide títulos, gráficos, escenas, efectos, transiciones, SFX y música según el estilo. Todo queda editable en el timeline.">i</span></h4>
+        <div class="pgroup v2only" id="styleSummary"></div>
+        <div class="pgroup v1only" id="dirGroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Director IA <span class="info" data-tip="La IA decide títulos, gráficos, escenas, efectos, transiciones, SFX y música según el estilo. Todo queda editable en el timeline.">i</span></h4>
           <div id="dirBody"></div>
-          <div class="subgroup v2only"><h5><svg class="ic" viewBox="0 0 24 24"><use href="#i-music"/></svg>Música</h5><div id="musBody"></div></div>
         </div>
-        <div class="pgroup v2only" id="profGroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-user"/></svg>Perfil <span class="info" data-tip="Quién sale en el video y sus enlaces. Cambiarlo actualiza al instante el rótulo, el botón Seguir, la invitación a reservar y la tarjeta final.">i</span></h4><div id="profBody"></div></div>
-        <div class="pgroup v2only" id="accentGroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-drop"/></svg>Color de acento <span class="info" data-tip="Un solo color para todo el proyecto: la palabra que se está diciendo en los subtítulos y el acento de títulos y tarjetas.">i</span></h4><div id="accentBody"></div></div>
-        <div class="pgroup v2only"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-type"/></svg>Subtítulos</h4><div id="capProBody"></div></div>
-        <div class="pgroup v2only"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-contrast"/></svg>Color</h4><div id="gradeBody"></div></div>
-        <div class="pgroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>Formato</h4>
+        <div class="pgroup v1only" id="projLegacy"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-film"/></svg>Formato, idioma y audio</h4>
           <div class="optrow">
-            <div><label>Formato</label><div class="seg" id="segFmt">
-              <button data-v="9:16" class="sel">9:16</button><button data-v="1:1">1:1</button>
-              <button data-v="4:5">4:5</button><button data-v="16:9">16:9</button>
-              <button data-v="original" title="Conserva el tamaño y encuadre originales; solo agrega subtítulos (sin reencuadrar ni recortar).">Original</button></div></div>
             <div class="v1only"><label>Plataforma</label><div class="seg" id="segPlat">
               <button data-v="none" class="sel">Genérico</button><button data-v="tiktok">TikTok</button>
               <button data-v="reels">Reels</button><button data-v="shorts">Shorts</button></div></div>
-            <div><label>Idioma</label><div class="seg" id="segLang">
-              <button data-v="es" class="sel">ES</button><button data-v="en">EN</button>
-              <button data-v="pt">PT</button><button data-v="fr">FR</button>
-              <button data-v="de">DE</button><button data-v="it">IT</button></div></div>
-          </div>
-          <div id="langNote" class="langnote" style="display:none"></div>
-          <div class="optrow">
-            <div id="airRow"><label>Aire <span id="airLbl">16%</span> <span class="info" data-tip="Margen desenfocado alrededor de un video horizontal al pasarlo a vertical.">i</span></label><input type="range" id="air" class="rng" min="0" max="30" value="16"></div>
             <div class="v1only"><label>Zoom énfasis <span id="zoomLbl">10%</span></label><input type="range" id="zoomAmt" class="rng" min="0" max="25" value="10"></div>
           </div>
-          <div class="hint pronote" id="airNote"></div>
+          <div id="projLegacyRows"></div>
         </div>
         <div class="pgroup v1only"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-type"/></svg>Estilo de subtítulos</h4>
           <div class="optrow">
@@ -769,28 +827,9 @@
               <button data-v="pop" class="sel">Pop</button><button data-v="fade">Fade</button><button data-v="none">No</button></div></div>
           </div>
         </div>
-        <div class="pgroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-tag"/></svg>Marca</h4>
-          <div class="optrow">
-            <div><label>Preset</label><select id="presetSel" class="selinp"><option value="">— ninguno —</option></select></div>
-            <button class="btn ghost mini" id="presetSave"><svg class="ic" viewBox="0 0 24 24"><use href="#i-save"/></svg>Guardar</button>
-            <button class="btn ghost mini" id="presetDel" title="Eliminar preset"><svg class="ic" viewBox="0 0 24 24"><use href="#i-trash"/></svg></button>
-          </div>
-          <div class="optrow" id="brandLogoRow">
-            <label class="swlabel"><input type="checkbox" class="toggle" id="logoOn"> <svg class="ic" viewBox="0 0 24 24"><use href="#i-image"/></svg>Logo</label>
-            <button class="btn ghost mini" id="logoUp"><svg class="ic" viewBox="0 0 24 24"><use href="#i-upload"/></svg>Subir</button>
-            <div><label>Esquina</label><div class="seg" id="segLogo">
-              <button data-v="tl" title="Arriba izq."><svg class="ic" viewBox="0 0 24 24"><use href="#i-corner-tl"/></svg></button>
-              <button data-v="tr" title="Arriba der."><svg class="ic" viewBox="0 0 24 24"><use href="#i-corner-tr"/></svg></button>
-              <button data-v="bl" title="Abajo izq."><svg class="ic" viewBox="0 0 24 24"><use href="#i-corner-bl"/></svg></button>
-              <button data-v="br" class="sel" title="Abajo der."><svg class="ic" viewBox="0 0 24 24"><use href="#i-corner-br"/></svg></button></div></div>
-            <div><label>Tamaño</label><input type="range" id="logoSize" class="rng" min="6" max="30" value="14"></div>
-          </div>
-          <div class="hint pronote" id="proNoteBrand">En la edición IA el logo todavía no se aplica al export: llega en una próxima versión del motor.</div>
-        </div>
-        <div class="pgroup"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-insp"/></svg>Procesado</h4>
+        <div class="pgroup v1only"><h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-insp"/></svg>Procesado</h4>
           <div class="optrow">
             <label class="swlabel v1only"><input type="checkbox" class="toggle" id="dynamic" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-scissors"/></svg>Cortes + zoom <span class="info" data-tip="Recorta los silencios automáticamente y hace acercamientos suaves en los momentos de énfasis. Las tomas repetidas se revisan en Limpieza de tomas.">i</span></label>
-            <label class="swlabel" id="enhanceRow"><input type="checkbox" class="toggle" id="enhance" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-mic"/></svg>Audio estudio <span class="info" data-tip="Limpia el ruido, quita golpes de aire y nivela el volumen al estándar de redes (-14 LUFS). En la edición IA siempre está activo.">i</span></label>
           </div>
           <div class="optrow v1only">
             <label class="swlabel"><input type="checkbox" class="toggle" id="hook" checked> <svg class="ic" viewBox="0 0 24 24"><use href="#i-spark"/></svg>Hook <span class="info" data-tip="Añade un título llamativo animado al inicio de cada short (el gancho para retener al espectador).">i</span></label>
@@ -957,9 +996,14 @@
 <video id="srcVid" style="display:none" playsinline></video>
 
 <script src="/static/floatcard.js?v=5c7b07c9"></script>
-<script src="/static/fxcore.js?v=42ad0c24"></script>
-<script src="/static/fx.js?v=42ad0c24"></script>
-<script src="/static/profile.js?v=42ad0c24"></script>
+<script src="/static/fxcore.js?v=e340f4bc"></script>
+<script src="/static/capdraw.js?v=e564c834"></script>
+<script src="/static/lookgl.js?v=4b75522a"></script>
+<script src="/static/fx.js?v=e340f4bc"></script>
+<script src="/static/estilo.js?v=55d8b18c"></script>
+<script src="/static/estilo_proyecto.js?v=77b318ea"></script>
+<script src="/static/estilo_catalog.js?v=8820f028"></script>
+<script src="/static/profile.js?v=e340f4bc"></script>
 <script>
 const $=s=>document.querySelector(s);
 /* tooltips flotantes (position:fixed) para que NO se corten dentro de paneles con overflow */
@@ -994,9 +1038,12 @@ const customOpts=()=>({cap_color:CAPC,cap_font:CAPF!=="Arial"?CAPF:null,cap_scal
 const renderOpts=()=>({dynamic:$("#dynamic").checked,enhance_audio:$("#enhance").checked,hook:$("#hook").checked,
                        smart:$("#smart").checked,platform:PLATFORM,broll:$("#broll").checked,
                        style:STYLE,anim:ANIM,format:FMT,lang:LANG,...musOpts(),...customOpts()});
+// opciones de un grupo: la elegida lleva .sel (y aria-checked si el grupo es de radios, como en Estilo)
+const segMark=(b,on)=>{b.classList.toggle("sel",on); if(b.getAttribute("role")==="radio") b.setAttribute("aria-checked",String(on));};
 function seg(id,set){const el=$(id);el.querySelectorAll("button").forEach(b=>b.onclick=()=>{
-  el.querySelectorAll("button").forEach(x=>x.classList.remove("sel"));b.classList.add("sel");set(b.dataset.v);});}
-function segSet(id,v){const el=$(id);el.querySelectorAll("button").forEach(b=>b.classList.toggle("sel",b.dataset.v==String(v)));}
+  el.querySelectorAll("button").forEach(x=>segMark(x,x===b));set(b.dataset.v);});}
+function segSet(id,v){const el=$(id);el.querySelectorAll("button").forEach(b=>segMark(b,b.dataset.v==String(v)));}
+const airLabel=v=>(window.Estilo&&Estilo.t&&Estilo.t("air.v",{v}))||`${v} % del alto`;
 function chip(txt){ const c=$("#chip");
   if(txt){ $("#chipTxt").textContent=txt; c.classList.add("on"); } else c.classList.remove("on"); }
 
@@ -1007,6 +1054,17 @@ inp.onchange=()=>inp.files.length&&pick([...inp.files]);
 ["dragover","dragenter"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add("hot")}));
 ["dragleave","drop"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove("hot")}));
 drop.addEventListener("drop",ev=>ev.dataTransfer.files.length&&pick([...ev.dataTransfer.files]));
+drop.addEventListener("keydown",ev=>{ if(ev.key==="Enter"||ev.key===" "){ ev.preventDefault(); inp.click(); } });
+/* «¿Cuántos shorts sugerir?»: Ninguno · 1 · 2 · 3 (el numero viaja en #highlights, como siempre) */
+(function hlSeg(){
+  const g=$("#hlSeg"); if(!g) return;
+  const bs=[...g.querySelectorAll("button")];
+  const set=(v,focus)=>{ $("#highlights").value=String(v); bs.forEach(b=>{ const on=b.dataset.v===String(v); b.setAttribute("aria-checked",String(on)); b.tabIndex=on?0:-1; if(on&&focus) b.focus(); }); };
+  bs.forEach(b=>b.onclick=()=>set(b.dataset.v));
+  g.addEventListener("keydown",e=>{ const i=bs.indexOf(document.activeElement); if(i<0) return;
+    const d={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[e.key]; if(!d) return; e.preventDefault(); set(bs[(i+d+bs.length)%bs.length].dataset.v,true); });
+  set($("#highlights").value);
+})();
 function pick(files){
   FILES=files;
   if(files.length===1&&FXCore.fileKind(files[0])!=="image"){
@@ -1601,7 +1659,143 @@ function asmSel(){ if(!ASM.sel) return null; return (ASM.sel.track==="clip"?ASM.
 function asmSelect(track,id){ ASM.sel={track,id}; ASM.insSel=null; asmRenderTL();
   const it=asmSel(); if(it){ const st=track==="clip"?clipStart(ASM.clips.indexOf(it)):it.start; asmGoto(st+0.01,true); }
   asmInspector(); if(ASM.montage) mtRender(); }
+/* ---- Ajustes del clip (Montar clips): cada ajuste en la fila de Estilo (nombre, qué hace, ejemplo;
+   Básico o Avanzado) con la copy de ui_copy.json. Sin la copy, las filas simples de siempre. */
+const asmT=(k,v)=>(window.Estilo&&Estilo.t&&Estilo.t(k,v))||"";
+const ASM_FADES=()=>[[0,asmT("asm.fade.none")],[0.5,asmT("asm.fade.soft")],[1.5,asmT("asm.fade.slow")]];
+const ASM_TRANS=()=>[[0,asmT("asm.trans.cut")],[0.3,asmT("asm.trans.fast")],[0.6,asmT("asm.trans.normal")],[1.2,asmT("asm.trans.slow")]];
+/** Nombre y ayuda de los controles fijos del montaje desde la copy (glosario, estilo de edición, imán). */
+function asmCopy(){
+  const ui=FX.uiCopy&&FX.uiCopy(); if(!ui||!ui.ui) return;
+  const g=ui.ui["setup.glossary"], st=ui.ui["asm.style"], sn=ui.ui["asm.snap"];
+  const gl=$("#asmGloss"); if(gl&&g){ gl.placeholder=g.label; gl.setAttribute("aria-label",g.label); gl.title=g.help; }
+  const sel=$("#asmStyle"), O=(ui.options||{})["director.style"]||{};
+  if(sel&&st){ sel.setAttribute("aria-label",st.label); sel.title=st.help;
+    [...sel.options].forEach(o=>{ const e=O[o.value]; if(e&&e.label) o.textContent=o.value==="none"?e.label:(asmT("asm.style.opt",{estilo:e.label})||e.label); }); }
+  const sb=$("#asmSnapBtn"); if(sb&&sn){ sb.title=sn.help; sb.setAttribute("aria-label",sn.label); sb.setAttribute("aria-pressed",String(!!ASM.snap)); }
+}
+/** Una fila del montaje (HelpRow angosta): el control ya armado y su ejemplo (o ninguno). */
+function asmRow(id,ctl,ex,exKind){
+  const r=Estilo.HelpRow.create({id,ctx:{},control:ctl,example:ex||null,exKind,layout:"narrow"});
+  r.el.classList.add("asm-row");
+  return r.el;
+}
+function asmSegCtl(choices,value,onPick,cls){
+  return Estilo.Segmented.create({choices:choices.map(([v,l])=>({v,label:l})),value,nearest:true,cls,onPick}).el;
+}
+function asmBar(min,max,step,value,text,onInput,aria){
+  const w=document.createElement("div"); w.className="adv-line";
+  const rg=document.createElement("input"); rg.type="range"; rg.className="rng"; rg.min=min; rg.max=max; rg.step=step; rg.value=value; rg.setAttribute("aria-label",aria);
+  const hv=document.createElement("span"); hv.className="hv";
+  const show=()=>{ hv.textContent=text(+rg.value); rg.setAttribute("aria-valuetext",hv.textContent); };
+  rg.addEventListener("input",()=>{ onInput(+rg.value); show(); }); show();
+  w.append(rg,hv); return w;
+}
+/** «Escuchar» un clip del montaje: 3 s desde su inicio en el visor (otro clic lo detiene). */
+function asmListenBtn(it){
+  const b=document.createElement("button"); b.type="button"; b.className="listen sm";
+  const st=it.start||0, on=()=>ASM.playing&&ASM.listen==="clip:"+it._id;
+  const sync=()=>{ const o=on(); b.setAttribute("aria-pressed",String(o)); b.classList.toggle("on",o); b.innerHTML=ICO(o?"stop":"play")+`<span>${mtEsc(asmT(o?"listen.stop":"listen.play"))}</span>`;
+    b.setAttribute("aria-label",asmT(o?"listen.stop.aria":"listen.aria",{nombre:asmT("asm.listen.clip")})); };
+  b.onclick=()=>{ if(on()){ asmPause(); ASM.listen=null; sync(); return; }
+    asmStopPreview(true); asmPause(); asmGoto(st+0.001,true); asmPlay(); ASM.stopAt=Math.min(clipEnd(it),st+3); ASM.listen="clip:"+it._id; sync();
+    const t=setInterval(()=>{ if(!on()){ clearInterval(t); if(ASM.listen==="clip:"+it._id) ASM.listen=null; sync(); } },150); };
+  sync(); return b;
+}
+/** Un cuadro de un clip o de una foto del montaje (los ejemplos de fundido y transicion). */
+const ASM_FR={};
+function asmFrame(c,at){
+  if(!c) return null; const k=c.sid+"|"+(at||0).toFixed(2); if(ASM_FR[k]!==undefined) return ASM_FR[k];
+  ASM_FR[k]=null;
+  if(c.type==="image"){ const im=new Image(); im.onload=()=>{ ASM_FR[k]=im; }; im.src="/tlsource/"+encodeURIComponent(c.sid); return null; }
+  const v=document.createElement("video"); v.muted=true; v.preload="auto"; v.src="/tlsource/"+encodeURIComponent(c.sid);
+  v.addEventListener("loadeddata",()=>{ try{ v.currentTime=Math.max(0,at||0); }catch(e){} },{once:true});
+  v.addEventListener("seeked",()=>{ const cv=document.createElement("canvas"); cv.width=Math.max(2,Math.round(v.videoWidth/4)); cv.height=Math.max(2,Math.round(v.videoHeight/4)); try{ cv.getContext("2d").drawImage(v,0,0,cv.width,cv.height); ASM_FR[k]=cv; }catch(e){} v.removeAttribute("src"); v.load(); },{once:true});
+  return null;
+}
+/** Dibujo de donde va la imagen encima del video (el cuadro vertical con la imagen en su lugar). */
+function asmOvSvg(o){
+  const c=ovXY(o), W=30, H=52, x0=33, y0=2, w=Math.max(3,o.size*W), h=w*0.8;
+  return `<svg viewBox="0 0 96 56" width="96" height="56" aria-hidden="true"><rect x="${x0}" y="${y0}" width="${W}" height="${H}" rx="4" fill="#2b313c" stroke="#7f899c"/>`
+    +`<rect x="${(x0+c.x*W-w/2).toFixed(1)}" y="${(y0+c.y*H-h/2).toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="#d7dce6"/></svg>`;
+}
 function asmInspector(){
+  const box=$("#asmInspector"); const it=asmSel();
+  if(!(window.Estilo&&Estilo.HelpRow&&Estilo.Catalog&&FX.uiCopy&&FX.uiCopy()&&FX.uiCopy().strings)) return asmInspectorPlain();
+  if(!it){ box.innerHTML=`<div class="hint">${mtEsc(asmT("asm.empty"))}</div>`; return; }
+  box.innerHTML=""; const rows=document.createElement("div"); rows.className="insp-rows asm-rows"; box.appendChild(rows);
+  const adv=Estilo.level()==="advanced";
+  const lv=document.createElement("div"); lv.className="caps-lvl ins-lvl"; lv.appendChild(Estilo.LevelSwitch.create().el); box.insertBefore(lv,rows);
+  const add=el=>{ if(el) rows.appendChild(el); };
+  if(ASM.sel.track==="clip"){
+    // clip de un armado con IA: a que parte del guion pertenece, sus tomas y escucharlo
+    if(it.montage&&it.montage.slot!=null&&ASM.montage){ const n=FXCore.slotNumbers(ASM.montage)[it.montage.slot];
+      const w=document.createElement("div"); w.className="mt-insp-ctl";
+      w.innerHTML=`<p class="mnote mt-insp">${mtEsc(n?asmT("asm.part",{n,conf:FXCore.CONF_LABEL[FXCore.montageConf(it.montage.conf)].toLowerCase()}):asmT("asm.extra"))}</p><button class="btn ghost mini" type="button" id="ai-takes">${ICO("wand")}${mtEsc(asmT("asm.see_takes"))}</button>`;
+      w.querySelector("#ai-takes").onclick=()=>{ asmSideMode("takes"); mtRender(); const el=document.querySelector("#asmTakes .mt-slot.sel"); if(el) el.scrollIntoView({block:"nearest"}); };
+      const ex=document.createElement("div"); ex.className="ex-listen"; ex.appendChild(asmListenBtn(it));
+      add(asmRow("asm.takes",w,ex,"audio")); }
+    if(it.type==="image"){
+      add(asmRow("asm.image.dur",asmBar(0.3,20,0.1,it.dur,v=>asmT("asm.secs",{v:v.toFixed(1)}),v=>{ it.dur=v; asmRenderTL(); },asmT("asm.image.dur.aria"))));
+    }else{
+      const mt=document.createElement("input"); mt.type="checkbox"; mt.className="toggle"; mt.id="ai-mute"; mt.checked=!!it.mute;
+      mt.onchange=()=>{ asmPush(); it.mute=mt.checked; asmInspector(); asmRenderTL(); };
+      add(asmRow("asm.clip.mute",mt));
+      if(adv){
+        // volumen: automatico (todos parejos) o el % de como se grabo
+        const w=document.createElement("div"); w.className="num-ctl";
+        w.appendChild(asmSegCtl([["auto",asmT("asm.vol.auto")],["manual",asmT("asm.vol.manual")]],it.volAuto?"auto":"manual",v=>{ asmPush(); if(v==="auto"){ it.volAuto=true; it.vol=1; } else delete it.volAuto; asmInspector(); asmRenderTL(); }));
+        if(!it.volAuto){ const bar=asmBar(0,200,1,Math.round(it.vol*100),v=>asmT("asm.vol.pct",{v}),v=>{ it.vol=v/100; delete it.volAuto; asmRenderTL(); },asmT("asm.vol.aria")); if(it.mute) bar.querySelector("input").disabled=true; w.appendChild(bar); }
+        const ex=document.createElement("div"); ex.className="ex-listen"; ex.appendChild(asmListenBtn(it));
+        add(asmRow("asm.clip.volume",w,ex,"audio"));
+      }
+      const tr=document.createElement("p"); tr.className="asm-trim"; tr.textContent=asmT("asm.trim",{a:it.in.toFixed(1),b:it.out.toFixed(1)});
+      rows.appendChild(tr);
+    }
+    // aparece desde negro / se va a negro (Avanzado): Sin · Suave · Lento, con su ejemplo de 1 s
+    if(adv){
+      const w=document.createElement("div"); w.className="num-ctl fade-ctl";
+      const lab=(t,el)=>{ const d=document.createElement("div"); d.className="fade-l"; d.innerHTML=`<span>${mtEsc(t)}</span>`; d.appendChild(el); return d; };
+      w.appendChild(lab(asmT("asm.fade.in"),asmSegCtl(ASM_FADES(),it.fadeIn||0,v=>{ asmPush(); it.fadeIn=v; asmRenderTL(); asmInspector(); })));
+      w.appendChild(lab(asmT("asm.fade.out"),asmSegCtl(ASM_FADES(),it.fadeOut||0,v=>{ asmPush(); it.fadeOut=v; asmRenderTL(); asmInspector(); })));
+      const ex=Estilo.Catalog.fadeExample({img:()=>asmFrame(it,it.type==="image"?0:it.in+0.3),dur:()=>Math.max(0.5,+it.fadeIn||0.5)}).el;
+      add(asmRow("asm.clip.fades",w,ex,"loop"));
+    }
+    // como entra este clip (desde el segundo): corte o fundido con el anterior
+    const idx=ASM.clips.indexOf(it);
+    if(idx>0){ const prev=ASM.clips[idx-1], d=it.trans&&it.trans.type==="crossfade"?(+it.trans.dur||0.5):0;
+      const seg=asmSegCtl(ASM_TRANS(),d,v=>{ asmPush(); if(v>0) it.trans={type:"crossfade",dur:v}; else delete it.trans; asmInspector(); asmRenderTL(); },"grid2");
+      const ex=Estilo.Catalog.asmTransExample({a:()=>asmFrame(prev,prev.type==="image"?0:Math.max(prev.in,prev.out-0.3)),b:()=>asmFrame(it,it.type==="image"?0:it.in+0.3),
+        dur:()=>(it.trans&&it.trans.type==="crossfade"?(+it.trans.dur||0.5):0)}).el;
+      add(asmRow("asm.clip.trans",seg,ex,"loop")); }
+    // cambio de camara al entrar a este clip: aceleracion del video (el audio no cambia)
+    const rmk=ASM.montage?(ASM.rampMarks||[]).find(x=>x.nextId===it._id):null;
+    if(rmk&&adv){
+      const w=document.createElement("div"); w.className="ramp-ctl";
+      w.innerHTML=`<input type="checkbox" class="toggle" id="ai-ramp" ${rmk.on?"checked":""} ${!rmk.on&&!rmk.possible?"disabled":""}>`;
+      w.querySelector("#ai-ramp").onchange=ev=>asmToggleRamp(it._id,ev.target.checked);
+      const note=rmk.on?asmT("asm.ramp.on",{lado:rmk.side==="out"?asmT("asm.ramp.out"):asmT("asm.ramp.in"),s:(+rmk.dur).toFixed(2)}):rmk.possible?asmT("asm.ramp.off"):asmT("asm.ramp.no");
+      const prev=idx>0?ASM.clips[idx-1]:null;
+      const ex=Estilo.Catalog.asmTransExample({a:()=>asmFrame(prev,prev&&prev.type!=="image"?Math.max(prev.in,prev.out-0.3):0),b:()=>asmFrame(it,it.type==="image"?0:it.in+0.3),dur:()=>(rmk.on?Math.max(0.15,+rmk.dur||0.3):0)}).el;
+      const r=Estilo.HelpRow.create({id:"asm.clip.ramp",ctx:{},control:w,example:ex,exKind:"loop",layout:"narrow",note}); r.el.classList.add("asm-row","ramprow"); add(r.el);
+    }
+  }else{
+    // imagen encima del video: centrada arriba, al centro o abajo; las esquinas (no simetricas) en Avanzado
+    const P=[["tc",asmT("asm.ov.tc")],["center",asmT("asm.ov.center")],["bc",asmT("asm.ov.bc")]];
+    if(adv) P.push(["tl",asmT("who.logo.tl")],["tr",asmT("who.logo.tr")],["bl",asmT("who.logo.bl")],["br",asmT("who.logo.br")]);
+    const cur=it.x!=null&&it.y!=null?(Math.abs(it.x-0.5)<0.01?(it.y<0.4?"tc":it.y>0.6?"bc":"center"):null):(it.pos||"center");
+    const w=document.createElement("div"); w.className="num-ctl";
+    w.appendChild(asmSegCtl(P,cur,v=>{ asmPush(); const m=0.06;
+      if(v==="tc"||v==="bc"){ it.x=0.5; it.y=v==="tc"?m+it.size*0.28:1-m-it.size*0.28; delete it.pos; }
+      else { it.pos=v; delete it.x; delete it.y; }
+      asmInspector(); asmRenderOverlays(ASM.t); },adv?"grid3":""));
+    w.appendChild(asmBar(10,90,1,Math.round(it.size*100),v=>asmT("asm.ov.size",{v}),v=>{ it.size=v/100; asmRenderOverlays(ASM.t); },asmT("asm.ov.size.aria")));
+    const note=adv?asmT("who.logo.corners"):undefined;
+    const ex=document.createElement("div"); ex.className="ov-ex"; ex.innerHTML=asmOvSvg(it);
+    const r=Estilo.HelpRow.create({id:"asm.overlay",ctx:{},control:w,example:ex,exKind:"vivo",layout:"narrow",note}); r.el.classList.add("asm-row"); add(r.el);
+  }
+}
+function asmInspectorPlain(){
   const box=$("#asmInspector"); const it=asmSel();
   if(!it){ box.innerHTML='<div class="hint">Selecciona un clip del timeline para ajustarlo.</div>'; return; }
   let h="";
@@ -1726,7 +1920,7 @@ $("#asmPlay").onclick=()=>ASM.playing?asmPause():asmPlay();
 $("#asmScrub").oninput=e=>{ asmPause(); asmGoto(+e.target.value/1000*asmMainDur(),true); };
 $("#asmSplit").onclick=asmSplit;
 $("#asmUndo2").onclick=asmUndo; $("#asmRedo2").onclick=asmRedo;
-$("#asmSnapBtn").onclick=()=>{ ASM.snap=!ASM.snap; $("#asmSnapBtn").classList.toggle("sel",ASM.snap); };
+$("#asmSnapBtn").onclick=()=>{ ASM.snap=!ASM.snap; $("#asmSnapBtn").classList.toggle("sel",ASM.snap); $("#asmSnapBtn").setAttribute("aria-pressed",String(ASM.snap)); };
 $("#asmFitBtn").onclick=()=>{ ASM.zoom=1; $("#asmZoom").value=1; asmFit(); asmUpdatePH(); };
 $("#asmDelSel").onclick=asmDelSel;
 $("#asmZoom").oninput=e=>{ ASM.zoom=+e.target.value; asmRenderTL(); asmUpdatePH(); };
@@ -2581,8 +2775,10 @@ function previewTrack(id, btn){
 }
 function loadLogo(){
   const im=new Image();
-  im.onload=()=>{logoImg=im;};
-  im.onerror=()=>{logoImg=null;};
+  // (Estilo › Quién sale y tu logo: «Mostrar el logo» solo se prende con un logo subido)
+  const done=()=>{ if(window.Estilo&&Estilo.refreshSoon) Estilo.refreshSoon(0); };
+  im.onload=()=>{logoImg=im; done();};
+  im.onerror=()=>{logoImg=null; done();};
   im.src="/brand/logo?t="+Date.now();
 }
 /* ---- apertura del editor (se cablea UNA sola vez; reabrir solo re-renderiza) ---- */
@@ -2642,7 +2838,7 @@ function wireEditorOnce(){
   $("#capMargin").oninput=e=>{MARGIN=+e.target.value; $("#marLbl").textContent=e.target.value;};
   $("#capFont").onchange=e=>CAPF=e.target.value;
   // en la edicion IA el aire es OPT-IN: cuenta solo cuando el usuario mueve el control (air_user)
-  $("#air").oninput=e=>{AIR=(+e.target.value)/100; FX.airUser=true; $("#airLbl").textContent=e.target.value+"%";};
+  $("#air").oninput=e=>{AIR=(+e.target.value)/100; FX.airUser=true; $("#airLbl").textContent=airLabel(+e.target.value);};
   $("#air").onchange=()=>{ FX.airUser=true; FX.syncProControls(); FX.planDirty(); };
   $("#zoomAmt").oninput=e=>{ZAMT=(+e.target.value)/100; $("#zoomLbl").textContent=e.target.value+"%";};
   $("#logoOn").onchange=e=>{ LOGO_ON=e.target.checked; FX.planDirty(); };
@@ -2906,11 +3102,12 @@ let PRESETS={};
 async function loadPresets(){
   try{ PRESETS=await(await fetch("/presets")).json(); }catch(e){ PRESETS={}; }
   const sel=$("#presetSel");
-  sel.innerHTML='<option value="">— ninguno —</option>'+
-    Object.keys(PRESETS).map(n=>`<option>${n}</option>`).join("");
+  const none=(window.Estilo&&Estilo.t&&Estilo.t("who.preset.none"))||"Ninguna plantilla";
+  sel.innerHTML=`<option value="">${none}</option>`+
+    Object.keys(PRESETS).map(n=>`<option>${FX.esc(n)}</option>`).join("");
 }
 async function savePreset(){
-  const name=prompt("Nombre del preset (ej. Keruvin):");
+  const name=prompt("Nombre de la plantilla (por ejemplo: Mi marca):");
   if(!name)return;
   await fetch("/presets",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({name,config:gatherPreset()})});
@@ -2918,7 +3115,7 @@ async function savePreset(){
 }
 async function deletePreset(){
   const n=$("#presetSel").value; if(!n)return;
-  if(!confirm(`¿Eliminar preset "${n}"?`))return;
+  if(!confirm(`¿Eliminar la plantilla «${n}»?`))return;
   await fetch("/presets/"+encodeURIComponent(n),{method:"DELETE"});
   await loadPresets();
 }
@@ -2940,7 +3137,7 @@ function applyPreset(name){
   if(SHADOW!=null){$("#capShadow").value=SHADOW;$("#shLbl").textContent=SHADOW;}
   if(MARGIN!=null){$("#capMargin").value=MARGIN;$("#marLbl").textContent=MARGIN;}
   if(CAPC)$("#capColor").value=CAPC; $("#capFont").value=CAPF;
-  $("#air").value=Math.round(AIR*100); $("#airLbl").textContent=Math.round(AIR*100)+"%";
+  $("#air").value=Math.round(AIR*100); $("#airLbl").textContent=airLabel(Math.round(AIR*100));
   $("#zoomAmt").value=Math.round(ZAMT*100); $("#zoomLbl").textContent=Math.round(ZAMT*100)+"%";
   $("#logoOn").checked=LOGO_ON; $("#logoSize").value=Math.round(LOGO_SIZE*100);
   $("#dynamic").checked=c.dynamic??true; $("#enhance").checked=c.enhance??true;
@@ -3063,7 +3260,7 @@ function draw(){
   // al reproducir se saltan los cortes activos (como el export); un corte seleccionado se reproduce
   if(!V.paused&&(pro||$("#dynamic").checked)){
     const ci=activeCutIndex(t);
-    if(ci>=0&&!(SEL&&SEL.type==="cut"&&SEL.i===ci)){ const c=PLAN.cuts[ci]; if(c.end<dur-0.05) V.currentTime=c.end+0.01; else V.pause(); }
+    if(ci>=0&&!(SEL&&SEL.type==="cut"&&SEL.i===ci)&&FX.clean.through!==ci){ const c=PLAN.cuts[ci]; if(c.end<dur-0.05) V.currentTime=c.end+0.01; else V.pause(); }
   }
   // "Escuchar cómo queda" (Limpieza de tomas): se detiene al final del tramo
   const LR=FX.clean.listenRange;
@@ -3091,14 +3288,22 @@ function draw(){
       const i=Math.min(PLAN.camera.length-1, Math.max(0,Math.floor(t*30)));
       cx=Math.min(Math.max(PLAN.camera[i]*vw-cw/2,0), vw-cw);
     }
-    let z=1, ox=0, oy=0, ax=0.5, ay=0.5;
-    if(pro){ const L=FX.videoLook(t); z=Math.max(1,L.z); ox=L.dx; oy=L.dy; ax=L.ax; ay=L.ay; CTX.filter=L.filter; }
+    let z=1, ox=0, oy=0, ax=0.5, ay=0.5, L=null;
+    // color del export: las tablas del motor con LookGL (WebGL); sin WebGL, el filtro CSS de siempre
+    const LKG=pro?FX.look():null;
+    if(pro){ L=FX.videoLook(t); z=Math.max(1,L.z); ox=L.dx; oy=L.dy; ax=L.ax; ay=L.ay; CTX.filter=LKG?L.fxFilter:L.filter; }
     else if($("#dynamic").checked&&ZAMT>0.004&&(PLAN.beats||[]).some(b=>t>=b&&t<b+1.1)) z=1+ZAMT;
     const sw=cw/z, sh=ch/z, cy0=(vh-ch)/2;
     // escala alrededor del ancla (cara en modo pro, centro en el clasico)
     let sx=cx+ax*cw-ax*sw-ox*cw, sy=cy0+ay*ch-ay*sh-oy*ch;
     sx=Math.max(0,Math.min(vw-sw,sx)); sy=Math.max(0,Math.min(vh-sh,sy));
-    CTX.drawImage(V, sx,sy,sw,sh, (CW-fw)/2,(CH-fh)/2, fw,fh);
+    const dx0=(CW-fw)/2, dy0=(CH-fh)/2;
+    // la cara de la toma en el cuadro (centro de la vinieta del B/N y su exposicion)
+    const fc=LKG&&L.face?[(L.face[0]*vw-sx)/sw*fw/CW+dx0/CW,(L.face[1]*vh-sy)/sh*fh/CH+dy0/CH,L.face[2]*vw/sw*fw/CW,L.face[3]*vh/sh*fh/CH]:null;
+    if(!(LKG&&LKG.draw(CTX,V,sx,sy,sw,sh,dx0,dy0,fw,fh,t,{frame:[0,0,CW,CH],face:fc}))){
+      if(LKG) CTX.filter=L.filter;
+      CTX.drawImage(V, sx,sy,sw,sh, dx0,dy0, fw,fh);
+    }
     CTX.filter="none";
     if(pro) FX.drawLive(t);
     else{ drawBrollMarker(t); drawCaption(t); drawEmoji(t); if(CAPDRAG) drawCapGuide(); }
@@ -3320,6 +3525,7 @@ function wireTransport(){
   };
   document.addEventListener("keydown",e=>{
     if(!$("#s-editor").classList.contains("on")||e.target.isContentEditable||/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+    if(window.Estilo&&Estilo.onKey(e)) return;
     if(FX.clean.onKey(e)) return;
     if(FX.onKey(e)) return;
     const meta=e.metaKey||e.ctrlKey;
@@ -3810,6 +4016,13 @@ async function rpFreeAll(btn){
 recentProjects();
 /* perfil de la persona para el proximo video (pantalla inicial y ensamblado) */
 PF.mountPicker($("#homeProfile")); PF.mountPicker($("#asmProfile"),true);
+/* Inicio con la misma fila que Estilo (nombre, qué hace y su ejemplo): la copy llega con el catálogo */
+FX.loadCopy().then(ui=>{
+  if(!ui||!window.Estilo||!Estilo.Catalog) return;
+  Estilo.Catalog.hydrateScreen($("#s-setup"));
+  const ex=$("#homeProfileEx"); if(ex&&!ex.firstChild) ex.appendChild(Estilo.Catalog.profileExample().el);
+  asmCopy();
+});
 /* reabrir un proyecto existente con ?job=ID (tambien sobrevive a recargar la pagina) */
 (async function reopenJob(){
   const id=new URLSearchParams(location.search).get("job");

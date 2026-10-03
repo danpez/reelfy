@@ -25,7 +25,7 @@
     cutaways: { label: "Escenas", icon: "scene", c: "var(--trk-scene)", rgb: "45,212,191" },
     effects: { label: "Efectos", icon: "wand", c: "var(--trk-fx)", rgb: "96,165,250" },
     transitions: { label: "Transiciones", icon: "transition", c: "var(--trk-trans)", rgb: "251,146,60" },
-    sfx: { label: "SFX", icon: "speaker", c: "var(--trk-sfx)", rgb: "250,204,21" },
+    sfx: { label: "Sonidos", icon: "speaker", c: "var(--trk-sfx)", rgb: "250,204,21" },
     music: { label: "Música", icon: "music", c: "var(--trk-mus)", rgb: "52,211,153" },
     // recursos del guion (imagen o video como tarjeta flotante): fx.media
     media: { label: "Recursos", icon: "card", c: "var(--trk-media)", rgb: "129,140,248" },
@@ -45,17 +45,17 @@
   const LABELS_ES = {
     // opciones frecuentes de selects (se muestran en espanol; el valor sigue siendo el del esquema)
     left: "Izquierda", center: "Centro", right: "Derecha", up: "Arriba", down: "Abajo", auto: "Auto",
-    none: "Ninguna", outline: "Contorno", filled: "Relleno", circle: "Círculo", squircle: "Squircle",
-    light: "Claro", dark: "Oscuro", brand: "Marca", start: "Inicio", end: "Fin",
+    none: "Ninguna", outline: "Solo línea", filled: "Relleno", circle: "Círculo", squircle: "Esquinas suaves",
+    light: "Claro", dark: "Oscuro", brand: "Color de tu marca", start: "Inicio", end: "Fin",
     upper: "MAYÚS", lower: "minús", title: "Título", natural: "Natural", hit: "Golpe", fade: "Fundido",
-    ai: "IA", procedural: "Procedural", library: "Biblioteca", file: "Archivo", split: "Dividir", sweep: "Barrer",
+    ai: "Creada con IA", procedural: "Rápida (sin IA)", library: "De la biblioteca", file: "Tu canción", split: "Se parte en dos", sweep: "Barre",
     whiteout: "Blanco total", partial: "Parcial", tape: "Frenado", cut: "Corte seco", spring: "Resorte", smooth: "Suave",
     brush: "Pincel", sketch: "Boceto", clean: "Limpio", neutral: "Neutro", warm: "Cálido", cool: "Frío", sepia: "Sepia",
-    clean_bold: "Limpio bold", karaoke: "Karaoke", boxed: "En caja", minimal_small: "Mínimo pequeño", bold_caps: "Mayúsculas bold",
-    natural_look: "Natural", warm_clean: "Cálido limpio", cinematic: "Cinemático", bright_pop: "Brillante pop", moody: "Dramático", bw_contrast: "B/N contraste",
+    clean_bold: "Palabra en color", karaoke: "Karaoke", boxed: "Pastilla de color", minimal_small: "Discreto", bold_caps: "Impacto en mayúsculas",
+    natural_look: "Natural", warm_clean: "Cálido", cinematic: "Cine", bright_pop: "Vivo", moody: "Oscuro dramático", bw_contrast: "Blanco y negro",
     initial: "Inicial", face: "Cara", face_left: "Izq. de la cara", face_right: "Der. de la cara", face_top: "Sobre la cara",
     // animo de la musica (el mismo nombre en Proyecto y en el inspector)
-    upbeat: "Alegre", chill: "Tranquila", inspiring: "Inspiradora", corporate: "Corporativa", playful: "Divertida", dramatic: "Dramática",
+    upbeat: "Alegre", chill: "Tranquila", inspiring: "Inspiradora", corporate: "Seria", playful: "Divertida", dramatic: "Dramática",
     // estilos del director y presets de titulo
     dinamico: "Dinámico", elegante: "Elegante", minimal: "Minimal", energetico: "Energético",
     title_pop: "Título pop", stack: "Apilado", cascade: "Cascada", serif_elegant: "Serif elegante", script_accent: "Manuscrita",
@@ -70,17 +70,25 @@
     // garabatos, tarjetas y fondos
     arrow_curve: "Flecha curva", arrow_down: "Flecha abajo", arrow_straight: "Flecha recta", burst: "Estallido", check: "Palomita", cross: "Tache",
     circle_scribble: "Círculo a mano", dotted_path: "Camino punteado", exclaim: "Exclamación", heart: "Corazón", lightning: "Rayo", loop: "Bucle",
-    question: "Pregunta", rays: "Rayos", sparkle: "Destello", squiggle: "Zigzag", star4: "Estrella de 4", star5: "Estrella de 5", swirl: "Espiral",
+    question: "Pregunta", rays: "Rayos", sparkle: "Chispa", squiggle: "Zigzag", star4: "Estrella de 4", star5: "Estrella de 5", swirl: "Espiral",
     underline: "Subrayado", checklist: "Lista", generic: "Genérica", link: "Enlace", location: "Ubicación", phone: "Teléfono", price: "Precio",
     rating: "Calificación", schedule: "Horario", stat: "Dato", follow: "Sígueme", link_below: "Link abajo", comment: "Comenta", save: "Guárdalo",
     share: "Compártelo", blur_self: "Video desenfocado", color: "Color sólido", dark_stars: "Estrellas", gradient: "Degradado", grid_warp: "Cuadrícula",
     halftone: "Semitono", paper: "Papel",
   };
-  const lbl = v => LABELS_ES[v] || C.accentEs(String(v).replace(/_/g, " "));
+  /** Nombre de una opcion: el de ui_copy.json (path = "<pista|grupo>.<clave>") y, si no hay, el respaldo. */
+  const lbl = (v, path) => {
+    const U = SCHEMA && SCHEMA.ui, O = U && U.options;
+    if (O && path) {
+      const al = (U.aliases || {})[path], e = (O[path] && O[path][v]) || (al && O[al] && O[al][v]);
+      if (e && e.label) return e.label;
+    }
+    return LABELS_ES[v] || C.accentEs(String(v).replace(/_/g, " "));
+  };
   const es = C.accentEs;
   /** Etiquetas propias del Studio por clave (evita "Subtítulos" dentro del grupo "Subtítulos"). */
   const PARAM_LABEL = { "captions.enabled": "Mostrar subtítulos", "music.enabled": "Música activa" };
-  const MOOD_ES = { upbeat: "Alegre", chill: "Tranquila", inspiring: "Inspiradora", corporate: "Corporativa", playful: "Divertida", dramatic: "Dramática" };
+  const MOOD_ES = { upbeat: "Alegre", chill: "Tranquila", inspiring: "Inspiradora", corporate: "Seria", playful: "Divertida", dramatic: "Dramática" };
 
   // ------------------------------------------------------------------ estado
   let SCHEMA = null, FONTS = [], SFXCAT = {}, CAT_TRIES = 0;
@@ -97,9 +105,13 @@
 
   const isPro = () => !!(typeof PLAN !== "undefined" && PLAN && PLAN.version === 2 && PLAN.fx);
   FX.isPro = isPro;
-  const fx = () => PLAN.fx;
-  const items = track => ((PLAN.fx && PLAN.fx[track]) || []);
-  const dur = () => +(PLAN && PLAN.duration) || 1;
+  /* Plan que se dibuja: el del proyecto, o el de una miniatura mientras FX.drawLiveTo la dibuja
+     (RPLAN se pone y se quita en un try/finally, sin esperas en medio). */
+  let RPLAN = null;
+  const curPlan = () => RPLAN || PLAN;
+  const fx = () => curPlan().fx;
+  const items = track => { const p = curPlan(); return (p.fx && p.fx[track]) || []; };
+  const dur = () => { const p = curPlan(); return +(p && p.duration) || 1; };
 
   /** Linea de tiempo cacheada (cambia con los cortes). */
   function tlObj() {
@@ -194,6 +206,12 @@
     if ((!SCHEMA || !FONTS.length) && CAT_TRIES++ < 40) setTimeout(() => loadCatalogs().then(() => { if (SCHEMA) { FX.renderAll(); } }), 4000);
   }
   FX.loadCatalogs = loadCatalogs;
+  /** Solo el catalogo con la copy (ui_copy.json): las pantallas antes del editor (Inicio, Montar clips)
+      ponen el nombre y que hace de cada ajuste. -> la copy o null. */
+  FX.loadCopy = async function () {
+    if (!SCHEMA) { try { SCHEMA = accentSchema(await jget("/fx/schema")); } catch (e) { /* sin servidor: los textos de siempre */ } }
+    return FX.uiCopy();
+  };
   /* Opciones del proyecto que el render pro ya aplica (el servidor las anuncia en /settings.pro_opts:
      "logo", "air", "enhance_audio"). Las demas se muestran deshabilitadas en la edicion IA: la UI no
      promete lo que el export no hace. */
@@ -221,24 +239,34 @@
       return off;
     };
     const logoOff = gate("#brandLogoRow", "logo");
+    // (sin logo subido sus controles siguen apagados aunque el render lo aplique: Estilo.syncLogo)
+    if (!logoOff && window.Estilo && Estilo.syncLogo) Estilo.syncLogo();
     gate("#airRow", "air");
     const enhOff = gate("#enhanceRow", "enhance_audio");
     if (enhOff) { const en = $("#enhance"); if (en && !en.checked) { en.checked = true; if (window.applyEnhance) applyEnhance(); } }
     const n = $("#proNoteBrand"); if (n) n.classList.toggle("on", logoOff);
-    // aire opt-in: el control dice si se aplica (solo con una fuente mas ancha que la salida)
-    const an = $("#airNote");
-    if (an) {
-      const opt = pro && PRO_OPTIN.has("air") && !PRO_OPTS.has("air");
-      an.classList.toggle("on", opt);
-      if (opt) an.textContent = FX.airUser ? `Aire aplicado: ${Math.round((typeof AIR !== "undefined" ? AIR : 0) * 100)} % de margen desenfocado (solo cambia un video horizontal).`
-        : "Sin aire: el video va a sangre completa. Mueve el control para dejar margen (solo cambia un video horizontal).";
-    }
+    FX.syncAir();
     $$("#segLang button").forEach(b => {
       const off = pro && !C.PRO_LANGS.includes(b.dataset.v);
       b.disabled = off; b.classList.toggle("dis", off);
       b.title = off ? "Este idioma aún no está disponible en la edición IA." : "";
     });
     FX.syncLangNote();
+  };
+  /** Tu video ya llena el cuadro del formato (no es mas ancho): el margen desenfocado no cambia nada. */
+  FX.airFills = () => !C.airApplies(typeof V !== "undefined" && V && V.videoWidth ? { w: V.videoWidth, h: V.videoHeight } : null, typeof FMT !== "undefined" ? FMT : "9:16");
+  /** El margen que de verdad sale en el video (0..0.35): el del control si se aplica, si no 0. */
+  FX.airApplied = () => (FX.airActive() && !FX.airFills() ? (typeof AIR !== "undefined" ? +AIR || 0 : 0) : 0);
+  /** «Margen desenfocado»: la nota dice lo que se aplica de verdad y el control se apaga si tu video ya
+      llena el cuadro (solo cambia un video horizontal en un formato mas angosto). */
+  FX.syncAir = function () {
+    const an = $("#airNote"), rg = $("#air"); if (!an) return;
+    const pro = isPro(), gated = pro && !PRO_OPTS.has("air") && !PRO_OPTIN.has("air");
+    const opt = pro && PRO_OPTIN.has("air") && !PRO_OPTS.has("air"), fills = FX.airFills();
+    const v = Math.round((typeof AIR !== "undefined" ? +AIR || 0 : 0) * 100);
+    const txt = gated ? "" : fills ? ST("air.note.fills") : opt ? (FX.airUser ? ST("air.note.on", { v }) : ST("air.note.off")) : "";
+    an.textContent = txt; an.hidden = !txt;
+    if (rg && !gated) rg.disabled = fills;
   };
   const LANG_ES = { es: "español", en: "inglés", pt: "portugués", fr: "francés", de: "alemán", it: "italiano" };
   FX.langName = l => LANG_ES[l] || l;
@@ -290,7 +318,7 @@
     w.classList.toggle("on", bad);
     w.innerHTML = bad ? `${ICO("alert")}Títulos en ${esc(FX.langName(tl))}, subtítulos en ${esc(FX.langName(LANG))}` : "";
     w.title = bad ? "El export saldría con dos idiomas. Clic para elegir el idioma o volver a los textos originales." : "";
-    w.onclick = bad ? () => { if (window.setPanelTab) setPanelTab("proj"); const n = $("#langNote"); if (n) n.scrollIntoView({ block: "center", behavior: "smooth" }); } : null;
+    w.onclick = bad ? () => { if (window.Estilo && Estilo.open) Estilo.open("stFormat", { focus: "project.lang" }); } : null;
   };
   /** Traduce EN SITIO los textos de titulos, graficos y escenas al idioma elegido (un paso de
       deshacer): POST /translate {texts, spans, lang} -> texts_<lang> + untranslated. Cada item parte
@@ -412,7 +440,7 @@
   function autoLock(it) {
     if (it && it.src === "ai" && !it.locked) {
       it.locked = true;
-      toast("Editado por ti: queda bloqueado para que la IA no lo cambie al re-dirigir.", "lock");
+      toast("Editado por ti: queda protegido para que la IA no lo cambie al rehacer la edición.", "lock");
     }
   }
   /** Envuelve una mutacion atomica: mut() + fn + refresco. */
@@ -424,6 +452,10 @@
     FX.changed(o);
   }
   FX.edit = edit;
+  /** Copy de la interfaz (ui_copy.json via /fx/schema), catalogo y fuentes para estilo.js. */
+  FX.uiCopy = () => (SCHEMA && SCHEMA.ui) || null;
+  FX.schema = () => SCHEMA;
+  FX.fontList = () => FONTS;
   /** Refresco tras cualquier cambio del plan. */
   FX.changed = function (o) {
     const opt = o || {};
@@ -433,6 +465,8 @@
     // el aviso del idioma cuenta los titulos traducidos / editados a mano / nuevos
     if (isPro() && ((typeof LANG !== "undefined" && LANG !== "es") || trState())) FX.syncLangNote();
     FX.planDirty();
+    FX.syncLook();
+    if (window.Estilo) Estilo.refreshSoon();
   };
   /** Gestos de controles: mut() UNA vez al empezar (input) y cierre en change/blur. */
   function gesture(el, apply, after) {
@@ -443,6 +477,7 @@
     el.addEventListener("change", () => { begin(); apply(); end(); FX.planDirty(); });
     el.addEventListener("blur", end);
   }
+  FX.gesture = gesture;
 
   // ------------------------------------------------------------------ seleccion
   FX.selection = () => SELX.slice();
@@ -483,7 +518,7 @@
     row.className = "trk fxrow " + (extraCls || "") + (n === 0 ? " empty" : ""); row.dataset.track = track;
     row.style.setProperty("--c", m.rgb);
     row.innerHTML = `<div class="tlab" title="${m.label}${n !== "" ? ` (${n})` : ""}">${ICO(m.icon)}<span class="tn">${m.label}</span>`
-      + `${track === "music" ? "" : `<button class="add" title="Agregar a ${m.label} en el playhead">${ICO("plus")}</button>`}</div>`
+      + `${track === "music" ? "" : `<button class="add" title="Agregar a ${m.label} donde está el cursor">${ICO("plus")}</button>`}</div>`
       + `<div class="lane fxl" data-lane="${track}"></div>`;
     const add = row.querySelector(".add");
     if (add) add.onclick = e => { e.stopPropagation(); FX.addMenu(track, add); };
@@ -550,7 +585,7 @@
     const cat = SFXCAT;
     const spans = arr.map(it => {
       const x = it.at * px;
-      if (track === "transitions") { const d = Math.max(0.05, +it.dur || 0.4); const a = x - d / 2 * px, b = Math.max(a + 10, x + d / 2 * px); return [a, b + (showLb ? 8 + lbl(it.kind).length * 6 : 0)]; }
+      if (track === "transitions") { const d = Math.max(0.05, +it.dur || 0.4); const a = x - d / 2 * px, b = Math.max(a + 10, x + d / 2 * px); return [a, b + (showLb ? 8 + lbl(it.kind, "transitions.kind").length * 6 : 0)]; }
       const [sa, sb] = C.eventSpan("sfx", it, cat);
       return [Math.min(x - 7, sa * px), Math.max(x + 7, sb * px) + (showLb ? 10 + String(it.name || "").length * 5.4 : 0)];
     });
@@ -576,8 +611,8 @@
         el.className = "fxe" + (it.enabled === false ? " off" : "") + (unknown ? " warn" : "");
         el.style.left = x + "px"; el.style.top = top + "px"; el.style.width = "1px";
         el.innerHTML = (sd ? `<div class="tail" style="left:${-hit * px}px;width:${Math.max(4, sd * px)}px"></div>` : "")
-          + `<div class="dia"></div>` + (showLb ? `<span class="elb">${esc(lbl(it.name))}</span>` : "");
-        el.title = `SFX ${lbl(it.name)} en ${C.fmtClock(it.at, .1)} (${(+it.gain_db || 0).toFixed(1)} dB)` + (unknown ? "\nEste sonido no existe en el catálogo: no sonará en el export. Elige otro en el inspector." : "");
+          + `<div class="dia"></div>` + (showLb ? `<span class="elb">${esc(lbl(it.name, "sfx.name"))}</span>` : "");
+        el.title = `Sonido ${lbl(it.name, "sfx.name")} en ${C.fmtClock(it.at, .1)} (${(+it.gain_db || 0).toFixed(1)} dB)` + (unknown ? "\nEste sonido no existe en el catálogo: no sonará en el export. Elige otro en el inspector." : "");
       }
       wireBlock(el, track, it);
       lane.appendChild(el);
@@ -677,7 +712,7 @@
     b.className = "musb2" + (on ? "" : " off"); b.style.left = "0px"; b.style.width = (D * px) + "px";
     const src = { ai: "IA", procedural: "Procedural", library: "Biblioteca", file: "Archivo", none: "Sin música" }[m.source || "ai"] || m.source;
     const bpm = FX.music.bpm ? Math.round(FX.music.bpm) : (+m.bpm > 0 ? +m.bpm : 0);
-    b.innerHTML = `${ICO("music")}<span>${esc(src)}${m.mood ? " · " + esc(lbl(m.mood)) : ""}${bpm ? " · " + bpm + " bpm" : ""}${FX.musicStale() && FX.music.file ? " · desactualizada" : ""}</span>`;
+    b.innerHTML = `${ICO("music")}<span>${esc(src)}${m.mood ? " · " + esc(lbl(m.mood, "music.mood")) : ""}${bpm ? " · " + bpm + " bpm" : ""}${FX.musicStale() && FX.music.file ? " · desactualizada" : ""}</span>`;
     b.onclick = e => { if (e.target !== b && !e.target.closest("span,svg")) return; if (FX.busy()) return; FX.selectMusic(); FX.focusElem(); };
     lane.appendChild(b);
     // pulsos de la musica (tiempo FINAL de la pista -> original del timeline): los de la ultima
@@ -739,8 +774,8 @@
     }
     return MENU;
   }
-  function openMenu(x, y, html, wire) {
-    const m = menuEl(); m.innerHTML = html; m.classList.add("on");
+  function openMenu(x, y, html, wire, cls) {
+    const m = menuEl(); m.className = "fxmenu" + (cls ? " " + cls : ""); m.innerHTML = html; m.classList.add("on");
     const r = m.getBoundingClientRect();
     m.style.left = clamp(x, 8, innerWidth - r.width - 8) + "px";
     m.style.top = clamp(y, 8, innerHeight - r.height - 8) + "px";
@@ -751,11 +786,22 @@
     if (!SCHEMA) { toast("El catálogo de efectos aún no está disponible. Reintentando…", "alert"); loadCatalogs(); return; }
     const ks = C.kinds(SCHEMA, track);
     const rect = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: anchor.x, bottom: anchor.y };
+    if (hasCopy()) {
+      // en rejilla: cada tipo con su miniatura animada; los sonidos por grupo con «Escuchar»
+      const e = ES(), mk = track !== "sfx" ? C.mediaKindFor(SCHEMA, track) : null;
+      const own = mk ? `<button type="button" class="am-own" data-media="${esc(mk)}" style="--c:${TRACK_META[track].rgb}">${ICO("upload")}${esc(ST(track === "cutaways" ? "add.own.scene" : "add.own"))}</button>` : "";
+      openMenu(rect.left, rect.bottom + 4, e.Catalog.addMenuHtml(track, ST("add.title", { pista: TRACK_META[track].label }), own), m => {
+        m.querySelectorAll("[data-k]").forEach(b => b.onclick = () => { m.classList.remove("on"); FX.addItem(track, b.dataset.k); });
+        m.querySelectorAll("[data-media]").forEach(b => b.onclick = () => { m.classList.remove("on"); FX.pickMedia(track, b.dataset.media); });
+        e.Catalog.addMenuWire(m, track);
+      }, track === "sfx" ? "amenu amenu-sfx" : "amenu");
+      return;
+    }
     let html = `<div class="mh">Agregar a ${TRACK_META[track].label}</div>`;
     if (track === "sfx") {
       const byCat = {};
       ks.forEach(k => { const c = (SFXCAT[k] && SFXCAT[k].category) || "otros"; (byCat[c] = byCat[c] || []).push(k); });
-      Object.keys(byCat).sort().forEach(c => { html += `<div class="mh">${esc(c)}</div>` + byCat[c].map(k => `<button data-k="${esc(k)}" style="--c:${TRACK_META.sfx.rgb}">${ICO("speaker")}${esc(lbl(k))}</button>`).join(""); });
+      Object.keys(byCat).sort().forEach(c => { html += `<div class="mh">${esc(c)}</div>` + byCat[c].map(k => `<button data-k="${esc(k)}" style="--c:${TRACK_META.sfx.rgb}">${ICO("speaker")}${esc(lbl(k, "sfx.name"))}</button>`).join(""); });
     } else {
       // medios propios (imagen o clip): graphics -> PiP, escenas -> foto (si el motor los declara)
       const mk = C.mediaKindFor(SCHEMA, track);
@@ -764,6 +810,12 @@
     }
     openMenu(rect.left, rect.bottom + 4, html, m => {
       m.querySelectorAll("[data-k]").forEach(b => b.onclick = () => { m.classList.remove("on"); FX.addItem(track, b.dataset.k); });
+      // sonidos: con el mouse encima 300 ms se escuchan antes de agregarlos (uno a la vez)
+      if (track === "sfx") m.querySelectorAll("[data-k]").forEach(b => {
+        let tm = 0;
+        b.addEventListener("mouseenter", () => { clearTimeout(tm); tm = setTimeout(() => { if (window.Estilo && Estilo.Audio) Estilo.Audio.play({ kind: "sfx", id: b.dataset.k }); else FX.playSfx(b.dataset.k); }, 300); });
+        b.addEventListener("mouseleave", () => clearTimeout(tm));
+      });
       m.querySelectorAll("[data-media]").forEach(b => b.onclick = () => { m.classList.remove("on"); FX.pickMedia(track, b.dataset.media); });
     });
   };
@@ -835,8 +887,8 @@
   }
   FX.addAnyMenu = function (anchor) {
     const r = anchor.getBoundingClientRect();
-    const html = `<div class="mh">Agregar en el playhead</div>` + ["text", "graphics", "cutaways", "effects", "transitions", "sfx", "media"]
-      .map(t => `<button data-t="${t}" style="--c:${TRACK_META[t].rgb}">${ICO(TRACK_META[t].icon)}${t === "media" ? "Recurso (imagen o video)" : TRACK_META[t].label}</button>`).join("");
+    const html = `<div class="mh">${esc(ST("add.here") || "Agregar donde está el cursor")}</div>` + ["text", "graphics", "cutaways", "effects", "transitions", "sfx", "media"]
+      .map(t => `<button data-t="${t}" style="--c:${TRACK_META[t].rgb}">${ICO(TRACK_META[t].icon)}${esc(t === "media" ? (ST("add.media") || "Recurso (imagen o video)") : TRACK_META[t].label)}</button>`).join("");
     openMenu(r.left, r.bottom + 4, html, m => m.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { m.classList.remove("on"); FX.addMenu(b.dataset.t, anchor); }));
   };
   FX.itemMenu = function (x, y) {
@@ -929,7 +981,7 @@
     });
   };
 
-  FX.copy = () => { const sel = FX.selectedItems(); if (!sel.length) return false; const t0 = Math.min(...sel.map(s => C.itemStart(s.track, s.item))); CLIP = { t0, items: sel.map(s => ({ track: s.track, item: C.clone(s.item) })) }; toast(`${sel.length} copiado(s). ⌘V pega en el playhead.`, "copy"); return true; };
+  FX.copy = () => { const sel = FX.selectedItems(); if (!sel.length) return false; const t0 = Math.min(...sel.map(s => C.itemStart(s.track, s.item))); CLIP = { t0, items: sel.map(s => ({ track: s.track, item: C.clone(s.item) })) }; toast(`${sel.length} copiado(s). ⌘V pega donde está el cursor.`, "copy"); return true; };
   FX.paste = () => {
     if (!CLIP || !isPro()) return false;
     const shift = (V.currentTime || 0) - CLIP.t0, news = [];
@@ -1185,6 +1237,7 @@
     return (ms.resync === "available" || ms.state === "superseded") && !FX.gridSynced();
   };
   FX.renderMusicSide = function () {
+    if (window.Estilo && Estilo.summary) Estilo.summary();     // el resumen de Proyecto dice si falta sincronizar
     const el = $("#dirMusic"); if (!el) return;
     const ms = FX.musicSide || {};
     let h = "";
@@ -1284,21 +1337,45 @@
     if (isPro()) syncMusicCache();
     FX.clean.refresh();
     FX.planDirty();
+    if (window.Estilo) Estilo.planReplaced();
   };
 
   // ------------------------------------------------------------------ panel Director + grupos del proyecto
-  FX.syncMode = function () { document.body.classList.toggle("pro", isPro()); FX.syncProControls(); };
+  FX.syncMode = function () {
+    document.body.classList.toggle("pro", isPro());
+    if (window.Estilo && Estilo.home) Estilo.home(isPro());
+    FX.syncProControls();
+  };
   FX.renderAll = function () {
     FX.syncMode(); FX.renderDirector(); FX.renderProjectGroups(); FX.renderLanes();
     if (window.PF && isPro()) PF.renderEditorGroup();
     FX.inspect(SEL);
+    FX.syncLook(true);
+    if (window.Estilo && isPro()) { if (CL.mode === "style") Estilo.show(); else Estilo.refresh(); }
   };
 
   /** Notas del director: las tecnicas (validacion con ids internos) van plegadas en "Detalles". */
   const TECH = /^[\w.]+\[[^\]]*\]\s*:|^[a-z_]+:[\w:.-]+$/i;
+  /** Elegir estilo de edicion o cantidad de efectos (Estilo › Edicion con IA): se aplica al instante
+      con el director rapido (sin IA de lenguaje), un paso de deshacer. -> true si se aplico. */
+  FX.applyDirector = async function (o) {
+    if (!isPro() || DIRECTING || !o) return false;
+    if (o.style) DSTYLE = o.style;
+    if (o.intensity != null) DINT = clamp(+o.intensity, 0, 1);
+    const ok = await FX.redirect(false);
+    if (!ok) { DSTYLE = null; DINT = null; }
+    FX.renderDirector();
+    return ok;
+  };
+  FX.directorNotes = function () {
+    const d = (PLAN && PLAN.director) || {}, all = (d.notes || []).concat(d.warnings || []).map(String);
+    const kit = d.kit ? [...new Set(Object.entries(d.kit).filter(([k, v]) => typeof v === "string" && k !== "accent").map(([, v]) => v))] : [];
+    return { notes: all.filter(n => !TECH.test(n)).map(n => es(n)), tech: all.filter(n => TECH.test(n)), fonts: kit };
+  };
   FX.renderDirector = function () {
+    if (isPro()) { if (window.Estilo && Estilo.directorChanged) Estilo.directorChanged(); FX.renderMusicSide(); return; }
     const box = $("#dirBody"); if (!box || !PLAN) return;
-    const pro = isPro(), st = FX.dirStyle(), inten = FX.dirIntensity(), busy = !!DIRECTING;
+    const pro = false, st = FX.dirStyle(), inten = FX.dirIntensity(), busy = !!DIRECTING;
     let h = `<div class="dirgrid">` + STYLES.map(s => `<button class="dircard ${s.v === st ? "sel" : ""}" data-v="${s.v}" ${busy ? "disabled" : ""}><b>${ICO(s.icon)}${s.label}</b><span>${s.desc}</span></button>`).join("") + `</div>`;
     h += `<div class="dirrow"><label style="margin:0">Intensidad</label><input type="range" class="rng grow" id="dirInt" min="0" max="100" step="5" value="${Math.round(inten * 100)}" ${busy ? "disabled" : ""}><span class="val" id="dirIntV">${Math.round(inten * 100)}%</span></div>`;
     if (pro) {
@@ -1336,12 +1413,8 @@
     FX.renderMusicSide();
     FX.renderMusicPanel();
   };
-  FX.renderDirectorStats = function () {
-    const el = $("#dirStats"); if (!el || !isPro()) return;
-    const n = t => items(t).filter(i => i.enabled !== false).length;
-    el.innerHTML = [["text", "títulos"], ["graphics", "gráficos"], ["cutaways", "escenas"], ["effects", "efectos"], ["transitions", "transiciones"], ["sfx", "SFX"]]
-      .map(([t, l]) => `<span><i>${n(t)}</i> ${l}</span>`).join("") + `<span><i>${C.lockedIds(PLAN.fx).length}</i> bloqueados</span>`;
-  };
+  /** El ejemplo con la cantidad real de titulos, graficos y efectos (Estilo › Edicion con IA). */
+  FX.renderDirectorStats = function () { if (isPro() && window.Estilo && Estilo.directorCounts) Estilo.directorCounts(); };
 
   // ---- musica (panel)
   /* Una sola semantica con el esquema: bpm 0 = automatico; los tiempos se muestran en tiempo
@@ -1355,74 +1428,20 @@
     const hit = FX.music.bySig[curMusicSig()];
     if (hit && hit.file !== FX.music.file) { Object.assign(FX.music, hit); FX.loadMusicAudio(); }
   }
-  FX.renderMusicPanel = function () {
-    const box = $("#musBody"); if (!box) return;
-    if (!isPro()) { box.innerHTML = ""; return; }
-    const m = PLAN.fx.music = PLAN.fx.music || { enabled: true, source: "ai" };
-    const src = m.enabled === false ? "none" : (m.source || "ai");
-    const moods = (((SCHEMA && SCHEMA.music && SCHEMA.music.params) || []).find(p => p.k === "mood") || {}).opts || Object.keys(MOOD_ES);
-    const bpmAuto = !(+m.bpm > 0);
-    const stale = FX.musicStale();
-    let h = `<div class="optrow"><div style="flex:1;min-width:0"><label>Origen</label><div class="seg sm" id="musSrc">`
-      + [["ai", "IA"], ["procedural", "Procedural"], ["library", "Biblioteca"], ["none", "Ninguna"]].map(([v, l]) => `<button data-v="${v}" class="${v === src ? "sel" : ""}">${l}</button>`).join("") + `</div></div></div>`;
-    if (src !== "none") {
-      h += `<div class="optrow"><div style="flex:1;min-width:120px"><label>Ánimo</label><select class="fsel" id="musMood"><option value="">Automático</option>`
-        + moods.map(o => `<option value="${o}" ${m.mood === o ? "selected" : ""}>${esc(lbl(o))}</option>`).join("") + `</select></div>`
-        + `<div><label>BPM <span class="info" data-tip="Automático: la IA elige el tempo según el ánimo. Fijo: la música usa exactamente ese tempo.">i</span></label><div class="fctl"><label class="fnull"><input type="checkbox" id="musBpmAuto" ${bpmAuto ? "checked" : ""}>Auto</label>`
-        + `<input type="number" class="fnum" id="musBpm" min="60" max="180" step="1" value="${bpmAuto ? (FX.music.bpm ? Math.round(FX.music.bpm) : 110) : m.bpm}" ${bpmAuto ? "disabled" : ""}></div></div></div>`;
-      if (src === "ai") h += `<div class="optrow"><div style="flex:1;min-width:0"><label>Descripción para la IA <span class="info" data-tip="Describe el género y la energía. Siempre es instrumental (sin voces).">i</span></label><input type="text" class="ftext" id="musPrompt" value="${esc(m.prompt || "")}" placeholder="pop moderno, brillante, positivo"></div></div>`;
-      if (src === "library") h += `<div id="musLib" class="mlist" style="max-height:160px;margin-bottom:8px"></div>`;
-      const inF = +(m.intro_fade || 0), outF = m.fade_out != null ? +m.fade_out : 1.5;
-      h += `<div class="optrow"><div style="flex:1;min-width:110px"><label>Entrada suave <span id="musInV">${inF > 0 ? inF.toFixed(2) + " s" : "con su golpe"}</span> <span class="info" data-tip="0 = la música entra con su arranque (golpe incluido). Más = sube en ese tiempo.">i</span></label><input type="range" class="rng w100" id="musIn" min="0" max="3" step="0.05" value="${inF}"></div>`
-        + `<div style="flex:1;min-width:110px"><label>Cola final <span id="musOutV">${outF.toFixed(2)} s</span> <span class="info" data-tip="Dónde cae el golpe o el desvanecido final antes del último cuadro.">i</span></label><input type="range" class="rng w100" id="musOut" min="0.6" max="3" step="0.05" value="${outF}"></div></div>`;
-      h += `<div class="optrow"><div style="flex:1;min-width:0"><label>Volumen bajo la voz <span id="musGainV">${(+(m.gain_db != null ? m.gain_db : -17)).toFixed(1)} dB</span></label><input type="range" class="rng w100" id="musGain" min="-40" max="0" step="0.5" value="${m.gain_db != null ? m.gain_db : -17}"></div></div>`;
-      const busy = FX.music.busy;
-      h += `<div class="btnrow">`
-        + (FX.music.file && stale ? `<button class="btn mini" id="musUpd" ${busy ? "disabled" : ""} title="Vuelve a generar la música con los ajustes actuales (misma variación)">${busy ? '<span class="spinner"></span>' : ICO("undo")}Actualizar música</button>` : "")
-        + `<button class="btn ghost mini" id="musGen" ${busy ? "disabled" : ""} title="Otra variación de la música">${busy && !(FX.music.file && stale) ? '<span class="spinner"></span>' : ICO("dice")}${FX.music.file ? "Otra música" : "Generar música"}</button></div>`;
-      h += `<div class="musplayer"><button class="mplay" id="musPlay" title="Escuchar" ${FX.music.file ? "" : "disabled"}>${ICO(FX.music.audio && !FX.music.audio.paused && FX.music.solo ? "pause" : "play")}</button>`
-        + `<div class="mi" id="musInfo">${musInfo()}<div class="musbar"><i id="musBar"></i></div></div></div>`;
-      if (FX.music.warnings && FX.music.warnings.length) h += `<div class="hint">${FX.music.warnings.map(x => esc(es(x))).join("<br>")}</div>`;
-      h += `<div class="hint">Silencios, subidas y el golpe principal se editan en la pista Música (clic en ella).</div>`;
-    } else h += `<div class="hint">Sin música de fondo. Los SFX y la voz se mantienen.</div>`;
-    box.innerHTML = h;
-    // eventos
-    box.querySelectorAll("#musSrc button").forEach(b => b.onclick = () => {
-      edit(() => { const v = b.dataset.v; if (v === "none") { m.enabled = false; } else { m.enabled = true; m.source = v; } }, { inspector: false });
-      FX.renderMusicPanel();
-    });
-    const mood = $("#musMood"); if (mood) mood.onchange = () => { edit(() => { m.mood = mood.value || null; }, { inspector: false }); FX.renderMusicPanel(); };
-    const ba = $("#musBpmAuto"), bn = $("#musBpm");
-    if (ba) ba.onchange = () => { edit(() => { if (ba.checked) { m.bpm = 0; m.bpm_lock = false; } else { m.bpm = clamp(Math.round(+bn.value || 110), 60, 180); m.bpm_lock = true; } }, { inspector: false }); FX.renderMusicPanel(); };
-    if (bn) bn.onchange = () => { edit(() => { m.bpm = clamp(Math.round(+bn.value || 110), 60, 180); m.bpm_lock = true; }, { inspector: false }); FX.renderMusicPanel(); };
-    const pr = $("#musPrompt"); if (pr) gesture(pr, () => { m.prompt = pr.value; }, d => d && FX.renderMusicPanelSoon());
-    const g = $("#musGain"); if (g) gesture(g, () => { m.gain_db = +g.value; $("#musGainV").textContent = (+g.value).toFixed(1) + " dB"; FX.applyMusicGain(); });
-    const mi = $("#musIn"); if (mi) gesture(mi, () => { m.intro_fade = r3(+mi.value); $("#musInV").textContent = +mi.value > 0 ? (+mi.value).toFixed(2) + " s" : "con su golpe"; }, d => d && FX.renderMusicPanelSoon());
-    const mo = $("#musOut"); if (mo) gesture(mo, () => { m.fade_out = r3(+mo.value); $("#musOutV").textContent = (+mo.value).toFixed(2) + " s"; }, d => d && FX.renderMusicPanelSoon());
-    const up = $("#musUpd"); if (up) up.onclick = () => FX.genMusic(false);
-    const gen = $("#musGen"); if (gen) gen.onclick = () => FX.genMusic(!!FX.music.file);
-    const pl = $("#musPlay"); if (pl) pl.onclick = () => FX.toggleMusicSolo();
-    if (src === "library") renderMusicLib(m);
-  };
+  /* La musica del proyecto se ajusta en Estilo › Musica (estilo_proyecto.js): origen, ambiente con
+     muestra para escuchar, volumen y, en Avanzado, el resto. Aqui queda lo que la genera y la suena. */
+  FX.renderMusicPanel = function () { if (isPro() && window.Estilo && Estilo.musicChanged) Estilo.musicChanged(); };
   let musPanelTimer = null;
-  FX.renderMusicPanelSoon = () => { clearTimeout(musPanelTimer); musPanelTimer = setTimeout(() => { const ae = document.activeElement; if (!ae || !$("#musBody") || !$("#musBody").contains(ae)) FX.renderMusicPanel(); }, 150); };
-  function musInfo() {
-    const M = FX.music;
-    if (M.busy) return `<b>Generando música…</b> · con IA tarda 10-40 s`;
-    if (!M.file) return `<b>Sin generar</b> · se genera al exportar`;
-    const drop = M.drop != null ? tlObj().inverse(+M.drop) : null;     // el servidor da tiempo final
-    return `<b>${M.bpm ? Math.round(M.bpm) + " bpm" : "Sin pulso"}</b>${drop != null ? ` · golpe en ${C.fmtClock(drop, .1)}` : ""}${FX.musicStale() ? ` · <span class="warnt">desactualizada</span>` : ""}`;
-  }
-  function renderMusicLib(m) {
-    const box = $("#musLib"); if (!box) return;
-    const list = (TRACKS || []);
-    if (!list.length) { box.innerHTML = `<div class="hint">Cargando biblioteca…</div>`; if (window.loadTracks) loadTracks().then(() => renderMusicLib(m)); return; }
-    box.innerHTML = list.map(t => `<div class="mrow ${t.id === m.track ? "sel" : ""}" data-id="${esc(t.id)}"><button class="mplay" data-id="${esc(t.id)}" title="Escuchar">${ICO("play")}</button>
-      <div class="minfo"><div class="mtitle">${esc(t.title)}</div><div class="mtags">${esc(t.genre || "")}${t.moods && t.moods.length ? " · " + esc(t.moods.slice(0, 3).join(", ")) : ""}</div></div></div>`).join("");
-    box.querySelectorAll(".mrow").forEach(r => r.onclick = e => { if (e.target.closest(".mplay")) return; edit(() => { m.track = r.dataset.id; }, { inspector: false }); FX.renderMusicPanel(); });
-    box.querySelectorAll(".mplay").forEach(b => b.onclick = e => { e.stopPropagation(); if (window.previewTrack) previewTrack(b.dataset.id, b); });
-  }
-
+  FX.renderMusicPanelSoon = () => { clearTimeout(musPanelTimer); musPanelTimer = setTimeout(() => FX.renderMusicPanel(), 150); };
+  /** Estado de la musica creada en palabras -> {busy, file, stale, bpm, drop (m:ss del video final)}. */
+  FX.musicState = function () {
+    const M = FX.music, drop = M.drop != null ? tlObj().inverse(+M.drop) : null;     // el servidor da tiempo final
+    return { busy: !!M.busy, file: M.file || null, stale: FX.musicStale(), bpm: M.bpm ? Math.round(M.bpm) : 0, drop: drop != null ? C.fmtClock(drop) : null };
+  };
+  /** URL de la musica creada (la que suena en la vista previa) o null. */
+  FX.musicUrl = () => { const f = FX.music.file; return f ? (/^\/|^https?:/.test(f) ? f : `/music-file/${encodeURIComponent(f)}`) : null; };
+  /** Duracion del video final (sin los tramos cortados), en segundos. */
+  FX.finalDuration = () => tlObj().finalDuration || dur();
   FX.genMusic = async function (newSeed) {
     if (!isPro() || FX.music.busy) return;
     const m = PLAN.fx.music;
@@ -1445,7 +1464,6 @@
     const M = FX.music; if (!M.file) return;
     if (!M.audio) {
       M.audio = new Audio(); M.audio.preload = "auto"; M.audio.crossOrigin = "anonymous";
-      M.audio.addEventListener("timeupdate", () => { const b = $("#musBar"); if (b && M.audio.duration) b.style.width = (M.audio.currentTime / M.audio.duration * 100) + "%"; });
       M.audio.addEventListener("ended", () => { M.solo = false; FX.renderMusicPanel(); });
     }
     const url = /^\/|^https?:/.test(M.file) ? M.file : `/music-file/${encodeURIComponent(M.file)}`;
@@ -1467,16 +1485,12 @@
     FX.renderMusicPanel();
   };
 
-  // ---- grupos Subtitulos (pro) y Color
+  // ---- resumen del estilo en Proyecto: Subtitulos, Color de tu marca y Color del video viven en Estilo
   FX.renderProjectGroups = function () {
-    const cb = $("#capProBody"), gb = $("#gradeBody");
-    if (!isPro() || !SCHEMA) { if (cb) cb.innerHTML = isPro() ? `<div class="hint">Cargando catálogo…</div>` : ""; if (gb) gb.innerHTML = ""; return; }
+    if (!isPro() || !SCHEMA) return;
     PLAN.fx.captions = PLAN.fx.captions || {};
     PLAN.fx.grade = PLAN.fx.grade || {};
-    const ab = $("#accentBody"); if (ab) renderAccent(ab);
-    // la palabra activa usa el Color de acento del proyecto (un solo control)
-    if (cb) { cb.innerHTML = ""; renderParams(cb, SCHEMA.captions.params.filter(p => p.k !== "accent"), PLAN.fx.captions, { noLock: true, ctx: "captions", onChange: () => { CAPCACHE.key = ""; } }); }
-    if (gb) { gb.innerHTML = ""; renderParams(gb, SCHEMA.grade.params, PLAN.fx.grade, { noLock: true, ctx: "grade" }); }
+    if (window.Estilo) Estilo.summary();
   };
 
   // ------------------------------------------------------------------ inspector guiado por esquema
@@ -1490,7 +1504,10 @@
   function updateTimeFields() {
     const s = SEL; if (!s || s.type !== "fx") return;
     const it = items(s.track).find(i => i.id === s.id); if (!it) return;
-    $$("#inspBody [data-k]").forEach(el => { const k = el.dataset.k; if (["start", "end", "at"].includes(k) && document.activeElement !== el) el.value = it[k]; });
+    $$("#inspBody [data-k]").forEach(el => {
+      const k = el.dataset.k; if (!["start", "end", "at"].includes(k) || document.activeElement === el) return;
+      el.value = el.classList.contains("tf-in") ? C.fmtTime(FX.finalTime(+it[k] || 0)) : it[k];   // m:ss del video final
+    });
   }
 
   /** Devuelve true si atendio la seleccion (fx/music/captions); false para que index.html siga. */
@@ -1539,81 +1556,168 @@
   }
   FX.mediaRefit = mediaRefit;
   const MEDIA_FIT_ES = { hold: "Completo (se queda en su último cuadro)", speed: "Ajustar la velocidad para que llene su tramo", trim: "Recortar: se ve lo que cabe" };
+
+  // ---- inspector con claridad (fase 4): cada ajuste en una fila de Estilo.HelpRow (nombre, que hace,
+  // ejemplo y Basico / Avanzado). La copy viene de ui_copy.json (SCHEMA.ui); sin ella (el catalogo aun
+  // no llega) quedan las filas simples de siempre.
+  const ES = () => window.Estilo || null;
+  const ST = (k, v) => { const e = ES(); return (e && e.t && e.t(k, v)) || ""; };
+  const lvl = () => (ES() && ES().level ? ES().level() : "basic");
+  const hasCopy = () => !!(ES() && ES().HelpRow && ES().Catalog && SCHEMA && SCHEMA.ui && SCHEMA.ui.strings);
+  /** La ayuda (i) de un campo dentro de una lista (pausas, subidas, tramos): la de la copy; sin ella,
+      la nota del esquema solo si no documenta valores del motor («tape = …», «grid = …»). */
+  const tipOf = p => {
+    if (!p) return null;
+    if (!hasCopy()) return p.hint || null;
+    if (p.help) return p.help;
+    return p.hint && !/(^|[\s;(])[a-z_]+ = /.test(p.hint) ? p.hint : null;
+  };
+  const copyIdOf = (p, opt) => C.paramCopyId(SCHEMA && SCHEMA.ui, { k: p.k, track: opt.track, kind: opt.kind, group: !opt.track ? opt.ctx : null, parent: opt.parent });
+  const ctxOf = opt => ({ kind: opt.kind, track: opt.track, preset: opt.kind });
+  /** Una fila del inspector (HelpRow angosta) con su control y su ejemplo; x = {id, full, exKind, note, cls}. */
+  function rowOf(p, opt, label, ctl, ex, x) {
+    const xo = x || {};
+    if (!hasCopy() || opt.inner) return frow(label, ctl, xo.full ? "wide" : false, tipOf(p));
+    const r = ES().HelpRow.create({ id: xo.id || copyIdOf(p, opt), ctx: ctxOf(opt), control: ctl, example: ex || null, exKind: xo.exKind,
+      layout: "narrow", full: !!xo.full, note: xo.note, cls: xo.cls });
+    return r.el;
+  }
+  /** Basico / Avanzado en el encabezado del inspector (la misma preferencia que en Estilo). */
+  function levelBar(b) {
+    const e = ES(); if (!e || !e.LevelSwitch || !hasCopy()) return;
+    const d = document.createElement("div"); d.className = "caps-lvl ins-lvl"; d.appendChild(e.LevelSwitch.create().el); b.appendChild(d);
+  }
+  /** Contenedor de las filas (de orilla a orilla del panel: las filas traen su propio margen igual a los lados). */
+  function rowsBox(b) { const d = document.createElement("div"); d.className = "insp-rows"; b.appendChild(d); return d; }
+  /** Visible · Proteger de la IA · Duplicar · Eliminar · Otra versión con IA, en una fila con su ayuda. */
+  function actionsRow(it, o) {
+    const op = o || {}, box = document.createElement("div"); box.className = "ins-actions";
+    box.innerHTML = `<button class="btn ghost mini" type="button" data-a="en" aria-pressed="${it.enabled === false}" title="${esc(ST("insp.act.visible.title"))}">${ICO(it.enabled === false ? "eyeoff" : "eye")}${esc(ST(it.enabled === false ? "insp.act.hidden" : "insp.act.visible"))}</button>`
+      + (op.noLock ? "" : `<button class="btn ghost mini ${it.locked ? "on" : ""}" type="button" data-a="lock" aria-pressed="${!!it.locked}" title="${esc(ST("insp.act.lock.title"))}">${ICO("lock")}${esc(ST(it.locked ? "insp.act.locked" : "insp.act.lock"))}</button>`)
+      + `<button class="btn ghost mini" type="button" data-a="dup" title="${esc(ST("insp.act.dup.title"))}">${ICO("copy")}${esc(ST("insp.act.dup"))}</button>`
+      + `<button class="btn ghost mini" type="button" data-a="del" title="${esc(ST("insp.act.del.title"))}">${ICO("trash")}${esc(ST("insp.act.del"))}</button>`
+      + (op.noRegen ? "" : `<button class="btn ghost mini full" type="button" data-a="regen" title="${esc(ST("insp.act.regen.title"))}"${DIRECTING ? " disabled" : ""}>${ICO("spark")}${esc(ST("insp.act.regen"))}</button>`);
+    box.querySelectorAll("[data-a]").forEach(x => x.onclick = () => { if (x.dataset.a === "regen") FX.regenerate([it.id]); else FX.action(x.dataset.a); });
+    return rowOf(null, {}, "", box, null, { id: "item.actions", full: true });
+  }
+  /** «Estilo de título», «Tipo de gráfico»...: la galeria con cada tipo en bucle; «Sonido»: por grupo con «Escuchar». */
+  function kindRow(track, it) {
+    const kk = C.kindKey(SCHEMA, track), id = `item.kind.${track}`, e = ES();
+    if (track === "sfx") {
+      const names = C.kinds(SCHEMA, "sfx"), unknown = names.length > 0 && !names.includes(it.name);
+      const ctl = document.createElement("div"); ctl.className = "sfx-ctl";
+      ctl.appendChild(e.Catalog.sfxPicker({ value: it.name, gainDb: it.gain_db, pan: it.pan,
+        onPick: v => { if (v === it.name) return; edit(() => { it.name = v; autoLock(it); }, { rebuild: true }); refocus(`.mopt[data-v="${CSS.escape(v)}"] .mopt-pick`); } }));
+      if (unknown) ctl.insertAdjacentHTML("beforeend", `<div class="insnote bad" id="sfxUnknown">${ICO("alert")}<span>${esc(ST("sfx.unknown", { nombre: it.name || "" }))}</span></div>`);
+      return rowOf(null, { track, kind: it.name }, "", ctl, null, { id, full: true });
+    }
+    const g = e.Catalog.kindGallery({ track, item: it, onPick: k => {
+      if (k === it[kk] || FX.busy()) return;
+      edit(() => { C.changeKind(SCHEMA, track, it, k); autoLock(it); }, { rebuild: true });
+      refocus(`.kcard[data-v="${CSS.escape(k)}"]`);
+    } });
+    return rowOf(null, { track, kind: it[kk] }, "", g.el, null, { id, full: true, exKind: "ninguno", cls: "kgrow" });
+  }
+  /** Tras reconstruir el inspector, el foco vuelve al control que se uso. */
+  function refocus(sel) { requestAnimationFrame(() => { const el = $(`#inspBody ${sel}`); if (el) el.focus({ preventScroll: true }); }); }
+  /** «Delante / Detrás»: dos botones (Traer al frente · Enviar atrás). */
+  function zRow(track, it, opt) {
+    const p = (C.commonParams(SCHEMA, track) || []).find(x => x.k === "z"); if (!p) return null;
+    const box = document.createElement("div"); box.className = "btnrow zbtns";
+    box.innerHTML = `<button class="btn ghost mini" type="button" data-z="1">${ICO("up")}${esc(ST("insp.z.front"))}</button><button class="btn ghost mini" type="button" data-z="-1">${ICO("down")}${esc(ST("insp.z.back"))}</button>`;
+    box.querySelectorAll("[data-z]").forEach(x => x.onclick = () => edit(() => { it.z = C.zStep(items(track), it, +x.dataset.z); autoLock(it); }, { inspector: false }));
+    return rowOf(p, opt, p.label, box);
+  }
+  /** Seccion plegable del inspector (abierta por omision; se recuerda por quien mira). */
+  const INS_CLOSED = () => { try { return new Set(JSON.parse(localStorage.getItem("reelfy.insp.closed") || "[]")); } catch (e) { return new Set(); } };
+  function insSection(box, key) {
+    const s = document.createElement("div"), closed = INS_CLOSED().has(key), title = ST("insp.sec." + key);
+    s.className = "ins-sec ins-sec2" + (closed ? " closed" : ""); s.dataset.sec = key;
+    s.innerHTML = `<h6><button type="button" class="ins-sh" aria-expanded="${!closed}" title="${esc(ST("section.toggle"))}">${esc(title)}</button></h6><div class="ins-body insp-rows"></div>`;
+    const sh = s.querySelector(".ins-sh");
+    sh.onclick = () => {
+      const now = !s.classList.contains("closed");
+      s.classList.toggle("closed", now); sh.setAttribute("aria-expanded", String(!now));
+      const c = INS_CLOSED(); if (now) c.add(key); else c.delete(key);
+      try { localStorage.setItem("reelfy.insp.closed", JSON.stringify([...c])); } catch (e) { /* solo esta vista */ }
+      if (ES() && ES().Ticker) ES().Ticker.kick();
+    };
+    box.appendChild(s);
+    return s.querySelector(".ins-body");
+  }
+  /** Quita las secciones que quedaron sin filas (todo era Avanzado o no aplica). */
+  function dropEmpty(box) { box.querySelectorAll(".ins-sec2").forEach(s => { if (!s.querySelector(".ins-body").childElementCount) s.remove(); }); }
+
   /** Inspector de un recurso (fx.media): archivo, tiempo y ajuste. Siempre centrado (simetria) y sin audio. */
   function inspectMedia(b, it) {
-    head(b, "media", it, it.name || "Recurso", `Recursos · ${C.fmtClock(it.start, .1)} a ${C.fmtClock(it.end, .1)} (${(it.end - it.start).toFixed(2)} s)`);
-    const act = document.createElement("div"); act.className = "ins-actions";
-    act.innerHTML = `<button class="btn ghost mini" data-a="en" title="Activar o desactivar (H)">${ICO(it.enabled === false ? "eyeoff" : "eye")}${it.enabled === false ? "Oculto" : "Visible"}</button>`
-      + `<button class="btn ghost mini" data-a="dup" title="Duplicar (⌘D)">${ICO("copy")}Duplicar</button>`
-      + `<button class="btn ghost mini" data-a="del" title="Eliminar (Supr)">${ICO("trash")}Eliminar</button>`;
-    act.querySelectorAll("[data-a]").forEach(x => x.onclick = () => FX.action(x.dataset.a));
-    b.appendChild(act);
-    const fs = section(b, "Archivo");
+    head(b, "media", it, it.name || "Recurso", `${TRACK_META.media.label} · ${C.fmtTime(FX.finalTime(+it.start))} a ${C.fmtTime(FX.finalTime(+it.end))} (${C.humanNum(Math.max(0, FX.finalTime(+it.end) - FX.finalTime(+it.start)))} s)`);
+    if (!hasCopy()) { b.insertAdjacentHTML("beforeend", `<div class="hint">Cargando el catálogo de ajustes…</div>`); return; }
+    levelBar(b);
+    const rows = rowsBox(b), opt = { track: "media", item: it, kind: it.style || "float_card" };
+    rows.appendChild(actionsRow(it, { noLock: true, noRegen: true }));
     const th = it.sid ? `/tlsource/${encodeURIComponent(it.sid)}/thumb` : "";
     const fr = document.createElement("div"); fr.className = "md-file";
-    fr.innerHTML = `<span class="md-th">${th ? `<img alt="" src="${th}">` : ICO("alert")}</span><span class="md-nm"><b>${esc(it.name || "Recurso")}</b><span>${it.sid ? (it.kind === "video" ? "Video · sin audio" : "Imagen · acercamiento suave") : "Falta el archivo"}</span></span>`;
-    const rb = document.createElement("button"); rb.className = "btn ghost mini"; rb.innerHTML = `${ICO("upload")}${it.sid ? "Reemplazar" : "Agregar archivo"}`;
-    rb.onclick = () => FX.replaceMedia(it); fr.appendChild(rb); fs.appendChild(fr);
-    fs.insertAdjacentHTML("beforeend", `<div class="hint">${it.src === "script" ? "Lo pidió el guion: aparece mientras se dice su línea. " : ""}Tarjeta flotante centrada (mismo margen a los lados) sobre el orador desenfocado; los subtítulos siguen encima.</div>`);
-    const ts = section(b, "Tiempo");
-    const num = (k, label) => {
-      const inp = document.createElement("input"); inp.type = "number"; inp.className = "fnum"; inp.step = "0.01"; inp.value = it[k]; inp.dataset.k = k;
-      inp.onchange = () => edit(() => {
-        const v = r3(+inp.value || 0);
-        if (k === "start") it.start = clamp(v, 0, it.end - 0.3); else it.end = clamp(v, it.start + 0.3, dur());
+    fr.innerHTML = `<span class="md-th">${th ? `<img alt="" src="${th}">` : ICO("alert")}</span><span class="md-nm"><b class="ucontent">${esc(it.name || "")}</b><span>${esc(ST(it.sid ? (it.kind === "video" ? "media.file.video" : "media.file.image") : "media.file.none"))}</span></span>`;
+    const rb = document.createElement("button"); rb.type = "button"; rb.className = "btn ghost mini"; rb.innerHTML = `${ICO("upload")}${esc(ST(it.sid ? "media.file.replace" : "media.file.add"))}`;
+    rb.onclick = () => FX.replaceMedia(it); fr.appendChild(rb);
+    rows.appendChild(rowOf(null, opt, "", fr, null, { id: "media.file", full: true, note: it.src === "script" ? ST("media.file.script") : undefined }));
+    const ts = insSection(b, "time");
+    ["start", "end"].forEach(k => {
+      const p = (C.commonParams(SCHEMA, "media") || []).find(x => x.k === k) || { k, type: "num", label: k };
+      const tf = ES().Catalog.timeField({ name: C.copyFor(SCHEMA.ui, `common.${k}`).label, get: () => it[k], set: v => edit(() => {
+        const t = r3(clamp(+v, 0, dur()));
+        if (k === "start") { const L = it.end - it.start; it.start = clamp(t, 0, dur() - 0.3); if (it.end <= it.start + 0.3) it.end = r3(Math.min(dur(), it.start + L)); }
+        else it.end = r3(clamp(t, it.start + 0.3, dur()));
         mediaRefit(it);
-      }, { rebuild: true });
-      ts.appendChild(frow(label, inp));
-    };
-    num("start", "Inicio (s)"); num("end", "Fin (s)");
-    const r = document.createElement("div"); r.className = "btnrow"; r.style.marginTop = "4px";
-    r.innerHTML = `<button class="btn ghost mini" data-m="s">${ICO("tostart")}Inicio al playhead</button><button class="btn ghost mini" data-m="e">${ICO("toend")}Fin al playhead</button>`;
-    r.querySelectorAll("[data-m]").forEach(x => x.onclick = () => edit(() => {
-      const t = r3(V.currentTime || 0);
-      if (x.dataset.m === "s") { const L = it.end - it.start; it.start = clamp(t, 0, dur() - 0.3); if (it.end <= it.start + 0.3) it.end = r3(Math.min(dur(), it.start + L)); }
-      else it.end = r3(clamp(t, it.start + 0.3, dur()));
-      mediaRefit(it);
-    }, { rebuild: true }));
-    ts.appendChild(r);
+      }, { rebuild: true }) });
+      tf.input.dataset.k = k;
+      ts.appendChild(rowOf(p, opt, p.label, tf.el));
+    });
     if (it.kind === "video") {
-      const vs = section(b, "Ajuste del video");
-      const sel = document.createElement("select"); sel.className = "fsel";
-      sel.innerHTML = Object.keys(MEDIA_FIT_ES).map(k => `<option value="${k}" ${k === (it.fit || "hold") ? "selected" : ""}>${MEDIA_FIT_ES[k]}</option>`).join("");
-      sel.onchange = () => edit(() => mediaRefit(it, sel.value), { rebuild: true });
-      vs.appendChild(frow("Ajuste", sel));
-      if (it.fit === "trim") {
+      const fs = insSection(b, "content");
+      const fp = { k: "fit", type: "seg", label: "fit" };
+      const seg = ES().Segmented.create({ choices: ["hold", "speed", "trim"].map(v => ({ v, label: lbl(v, "media.fit") || MEDIA_FIT_ES[v] })), value: it.fit || "hold",
+        onPick: v => edit(() => mediaRefit(it, v), { rebuild: true }), cls: "grid1" });
+      const d = mediaDurOf(it);
+      // (un clip que se alenta dice «más lento», nunca «acelerado»)
+      const sp = it.fit === "speed" ? ` ${ST((+it.speed || 1) < 1 ? "media.speed.slow" : "media.speed.fast", { v: (+it.speed || 1).toFixed(2) }) || ((+it.speed || 1) < 1 ? "Se reproduce más lento." : "Se reproduce acelerado.")}` : "";
+      fs.appendChild(rowOf(fp, opt, "", seg.el, null, { note: d ? ST("media.fit.note", { clip: d.toFixed(1), tramo: (it.end - it.start).toFixed(1) }) + sp : undefined }));
+      if (it.fit === "trim" && lvl() === "advanced") {
+        const sp = { k: "src_in", type: "num", label: "src_in", min: 0, max: Math.max(0, d), step: 0.1, unit: "s" };
         const inp = document.createElement("input"); inp.type = "number"; inp.className = "fnum"; inp.step = "0.1"; inp.min = "0"; inp.value = +it.src_in || 0;
         inp.onchange = () => edit(() => { it.src_in = r3(Math.max(0, +inp.value || 0)); mediaRefit(it); }, { rebuild: true });
-        vs.appendChild(frow("Empieza en (s del video)", inp));
+        const w = document.createElement("div"); w.className = "fctl"; w.append(inp); w.insertAdjacentHTML("beforeend", `<span class="funit">s</span>`);
+        fs.appendChild(rowOf(sp, opt, "", w));
       }
-      const d = mediaDurOf(it);
-      vs.insertAdjacentHTML("beforeend", `<div class="hint">${d ? `El video dura ${d.toFixed(1)} s y el tramo ${(it.end - it.start).toFixed(1)} s.` : ""}${it.fit === "speed" ? ` Se reproduce ${(+it.speed || 1) < 1 ? "más lento" : "acelerado"} a ×${(+it.speed || 1).toFixed(2)}.` : ""} Siempre sin audio.</div>`);
     }
     // estilo de la tarjeta (esquema del motor: desenfoque, oscurecido, esquinas, sombra, entrada...);
     // nunca una posicion X: la tarjeta va centrada (simetria)
-    if (SCHEMA) {
-      const skip = new Set(["sid", "path", "name", "kind", "fit", "speed", "src_in", "x"]);
-      const ps = C.kindParams(SCHEMA, "media", it.style || "float_card").filter(p => !p.internal && !skip.has(p.k));
-      if (ps.length) renderParams(section(b, "Estilo de la tarjeta", true), ps, it, { track: "media", item: it });
-    }
+    const skip = new Set(["sid", "path", "name", "kind", "fit", "speed", "src_in", "x"]);
+    const ps = C.kindParams(SCHEMA, "media", it.style || "float_card").filter(p => !p.internal && !skip.has(p.k));
+    if (ps.length) renderParams(insSection(b, "style"), ps, it, opt);
+    dropEmpty(b);
   }
   function emptyInspector() {
-    return `<div class="hint" style="margin:6px 0 12px">Selecciona un elemento del timeline o de la vista previa para editarlo.</div>`
-      + (isPro() ? `<div class="subgroup" style="margin-top:0;border:0;padding-top:0"><h5>${ICO("plus")}Agregar en el playhead</h5><div class="btnrow">`
+    return `<div class="hint" style="margin:6px 0 12px">${esc(ST("insp.empty") || "Selecciona un elemento de la línea de tiempo o de la vista previa para editarlo.")}</div>`
+      + (isPro() ? `<div class="subgroup" style="margin-top:0;border:0;padding-top:0"><h5>${ICO("plus")}${esc(ST("add.here") || "Agregar donde está el cursor")}</h5><div class="btnrow">`
       + ["text", "graphics", "cutaways", "effects", "transitions", "sfx"].map(t => `<button class="btn ghost mini" style="flex:1 1 44%" onclick="FX.addMenu('${t}',this)">${ICO(TRACK_META[t].icon)}${TRACK_META[t].label}</button>`).join("") + `</div></div>` : "");
   }
 
   function head(b, track, it, title, sub) {
     const m = TRACK_META[track];
     const h = document.createElement("div"); h.className = "ins-head"; h.style.setProperty("--c", m.rgb);
-    h.innerHTML = `<div class="ins-sw">${ICO(it ? kindIcon(track, it) : m.icon)}</div><div class="ins-title"><b>${esc(title)}</b><span>${esc(sub || "")}</span></div>`;
+    // el titulo lleva el texto del elemento (contenido del usuario); el subtitulo, la pista y el tiempo
+    h.innerHTML = `<div class="ins-sw">${ICO(it ? kindIcon(track, it) : m.icon)}</div><div class="ins-title"><b${it ? ' class="ucontent"' : ""}>${esc(title)}</b><span>${esc(sub || "")}</span></div>`;
     b.appendChild(h);
   }
 
   function inspectItem(b, track, it) {
     const kk = C.kindKey(SCHEMA, track), kind = it[kk];
-    const span = C.isEvent(track) ? `${TRACK_META[track].label} · en ${C.fmtClock(it.at, .1)}` : `${TRACK_META[track].label} · ${C.fmtClock(it.start, .1)} a ${C.fmtClock(it.end, .1)} (${(it.end - it.start).toFixed(2)} s)`;
-    head(b, track, it, C.itemLabel(SCHEMA, track, it) || C.kindLabel(SCHEMA, track, kind), span);
+    // en el tiempo del video final, como los campos de tiempo
+    const ft = v => C.fmtTime(FX.finalTime(+v || 0));
+    const span = C.isEvent(track) ? `${TRACK_META[track].label} · ${ST("insp.at") || "en"} ${ft(it.at)}` : `${TRACK_META[track].label} · ${ft(it.start)} a ${ft(it.end)} (${C.humanNum(Math.max(0, FX.finalTime(+it.end) - FX.finalTime(+it.start)))} s)`;
+    head(b, track, it, (track === "sfx" ? lbl(it.name, "sfx.name") : C.itemLabel(SCHEMA, track, it)) || C.kindLabel(SCHEMA, track, kind), span);
+    levelBar(b);
     const tags = document.createElement("div"); tags.className = "ins-tags"; tags.id = "insTags";
     tags.innerHTML = tagsHtml(it);
     b.appendChild(tags);
@@ -1622,168 +1726,132 @@
       const all = [{ track, id: it.id }].concat(FX.groupOf([it.id]).map(g => ({ track: g.track, id: g.id })));
       SELX = all; SEL = { type: "fx", track, id: it.id }; markSelection(); FX.inspect(SEL, true);
     });
+    if (!SCHEMA || !hasCopy()) { inspectItemPlain(b, track, it); return; }
+    const opt = { track, item: it, kind };
+    const top = rowsBox(b);
+    top.appendChild(actionsRow(it));
+    top.appendChild(kindRow(track, it));
+    // tiempo (empieza / termina, o el momento); la fuerza va en Animación y Delante/Detrás en Posición
+    const common = C.commonParams(SCHEMA, track).filter(p => !["enabled", "locked"].includes(p.k));
+    renderParams(insSection(b, "time"), common.filter(p => ["start", "end", "at"].includes(p.k)), it, opt);
+    const G = C.inspectorGroups(C.kindParams(SCHEMA, track, kind));
+    const cs = insSection(b, "content");
+    if (track === "text") {
+      // text.py usa `lines` (si no esta vacio) e ignora `text`: el campo de texto escribe en las
+      // lineas (conservando su estilo) y el editor de lineas queda para el estilo de cada una
+      const tp = G.cont.find(p => p.k === "text");
+      if (tp) { const r = titleTextControl(tp, it, opt); if (r) cs.appendChild(r); }
+      renderParams(cs, G.cont.filter(p => p.k !== "text"), it, opt);
+    } else renderParams(cs, G.cont, it, opt);
+    const ps = insSection(b, "pos");
+    renderParams(ps, G.pos, it, opt);
+    // delante / detras: solo donde el motor apila por z (titulos y graficos)
+    if (lvl() === "advanced" && (track === "text" || track === "graphics")) { const z = zRow(track, it, opt); if (z) ps.appendChild(z); }
+    renderParams(insSection(b, track === "sfx" ? "sound" : "style"), G.style, it, opt);
+    renderParams(insSection(b, "anim"), common.filter(p => p.k === "intensity").concat(G.anim), it, opt);
+    dropEmpty(b);
+  }
+  /** Sin la copy (el catalogo aun no llega): las filas simples de siempre. */
+  function inspectItemPlain(b, track, it) {
     const act = document.createElement("div"); act.className = "ins-actions";
-    act.innerHTML = `<button class="btn ghost mini" data-a="en" title="Activar o desactivar (H)">${ICO(it.enabled === false ? "eyeoff" : "eye")}${it.enabled === false ? "Oculto" : "Visible"}</button>`
-      + `<button class="btn ghost mini ${it.locked ? "on" : ""}" data-a="lock" title="La IA no lo cambia al re-dirigir (L)">${ICO("lock")}${it.locked ? "Bloqueado" : "Bloquear"}</button>`
-      + `<button class="btn ghost mini" data-a="dup" title="Duplicar (⌘D)">${ICO("copy")}Duplicar</button>`
-      + `<button class="btn ghost mini" data-a="del" title="Eliminar (Supr)">${ICO("trash")}Eliminar</button>`;
+    act.innerHTML = `<button class="btn ghost mini" data-a="en">${ICO(it.enabled === false ? "eyeoff" : "eye")}${it.enabled === false ? "Oculto" : "Visible"}</button>`
+      + `<button class="btn ghost mini" data-a="dup">${ICO("copy")}Duplicar</button><button class="btn ghost mini" data-a="del">${ICO("trash")}Eliminar</button>`;
     act.querySelectorAll("[data-a]").forEach(x => x.onclick = () => FX.action(x.dataset.a));
     b.appendChild(act);
-    const regen = document.createElement("button"); regen.className = "btn ghost mini full"; regen.style.marginBottom = "12px";
-    regen.innerHTML = `${ICO("spark")}Regenerar con IA`; regen.title = "La IA propone otra versión de este elemento (se desbloquea para esta petición).";
-    regen.onclick = () => FX.regenerate([it.id]); regen.disabled = !!DIRECTING;
-    b.appendChild(regen);
-    if (!SCHEMA) { b.insertAdjacentHTML("beforeend", `<div class="hint">Cargando el catálogo de parámetros…</div>`); return; }
-    // tipo / preset
-    const ks = C.kinds(SCHEMA, track);
-    const tsec = section(b, track === "text" ? "Estilo de título" : track === "sfx" ? "Sonido" : "Tipo");
-    if (track === "sfx") tsec.appendChild(sfxPicker(it));
-    else {
-      const sel = document.createElement("select"); sel.className = "fsel";
-      sel.innerHTML = ks.map(k => `<option value="${esc(k)}" ${k === kind ? "selected" : ""}>${esc(C.kindLabel(SCHEMA, track, k))}</option>`).join("");
-      sel.onchange = () => { edit(() => { C.changeKind(SCHEMA, track, it, sel.value); autoLock(it); }, { rebuild: true }); };
-      tsec.appendChild(frow(track === "text" ? "Preset" : "Tipo", sel));
-    }
-    // tiempo y comunes
-    const common = C.commonParams(SCHEMA, track).filter(p => !["enabled", "locked"].includes(p.k));
-    const csec = section(b, "Tiempo");
-    renderParams(csec, common, it, { track, item: it });
-    if (!C.isEvent(track)) {
-      const r = document.createElement("div"); r.className = "btnrow"; r.style.marginTop = "4px";
-      r.innerHTML = `<button class="btn ghost mini" data-m="s">${ICO("tostart")}Inicio al playhead</button><button class="btn ghost mini" data-m="e">${ICO("toend")}Fin al playhead</button>`;
-      r.querySelectorAll("[data-m]").forEach(x => x.onclick = () => edit(() => {
-        const t = r3(V.currentTime || 0);
-        if (x.dataset.m === "s") { const L = it.end - it.start; it.start = clamp(t, 0, dur() - 0.1); if (it.end <= it.start + 0.1) it.end = r3(Math.min(dur(), it.start + L)); }
-        else it.end = r3(clamp(t, it.start + 0.1, dur()));
-        autoLock(it);
-      }, { rebuild: true }));
-      csec.appendChild(r);
-    } else {
-      const r = document.createElement("div"); r.className = "btnrow"; r.style.marginTop = "4px";
-      r.innerHTML = `<button class="btn ghost mini">${ICO("tostart")}Mover al playhead</button>`;
-      r.firstChild.onclick = () => edit(() => { it.at = r3(V.currentTime || 0); autoLock(it); }, { rebuild: true });
-      csec.appendChild(r);
-    }
-    // parametros del kind agrupados
-    const ps = C.kindParams(SCHEMA, track, kind);
-    const groups = { cont: [], pos: [], anim: [], style: [] };
-    ps.forEach(p => {
-      const k = p.k;
-      if (["text", "lines", "title", "subtitle", "value", "items", "label", "handle", "text.text", "prefix", "suffix", "from", "to", "decimals", "accent_words", "name", "icon", "variant", "text.preset"].includes(k)) groups.cont.push(p);
-      else if (["x", "y", "size", "rotation", "align", "path_to"].includes(k)) groups.pos.push(p);
-      else if (/^anim_|easing/.test(k)) groups.anim.push(p);
-      else groups.style.push(p);
-    });
-    if (groups.cont.length) {
-      const cs = section(b, "Contenido");
-      if (track === "text") {
-        // text.py usa `lines` (si no esta vacio) e ignora `text`: el campo de texto escribe en las
-        // lineas (conservando su estilo) y el editor de lineas queda para el estilo de cada una
-        const tp = groups.cont.find(p => p.k === "text");
-        if (tp) { const r = titleTextControl(tp, it); if (r) cs.appendChild(r); }
-        renderParams(cs, groups.cont.filter(p => p.k !== "text"), it, { track, item: it });
-      } else renderParams(cs, groups.cont, it, { track, item: it });
-    }
-    if (groups.pos.length) renderParams(section(b, "Posición y tamaño"), groups.pos, it, { track, item: it });
-    if (groups.style.length) renderParams(section(b, "Estilo"), groups.style, it, { track, item: it });
-    if (groups.anim.length) renderParams(section(b, "Animación", true), groups.anim, it, { track, item: it });
+    if (!SCHEMA) { b.insertAdjacentHTML("beforeend", `<div class="hint">Cargando el catálogo de ajustes…</div>`); return; }
+    const kind = it[C.kindKey(SCHEMA, track)];
+    renderParams(section(b, "Ajustes"), C.commonParams(SCHEMA, track).filter(p => !["enabled", "locked"].includes(p.k)).concat(C.kindParams(SCHEMA, track, kind)), it, { track, item: it, kind });
   }
 
   function inspectMulti(b) {
     const sel = FX.selectedItems();
-    head(b, sel[0].track, null, `${sel.length} elementos seleccionados`, [...new Set(sel.map(s => TRACK_META[s.track].label))].join(", "));
+    head(b, sel[0].track, null, ST("insp.multi", { n: sel.length }) || `${sel.length} elementos seleccionados`, [...new Set(sel.map(s => TRACK_META[s.track].label))].join(", "));
     const act = document.createElement("div"); act.className = "ins-actions";
-    act.innerHTML = `<button class="btn ghost mini" data-a="en">${ICO("eye")}Visibles</button><button class="btn ghost mini" data-a="lock">${ICO("lock")}Bloquear</button>`
-      + `<button class="btn ghost mini" data-a="dup">${ICO("copy")}Duplicar</button><button class="btn ghost mini" data-a="del">${ICO("trash")}Eliminar</button>`;
+    act.innerHTML = `<button class="btn ghost mini" data-a="en">${ICO("eye")}${esc(ST("insp.act.visible") || "Visible")}</button><button class="btn ghost mini" data-a="lock">${ICO("lock")}${esc(ST("insp.act.lock") || "Proteger de la IA")}</button>`
+      + `<button class="btn ghost mini" data-a="dup">${ICO("copy")}${esc(ST("insp.act.dup") || "Duplicar")}</button><button class="btn ghost mini" data-a="del">${ICO("trash")}${esc(ST("insp.act.del") || "Eliminar")}</button>`;
     act.querySelectorAll("[data-a]").forEach(x => x.onclick = () => FX.action(x.dataset.a));
     b.appendChild(act);
-    const regen = document.createElement("button"); regen.className = "btn ghost mini full"; regen.innerHTML = `${ICO("spark")}Regenerar con IA`;
+    const regen = document.createElement("button"); regen.className = "btn ghost mini full"; regen.innerHTML = `${ICO("spark")}${esc(ST("insp.act.regen") || "Otra versión con IA")}`;
     regen.onclick = () => FX.action("regen"); b.appendChild(regen);
-    b.insertAdjacentHTML("beforeend", `<div class="hint">Arrastra cualquiera de los bloques seleccionados para moverlos juntos. Alt + flechas los empuja un cuadro.</div>`);
+    b.insertAdjacentHTML("beforeend", `<div class="hint">${esc(ST("insp.multi.hint") || "Arrastra cualquiera de los bloques seleccionados para moverlos juntos. Alt + flechas los empuja un cuadro.")}</div>`);
   }
 
   function inspectMusic(b) {
     const m = PLAN.fx.music = PLAN.fx.music || {};
-    head(b, "music", null, "Música de fondo", { ai: "Generada con IA", procedural: "Procedural", library: "Biblioteca", none: "Sin música" }[m.enabled === false ? "none" : (m.source || "ai")]);
-    const quick = document.createElement("div"); quick.id = "musBody2";
-    b.appendChild(quick);
-    const btns = document.createElement("div"); btns.className = "btnrow"; btns.style.marginBottom = "10px";
-    btns.innerHTML = `<button class="btn ghost mini" data-m="stop">${ICO("pause")}Silencio en el playhead</button><button class="btn ghost mini" data-m="drop">${ICO("bolt")}Drop en el playhead</button><button class="btn ghost mini" data-m="swell">${ICO("plus")}Subida aquí</button>`;
-    btns.querySelectorAll("[data-m]").forEach(x => x.onclick = () => edit(() => {
-      const t = r3(V.currentTime || 0);
-      if (x.dataset.m === "stop") { m.stops = m.stops || []; m.stops.push({ at: t, dur: 0.8 }); }
-      else if (x.dataset.m === "drop") m.drop_at = t;
-      else { m.swells = m.swells || []; m.swells.push({ start: t, end: r3(Math.min(dur(), t + 3)), db: 3 }); }
-    }, { rebuild: true }));
-    b.appendChild(btns);
-    if (!SCHEMA) return;
-    const skip = new Set(["enabled", "source", "track", "file", "stops", "swells"]);
-    const mOpt = { noLock: true, ctx: "music", onChange: () => { FX.applyMusicGain(); FX.renderMusicPanelSoon(); } };
-    const dropF = FX.music.drop != null ? ` El último golpe generado cae en ${C.fmtClock(tlObj().inverse(+FX.music.drop), .1)}.` : "";
-    b.insertAdjacentHTML("beforeend", `<div class="hint" style="margin:-4px 0 10px">Los tiempos son del video original, como el timeline.${esc(dropF)} BPM 0 = automático.</div>`);
-    renderParams(section(b, "Ajustes"), SCHEMA.music.params.filter(p => !skip.has(p.k)), m, mOpt);
-    const rowsP = SCHEMA.music.params.filter(p => p.type === "rows");
-    if (rowsP.length) { renderParams(section(b, "Silencios y subidas"), rowsP, m, mOpt); return; }
-    // silencios y subidas editables
-    const ls = section(b, "Silencios y subidas", true);
-    (m.stops || []).forEach((s, i) => {
-      const r = document.createElement("div"); r.className = "fctl"; r.style.marginBottom = "6px";
-      r.innerHTML = `<span class="funit">Silencio</span><input type="number" class="fnum" step="0.01" value="${s.at}" title="Momento (s)"><input type="number" class="fnum" step="0.05" value="${s.dur}" title="Duración (s)"><button class="xbtn" title="Quitar">${ICO("trash")}</button>`;
-      const [a, d] = r.querySelectorAll("input");
-      a.onchange = () => edit(() => { s.at = r3(+a.value); }, { rebuild: true }); d.onchange = () => edit(() => { s.dur = r3(Math.max(0.05, +d.value)); }, { rebuild: true });
-      r.querySelector("button").onclick = () => edit(() => m.stops.splice(i, 1), { rebuild: true });
-      ls.appendChild(r);
+    // aqui solo lo que depende del momento del video (golpe, pausas, subidas); lo demas vive en Estilo › Musica
+    head(b, "music", null, ST("mus.insp.title") || "Música de fondo", lbl(C.musicSourceOf(m), "music.source"));
+    const more = document.createElement("button"); more.type = "button"; more.className = "btn ghost mini mus-more";
+    more.innerHTML = `${ICO("drop")}${esc(ST("mus.more") || "Más ajustes de música en Estilo")}`;
+    more.onclick = () => { if (window.Estilo) Estilo.open("stMusic"); };
+    if (!SCHEMA || !hasCopy()) { b.appendChild(more); return; }
+    levelBar(b);
+    const rows = rowsBox(b), mOpt = { noLock: true, ctx: "music", onChange: () => { FX.applyMusicGain(); FX.renderMusicPanelSoon(); } };
+    rows.appendChild(rowOf(null, {}, "", more, null, { id: "music.single_home" }));
+    if (lvl() !== "advanced") return;
+    // golpe principal, pausas dramaticas y subidas: en el momento del cursor (Avanzado)
+    const P = id => (SCHEMA.music.params || []).find(p => p.k === id);
+    const dp = P("drop_at");
+    if (dp) {
+      const tf = ES().Catalog.timeField({ name: C.copyFor(SCHEMA.ui, "music.drop_at").label, get: () => (m.drop_at != null ? m.drop_at : FX.music.drop != null ? tlObj().inverse(+FX.music.drop) : 0),
+        set: v => { edit(() => { m.drop_at = r3(clamp(+v, 0, dur())); }, { rebuild: true }); FX.renderMusicPanelSoon(); } });
+      tf.input.dataset.k = "drop_at";
+      const ls = ES().ListenButton ? ES().ListenButton.create({ key: "range:drop", name: C.copyFor(SCHEMA.ui, "music.drop_at").label, cls: "sm",
+        why: () => (FX.musicState().file ? null : ST("listen.need_music")),
+        spec: () => ({ kind: "voice_music", id: "drop", at: Math.max(0, (m.drop_at != null ? +m.drop_at : FX.music.drop != null ? tlObj().inverse(+FX.music.drop) : 0) - 2), max: 4, sample: C.moodSampleUrl(m.mood || "auto", FX.dirStyle()) }) }) : null;
+      const ex = ls ? (() => { const d = document.createElement("div"); d.className = "ex-listen"; d.appendChild(ls.el); return d; })() : null;
+      rows.appendChild(rowOf(dp, mOpt, dp.label, tf.el, ex, { id: "music.drop_at", note: FX.music.drop != null ? ST("mus.drop", { t: C.fmtTime(+FX.music.drop) }) : undefined }));
+    }
+    const addBtn = (key, icon, fn) => { const x = document.createElement("button"); x.type = "button"; x.className = "btn ghost mini"; x.innerHTML = `${ICO(icon)}${esc(ST(key))}`; x.onclick = () => edit(fn, { rebuild: true }); return x; };
+    ["stops", "swells"].forEach(k => {
+      const p = P(k); if (!p) return;
+      const w = document.createElement("div"); w.className = "mus-rows";
+      w.appendChild(paramControlInner(p, m, mOpt));
+      w.appendChild(addBtn(k === "stops" ? "mus.stop.here" : "mus.swell.here", k === "stops" ? "pause" : "plus", () => {
+        const t = r3(V.currentTime || 0);
+        if (k === "stops") { m.stops = m.stops || []; m.stops.push({ at: t, dur: 0.8 }); }
+        else { m.swells = m.swells || []; m.swells.push({ start: t, end: r3(Math.min(dur(), t + 3)), db: 3 }); }
+      }));
+      const ls = ES().ListenButton ? ES().ListenButton.create({ key: "range:" + k, name: C.copyFor(SCHEMA.ui, "music." + k).label, cls: "sm",
+        why: () => (FX.musicState().file ? null : ST("listen.need_music")),
+        spec: () => { const a = (m[k] || [])[0]; const t0 = a ? +(a.at != null ? a.at : a.start) : (V.currentTime || 0); return { kind: "voice_music", id: k, at: Math.max(0, t0 - 2), max: 4, sample: C.moodSampleUrl(m.mood || "auto", FX.dirStyle()) }; } }) : null;
+      const ex = ls ? (() => { const d = document.createElement("div"); d.className = "ex-listen"; d.appendChild(ls.el); return d; })() : null;
+      rows.appendChild(rowOf(p, mOpt, p.label, w, ex, { id: "music." + k, full: true }));
     });
-    (m.swells || []).forEach((s, i) => {
-      const r = document.createElement("div"); r.className = "fctl"; r.style.marginBottom = "6px";
-      r.innerHTML = `<span class="funit">Subida</span><input type="number" class="fnum" step="0.01" value="${s.start}"><input type="number" class="fnum" step="0.01" value="${s.end}"><input type="number" class="fnum" step="0.5" value="${s.db}" title="dB"><button class="xbtn" title="Quitar">${ICO("trash")}</button>`;
-      const [a, e2, d] = r.querySelectorAll("input");
-      a.onchange = () => edit(() => { s.start = r3(+a.value); }, { rebuild: true }); e2.onchange = () => edit(() => { s.end = r3(+e2.value); }, { rebuild: true });
-      d.onchange = () => edit(() => { s.db = clamp(+d.value, -24, 12); }, { rebuild: true });
-      r.querySelector("button").onclick = () => edit(() => m.swells.splice(i, 1), { rebuild: true });
-      ls.appendChild(r);
-    });
-    if (!(m.stops || []).length && !(m.swells || []).length) ls.insertAdjacentHTML("beforeend", `<div class="hint">Sin silencios ni subidas. Usa los botones de arriba.</div>`);
   }
-
+  /** El editor de una lista (pausas, subidas) con sus campos simples dentro de una sola fila. */
+  function paramControlInner(p, obj, opt) {
+    const r = paramControl(p, obj, Object.assign({}, opt, { inner: true }));
+    const c = r && r.querySelector(".fctl");
+    return c || r;
+  }
+  /** Elemento › Subtítulos: los mismos componentes que Estilo › Subtítulos en compacto (galería
+      de 2 columnas, colores del estilo, altura, tamaño y letras; en Avanzado, los tramos). */
   function inspectCaptions(b) {
-    head(b, "text", null, "Subtítulos", "Estilo global de los subtítulos");
     if (!SCHEMA) return;
     PLAN.fx.captions = PLAN.fx.captions || {};
-    const as = section(b, "Color de acento del proyecto"); renderAccent(as);
-    renderParams(section(b, "Estilo"), SCHEMA.captions.params.filter(p => p.k !== "accent"), PLAN.fx.captions, { noLock: true, ctx: "captions", onChange: () => { CAPCACHE.key = ""; FX.renderProjectGroupsSoon(); } });
+    if (window.Estilo && Estilo.renderCaptionsInspector(b)) return;
+    head(b, "text", null, "Subtítulos", "");
+    renderParams(section(b, "Estilo"), SCHEMA.captions.params.filter(p => p.level !== "hidden" && p.k !== "accent"), PLAN.fx.captions, { noLock: true, ctx: "captions", onChange: () => { CAPCACHE.key = ""; } });
   }
+  /** El control de un parametro sin su fila (el editor de tramos dentro de una fila de Estilo). */
+  FX.paramEditor = function (p, obj, opt) {
+    // solo el control: la fila (nombre y que hace) la pone quien lo usa (Estilo › tramos de subtitulos)
+    const row = paramControl(p, obj, Object.assign({}, opt, { inner: true }));
+    const c = row && row.querySelector(".fctl");
+    return c || row;
+  };
   /* Color de acento del proyecto (plan.fx.accent; fxcore.applyAccent): la palabra activa de los
      subtitulos y el acento de titulos y tarjetas. Por defecto el amarillo de siempre. */
   const STYLE_ACCENT = { dinamico: "#FFD23F", elegante: "#E8C27A", minimal: "#FFFFFF", energetico: "#FFE600" };
   FX.projectAccent = () => C.projectAccent(PLAN);
   /** Acento para lo que no trae color propio (= la paleta del render con plan.fx.accent). */
-  function ACC() { return C.projectAccent(PLAN); }
+  function ACC() { return C.projectAccent(curPlan()); }
   FX.setAccent = function (v) {
     const h = C.normHex(v); if (!h || !isPro() || h === C.projectAccent(PLAN) && PLAN.fx.accent) return false;
     edit(() => { C.applyAccent(PLAN, h, { palette: STYLE_ACCENT[FX.dirStyle()] }); }, { noLanes: false });
     CAPCACHE.key = ""; FX.renderProjectGroupsSoon();
     return true;
   };
-  function renderAccent(box) {
-    const acc = C.projectAccent(PLAN), dark = lum(acc) > 0.6;
-    box.innerHTML = `<div class="acc-row"><input type="color" class="acc-sw" value="${acc.toLowerCase()}" aria-label="Color de acento">`
-      + `<input type="text" class="acc-hex" value="${acc}" maxlength="7" spellcheck="false" aria-label="Color de acento en hexadecimal">`
-      + `<button class="btn ghost mini" data-a="def"${acc === C.DEFAULT_ACCENT ? " disabled" : ""} title="Volver al amarillo de siempre (#FFD23F)">Amarillo</button></div>`
-      + `<div class="acc-demo"><b>Así se ve tu <i style="background:${acc};color:${dark ? "#111" : "#fff"}">acento</i></b></div>`
-      + `<div class="hint">Resalta la palabra que se está diciendo en los subtítulos y el acento de títulos y tarjetas.</div>`;
-    const sw = box.querySelector(".acc-sw"), hx = box.querySelector(".acc-hex"), def = box.querySelector('[data-a="def"]');
-    let open = false;
-    const live = v => { const h = C.normHex(v); if (!h) return; if (!open) { mut(); open = true; }
-      C.applyAccent(PLAN, h, { palette: STYLE_ACCENT[FX.dirStyle()] }); CAPCACHE.key = ""; FX.planDirty();
-      const d = box.querySelector(".acc-demo i"); if (d) { d.style.background = h; d.style.color = lum(h) > 0.6 ? "#111" : "#fff"; } };
-    const end = () => { if (open) { open = false; syncLocked(); FX.renderLanesSoon(); FX.renderProjectGroupsSoon(); } };
-    sw.addEventListener("input", () => { hx.value = sw.value.toUpperCase(); live(sw.value); });
-    sw.addEventListener("change", end);
-    hx.addEventListener("change", () => { const h = C.normHex(hx.value); if (!h) { hx.value = C.projectAccent(PLAN); return; } sw.value = h.toLowerCase(); live(h); end(); });
-    def.onclick = () => { live(C.DEFAULT_ACCENT); end(); toast("Color de acento: amarillo (predeterminado).", "check", true); };
-  }
-
   function section(b, title, closed) {
     const s = document.createElement("div"); s.className = "ins-sec" + (closed ? " closed" : "");
     s.innerHTML = `<h6>${esc(title)}</h6><div class="ins-body"></div>`;
@@ -1802,11 +1870,20 @@
     return r;
   }
 
-  /** Dibuja los controles de una lista de parametros del esquema sobre `obj`. */
+  /** Dibuja los controles de una lista de parametros del esquema sobre `obj`: una fila (HelpRow) por
+      ajuste con su nombre, que hace y ejemplo; en Basico solo las filas basicas, nunca las ocultas, y en
+      tarjetas e invitaciones solo los campos que usa su tipo. */
   function renderParams(box, params, obj, o) {
     const opt = o || {};
+    if (opt.track && opt.kind === undefined && obj) opt.kind = C.itemKind(SCHEMA, opt.track, obj);
+    const adv = lvl() === "advanced", useCopy = hasCopy() && !opt.inner;
     params.forEach(p => {
       if (p.k === "enabled" && opt.noLock === undefined) return;
+      if (useCopy) {
+        const cp = C.copyFor(SCHEMA.ui, copyIdOf(p, opt), ctxOf(opt));
+        if (cp.level === "hidden" || (cp.level === "advanced" && !adv)) return;
+        if (opt.track && C.paramHidden(opt.track, opt.kind, obj, p.k)) return;
+      }
       const row = paramControl(p, obj, opt);
       if (row) box.appendChild(row);
     });
@@ -1823,7 +1900,7 @@
   /** Actualiza solo etiquetas y botones del encabezado del inspector (sin reconstruirlo). */
   function refreshTags(it) {
     const tg = $("#insTags"); if (tg) tg.innerHTML = tagsHtml(it);
-    const lk = $('#inspBody [data-a="lock"]'); if (lk) { lk.classList.toggle("on", !!it.locked); lk.innerHTML = `${ICO("lock")}${it.locked ? "Bloqueado" : "Bloquear"}`; }
+    const lk = $('#inspBody [data-a="lock"]'); if (lk) { lk.classList.toggle("on", !!it.locked); lk.setAttribute("aria-pressed", String(!!it.locked)); lk.innerHTML = `${ICO("lock")}${esc(ST(it.locked ? "insp.act.locked" : "insp.act.lock") || (it.locked ? "Protegido" : "Proteger de la IA"))}`; }
   }
   /** Piezas de la misma composicion (tx_bghero_s<N>, tx_bghero_s<N>b, fx_bgswap_s<N>) que no
       estan en `ids`: el director las trata como una sola (se bloquean y regeneran juntas). */
@@ -1836,96 +1913,284 @@
   };
   function tagsHtml(it) {
     const grp = anchorOf(it.id) != null ? FX.groupOf([it.id]) : [];
-    return (grp.length ? `<span class="tagp comp" title="Palabra gigante, frase y fondo se editan por separado pero se bloquean y regeneran juntos">${ICO("layers")}Composición (${grp.length + 1} piezas) <button class="linkbtn" type="button" data-grp="1">Seleccionar</button></span>` : "")
-      + (it.src === "user" ? `<span class="tagp user">${ICO("user")}Creado por ti</span>` : `<span class="tagp ai">${ICO("spark")}IA</span>`)
-      + (it.locked ? `<span class="tagp lock">${ICO("lock")}Bloqueado</span>` : "") + (it.enabled === false ? `<span class="tagp off">${ICO("eyeoff")}Desactivado</span>` : "");
+    return (grp.length ? `<span class="tagp comp" title="${esc(ST("insp.tag.comp.title") || "Palabra gigante, frase y fondo se editan por separado pero se protegen y se rehacen juntos")}">${ICO("layers")}${esc(ST("insp.tag.comp", { n: grp.length + 1 }) || `Composición (${grp.length + 1} piezas)`)} <button class="linkbtn" type="button" data-grp="1" aria-label="${esc(ST("insp.tag.comp.select") || "Seleccionar todas las piezas")}">${esc(ST("insp.tag.comp.btn") || "Seleccionar")}</button></span>` : "")
+      + (it.src === "user" ? `<span class="tagp user">${ICO("user")}${esc(ST("insp.tag.user") || "Creado por ti")}</span>` : `<span class="tagp ai">${ICO("spark")}${esc(ST("insp.tag.ai") || "IA")}</span>`)
+      + (it.locked ? `<span class="tagp lock">${ICO("lock")}${esc(ST("insp.tag.locked") || "Protegido")}</span>` : "") + (it.enabled === false ? `<span class="tagp off">${ICO("eyeoff")}${esc(ST("insp.tag.off") || "Oculto")}</span>` : "");
   }
   let laneTimer = null;
   FX.renderLanesSoon = () => { clearTimeout(laneTimer); laneTimer = setTimeout(() => FX.renderLanes(), 120); };
+
+  const TIME_KEYS = ["start", "end", "at", "src_t", "drop_at"];
+  const clampP = (p, y) => { let v = +y; if (p.min != null) v = Math.max(+p.min, v); if (p.max != null) v = Math.min(+p.max, v); if (+p.step >= 1) v = Math.round(v); return +v.toFixed(4); };
+  /** Nombre de una opcion: las redes con su nombre del catalogo de perfiles; lo demas, de la copy. */
+  const lblOpt = (x, path, p) => (p && p.k === "platform" ? (PLATS[x] && PLATS[x].label) || C.accentEs(String(x)) : lbl(x, path));
+  const ARROW = { left: "left", right: "right", up: "up", down: "down" };
+  /** El ejemplo de una fila segun su copy: «Ej.: …», «Escuchar», o TU elemento en vivo (o la
+      transicion entre dos de tus tomas). Las filas «En el video» no llevan: el ejemplo es la vista grande. */
+  function autoExample(p, obj, opt, cp) {
+    const e = ES(), x = cp && cp.ex;
+    if (!x || x === "ninguno" || x === "en_video") return null;
+    if (x === "texto") return cp.ex_ui || null;
+    if (x === "audio" && opt.track === "sfx" && obj && e.ListenButton) {
+      const d = document.createElement("div"); d.className = "ex-listen";
+      d.appendChild(e.ListenButton.create({ key: `sfx:${obj.name}:${p.k}`, name: cp.label, cls: "sm", spec: () => ({ kind: "sfx", id: obj.name, gainDb: obj.gain_db, pan: obj.pan, variant: obj.variant }) }).el);
+      return d;
+    }
+    if (!opt.track || !obj || !e.Catalog) return null;
+    if (p.k === "behind" && opt.track === "text") return e.Catalog.behindTile({ get: () => obj }).el;
+    if (p.type === "font") {
+      const d = document.createElement("div"); d.className = "ex-font";
+      const f = C.getPath(obj, p.k), txt = String((opt.track === "text" ? C.titleText(obj) : obj.text) || "").split("\n")[0].slice(0, 14) || "Aa";
+      d.innerHTML = `<span style="font-family:${f ? ensureFont(f) : "inherit"};font-weight:${WEIGHT(f || "")}">${esc(txt)}</span>`;
+      return d;
+    }
+    return e.Catalog.itemTile({ track: opt.track, get: () => obj, live: opt.track === "transitions" }).el;
+  }
+  /** Barra de Avanzado con su valor en palabras (adv de la copy, o la unidad en español); con
+      «Automático» si el valor puede quedar vacio. -> {el, sync} */
+  function advRange(p, obj, o2, get, set, cp, opt, onMove) {
+    const a = cp && cp.adv, sc = a && a.scale != null ? +a.scale : 1;
+    const line = document.createElement("div"); line.className = "adv-line";
+    const rg = document.createElement("input"); rg.type = "range"; rg.className = "rng";
+    rg.min = a ? a.min : p.min; rg.max = a ? a.max : p.max; rg.step = a ? (a.step || 1) : (p.step || 0.01);
+    rg.setAttribute("aria-label", (cp && (cp.adv_label || cp.label)) || p.label || p.k);
+    const hv = document.createElement("span"); hv.className = "hv";
+    let auto = null;
+    const txt = v => (v == null ? ST("opt.auto") : a ? C.humanValue(a, v, ctxOf(opt)) : C.plainValue(p, v));
+    const sync = () => {
+      const v = get(), s = txt(v);
+      hv.textContent = s; rg.setAttribute("aria-valuetext", s);
+      if (document.activeElement !== rg) rg.value = String((v == null ? (p.default != null ? +p.default : (+p.min || 0)) : +v) * sc);
+      rg.disabled = v == null && !!p.nullable;
+      if (auto) auto.checked = v == null;
+    };
+    gesture(rg, () => { set(clampP(p, +rg.value / sc)); sync(); if (onMove) onMove(); after(obj, o2, false); }, d => d && after(obj, o2, true));
+    line.append(rg, hv);
+    if (p.nullable) {
+      const lb = document.createElement("label"); lb.className = "fnull";
+      lb.innerHTML = `<input type="checkbox"> ${esc(ST("opt.auto"))}`;
+      auto = lb.querySelector("input");
+      const fixed = () => (p.k === "x" ? (obj.kind === "lower_third" && !C.ltCentered(obj) ? C.SAFE.left : C.XC) : p.default != null ? p.default : (p.min != null ? p.min : 0));
+      auto.onchange = () => edit(() => { set(auto.checked ? null : fixed()); after(obj, o2, true); }, { rebuild: true });
+      line.appendChild(lb);
+    }
+    sync();
+    return { el: line, sync };
+  }
+  /** «Palabras destacadas»: las palabras del titulo como botones; el ejemplo, el titulo con ellas en su color. */
+  let AW_REFRESH = null;
+  function accentWordsRow(p, it, opt, o2, label) {
+    const e = ES(), host = document.createElement("div"), exBox = document.createElement("div"); exBox.className = "aw-exbox";
+    const draw = () => {
+      host.innerHTML = "";
+      host.appendChild(e.Catalog.wordChips({ text: C.titleText(it), value: it.accent_words || [], onToggle: w => {
+        edit(() => {
+          const cur = (it.accent_words || []).slice(), i = cur.findIndex(x => String(x).toLowerCase() === w.toLowerCase());
+          if (i >= 0) cur.splice(i, 1); else cur.push(w);
+          it.accent_words = cur; autoLock(it); after(it, o2, true);
+        }, { inspector: false });
+        draw();
+        const b = host.querySelector(`[data-w="${CSS.escape(w)}"]`); if (b) b.focus();
+      } }));
+      exBox.innerHTML = ""; exBox.appendChild(e.Catalog.wordsExample({ text: C.titleText(it), value: it.accent_words || [], color: it.accent || ACC() }));
+    };
+    draw();
+    AW_REFRESH = draw;
+    return rowOf(p, opt, label, host, exBox);
+  }
 
   function paramControl(p, obj, opt) {
     const get = () => C.getPath(obj, p.k);
     const set = v => C.setPath(obj, p.k, v);
     const o2 = Object.assign({}, opt, { _k: p.k });
     const label = PARAM_LABEL[`${opt.ctx}.${p.k}`] || p.label || p.k;
-    const t = p.type;
+    const t = p.type, e = ES(), rich = hasCopy() && !opt.inner;
+    const cp = rich ? C.copyFor(SCHEMA.ui, copyIdOf(p, opt), ctxOf(opt)) : null;
+    const wrap = (ctl, ex, x) => rowOf(p, opt, label, ctl, ex, x);
+    const ex0 = () => (rich ? autoExample(p, obj, opt, cp) : null);
     if (t === "bool") {
+      if (p.nullable && rich) {
+        const tri = e.TriState.create({ value: get(), onPick: v => { edit(() => { set(v); after(obj, o2, true); }, { inspector: false }); tri.update({ value: v }); } });
+        return wrap(tri.el, ex0());
+      }
       const i = document.createElement("input"); i.type = "checkbox"; i.className = "toggle"; i.checked = !!get();
       i.onchange = () => { edit(() => { set(i.checked); after(obj, o2, true); }, { inspector: false }); };
-      return frow(label, i, false, p.hint);
+      return wrap(i, ex0());
     }
-    if (t === "num" && p.len) return vecControl(p, obj, o2, get, set, label);
+    if (t === "num" && p.len) return wrap(vecControl(p, obj, o2, get, set, label), ex0());
     if (t === "num") {
-      const v = get(), nullable = p.nullable;
-      const wrap = document.createElement("div"); wrap.className = "fctl"; wrap.style.width = "100%";
-      const leaf = p.k.split(".").pop();
-      const isTime = ["start", "end", "at", "src_t", "drop_at"].includes(leaf);
+      const v = get(), nullable = p.nullable, leaf = p.k.split(".").pop();
+      const isTime = TIME_KEYS.includes(leaf);
+      if (rich && isTime) {
+        // m:ss del video final con «Aquí» (el cursor); se guarda en el tiempo del video original
+        const tf = e.Catalog.timeField({ name: cp.label, get: () => +get() || 0, set: x => edit(() => {
+          const y = r3(clamp(+x, 0, dur()));
+          if (opt.item && p.k === "start") { const it = opt.item, L = it.end - it.start; it.start = r3(clamp(y, 0, Math.max(0, dur() - 0.1))); if (it.end <= it.start + 0.05) it.end = r3(Math.min(dur(), it.start + Math.max(0.1, L))); }
+          else if (opt.item && p.k === "end") { const it = opt.item; it.end = r3(clamp(y, it.start + 0.1, dur())); }
+          else set(y);
+          if (opt.item) autoLock(opt.item);
+          after(obj, o2, true);
+        }, { rebuild: true }) });
+        tf.input.dataset.k = p.k;
+        return wrap(tf.el, ex0());
+      }
+      const ch = rich ? (cp.basic_choices || (cp.relative_choices ? C.relChoices(cp.relative_choices, p.default) : null)) : null;
+      if (ch && ch.length) {
+        // opciones humanas (Chico · Mediano · Grande); en Avanzado tambien la barra con su valor en palabras
+        const w = document.createElement("div"); w.className = "num-ctl";
+        const choices = ch.map(([x, l]) => ({ v: x, label: l }));
+        if (nullable) choices.unshift({ v: null, label: ST("opt.auto") });
+        const val = () => { const x = get(); return x == null ? (nullable ? null : (p.default != null ? +p.default : null)) : +x; };
+        let rg = null;
+        const seg = e.Segmented.create({ choices, value: val(), nearest: true, cls: choices.length > 4 ? "grid2" : "",
+          onPick: x => { edit(() => { set(x); after(obj, o2, true); }, { inspector: false }); seg.update({ value: val() }); if (rg) rg.sync(); } });
+        w.appendChild(seg.el);
+        if (lvl() === "advanced") { rg = advRange(p, obj, o2, get, set, cp, opt, () => seg.update({ value: val() })); w.appendChild(rg.el); }
+        return wrap(w, ex0());
+      }
+      if (rich && cp.level !== "advanced") {
+        // numeros que escribe el usuario (el contador): campo de texto, nunca un numero a teclear con flechas
+        const inp = document.createElement("input"); inp.type = "text"; inp.inputMode = "decimal"; inp.className = "ftext ucontent tnum"; inp.spellcheck = false;
+        inp.value = v == null ? "" : String(+v);
+        if (v == null && nullable) inp.placeholder = ST("opt.auto");
+        inp.addEventListener("change", () => {
+          const s = inp.value.trim().replace(",", ".");
+          if (!s && nullable) { edit(() => { set(null); after(obj, o2, true); }, { inspector: false }); return; }
+          if (!isFinite(+s) || s === "") { inp.value = get() == null ? "" : String(+get()); inp.setAttribute("aria-invalid", "true"); return; }
+          inp.removeAttribute("aria-invalid");
+          edit(() => { set(clampP(p, +s)); after(obj, o2, true); }, { inspector: false });
+        });
+        return wrap(inp, ex0());
+      }
+      if (rich) {
+        // Avanzado: la barra con su valor en palabras; sin limites razonables, el numero exacto con su unidad
+        const bounded = p.min != null && p.max != null && (p.max - p.min) <= 1000;
+        if (bounded || cp.adv) { const w = document.createElement("div"); w.className = "num-ctl"; w.appendChild(advRange(p, obj, o2, get, set, cp, opt).el); return wrap(w, ex0()); }
+        const w = document.createElement("div"); w.className = "fctl";
+        const n = document.createElement("input"); n.type = "number"; n.className = "fnum w"; n.step = p.step || 0.01; if (p.min != null) n.min = p.min; if (p.max != null) n.max = p.max;
+        n.value = v != null ? +(+v).toFixed(4) : ""; if (v == null && nullable) n.placeholder = ST("opt.auto");
+        gesture(n, () => { if (n.value === "" && nullable) { set(null); after(obj, o2, false); return; } const y = clampP(p, n.value); if (!isFinite(y)) return; set(y); after(obj, o2, false); }, d => d && after(obj, o2, true));
+        w.appendChild(n);
+        if (p.unit) w.insertAdjacentHTML("beforeend", `<span class="funit">${esc(C.unitEs(p.unit))}</span>`);
+        return wrap(w, ex0());
+      }
+      // sin la copy: la fila simple de siempre
+      const wrapEl = document.createElement("div"); wrapEl.className = "fctl"; wrapEl.style.width = "100%";
       const bigRange = p.min == null || p.max == null || (p.max - p.min) > 1000;
       const range = !isTime && !bigRange;
       let rg = null;
-      if (range) { rg = document.createElement("input"); rg.type = "range"; rg.className = "rng"; rg.min = p.min; rg.max = p.max; rg.step = p.step || 0.01; rg.value = v != null ? v : (p.default != null ? p.default : p.min); wrap.appendChild(rg); }
+      if (range) { rg = document.createElement("input"); rg.type = "range"; rg.className = "rng"; rg.min = p.min; rg.max = p.max; rg.step = p.step || 0.01; rg.value = v != null ? v : (p.default != null ? p.default : p.min); wrapEl.appendChild(rg); }
       const n = document.createElement("input"); n.type = "number"; n.className = "fnum" + (range ? "" : " w"); n.step = p.step || 0.01;
       if (p.min != null) n.min = p.min; if (p.max != null) n.max = p.max;
       n.value = v != null ? +(+v).toFixed(4) : ""; n.dataset.k = p.k;
-      // sin valor: se ve el que usara el motor (default del esquema) o "auto"
-      if (v == null) n.placeholder = nullable ? "auto" : (p.default != null ? String(p.default) : "");
-      wrap.appendChild(n);
-      if (p.unit) { const u = document.createElement("span"); u.className = "funit"; u.textContent = p.unit; wrap.appendChild(u); }
+      if (v == null) n.placeholder = nullable ? "automático" : (p.default != null ? String(p.default) : "");
+      wrapEl.appendChild(n);
+      if (p.unit) { const u = document.createElement("span"); u.className = "funit"; u.textContent = C.unitEs(p.unit); wrapEl.appendChild(u); }
       if (nullable) {
-        const nl = document.createElement("label"); nl.className = "fnull"; nl.innerHTML = `<input type="checkbox" ${v == null ? "checked" : ""}>Auto`;
+        const nl = document.createElement("label"); nl.className = "fnull"; nl.innerHTML = `<input type="checkbox" ${v == null ? "checked" : ""}>Automático`;
         const cb = nl.querySelector("input");
-        // x fijo nace centrado (simetria); un rotulo anclado a la izquierda, en el borde de SAFE
         const fixed = () => (p.k === "x" ? (obj.kind === "lower_third" && !C.ltCentered(obj) ? C.SAFE.left : C.XC) : p.default != null ? p.default : (p.min != null ? p.min : 0));
         cb.onchange = () => edit(() => { set(cb.checked ? null : fixed()); after(obj, o2, true); }, { rebuild: true });
-        wrap.appendChild(nl);
+        wrapEl.appendChild(nl);
         if (v == null) { n.disabled = true; if (rg) rg.disabled = true; }
       }
-      const val = x => { let y = +x; if (!isFinite(y)) return; if (p.min != null) y = Math.max(p.min, y); if (p.max != null) y = Math.min(p.max, y); if (p.step >= 1) y = Math.round(y); return +y.toFixed(4); };
-      if (rg) gesture(rg, () => { const y = val(rg.value); set(y); n.value = y; after(obj, o2, false); }, done => { if (done) after(obj, o2, true); });
-      gesture(n, () => { const y = val(n.value); if (y == null) return; set(y); if (rg) rg.value = y; after(obj, o2, false); }, done => {
+      if (rg) gesture(rg, () => { const y = clampP(p, rg.value); set(y); n.value = y; after(obj, o2, false); }, done => { if (done) after(obj, o2, true); });
+      gesture(n, () => { const y = clampP(p, n.value); if (!isFinite(y)) return; set(y); if (rg) rg.value = y; after(obj, o2, false); }, done => {
         if (done) { if (["start", "end"].includes(p.k) && opt.item) { const it = opt.item; if (it.end < it.start + 0.05) { if (p.k === "start") it.end = r3(it.start + 0.1); else it.start = r3(Math.max(0, it.end - 0.1)); } } after(obj, o2, true); }
       });
-      return frow(label, wrap, false, p.hint);
+      return frow(label, wrapEl, false, tipOf(p));
     }
     if (t === "text") {
       let v = get();
+      if (rich && p.k === "accent_words" && opt.track === "text") return accentWordsRow(p, obj, opt, o2, label);
       if (p.list) {
-        const ta = document.createElement("textarea"); ta.className = "ftext"; ta.rows = 2; ta.placeholder = "Una por línea";
+        const ta = document.createElement("textarea"); ta.className = "ftext ucontent"; ta.rows = 2; ta.placeholder = rich ? ST("text.list.ph") : "Una por línea";
         ta.value = Array.isArray(v) ? v.join("\n") : (v || "");
         gesture(ta, () => { set(ta.value.split("\n").map(s => s.trim()).filter(Boolean)); after(obj, o2, false); }, d => d && after(obj, o2, true));
-        return frow(label, ta, true);
+        return rich ? wrap(ta, ex0()) : frow(label, ta, true);
       }
       const multi = p.multiline;
-      const el = document.createElement(multi ? "textarea" : "input"); el.className = "ftext";
+      const el = document.createElement(multi ? "textarea" : "input"); el.className = "ftext ucontent";
       if (!multi) el.type = "text"; else el.rows = 2;
       el.value = v == null ? "" : v;
-      if (p.nullable && v == null) el.placeholder = "automático";
+      if (p.nullable && v == null) el.placeholder = rich ? ST("opt.auto") : "automático";
       gesture(el, () => { set(el.value === "" && p.nullable ? null : el.value); after(obj, o2, false); }, d => d && after(obj, o2, true));
-      return frow(label, el, multi);
+      return rich ? wrap(el, ex0()) : frow(label, el, multi);
     }
-    if (t === "color") return colorControl(p, obj, o2, get, set, label);
+    if (t === "color") {
+      if (!rich) return frow(label, colorControl(p, obj, o2, get, set, label), !!p.list);
+      if (p.list) return wrap(colorControl(p, obj, o2, get, set, label), ex0(), { full: false });
+      // muestras con el color que de verdad se pinta (el de tu marca si el elemento no trae uno)
+      const host = document.createElement("div"); host.className = "ip-color-host";
+      const fromBrand = C.colorFromBrand(opt.track, opt.kind, p.k);
+      // boton «Seguir»: el motor usa button_color, si no `color`, y cambia un casi blanco por rojo
+      // (graphics._cta_follow): se muestra ese color, sin casi blancos, y «Color de tu marca» lo escribe
+      const followBtn = opt.track === "graphics" && obj && obj.kind === "cta" && (obj.variant || "follow") === "follow" && p.k === "button_color";
+      const draw = () => {
+        const x = get();
+        const resolved = followBtn ? C.ctaButtonColor(obj) : x != null && x !== "" ? (NAMED[x] || C.normHex(x)) : fromBrand ? ACC() : (p.default ? (NAMED[p.default] || C.normHex(p.default)) : null);
+        host.innerHTML = "";
+        host.appendChild(e.Catalog.colorPick({ value: x, resolved, fromBrand, nullable: !!p.nullable && !followBtn, none: p.k === "box" ? ST("color.none.box") : null,
+          skip: followBtn ? h => C.engineLum(h) > 0.85 : null,
+          onPick: y => { edit(() => { set(y); after(obj, o2, true); }, { inspector: false }); draw(); },
+          input: inp => gesture(inp, () => { set(inp.value.toUpperCase()); after(obj, o2, false); }, d => { if (d) { after(obj, o2, true); draw(); } }) }));
+      };
+      draw();
+      return wrap(host, ex0());
+    }
     if (t === "select" || t === "seg") {
-      const v = get(), opts = p.opts || [];
+      const v = get(), opts = p.opts || [], opath = opt.track ? `${opt.track}.${p.k}` : `${opt.ctx}.${p.k}`;
+      // animaciones, figuras, fondos, estilos del texto y tipos de tarjeta: rejilla con su ejemplo en bucle
+      const gal = rich && opt.track && obj && opt.track !== "transitions" && p.k !== "platform" && opts.length <= 20
+        && (cp.ex === "loop" || (cp.ex === "vivo" && t === "select"));
+      if (gal) {
+        const g = e.Catalog.optionGallery({ track: opt.track, item: obj, param: p, path: opath, copyId: copyIdOf(p, opt), value: v == null ? null : v, cols: p.k === "name" ? 4 : 3,
+          onPick: x => {
+            if (x === get()) return;
+            edit(() => { set(x); if (p.k === "variant" && e.Catalog_ctaLabel) e.Catalog_ctaLabel(obj, x); autoLock(obj); after(obj, o2, true); }, p.k === "variant" || p.k === "avatar" ? { rebuild: true } : { inspector: false });
+            g.sync(x);
+          } });
+        return wrap(g.el, null, { full: true, exKind: "ninguno" });
+      }
       if (t === "seg" && opts.length <= 5) {
-        const s = document.createElement("div"); s.className = "seg sm";
         // rotulo: centrado <-> izquierda cambia el significado de x (centro / borde): se recoloca
         const ltA = p.k === "align" && obj && obj.kind === "lower_third";
-        const vv = ltA && v == null ? "left" : v;          // sin align = rotulo de un plan viejo
-        s.innerHTML = opts.map(x => `<button data-v="${esc(x)}" class="${x === vv ? "sel" : ""}">${esc(lbl(x))}</button>`).join("");
+        const val = () => { const x = get(); return ltA && x == null ? "left" : x == null && !p.nullable && p.default != null ? p.default : x; };   // sin align = rotulo de un plan viejo; sin valor, el del motor
+        if (rich) {
+          // «Tu cara del video» sin una cara encontrada en las tomas: el motor no tiene que recortar (apagada y dice por que)
+          const noFace = p.k === "avatar" && !(curPlan().shots || []).some(sh => Array.isArray(sh.face));
+          // «Foto propia» sin foto: primero se sube en «Foto» (al subirla queda elegida)
+          const noPhoto = p.k === "avatar" && !(obj.media && obj.media.sid);
+          const choices = opts.map(x => ({ v: x, label: lblOpt(x, opath, p), icon: p.k === "dir" && ARROW[x] ? ICO(ARROW[x]) : null, disabled: (noFace && x === "face") || (noPhoto && x === "image") }));
+          if (p.nullable) choices.unshift({ v: null, label: ST("opt.auto") });
+          const seg = e.Segmented.create({ choices, value: val(), cls: choices.length > 4 ? "grid3" : "",
+            onPick: x => { edit(() => { if (ltA) C.setLowerThirdAlign(obj, x); else set(x); after(obj, o2, true); }, ltA || p.k === "avatar" || p.k === "variant" ? { rebuild: true } : { inspector: false }); seg.update({ value: val() }); } });
+          const avNote = [noPhoto ? ST("insp.avatar.nophoto") : "", noFace ? ST("insp.avatar.noface") : ""].filter(Boolean).join(" ");
+          return wrap(seg.el, ex0(), avNote ? { note: avNote } : null);
+        }
+        // dentro de una lista (pausas de la musica): seleccion neutra como el resto (el naranja es solo de la accion principal)
+        const s = document.createElement("div"); s.className = hasCopy() ? "seg sm seg-st" : "seg sm";
+        s.innerHTML = opts.map(x => `<button data-v="${esc(x)}" class="${x === val() ? "sel" : ""}">${esc(lblOpt(x, opath, p))}</button>`).join("");
         s.querySelectorAll("button").forEach(bt => bt.onclick = () => { edit(() => { if (ltA) C.setLowerThirdAlign(obj, bt.dataset.v); else set(bt.dataset.v); after(obj, o2, true); }, ltA ? { rebuild: true } : { inspector: false }); s.querySelectorAll("button").forEach(x => x.classList.toggle("sel", x === bt)); });
-        return frow(label, s, false, p.hint);
+        return frow(label, s, false, tipOf(p));
       }
       const sel = document.createElement("select"); sel.className = "fsel";
-      sel.innerHTML = (p.nullable ? `<option value="">Automático</option>` : "") + opts.map(x => `<option value="${esc(x)}" ${x === v ? "selected" : ""}>${esc(lbl(x))}</option>`).join("");
+      sel.innerHTML = (p.nullable ? `<option value="">${esc(rich ? ST("opt.auto") : "Automático")}</option>` : "") + opts.map(x => `<option value="${esc(x)}" ${x === v ? "selected" : ""}>${esc(lblOpt(x, opath, p))}</option>`).join("");
       sel.onchange = () => edit(() => { set(sel.value === "" && p.nullable ? null : sel.value); after(obj, o2, true); }, { inspector: false });
-      return frow(label, sel, false, p.hint);
+      return rich ? wrap(sel, ex0()) : frow(label, sel, false, tipOf(p));
     }
-    if (t === "font") return frow(label, fontPicker(get(), p.nullable, v => edit(() => { set(v); after(obj, o2, true); }, { inspector: false })));
-    if (t === "icon") return frow(label, iconPicker(get(), v => edit(() => { set(v); after(obj, o2, true); }, { inspector: false })), true);
-    if (t === "lines") return frow(label, linesEditor(p, obj, o2, get, set), "wide", p.hint);
-    if (t === "rows") return frow(label, rowsEditor(p, obj, o2, get, set), "wide", p.hint);
+    if (t === "font") return wrap(fontPicker(get(), p.nullable, v => edit(() => { set(v); after(obj, o2, true); }, { inspector: false })), ex0());
+    if (t === "icon") return wrap(iconPicker(get(), v => edit(() => { set(v); after(obj, o2, true); }, { inspector: false })), ex0(), { full: true });
+    if (t === "lines") return wrap(linesEditor(p, obj, o2, get, set), ex0(), { full: true });
+    if (t === "rows") return wrap(rowsEditor(p, obj, o2, get, set), ex0(), { full: true });
     if (t === "sfx") return sfxPicker(obj);
-    if (t === "media") return frow(label, mediaControl(obj, o2, get, set, p), true, p.hint);
+    if (t === "media") {
+      // la foto de «Sígueme»: subirla es usarla (el avatar pasa a «Foto propia»)
+      const follow = obj && obj.kind === "cta" && (obj.variant || "follow") === "follow" && p.k === "media";
+      const setM = follow ? v => { set(v); if (v && v.sid) obj.avatar = "image"; else if (obj.avatar === "image") obj.avatar = "initial"; } : set;
+      const ctl = mediaControl(obj, Object.assign({}, o2, follow ? { rebuildAfter: true } : {}), get, setM, p);
+      return wrap(ctl, ex0(), { full: true });
+    }
     return null;
   }
 
@@ -1947,13 +2212,13 @@
         try {
           const m = await uploadMedia(file);
           if (only && m.type && m.type !== only) throw new Error(only === "image" ? "aquí solo va una imagen" : "aquí solo va un clip");
-          edit(() => { set(m); after(obj, o2, true); }, { inspector: false }); draw();
+          edit(() => { set(m); after(obj, o2, true); }, o2.rebuildAfter ? { rebuild: true } : { inspector: false }); if (!o2.rebuildAfter) draw();
         }
         catch (e) { toast(`No se pudo subir: ${e.message || e}`, "alert"); }
         finally { if (window.chip) chip(null); }
       });
       const cl = w.querySelector('[data-a="clear"]');
-      if (cl) cl.onclick = () => { edit(() => { set(null); after(obj, o2, true); }, { inspector: false }); draw(); };
+      if (cl) cl.onclick = () => { edit(() => { set(null); after(obj, o2, true); }, o2.rebuildAfter ? { rebuild: true } : { inspector: false }); if (!o2.rebuildAfter) draw(); };
     };
     draw();
     return w;
@@ -1961,20 +2226,20 @@
 
   /** Texto de un titulo: con `lines` escribe en ellas (fxcore.setTitleText) y ofrece quitar el
       estilo por linea; sin lines es el texto simple. Un gesto = un paso de deshacer. */
-  function titleTextControl(p, it) {
+  function titleTextControl(p, it, opt) {
     const w = document.createElement("div"); w.style.width = "100%";
-    const ta = document.createElement("textarea"); ta.className = "ftext"; ta.rows = 2; ta.value = C.titleText(it);
+    const ta = document.createElement("textarea"); ta.className = "ftext ucontent"; ta.rows = 2; ta.value = C.titleText(it);
     ta.dataset.k = "title-text";
     w.appendChild(ta);
     const o2 = { track: "text", item: it, _k: "text" };
-    gesture(ta, () => { C.setTitleText(it, ta.value); after(it, o2, false); FX.refreshLinesEditor(); }, d => d && after(it, o2, true));
+    gesture(ta, () => { C.setTitleText(it, ta.value); after(it, o2, false); FX.refreshLinesEditor(); if (AW_REFRESH) AW_REFRESH(); }, d => d && after(it, o2, true));
     if (C.hasLines(it)) {
       const note = document.createElement("div"); note.className = "hint"; note.style.margin = "5px 0 0";
-      note.innerHTML = `Cada renglón es una línea con su propio estilo (abajo). <button class="linkbtn" type="button">Quitar estilo por línea</button>`;
+      note.innerHTML = `${esc(ST("insp.lines.note") || "Cada renglón es una línea con su propio estilo (abajo).")} <button class="linkbtn" type="button">${esc(ST("insp.lines.clear") || "Quitar estilo por línea")}</button>`;
       note.querySelector("button").onclick = () => edit(() => { C.clearLineStyles(it); autoLock(it); }, { rebuild: true });
       w.appendChild(note);
     }
-    return frow(es(p.label || "Texto"), w, true, p.hint);
+    return rowOf(p, opt || { track: "text", item: it, kind: it.preset }, es(p.label || "Texto"), w, null);
   }
   /** Refresca los textos del editor de lineas sin reconstruir el inspector (se esta escribiendo). */
   FX.refreshLinesEditor = function () {
@@ -2001,7 +2266,7 @@
       nl.querySelector("input").onchange = e => edit(() => { set(e.target.checked ? null : vals.slice()); after(obj, o2, true); }, { rebuild: true });
       w.appendChild(nl);
     }
-    return frow(label, w);
+    return w;
   }
 
   const NAMED = { white: "#FFFFFF", warm: "#FFB36B", cool: "#8FD3FF", black: "#000000" };
@@ -2025,7 +2290,7 @@
         w.appendChild(add);
       };
       draw();
-      return frow(label, w, true);
+      return w;
     }
     const ci = document.createElement("input"); ci.type = "color"; ci.value = toHex(v); ci.disabled = v == null && p.nullable;
     const hx = document.createElement("input"); hx.type = "text"; hx.className = "hex"; hx.value = v == null ? "" : v; hx.placeholder = p.nullable ? "ninguno" : "#FFFFFF";
@@ -2042,7 +2307,7 @@
       nl.querySelector("input").onchange = e => edit(() => { set(e.target.checked ? null : (p.default || "#FFD23F")); after(obj, o2, true); }, { rebuild: true });
       w.appendChild(nl);
     }
-    return frow(label, w);
+    return w;
   }
 
   // ---- selector de fuentes con muestras reales
@@ -2069,29 +2334,30 @@
     };
     w.appendChild(b); return w;
   }
-  const ROLE_ES = { bold: "Negritas", impact: "Impacto", serif: "Serif", serif_italic: "Serif cursiva", script: "Manuscritas", fun: "Divertidas", body: "Texto", mono: "Monoespaciada", display: "Display", otras: "Otras" };
+  const ROLE_ES = { bold: "Negritas", impact: "Impacto", serif: "Con remates", serif_italic: "Con remates, cursiva", script: "Manuscritas", fun: "Divertidas", body: "Texto", mono: "Monoespaciada", display: "Para títulos", otras: "Otras" };
   function roleOf(v) { const f = FONTS.find(x => x.name === v); return f ? (ROLE_ES[f.role] || f.role || "") : ""; }
 
   // ---- selector de iconos con buscador
   function iconPicker(value, onPick) {
     const w = document.createElement("div"); w.className = "iconpick";
-    w.innerHTML = `<div class="cur"><div class="ib"></div><b>${esc(value || "ninguno")}</b></div><input type="text" class="ftext" placeholder="Buscar icono (español o inglés): corazón, ubicación, dinero…"><div class="icongrid"></div>`;
+    // los nombres del catalogo de iconos estan en ingles: se ve el icono, nunca su nombre
+    w.innerHTML = `<div class="cur"><div class="ib"></div><b>${esc(ST(value ? "icon.current" : "icon.none") || (value ? "Ícono elegido" : "Sin ícono"))}</b></div><input type="text" class="ftext" placeholder="${esc(ST("icon.search") || "Buscar ícono: corazón, ubicación, dinero…")}" aria-label="${esc(ST("icon.search.aria") || "Buscar un ícono")}"><div class="icongrid" role="group" aria-label="${esc(ST("icon.grid.aria") || "Íconos encontrados")}"></div>`;
     const ib = w.querySelector(".ib"), q = w.querySelector("input"), grid = w.querySelector(".icongrid");
-    const setCur = n => { w.querySelector("b").textContent = n || "ninguno"; iconSvg(n).then(s => { ib.innerHTML = s || ""; }); };
+    const setCur = n => { w.querySelector("b").textContent = ST(n ? "icon.current" : "icon.none") || (n ? "Ícono elegido" : "Sin ícono"); iconSvg(n).then(s => { ib.innerHTML = s || ""; }); };
     setCur(value);
     let timer = null, seq = 0;
     const search = async () => {
       const my = ++seq, term = q.value.trim() || value || "star";
-      grid.innerHTML = `<div class="hint" style="grid-column:1/-1">Buscando…</div>`;
+      grid.innerHTML = `<div class="hint" style="grid-column:1/-1">${esc(ST("icon.searching") || "Buscando…")}</div>`;
       try {
         const d = await jget(`/fx/icons?q=${encodeURIComponent(term)}&limit=48`);
         if (my !== seq) return;
         const ics = d.icons || [];
         ics.forEach(ic => { ICON_CACHE[ic.name] = ic.svg; });
-        grid.innerHTML = ics.length ? "" : `<div class="hint" style="grid-column:1/-1">Sin resultados.</div>`;
-        ics.forEach(ic => { const bt = document.createElement("button"); bt.type = "button"; bt.title = ic.name; bt.innerHTML = ic.svg; if (ic.name === value) bt.classList.add("sel");
-          bt.onclick = () => { value = ic.name; grid.querySelectorAll("button").forEach(x => x.classList.toggle("sel", x === bt)); setCur(ic.name); onPick(ic.name); }; grid.appendChild(bt); });
-      } catch (e) { grid.innerHTML = `<div class="hint" style="grid-column:1/-1">El buscador de iconos no está disponible.</div>`; }
+        grid.innerHTML = ics.length ? "" : `<div class="hint" style="grid-column:1/-1">${esc(ST("icon.empty") || "Sin resultados.")}</div>`;
+        ics.forEach((ic, i) => { const bt = document.createElement("button"); bt.type = "button"; bt.setAttribute("aria-label", ST("icon.option", { n: i + 1 }) || `Ícono ${i + 1}`); bt.setAttribute("aria-pressed", String(ic.name === value)); bt.innerHTML = ic.svg; if (ic.name === value) bt.classList.add("sel");
+          bt.onclick = () => { value = ic.name; grid.querySelectorAll("button").forEach(x => { x.classList.toggle("sel", x === bt); x.setAttribute("aria-pressed", String(x === bt)); }); setCur(ic.name); onPick(ic.name); }; grid.appendChild(bt); });
+      } catch (e) { grid.innerHTML = `<div class="hint" style="grid-column:1/-1">${esc(ST("icon.off") || "El buscador de íconos no está disponible.")}</div>`; }
     };
     q.oninput = () => { clearTimeout(timer); timer = setTimeout(search, 220); };
     search();
@@ -2164,7 +2430,7 @@
         (p.fields || []).forEach(f => { const r = paramControl(f, row, Object.assign({}, o2)); if (r) box.appendChild(r); });
         w.appendChild(box);
       });
-      const add = document.createElement("button"); add.className = "btn ghost mini"; add.innerHTML = `${ICO("plus")}Agregar en el playhead`;
+      const add = document.createElement("button"); add.className = "btn ghost mini"; add.innerHTML = `${ICO("plus")}${esc(ST("add.here") || "Agregar donde está el cursor")}`;
       add.onclick = () => {
         const t = r3(V.currentTime || 0), row = {};
         (p.fields || []).forEach(f => { if (f.default !== undefined && f.default !== null) row[f.k] = C.clone(f.default); });
@@ -2187,7 +2453,7 @@
     const byCat = {}; names.forEach(k => { const c = (SFXCAT[k] && SFXCAT[k].category) || "otros"; (byCat[c] = byCat[c] || []).push(k); });
     // nombre fuera del catalogo (el export lo omite): se muestra tal cual y marcado, no el primero de la lista
     const unknown = names.length > 0 && !names.includes(it.name);
-    w.innerHTML = `<div class="sfxrow"><select class="fsel${unknown ? " bad" : ""}">${unknown ? `<option value="${esc(it.name)}" selected>${esc(lbl(it.name || "sin nombre"))} (no existe)</option>` : ""}${Object.keys(byCat).sort().map(c => `<optgroup label="${esc(c)}">${byCat[c].map(k => `<option value="${esc(k)}" ${k === it.name ? "selected" : ""}>${esc(lbl(k))}</option>`).join("")}</optgroup>`).join("")}</select>
+    w.innerHTML = `<div class="sfxrow"><select class="fsel${unknown ? " bad" : ""}">${unknown ? `<option value="${esc(it.name)}" selected>${esc(lbl(it.name || "sin nombre", "sfx.name"))} (no existe)</option>` : ""}${Object.keys(byCat).sort().map(c => `<optgroup label="${esc(c)}">${byCat[c].map(k => `<option value="${esc(k)}" ${k === it.name ? "selected" : ""}>${esc(lbl(k, "sfx.name"))}</option>`).join("")}</optgroup>`).join("")}</select>
       <button class="btn ghost mini" title="Escuchar">${ICO("play")}Escuchar</button></div><div class="sfxdesc"></div>`
       + (unknown ? `<div class="insnote bad" id="sfxUnknown">${ICO("alert")}<span>Este sonido no existe en el catálogo: no sonará y el export lo omite. Elige otro.</span></div>` : "");
     const sel = w.querySelector("select"), desc = w.querySelector(".sfxdesc");
@@ -2201,23 +2467,29 @@
   // ------------------------------------------------------------------ audio: SFX en vivo y musica sincronizada
   const SFXBUF = {};
   function audioCtx() { if (window.ensureAudio) ensureAudio(); return AC || null; }
-  async function sfxBuffer(name) {
+  async function sfxBuffer(name, variant) {
     const ac = audioCtx(); if (!ac) return null;
-    if (SFXBUF[name]) return SFXBUF[name];
-    SFXBUF[name] = fetch(`/fx/sfx/${encodeURIComponent(name)}`).then(r => { if (!r.ok) throw new Error(); return r.arrayBuffer(); })
+    const v = +variant > 0 ? Math.round(+variant) : 0, key = v ? `${name}|${v}` : name;
+    if (SFXBUF[key]) return SFXBUF[key];
+    SFXBUF[key] = fetch(`/fx/sfx/${encodeURIComponent(name)}${v ? `?variant=${v}` : ""}`).then(r => { if (!r.ok) throw new Error(); return r.arrayBuffer(); })
       .then(b => ac.decodeAudioData(b)).catch(() => null);
-    return SFXBUF[name];
+    return SFXBUF[key];
   }
-  FX.playSfx = async function (name, gainDb, pan, when) {
-    const ac = audioCtx(); if (!ac) { const a = new Audio(`/fx/sfx/${encodeURIComponent(name)}`); a.play().catch(() => {}); return; }
+  /** Catalogo de sonidos (/fx/sfx): grupo, duracion y versiones de cada uno (estilo_catalog.js). */
+  FX.sfxCat = () => SFXCAT;
+  /** Suena un SFX -> {stop(), t()} (t = segundos sonando) o null; Estilo.Audio lo usa para que suene uno a la vez. */
+  FX.playSfx = async function (name, gainDb, pan, when, variant) {
+    const ac = audioCtx(); if (!ac) { const a = new Audio(`/fx/sfx/${encodeURIComponent(name)}${+variant > 0 ? `?variant=${Math.round(+variant)}` : ""}`); a.play().catch(() => {}); return { stop: () => a.pause(), t: () => a.currentTime, el: a }; }
     if (ac.state === "suspended") ac.resume();
-    const buf = await sfxBuffer(name); if (!buf) return;
+    const buf = await sfxBuffer(name, variant); if (!buf) return null;
     const src = ac.createBufferSource(); src.buffer = buf;
     const g = ac.createGain(); g.gain.value = Math.pow(10, (gainDb != null ? +gainDb : -6) / 20) * 1.6;
     let node = src.connect(g);
     if (ac.createStereoPanner) { const p = ac.createStereoPanner(); p.pan.value = clamp(+pan || 0, -1, 1); g.connect(p); p.connect(ac.destination); }
     else g.connect(ac.destination);
     src.start(when || 0);
+    const t0 = ac.currentTime;
+    return { stop: () => { try { src.stop(); } catch (e) { /* ya termino */ } }, t: () => ac.currentTime - t0, dur: buf.duration, node: src };
   };
   let lastT = null;
   /** Llamado en cada cuadro de draw(): SFX en vivo y musica generada sincronizada al tiempo final. */
@@ -2273,26 +2545,33 @@
     const inF = +(m.intro_fade || 0); if (inF > 0) target *= clamp(FX.finalTime(t) / inF, 0, 1);    // entrada suave
     M.gain.gain.value += (target - M.gain.gain.value) * 0.18;
   }
-  FX.onCutsChanged = () => { if (isPro() && $("#musBody")) FX.renderMusicPanelSoon(); };
+  FX.onCutsChanged = () => { if (isPro()) FX.renderMusicPanelSoon(); };
 
   // ------------------------------------------------------------------ vista previa en vivo (aproximada)
   let LB = { x: 0, y: 0, w: 540, h: 960, s: 0.5 };
-  function layoutBox() {
-    const W = CW, H = CH;
+  // tamano del lienzo que se dibuja (el del Studio, o el de una miniatura en FX.drawLiveTo)
+  let DW = 540, DH = 960;
+  /** Caja de layout 9:16 centrada en un lienzo W x H (sin efectos: el dibujo principal asigna LB). */
+  function layoutBox(W, H) {
+    if (W == null) W = CW;
+    if (H == null) H = CH;
     let w, h, x, y;
     if (W / H >= 9 / 16) { h = H; w = H * 9 / 16; x = (W - w) / 2; y = 0; } else { w = W; h = W * 16 / 9; x = 0; y = (H - h) / 2; }
-    LB = { x, y, w, h, s: w / 1080 };
-    return LB;
+    return { x, y, w, h, s: w / 1080 };
   }
+  FX.layoutBox = layoutBox;
   const LOOK = {
     natural: "", warm_clean: "saturate(1.08) contrast(1.04) sepia(0.06)", cinematic: "contrast(1.1) saturate(0.88) brightness(0.97)",
     bright_pop: "saturate(1.28) brightness(1.05) contrast(1.05)", moody: "contrast(1.15) brightness(0.9) saturate(0.82)", bw_contrast: "grayscale(1) contrast(1.25)",
   };
-  /** Transformacion de camara y filtro del video base en t (para draw()). */
+  /** Transformacion de camara y filtros del video base en t (para draw()): `filter` = estilo de
+      color aproximado (respaldo sin WebGL) + efectos; `fxFilter` = solo los efectos (con LookGL el
+      color del export ya va en las tablas del motor). */
   FX.videoLook = function (t) {
     const cam = C.cameraAt(items("effects"), t);
     const g = PLAN.fx.grade || {};
-    let f = g.enabled === false ? "" : (LOOK[g.look] || "");
+    const lookF = g.enabled === false ? "" : (LOOK[g.look] || "");
+    let f = "";
     items("effects").forEach(e => {
       if (e.enabled === false || !(t >= e.start && t < e.end)) return;
       const k = e.intensity == null ? 1 : +e.intensity;
@@ -2305,11 +2584,63 @@
     if (mc) { const bf = FCm.bgFilter(mc, FCm.cardAnim(t - mc.start, mc.end - mc.start, FCm.param(mc, "in_dur"), FCm.param(mc, "out_dur"), FCm.param(mc, "float")).bg, LB.w); if (bf) f += " " + bf; }
     // el render ancla los zooms en la cara de la toma: se escala alrededor de ese punto
     const fc = faceAt(t);
-    return { z: cam.z, dx: cam.dx, dy: cam.dy, ax: fc ? clamp(fc[0], 0.15, 0.85) : 0.5, ay: fc ? clamp(fc[1], 0.15, 0.85) : 0.5, filter: f.trim() || "none" };
+    return { z: cam.z, dx: cam.dx, dy: cam.dy, ax: fc ? clamp(fc[0], 0.15, 0.85) : 0.5, ay: fc ? clamp(fc[1], 0.15, 0.85) : 0.5,
+      filter: (lookF + f).trim() || "none", fxFilter: f.trim() || "none", face: fc };
   };
 
+  // ------------------------------------------------------------------ color del export en vivo (LookGL)
+  /* El reproductor y Estilo dibujan el color del export con las tablas del motor (POST /fx/look_luts,
+     lookgl.js): Brillo, Calidez, Contraste, igualar tomas... se ven tambien mientras el video corre.
+     Un cambio de color se pide 150 ms despues; sin WebGL queda el filtro CSS de siempre (LOOK). */
+  const LK = { gl: null, want: "", key: "", timer: 0, seq: 0, payload: null, shotsSig: "", polls: 0, poll: 0 };
+  const lookShotsSig = () => JSON.stringify([PLAN.video, PLAN.duration, (PLAN.cuts || []).map(c => [c.start, c.end, c.enabled !== false]),
+    (PLAN.shots || []).map(s => [s.start, s.end]), typeof FMT !== "undefined" ? FMT : "9:16"]);
+  const lookReqKey = () => JSON.stringify([JOB, PLAN.fx.grade || {}, lookShotsSig()]);
+  FX.syncLook = function (now) {
+    if (!isPro() || !JOB || JOB === "demo" || !window.LookGL) return;
+    if (lookReqKey() === LK.want) return;
+    // a lo mas un pedido cada 150 ms mientras se arrastra (no se reinicia el reloj en cada cambio)
+    if (now) { clearTimeout(LK.timer); LK.timer = 0; }
+    if (!LK.timer) LK.timer = setTimeout(() => { LK.timer = 0; fetchLook(); }, now ? 0 : 150);
+  };
+  async function fetchLook() {
+    const k = lookReqKey(), seq = ++LK.seq, ss = lookShotsSig();
+    LK.want = k;
+    const body = { grade: PLAN.fx.grade || {}, shots: true, fmt: typeof FMT !== "undefined" ? FMT : "9:16" };
+    if (ss !== LK.shotsSig) { body.plan = planForServer(); LK.polls = 0; }   // cortes o tomas nuevos: el servidor ubica su analisis
+    try {
+      const r = await fetch(`/fx/look_luts/${JOB}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const p = await r.json();
+      if (seq !== LK.seq) return;
+      if (!LK.gl) LK.gl = LookGL.create();
+      LK.gl.setLut(p); LK.payload = p; LK.key = k; LK.shotsSig = ss;
+      // el analisis de las tomas aun no termina: se vuelve a mirar (un stat en el servidor) sin cambiar
+      // nada; cada 8 s y, pasados ~5 min, cada 30 s, sin rendirse (al volver a la ventana, ya)
+      clearTimeout(LK.poll); LK.poll = 0;
+      if (p.shots_state === "pending") LK.poll = setTimeout(() => lookRepoll(k), C.lookPollDelay(LK.polls++));
+      if (window.Estilo) Estilo.lookChanged();
+      if (lookReqKey() !== k) FX.syncLook();      // cambio mientras llegaba
+    } catch (e) {
+      if (seq === LK.seq) LK.want = "";          // se reintenta en el siguiente cambio
+    }
+  }
+  /** Vuelve a pedir las tablas de ESTE color (k) si siguen vigentes (las del analisis de las tomas). */
+  function lookRepoll(k) { LK.poll = 0; if (LK.key === k && lookReqKey() === k) { LK.want = ""; FX.syncLook(true); } }
+  /** Al volver a la ventana (o a la pestaña) con las tomas aun pendientes: se pregunta ya. */
+  const lookWake = () => { if (!document.hidden && LK.payload && LK.payload.shots_state === "pending" && LK.key) lookRepoll(LK.key); };
+  document.addEventListener("visibilitychange", lookWake);
+  window.addEventListener("focus", lookWake);
+  FX.lookPolls = () => LK.polls;
+  /** El dibujante del color del export (LookGL con las tablas vigentes) o null (sin WebGL o sin tablas). */
+  FX.look = () => (LK.gl && LK.payload && window.LookGL && LookGL.supported() ? LK.gl : null);
+  FX.lookPayload = () => LK.payload;
+  /** Pruebas: las tablas que se dibujan ya son las del color de ahora. */
+  FX.lookFresh = () => !!LK.payload && LK.key === lookReqKey();
+  FX.faceAt = t => faceAt(t);
+
   /** Posicion normalizada de un item; con x/y vacios usa `anchor` junto a la cara de la toma. */
-  function faceAt(t) { const sh = (PLAN.shots || []).find(x => t >= x.start && t < x.end); return sh && Array.isArray(sh.face) ? sh.face : null; }
+  function faceAt(t) { const sh = (curPlan().shots || []).find(x => t >= x.start && t < x.end); return sh && Array.isArray(sh.face) ? sh.face : null; }
   function itemXY(it, t) {
     let x = it.x, y = it.y;
     if (x == null || y == null) {
@@ -2461,8 +2792,10 @@
     if (it.word_sync === false && allW.length) wtimes = allW.map(() => 0);     // entra entero al inicio
     else if (it.preset !== "counter" && allW.length) {
       let spoken = null;
-      if (it.start != null && !box && typeof flatWords !== "undefined") {
-        spoken = flatWords.filter(w => w.start >= +it.start - 0.05 && w.start < +it.end).map(w => ({ norm: C.normWord(w.text), start: w.start - it.start }));
+      // palabras dichas del plan que se dibuja (una miniatura de Estilo trae las suyas, o ninguna)
+      const fw = RPLAN ? (RPLAN.phrases || []).flat() : typeof flatWords !== "undefined" ? flatWords : null;
+      if (it.start != null && !box && fw) {
+        spoken = fw.filter(w => w.start >= +it.start - 0.05 && w.start < +it.end).map(w => ({ norm: C.normWord(w.text), start: w.start - it.start }));
       }
       const step = ["pop", "scale_down", "fade", "mask"].includes(it.anim_in) && !(spoken && spoken.length) && ["title_pop", "behind_giant"].includes(it.preset) ? 0.08 : 0.12;
       wtimes = C.unitTimes(allW.map(x => C.normWord(x.w)), spoken, L, step, allW.map(x => x.li));
@@ -2539,11 +2872,26 @@
       tipografia proporcionales al ancho). Devuelve la caja en coordenadas del canvas. */
   // ancho maximo de todo lo centrado = C.SYM_W (0.76): centrado en 0.5 nunca toca el borde de SAFE
   const CTA_SIZE = { follow: 0.72, link_below: 0.56 }, SYM_W = C.SYM_W;
-  function drawCta(c, it, cx, cy, B, lt) {
+  let FACE_OFF = null;
+  function drawCta(c, it, cx, cy, B, lt, t) {
     const v = it.variant || "follow", W = B.w;
+    // «Tu cara del video» (graphics._face_crop): el recorte de la cara en el cuadro, tomado antes de
+    // dibujar la pastilla encima (cuadrado de 1.5 veces la cara)
+    let faceIm = null;
+    if (v === "follow" && it.avatar === "face" && t != null) {
+      const f = faceAt(t);
+      if (f) {
+        const sz = Math.max(f[2] * B.w, f[3] * B.h) * 1.5, sx = B.x + f[0] * B.w - sz / 2, sy = B.y + f[1] * B.h - sz / 2, n = Math.max(8, Math.round(sz));
+        const o = FACE_OFF || (FACE_OFF = document.createElement("canvas")); o.width = n; o.height = n;
+        // mismo formato que mediaFrame ({src, w, h}): drawFit lo recorta como cualquier foto
+        try { o.getContext("2d").drawImage(c.canvas, sx, sy, sz, sz, 0, 0, n, n); faceIm = { src: o, w: n, h: n }; } catch (e) { faceIm = null; }
+      }
+    }
     const rng = v === "follow" ? [0.56, SYM_W] : v === "link_below" ? [0.4, 0.74] : [0.45, SYM_W];
     const S = clamp(+(it.size != null ? it.size : (CTA_SIZE[v] || 0.62)), rng[0], rng[1]) * W;
-    const ent = PLAN.entities || {}, acc = it.color && it.color !== "#FFFFFF" ? it.color : ACC();
+    // como el motor: «Seguir» no usa `color` (avatar con la paleta, boton con ctaButtonColor); los
+    // demas tipos pintan con `color` tal cual (tambien blanco) o, sin el, con tu marca
+    const ent = curPlan().entities || {}, acc = (v === "follow" ? null : C.normHex(it.color)) || ACC();
     const bold = "Poppins-ExtraBold";
     c.shadowColor = "rgba(0,0,0,.35)"; c.shadowBlur = 14 * B.s; c.shadowOffsetY = 4 * B.s;
     c.textBaseline = "middle"; c.textAlign = "left";
@@ -2622,7 +2970,7 @@
       const fs = sub ? fitTo("Poppins-SemiBold", sub, h * 0.22, maxw, h * 0.104) : 0;
       c.fillStyle = "#FFFFFF"; rrect(c, -Wd / 2, -h / 2, Wd, h, h / 2); c.fill(); c.shadowBlur = 0; c.shadowOffsetY = 0;
       const ax = -Wd / 2 + h * 0.13 + d / 2;
-      const avIm = it.media && it.media.sid && (it.avatar === "image" || !it.avatar) ? mediaFrame(it, it.media, 0, false) : null;
+      const avIm = faceIm || (it.media && it.media.sid && (it.avatar === "image" || !it.avatar) ? mediaFrame(it, it.media, 0, false) : null);
       c.save(); c.beginPath(); c.arc(ax, 0, d / 2, 0, Math.PI * 2); c.fillStyle = acc; c.fill();
       if (avIm) { c.clip(); drawFit(c, avIm, ax - d / 2, -d / 2, d, d, "cover", null, 1); }
       else {
@@ -2642,7 +2990,7 @@
           const im = iconImage(pl.icon, lum(pl.color || "#000") > 0.6 ? "#141418" : "#FFFFFF"); if (im) c.drawImage(im, bx - bd * 0.32, by - bd * 0.32, bd * 0.64, bd * 0.64);
         }
       }
-      const bcol = it.button_color || (it.color && lum(it.color) <= 0.85 ? it.color : "#FF3B5C");
+      const bcol = C.ctaButtonColor(it);
       c.fillStyle = bcol; rrect(c, Wd / 2 - h * 0.15 - bwb, -h * 0.3, bwb, h * 0.6, h * 0.3); c.fill();
       c.fillStyle = lum(bcol) > 0.6 ? "#141418" : "#FFFFFF"; c.font = fontCss(bold, h * kb); c.textBaseline = "middle"; c.textAlign = "center";
       c.fillText(btn, Wd / 2 - h * 0.15 - bwb / 2, h * 0.01); c.textAlign = "left";
@@ -2740,7 +3088,7 @@
       const fs0 = clamp(+it.size || 0.056, 0.03, 0.09) * W, light = it.theme === "light";
       let acc2 = it.color || it.accent || ACC(); if (light && lum(acc2) > 0.8) acc2 = "#FF3B5C";
       const padx = 28 * s, pady = 20 * s, barw = 10 * s;
-      const title = String(it.title || (PLAN.entities || {}).name || ""), sub = String(it.subtitle || (PLAN.entities || {}).role || "").toUpperCase();
+      const title = String(it.title || (curPlan().entities || {}).name || ""), sub = String(it.subtitle || (curPlan().entities || {}).role || "").toUpperCase();
       const avail = C.lowerThirdX(it, W, 0, barw, padx, 120 * s).avail;
       // lo que no cabe se reduce (fit_font hasta 0.55 del titulo; el rol hasta 0.7)
       let fs = fs0; c.font = fontCss("Poppins-Bold", fs); let wt = c.measureText(title).width;
@@ -2791,7 +3139,7 @@
       }
       c.textAlign = "left";
     } else if (k === "cta") {
-      bb = drawCta(c, it, cx, cy, B, lt);
+      bb = drawCta(c, it, cx, cy, B, lt, t);
     } else if (k === "sticker_text") {
       const txt = it.text || "";
       const fs = (+it.size || 0.06) * W;
@@ -3008,7 +3356,8 @@
   FX.pipPlace = function (it) {
     const m = it.media || {};
     // cara mediana en el rango del item (pista de rostro de las tomas), como el render
-    return C.pipPlace(PLAN.fx, it, C.faceMedian(PLAN.shots, +it.start || 0, +it.end || 0), +m.w || 0, +m.h || 0, 1080, 1920);
+    const pl = curPlan();
+    return C.pipPlace(pl.fx, it, C.faceMedian(pl.shots, +it.start || 0, +it.end || 0), +m.w || 0, +m.h || 0, 1080, 1920);
   };
   /** graphics.media (PiP) con la geometria de graphics.draw_media. */
   function drawPip(c, it, lt, L, B, t, st) {
@@ -3056,7 +3405,7 @@
     const cap = (it.caption != null ? it.caption : typeof it.text === "string" ? it.text : "") || "";
     if (cap) {
       const n = Math.ceil(String(cap).length * clamp((lt - 0.45) / 0.5, 0, 1));
-      const kitScript = (PLAN.director && PLAN.director.kit && PLAN.director.kit.script) || "Caveat-Bold";
+      const kitScript = (curPlan().director && curPlan().director.kit && curPlan().director.kit.script) || "Caveat-Bold";
       let fs = bottom * 0.62; c.font = fontCss(kitScript, fs);
       const tw = c.measureText(String(cap)).width; if (tw > fw - 2 * border) { fs *= (fw - 2 * border) / tw; c.font = fontCss(kitScript, fs); }
       c.fillStyle = "#2A2A33"; c.textAlign = "center"; c.textBaseline = "middle";
@@ -3069,14 +3418,14 @@
   function drawSelfBroll(c, it, lt) {
     const m = it.media && it.media.sid ? it.media : null; if (!m) return false;
     const f = mediaFrame(it, m, lt, V && !V.paused);
-    if (f) drawFit(c, f, 0, 0, CW, CH, it.fit || "cover", it.focus, it.zoom);
+    if (f) drawFit(c, f, 0, 0, DW, DH, it.fit || "cover", it.focus, it.zoom);
     else mediaPlaceholder(c, LB.x + LB.w * 0.2, LB.y + LB.h * 0.35, LB.w * 0.6, LB.h * 0.3, m, MEDIA_EL[`${m.type}|${m.sid}`] && MEDIA_EL[`${m.type}|${m.sid}`].err);
     return true;
   }
 
   function drawSceneBg(c, bg, colors, lt) {
     const cols = (colors && colors.length ? colors : ["#101218", "#2EC4B6"]);
-    const W = CW, H = CH;
+    const W = DW, H = DH;
     if (bg === "blur_self") { c.save(); c.filter = "blur(14px) brightness(.7)"; c.drawImage(V, -20, -20, W + 40, H + 40); c.restore(); return; }
     if (bg === "paper") { c.fillStyle = cols[0] && lum(cols[0]) > 0.5 ? cols[0] : "#EFE8DC"; c.fillRect(0, 0, W, H); return; }
     if (bg === "color") { c.fillStyle = cols[0]; c.fillRect(0, 0, W, H); return; }
@@ -3116,9 +3465,9 @@
         else { const th = e.thumb; f = th && th.complete && th.naturalWidth ? { src: th, w: th.naturalWidth, h: th.naturalHeight } : null; }
       }
     }
-    const capOn = !!(PLAN.fx.captions && PLAN.fx.captions.enabled !== false);
-    const card = FCm.cardLayout(f ? f.w : 1080, f ? f.h : 1350, B.w / B.h, FCm.captionTop(PLAN.fx.captions, capOn, it.start, it.end, B.w / B.h), it.width, it.aspect, it.y,
-      FCm.captionBottom(PLAN.fx.captions, capOn, it.start, it.end, B.w / B.h));
+    const pcap = curPlan().fx.captions, capOn = !!(pcap && pcap.enabled !== false);
+    const card = FCm.cardLayout(f ? f.w : 1080, f ? f.h : 1350, B.w / B.h, FCm.captionTop(pcap, capOn, it.start, it.end, B.w / B.h), it.width, it.aspect, it.y,
+      FCm.captionBottom(pcap, capOn, it.start, it.end, B.w / B.h));
     const st = FCm.cardAnim(lt, L, FCm.param(it, "in_dur"), FCm.param(it, "out_dur"), FCm.param(it, "float"));
     // el render hornea el clip al tamano de la tarjeta (sin Ken Burns); las imagenes si lo llevan
     const r = FCm.drawCard(c, f, B, card, st, it.kind === "video" ? Object.assign({}, it, { kenburns: 0 }) : it, lt, L);
@@ -3131,23 +3480,33 @@
 
   let HITS = [];   // cajas de lo dibujado en el ultimo cuadro (para seleccionar en el canvas)
   let DRAG_GUIDE = false;   // guia vertical del centro mientras el arrastre queda imantado al centro
-  /** Composicion en vivo sobre el canvas (despues del video base). */
-  FX.drawLive = function (t) {
-    if (!isPro()) return;
-    const c = CTX; HITS = [];
-    layoutBox();
-    ensureCaptions();
-    // vinieta del look
-    const g = PLAN.fx.grade || {};
-    if (g.enabled !== false && +g.vignette > 0) {
-      const rg = c.createRadialGradient(CW / 2, CH / 2, Math.min(CW, CH) * 0.35, CW / 2, CH / 2, Math.max(CW, CH) * 0.72);
-      rg.addColorStop(0, "rgba(0,0,0,0)"); rg.addColorStop(1, `rgba(0,0,0,${clamp(+g.vignette * 1.6, 0, 0.8)})`); c.fillStyle = rg; c.fillRect(0, 0, CW, CH);
+  /** Composicion en vivo (despues del cuadro base) sobre un lienzo W x H: la vista del Studio o
+      una miniatura de Estilo con su propio plan (mismo codigo de dibujo; ver curPlan). Solo el
+      dibujo principal (hits: true) guarda las cajas para seleccionar en el canvas, pide los grupos
+      de subtitulos del export y pausa los medios sin uso. -> cajas [{track, id, bb}]. */
+  FX.drawLiveTo = function (o) {
+    const c = o.ctx, W = o.W, H = o.H, plan = o.plan || PLAN, t = o.t, main = o.hits === true;
+    const prev = [RPLAN, LB, DW, DH], out = [];
+    RPLAN = plan === PLAN ? null : plan; LB = layoutBox(W, H); DW = W; DH = H;
+    try { liveBody(c, W, H, t, out, main); }
+    finally { RPLAN = prev[0]; if (!main) { LB = prev[1]; DW = prev[2]; DH = prev[3]; } }
+    if (main) HITS = out;
+    return out;
+  };
+  function liveBody(c, W, H, t, HT, main) {
+    const P0 = curPlan();
+    if (main) ensureCaptions();
+    // vinieta del estilo de color (respaldo sin WebGL: con LookGL va en las tablas del motor)
+    const g = P0.fx.grade || {};
+    if (g.enabled !== false && +g.vignette > 0 && !(main && FX.look())) {
+      const rg = c.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.72);
+      rg.addColorStop(0, "rgba(0,0,0,0)"); rg.addColorStop(1, `rgba(0,0,0,${clamp(+g.vignette * 1.6, 0, 0.8)})`); c.fillStyle = rg; c.fillRect(0, 0, W, H);
     }
     // flash_frame
-    items("effects").forEach(e => { if (e.enabled !== false && e.kind === "flash_frame" && t >= e.start && t < e.end) { const p = (t - e.start) / Math.max(0.05, e.end - e.start); c.fillStyle = hexA(e.color || "#FFFFFF", (1 - p) * 0.9 * (e.intensity == null ? 1 : e.intensity)); c.fillRect(0, 0, CW, CH); } });
+    items("effects").forEach(e => { if (e.enabled !== false && e.kind === "flash_frame" && t >= e.start && t < e.end) { const p = (t - e.start) / Math.max(0.05, e.end - e.start); c.fillStyle = hexA(e.color || "#FFFFFF", (1 - p) * 0.9 * (e.intensity == null ? 1 : e.intensity)); c.fillRect(0, 0, W, H); } });
     // texto detras del sujeto (sin recorte en vivo)
     const texts = activeRange("text", t);
-    texts.filter(x => x.behind).forEach(it => { const bb = drawTextItem(c, it, t - it.start, it.end - it.start); if (bb) HITS.push({ track: "text", id: it.id, bb }); });
+    texts.filter(x => x.behind).forEach(it => { const bb = drawTextItem(c, it, t - it.start, it.end - it.start); if (bb) HT.push({ track: "text", id: it.id, bb }); });
     // escenas
     const scenes = activeRange("cutaways", t);
     scenes.forEach(it => {
@@ -3169,32 +3528,69 @@
         if (lg >= 0 && lg < ln) drawGraphic(c, gr, lg, ln, null, t);
       });
       c.restore();
-      HITS.push({ track: "cutaways", id: it.id, bb: { x: 0, y: 0, w: CW, h: CH }, scene: true });
+      HT.push({ track: "cutaways", id: it.id, bb: { x: 0, y: 0, w: W, h: H }, scene: true });
     });
     // recursos (tarjeta flotante): centrados y fijos (simetria); se seleccionan pero no se arrastran.
     // Mismo orden que el render (Compositor.frame 4b): despues de las escenas y ANTES de graficos,
     // textos y subtitulos (esos quedan encima de la tarjeta)
-    activeRange("media", t).filter(it => it.sid).forEach(it => { const bb = drawMediaCard(c, it, t); if (bb) HITS.push({ track: "media", id: it.id, bb, fixed: true }); });
+    activeRange("media", t).filter(it => it.sid).forEach(it => { const bb = drawMediaCard(c, it, t); if (bb) HT.push({ track: "media", id: it.id, bb, fixed: true }); });
     // graficos (por z)
-    activeRange("graphics", t).sort((a, b) => (+a.z || 0) - (+b.z || 0)).forEach(it => { const bb = drawGraphic(c, it, t - it.start, it.end - it.start, null, t); if (bb) HITS.push({ track: "graphics", id: it.id, bb }); });
+    activeRange("graphics", t).sort((a, b) => (+a.z || 0) - (+b.z || 0)).forEach(it => { const bb = drawGraphic(c, it, t - it.start, it.end - it.start, null, t); if (bb) HT.push({ track: "graphics", id: it.id, bb }); });
     // texto normal
-    texts.filter(x => !x.behind).sort((a, b) => (+a.z || 0) - (+b.z || 0)).forEach(it => { const bb = drawTextItem(c, it, t - it.start, it.end - it.start); if (bb) HITS.push({ track: "text", id: it.id, bb }); });
+    texts.filter(x => !x.behind).sort((a, b) => (+a.z || 0) - (+b.z || 0)).forEach(it => { const bb = drawTextItem(c, it, t - it.start, it.end - it.start); if (bb) HT.push({ track: "text", id: it.id, bb }); });
     // subtitulos: misma regla que el render (fxcore.captionsHiddenAt)
-    if (!C.captionsHiddenAt(PLAN.fx, t, LB.w / LB.h)) FX.drawCaptions(t);
+    if (!C.captionsHiddenAt(P0.fx, t, LB.w / LB.h)) { const bb = drawCaptionsTo(c, t, main); if (bb) HT.push({ track: "captions", id: "captions", bb }); }
     // transiciones
     items("transitions").forEach(tr => {
       if (tr.enabled === false || tr.kind === "cut") return;
       const d = Math.max(0.05, +tr.dur || 0.4), a0 = tr.at - d / 2;
       if (t < a0 || t > a0 + d) return;
       const p = (t - a0) / d, peak = 1 - Math.abs(2 * p - 1), k = tr.intensity == null ? 1 : +tr.intensity;
-      if (tr.kind === "flash") { c.fillStyle = hexA(NAMED[tr.color] || tr.color || "#FFFFFF", peak * 0.95 * k); c.fillRect(0, 0, CW, CH); }
+      if (tr.kind === "flash") { c.fillStyle = hexA(NAMED[tr.color] || tr.color || "#FFFFFF", peak * 0.95 * k); c.fillRect(0, 0, W, H); }
       else if (tr.kind === "light_leak" || tr.kind === "film_burn") {
-        const rg = c.createRadialGradient(CW * 0.8, CH * 0.2, 0, CW * 0.8, CH * 0.2, CH * 0.9);
-        rg.addColorStop(0, hexA(NAMED[tr.color] || tr.color || "#FF7A3D", peak * 0.95 * k)); rg.addColorStop(1, hexA("#FFB36B", 0)); c.fillStyle = rg; c.fillRect(0, 0, CW, CH);
-      } else { c.fillStyle = `rgba(255,255,255,${peak * 0.35 * k})`; c.fillRect(0, 0, CW, CH); }
+        const rg = c.createRadialGradient(W * 0.8, H * 0.2, 0, W * 0.8, H * 0.2, H * 0.9);
+        rg.addColorStop(0, hexA(NAMED[tr.color] || tr.color || "#FF7A3D", peak * 0.95 * k)); rg.addColorStop(1, hexA("#FFB36B", 0)); c.fillStyle = rg; c.fillRect(0, 0, W, H);
+      } else { c.fillStyle = `rgba(255,255,255,${peak * 0.35 * k})`; c.fillRect(0, 0, W, H); }
     });
-    pauseIdleMedia(performance.now());
+    if (main) pauseIdleMedia(performance.now());
+  }
+  /** Composicion en vivo sobre el canvas del Studio (despues del video base). */
+  FX.drawLive = function (t) {
+    if (!isPro()) return;
+    FX.drawLiveTo({ ctx: CTX, W: CW, H: CH, plan: PLAN, t, hits: true });
   };
+  /** Una miniatura (Estilo): el cuadro `frame` cubriendo el lienzo y encima todo lo del `plan` en
+      t, con el mismo codigo de dibujo del Studio. -> cajas de lo dibujado. */
+  let MINI_LK = null;
+  FX.renderMini = function (o) {
+    const c = o.ctx, W = o.W, H = o.H;
+    c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.globalAlpha = 1;
+    if (o.frame) {
+      // con `look` (tablas de /fx/look_luts), el cuadro va con el color del export (LookGL)
+      const L = o.look && window.LookGL ? (MINI_LK || (MINI_LK = LookGL.create())) : null;
+      if (L && L.payload() !== o.look) L.setLut(o.look);
+      const r = coverRect(o.frame, W, H, o.focusX);
+      if (!(r && L && L.draw(c, o.frame, r.sx, r.sy, r.sw, r.sh, 0, 0, W, H, o.t, {}))) drawCover(c, o.frame, 0, 0, W, H, o.focusX);
+    }
+    else { const g = c.createLinearGradient(0, 0, 0, H); g.addColorStop(0, "#3a404c"); g.addColorStop(1, "#14171d"); c.fillStyle = g; c.fillRect(0, 0, W, H); }
+    c.restore();
+    return FX.drawLiveTo({ ctx: c, W, H, plan: o.plan, t: o.t });
+  };
+  /** Recorte de `img` que cubre w x h (centrado; focusX 0..1 en horizontal) -> {sx, sy, sw, sh, iw, ih} o null. */
+  function coverRect(img, w, h, focusX) {
+    const iw = img.videoWidth || img.naturalWidth || img.width, ih = img.videoHeight || img.naturalHeight || img.height;
+    if (!iw || !ih) return null;
+    const s = Math.max(w / iw, h / ih), sw = w / s, sh = h / s;
+    const fx0 = focusX == null ? 0.5 : clamp(+focusX, 0, 1);
+    return { sx: clamp(fx0 * iw - sw / 2, 0, iw - sw), sy: (ih - sh) / 2, sw, sh, iw, ih };
+  }
+  /** Dibuja una imagen/lienzo cubriendo el rectangulo (recorte centrado; focusX 0..1 en horizontal). */
+  function drawCover(c, img, x, y, w, h, focusX) {
+    const r = coverRect(img, w, h, focusX);
+    if (r) c.drawImage(img, r.sx, r.sy, r.sw, r.sh, x, y, w, h);
+  }
+  FX.drawCover = drawCover;
+  FX.coverRect = coverRect;
 
   /** Subtitulos con el preset del plan y las fuentes reales. */
   /* Grupos de subtitulos: los REALES del export (POST /captions: text.caption_groups en tiempo
@@ -3233,45 +3629,20 @@
     if (sk !== CAPSRV.key && CAPSRV.fails < 3) requestCaptions(sk);
   }
   FX.captionGroupsNow = () => CAPSRV.groups;
-  /* Geometria de los subtitulos en vivo = la del render (fxcore.captionLayout: tamano y espacio del
-     preset, envoltura balanceada, ancho util). Con los grupos de /captions se calibra con su `rect`
-     (la caja real del export): mismo ancho, mismo centro y mismo alto. Las medidas de cada palabra
-     salen del canvas con la fuente real (se cachean por fuente cargada). */
-  const CAPM = new Map();
-  function capMeasure(font) {
-    const fam = ensureFont(font), c = CTX;
-    return (txt, px) => {
-      const key = `${fam}|${font}|${txt}`;
-      let m = CAPM.get(key);
-      if (!m) {
-        if (CAPM.size > 3000) CAPM.clear();
-        c.save(); c.font = fontCss(font, 100); const r = c.measureText(txt); c.restore();
-        const adv = r.width;
-        m = { adv, l: r.actualBoundingBoxLeft != null ? -r.actualBoundingBoxLeft : 0, r: r.actualBoundingBoxRight != null ? r.actualBoundingBoxRight : adv,
-          asc: r.actualBoundingBoxAscent != null ? r.actualBoundingBoxAscent : 72, desc: r.actualBoundingBoxDescent != null ? r.actualBoundingBoxDescent : 0 };
-        CAPM.set(key, m);
-      }
-      const k = px / 100;
-      return { adv: m.adv * k, l: m.l * k, r: m.r * k, asc: m.asc * k, desc: m.desc * k };
-    };
+  /* Geometria y dibujo de los subtitulos en vivo = los del render (capdraw.js sobre
+     fxcore.captionLayout: tamano y espacio del preset, envoltura balanceada, ancho util, pastilla
+     que se desliza). Con los grupos de /captions se calibra con su `rect` (la caja real del
+     export): mismo ancho, mismo centro y mismo alto. */
+  // las letras del estilo de edicion para los subtitulos ({title, caption}: assets.PALETTES, como el motor):
+  // «La del estilo» (font vacia) y «Impacto en mayúsculas» se dibujan con la letra que usa el export
+  const capTitleFont = plan => C.captionFonts(plan || curPlan());
+  FX.capTitleFont = capTitleFont;
+  /** Opciones de CapDraw.drawGroup para el plan que se dibuja. */
+  function capOpt(plan, t, ra, srv) {
+    return { cfg: plan.fx.captions || {}, accent: C.projectAccent(plan), srv: !!srv, yFrac: C.captionYAt(plan.fx, t, LB.w / LB.h),
+      rangeAlpha: ra, titleFont: capTitleFont(plan), fontCss, ensureFont };
   }
-  const capTitleFont = () => (PLAN.director && PLAN.director.kit && typeof PLAN.director.kit.title === "string" ? PLAN.director.kit.title : null);
-  const capCase = (w, cs) => (cs === "upper" ? w.toUpperCase() : cs === "lower" ? w.toLowerCase() : cs === "title" ? w.charAt(0).toUpperCase() + w.slice(1) : w);
-  /** Layout (cacheado por grupo) del grupo `gr` en la caja B. srv = grupo del render (con rect/lines). */
-  function capLayoutOf(gr, cfg, B, srv, noRect) {
-    const D = C.captionCfg(cfg, capTitleFont());
-    const words = gr.words.map(w => ({ w, txt: capCase(String(w.text || "").trim(), D.case) })).filter(x => x.txt);
-    if (!words.length) return null;
-    const key = `${B.w.toFixed(1)}|${B.h.toFixed(1)}|${ensureFont(D.font)}|${JSON.stringify(cfg)}|${noRect ? 1 : 0}`;
-    const cache = noRect ? null : gr._lay;
-    if (cache && cache.key === key) return cache.L;
-    const L = C.captionLayout(words.map(x => x.txt), cfg, B.w, B.h, capMeasure(D.font),
-      { lines: srv ? gr.lines : null, rect: srv && !noRect ? gr.rect : null, titleFont: capTitleFont() });
-    if (!L) return null;
-    L.words = words; L.D = D;
-    if (!noRect) { try { Object.defineProperty(gr, "_lay", { value: { key, L }, writable: true, configurable: true, enumerable: false }); } catch (e) { /* grupo congelado */ } }
-    return L;
-  }
+  FX.capFontCss = fontCss;
   /** Grupo de subtitulos activo en t (del render o aproximado). -> {gr, srv} o null. */
   function capGroupNow(t) {
     const cfg = PLAN.fx.captions || {};
@@ -3280,9 +3651,19 @@
       const gr = C.capGroupAt(CAPSRV.groups, t); return gr ? { gr, srv: true } : null;
     }
     const phs = P();
-    const key = JSON.stringify([cfg.max_words, phs.length, phs.length ? phs[0].length : 0, LANG, (UNDO || []).length]);
-    if (key !== CAPCACHE.key) CAPCACHE = { key, groups: C.captionGroups(phs, cfg.max_words || 4) };
+    // max_words EFECTIVO del estilo (Impacto en mayusculas muestra maximo 3)
+    const key = JSON.stringify([cfg.preset, cfg.max_words, phs.length, phs.length ? phs[0].length : 0, LANG, (UNDO || []).length]);
+    if (key !== CAPCACHE.key) CAPCACHE = { key, groups: C.captionGroupsFor(phs, cfg, capTitleFont(PLAN)) };
     const gr = CAPCACHE.groups.find(g => t >= g.start - 0.02 && t < g.end + 0.12);
+    return gr ? { gr, srv: false } : null;
+  }
+  /** Grupo aproximado de un plan de miniatura (sin pedir al servidor). */
+  const MINI_CAPS = new WeakMap();
+  function capGroupOf(plan, t) {
+    const cfg = plan.fx.captions || {}, key = JSON.stringify([cfg.preset, cfg.max_words]);
+    let e = MINI_CAPS.get(plan);
+    if (!e || e.key !== key) { e = { key, groups: C.captionGroupsFor(plan.phrases || [], cfg, capTitleFont(plan)) }; MINI_CAPS.set(plan, e); }
+    const gr = e.groups.find(g => t >= g.start - 0.02 && t < g.end + 0.12);
     return gr ? { gr, srv: false } : null;
   }
   /** Diagnostico de paridad (pruebas): ancho del grupo en vivo con y sin calibrar contra el rect del
@@ -3290,98 +3671,33 @@
   FX.captionDebug = function (t) {
     const cfg = PLAN.fx.captions || {}, g = capGroupNow(t);
     if (!g) return null;
-    layoutBox();
-    const L = capLayoutOf(g.gr, cfg, LB, g.srv), U = capLayoutOf(g.gr, cfg, LB, g.srv, true);
-    const wOf = X => X ? Math.max(...X.rows.map(r => r.w)) / LB.w : null;
+    const B = layoutBox(), o = { cfg, srv: g.srv, titleFont: capTitleFont(PLAN), fontCss, ensureFont };
+    const L = CapDraw.layout(g.gr, cfg, B, o), U = CapDraw.layout(g.gr, cfg, B, Object.assign({}, o, { noRect: true }));
+    const wOf = X => X ? Math.max(...X.rows.map(r => r.w)) / B.w : null;
     return { srv: g.srv, text: g.gr.text || g.gr.words.map(w => w.text).join(" "), lines: L ? L.rows.length : null,
       rectW: g.srv && g.gr.rect ? +(g.gr.rect[2] - g.gr.rect[0]).toFixed(4) : null, liveW: wOf(L), portW: wOf(U), font: L && L.D.font,
       fontReady: L ? FONT_STATE[L.D.font] === "ok" : false };
   };
-  function mixHex(a, b, q) {
-    const p = h => { const s = String(h || "#fff").replace("#", ""); const v = s.length === 3 ? s.split("").map(x => x + x).join("") : s.slice(0, 6); const n = parseInt(v, 16) || 0; return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
-    const x = p(a), y = p(b), k = clamp(q, 0, 1);
-    return `rgb(${x.map((v, i) => Math.round(v + (y[i] - v) * k)).join(",")})`;
-  }
-  FX.drawCaptions = function (t) {
-    const cfg = PLAN.fx.captions || {};
-    if (cfg.enabled === false || cfg.preset === "none") return;
+  /** Subtitulos del plan que se dibuja en t sobre `c` (caja LB): resuelve grupo, supresion, altura
+      y alfa por tramos, y dibuja con CapDraw (lo mismo que el export). -> caja o null. */
+  function drawCaptionsTo(c, t, main) {
+    const plan = curPlan(), cfg = plan.fx.captions || {};
+    if (cfg.enabled === false || cfg.preset === "none") return null;
     const ra = C.captionRangeAlpha(cfg, t);          // filas y_ranges con hide (primer plano con CTA)
-    if (ra <= 0.003) return;
-    const sk = capServerKey();
-    if (sk !== CAPSRV.key && CAPSRV.fails < 3) requestCaptions(sk);
-    const g = capGroupNow(t);
-    if (!g || !g.gr.words || !g.gr.words.length) return;
-    const gr = g.gr;
+    if (ra <= 0.003) return null;
+    if (main) { const sk = capServerKey(); if (sk !== CAPSRV.key && CAPSRV.fails < 3) requestCaptions(sk); }
+    const g = main ? capGroupNow(t) : capGroupOf(plan, t);
+    if (!g || !g.gr.words || !g.gr.words.length) return null;
     // como text.draw_captions: un grupo que empezo tapado por un titulo no reaparece al terminar
     // el titulo (repetiria lo que el titulo ya mostro)
-    if (C.captionGroupSuppressed(PLAN.fx, gr, t, LB.w / LB.h)) return;
-    const c = CTX, B = LB, s = B.s;
-    const L = capLayoutOf(gr, cfg, B, g.srv);
-    if (!L) return;
-    const D = L.D, fs = L.fs;
-    const color = cfg.color || "#FFFFFF", accent = cfg.accent || ACC(), hi = cfg.highlight || accent;
-    const accentSet = g.srv && D.kw_accent !== false && cfg.kw_accent !== false ? new Set((gr.accent || []).map(C.normWord)) : null;
-    // altura: la del export (y_ranges, foto con pie) respecto a la base del preset
-    const dyY = (C.captionYAt(PLAN.fx, t, B.w / B.h) - D.y) * B.h;
-    const top = B.y + L.top + dyY;
-    // salida del grupo (la de los grupos del render ya viene en su permanencia)
-    const out = g.srv ? clamp((+gr.end - t) / 0.11, 0, 1) : clamp((gr.end + 0.12 - t) / 0.12, 0, 1);
-    let ga = out * ra, gdy = 0;
-    if (D.reveal === "group") { const u = t - gr.start; ga *= C.ease("out_cubic", u / 0.14); gdy = (1 - C.ease("out_cubic", u / 0.35)) * 0.22 * fs; }
-    if (ga <= 0.003) return;
-    c.save(); c.textBaseline = "alphabetic"; c.lineJoin = "round";
-    const stroke = 2 * D.stroke * s;
-    // palabra de la pastilla (boxed): la ultima que ya empezo
-    let pill = -1; if (D.active === "pill") L.words.forEach((x, i) => { if (t >= +x.w.start - 0.03) pill = i; });
-    L.rows.forEach(r => {
-      const vis = i => D.reveal !== "word" || t >= +L.words[i].w.start - 0.05;
-      let v1 = r.a; while (v1 < r.b && vis(v1)) v1++;
-      if (v1 === r.a) return;
-      const sc = r.sc, M = L.M;
-      // recentrado: la parte ya dicha queda centrada (text._recenter_dx; aqui sin resorte)
-      let dx = 0;
-      if (D.recenter && D.reveal === "word" && v1 < r.b) {
-        const l = r.x0 + L.xs[r.a] + M[r.a].l * sc, rr = r.x0 + L.xs[v1 - 1] + M[v1 - 1].r * sc;
-        dx = L.cx - (l + rr) / 2;
-      }
-      const base = top + r.base + gdy;
-      for (let i = r.a; i < v1; i++) {
-        const ww = L.words[i], w = ww.w, x = B.x + r.x0 + L.xs[i] + dx, wd = M[i].adv * sc;
-        const u = t - (+w.start - 0.05);
-        let a = 1, wsc = 1, wdy = 0;
-        if (D.reveal === "word") {
-          if (D.anim === "pop") { wsc = 0.8 + 0.2 * C.ease("out_back", u / 0.25); a = C.ease("out_cubic", u / 0.08); wdy = (1 - C.ease("out_cubic", u / 0.22)) * 0.1 * fs; }
-          else if (D.anim === "pop_strong") { wsc = 0.7 + 0.3 * C.ease("out_back", u / 0.3); a = C.ease("out_cubic", u / 0.07); }
-          else { a = C.ease("smoothstep", u / 0.2); wdy = (1 - C.ease("out_cubic", u / 0.3)) * 0.12 * fs; }
-        }
-        const kw = accentSet && accentSet.has(C.normWord(w.text));
-        let fill = kw ? accent : color;
-        const q = C.activeBump(t, w);
-        if (D.active === "color" && !kw && q > 0.002) fill = mixHex(color, accent, q);
-        if (D.active_scale > 0) { wsc *= 1 + D.active_scale * q; wdy -= 0.02 * fs * q; }
-        if (D.active === "wipe") fill = t >= +w.end ? accent : color;
-        c.save(); c.globalAlpha = ga * a;
-        c.font = fontCss(D.font, fs * sc);
-        const cy = base + wdy;
-        if (wsc !== 1) { const px = x + wd / 2, py = cy - M[i].asc * sc / 2; c.translate(px, py); c.scale(wsc, wsc); c.translate(-px, -py); }
-        if (i === pill) {
-          const h = (M[i].asc + M[i].desc) * sc + 0.28 * fs;
-          c.save(); c.shadowColor = "transparent"; c.fillStyle = hi; rrect(c, x + M[i].l * sc - 0.18 * fs, cy - M[i].asc * sc - 0.14 * fs, (M[i].r - M[i].l) * sc + 0.36 * fs, h, h * 0.3); c.fill(); c.restore();
-          fill = lum(hi) > 0.6 ? "#111111" : "#FFFFFF";
-        } else if (D.shadow > 0) { c.shadowColor = `rgba(0,0,0,${Math.min(0.85, 0.62 * D.shadow)})`; c.shadowBlur = 10 * s * D.shadow; c.shadowOffsetY = 3 * s; }
-        if (stroke > 0) { c.lineWidth = stroke; c.strokeStyle = cfg.stroke_color || "#000000"; c.strokeText(ww.txt, x, cy); }
-        c.fillStyle = fill; c.fillText(ww.txt, x, cy);
-        if (D.active === "wipe" && t >= +w.start && t < +w.end) {
-          // barrido del karaoke: la parte ya dicha de la palabra en acento
-          const p = clamp((t - +w.start) / Math.max(0.08, +w.end - +w.start), 0, 1);
-          c.save(); c.shadowColor = "transparent"; c.beginPath(); c.rect(x - fs, cy - fs * 1.5, (wd + fs) * p + fs * 0.05, fs * 2.2); c.clip(); c.fillStyle = accent; c.fillText(ww.txt, x, cy); c.restore();
-        }
-        c.restore();
-      }
-    });
-    c.restore();
-    const wmax = Math.max(...L.rows.map(r => r.w)), x0 = Math.min(...L.rows.map(r => r.x0));
-    HITS.push({ track: "captions", id: "captions", bb: { x: B.x + x0, y: top, w: wmax, h: L.height } });
+    if (C.captionGroupSuppressed(plan.fx, g.gr, t, LB.w / LB.h)) return null;
+    return CapDraw.drawGroup(c, LB, g.gr, t, capOpt(plan, t, ra, g.srv));
+  }
+  /** Subtitulos sobre el canvas del Studio (con sus cajas para seleccionar). */
+  FX.drawCaptions = function (t) {
+    const bb = drawCaptionsTo(CTX, t, true);
+    if (bb) HITS.push({ track: "captions", id: "captions", bb });
+    return bb;
   };
 
   // ------------------------------------------------------------------ capa superior: seleccion y marcadores
@@ -4269,9 +4585,8 @@
   // ------------------------------------------------------------------ presets de marca
   FX.gatherPreset = function () {
     if (!isPro()) return null;
-    const f = PLAN.fx;
-    return { style: FX.dirStyle(), intensity: FX.dirIntensity(), captions: C.clone(f.captions || {}), grade: C.clone(f.grade || {}),
-      music: { source: f.music && f.music.source, mood: f.music && f.music.mood, gain_db: f.music && f.music.gain_db, duck_db: f.music && f.music.duck_db, prompt: f.music && f.music.prompt } };
+    // con el color de la marca (antes se perdia al usar la plantilla en otro video)
+    return C.presetFromPlan(PLAN, { style: FX.dirStyle(), intensity: FX.dirIntensity() });
   };
   FX.applyPreset = function (p) {
     if (!p || !isPro()) return;
@@ -4282,6 +4597,7 @@
       PLAN.director = PLAN.director || {};
       if (p.style) { PLAN.director.style = p.style; DSTYLE = p.style; }
       if (p.intensity != null) { PLAN.director.intensity = p.intensity; DINT = p.intensity; }
+      if (C.normHex(p.accent)) C.applyAccent(PLAN, p.accent, { palette: STYLE_ACCENT[FX.dirStyle()] });
       CAPCACHE.key = "";
     }, { rebuild: true });
     FX.renderAll();
@@ -4337,7 +4653,7 @@
     arranque_fallido: "Empezaste la frase y la retomaste enseguida.",
     autocorreccion: "Te corregiste; queda la versión corregida.",
     tartamudeo: "Palabras repetidas sin querer.",
-    error: "Un error o una expresión que no va en el video.",
+    error: "Un comentario entre tomas o una expresión que no va en el video.",
     digresion: "Esta parte se sale del tema del video.",
     silencio: "Pausa sin voz.", manual: "Corte que hiciste a mano.", ai: "Recorte propuesto por la IA.",
   };
@@ -4456,7 +4772,8 @@
     const box = $("#gChips"); if (!box) return;
     const cnt = C.kindCounts(PLAN.cuts);
     const kinds = ["retoma", "arranque_fallido", "autocorreccion", "tartamudeo", "error"].concat(cnt.digresion ? ["digresion"] : []);
-    const chip = (v, label, n) => `<button class="gchip${CL.filter === v ? " on" : ""}" data-f="${v}" aria-pressed="${CL.filter === v}"${v !== "todos" ? ` style="--k:${CL.rgb(v)}"` : ""}${n || v === "todos" ? "" : " disabled"}>`
+    // (el nombre corto del filtro lleva el completo de la copy como titulo: «Comentarios» = «Comentarios fuera de toma»)
+    const chip = (v, label, n) => `<button class="gchip${CL.filter === v ? " on" : ""}" data-f="${v}" aria-pressed="${CL.filter === v}"${v !== "todos" ? ` style="--k:${CL.rgb(v)}" title="${esc(C.TAKE_PLURAL[v])}"` : ""}${n || v === "todos" ? "" : " disabled"}>`
       + `${v !== "todos" ? '<span class="d"></span>' : ""}${label} <b>${n}</b></button>`;
     box.innerHTML = chip("todos", "Todos", C.reviewItems(PLAN.cuts, "todos", CL.sil).length) + kinds.map(k => chip(k, C.TAKE_CHIP[k], cnt[k] || 0)).join("");
   }
@@ -4464,6 +4781,11 @@
     const it = reviewList(), k = it.indexOf(CL.sel), pos = $("#gPos");
     if (pos) pos.textContent = !it.length ? "Sin cortes que revisar" : k >= 0 ? `Corte ${k + 1} de ${it.length}` : `${it.length} corte${it.length === 1 ? "" : "s"}`;
     ["#gPrev", "#gNext"].forEach(q => { const b = $(q); if (b) b.disabled = !it.length; });
+    syncCleanCtl();
+  }
+  /** «Ver los silencios en el guion» y «Restaurar todo…» (en el resumen, cada uno en su fila). */
+  function syncCleanCtl() {
+    const it = reviewList();
     const sil = $("#gSil"); if (sil) { sil.setAttribute("aria-checked", String(CL.sil)); sil.classList.toggle("on", CL.sil); }
     const ra = $("#gRestAll");
     if (ra) { const anyOn = it.some(ci => C.cutOn(PLAN.cuts[ci])); ra.textContent = anyOn || !it.length ? "Restaurar todo…" : "Quitar todo…"; ra.disabled = !it.length; ra.dataset.on = anyOn ? "1" : "0"; }
@@ -4499,34 +4821,80 @@
     }
     const md = $("#cmapDur"); if (md) md.textContent = `${fmtM(d)} original`;
   }
+  /** Primer corte de un tipo (para «Escuchar un ejemplo») -> indice o -1. */
+  const firstCutOf = k => (PLAN.cuts || []).findIndex(c => c && +c.end > +c.start && C.cutKind(c) === k);
   function renderSum() {
     const box = $("#cSum"); if (!box || !PLAN) return;
     const tk = PLAN.takes || null, d = dur(), fin = tlObj().finalDuration, rem = C.removedByCategory(PLAN.cuts, d);
     const topic = (tk && tk.topic) || PLAN.topic || null;
     const cur = (tk && tk.sensitivity) || "normal";
+    const rich = hasCopy();
     let h = `<div class="cs-h"><h3>${ICO("spark")}Resumen de la IA</h3><div class="cs-tot"><span>${fmtM(d)}</span>${ICO("right")}<b>${fmtM(fin)}</b><em>−${fmtM(Math.max(0, d - fin))}</em></div></div>`;
     h += `<p class="cs-topic">${topic ? `<b>Tema:</b> ${esc(topic)}` : `<span>La IA todavía no detectó el tema de este video.</span>`}</p>`;
     if (tk && tk.summary) h += `<p class="cs-sum">${esc(tk.summary)}</p>`;
-    if (tk && tk.llm === false) h += `<div class="cs-deg">${ICO("alert")}<span>La IA de lenguaje no respondió: busqué las tomas solo con reglas.</span><button class="btn ghost mini" data-a="retry"${CL.busy ? " disabled" : ""}>Reintentar con IA</button></div>`;
+    if (tk && tk.llm === false) h += `<div class="cs-deg">${ICO("alert")}<span>La IA de lenguaje no respondió: busqué las tomas solo con reglas.</span>${rich ? "" : `<button class="btn ghost mini" data-a="retry"${CL.busy ? " disabled" : ""}>Reintentar con IA</button>`}</div>`;
     const cats = CAT_ORDER.filter(k => rem.cats[k] > 0.05);
     if (cats.length) {
       h += `<div class="cs-stack" role="img" aria-label="Tiempo quitado por categoría">${cats.map(k => `<i style="--k:${CL.rgb(k)};flex-grow:${rem.cats[k]}" title="${esc(C.TAKE_PLURAL[k])}: ${C.fmtLen(rem.cats[k])}"></i>`).join("")}</div>`;
       h += `<div class="cs-leg">${cats.map(k => `<span><i style="--k:${CL.rgb(k)}"></i>${esc(C.TAKE_PLURAL[k])} <b>${C.fmtLen(rem.cats[k])}</b></span>`).join("")}</div>`;
     } else h += `<p class="cs-none">Todavía no se quita nada del video.</p>`;
-    if (tk) {
-      const busy = CL.busy && !CL.busy.first;
-      h += `<div class="cs-lvh"><h4>Nivel de limpieza</h4><span>${busy ? `<span class="spinner"></span> La IA está recalculando…` : "Lo que tocaste a mano se respeta"}</span></div>`;
-      h += `<div class="cs-lv" role="radiogroup" aria-label="Nivel de limpieza">` + ["suave", "normal", "a_fondo"].map(lv =>
-        `<button role="radio" aria-checked="${cur === lv}" class="${cur === lv ? "on" : ""}" data-lv="${lv}"${CL.busy ? " disabled" : ""}>${C.LEVEL_LABEL[lv]}<small>queda ${fmtM(C.levelFinal(PLAN, lv, 30))}</small></button>`).join("") + `</div>`;
-    }
+    const busy = CL.busy && !CL.busy.first;
+    const lvBtns = `<div class="cs-lv" role="radiogroup" aria-label="Nivel de limpieza">` + ["suave", "normal", "a_fondo"].map(lv =>
+      `<button role="radio" aria-checked="${cur === lv}" class="${cur === lv ? "on" : ""}" data-lv="${lv}"${CL.busy ? " disabled" : ""}>${C.LEVEL_LABEL[lv]}<small>queda ${fmtM(C.levelFinal(PLAN, lv, 30))}</small></button>`).join("") + `</div>`;
     const st = C.takeStats(PLAN.cuts), cnt = C.kindCounts(PLAN.cuts);
+    const kinds = (tk ? C.TAKE_KINDS : []).concat(["silencio"]);
+    if (rich) {
+      // cada ajuste en su fila: nombre, que hace y su ejemplo (el nivel con tus numeros; cada tipo con
+      // «Escuchar un ejemplo»: el primer corte de ese tipo con 1 s antes y despues)
+      if (tk) {
+        const cp = C.copyFor(SCHEMA.ui, "clean.level"), nOn = (PLAN.cuts || []).filter(c => C.cutOn(c) && C.cutKind(c) === "retoma").length;
+        const ex = C.fillExample(cp.ex_tpl, { nivel: C.LEVEL_LABEL[cur], n: nOn, dur: fmtM(fin) }, cp.ex_ui);
+        h += `<div class="hrow narrow full cs-row cs-lvrow" data-setting="clean.level"><div class="hrow-txt"><p class="hrow-note">${busy ? `<span class="spinner"></span> La IA está recalculando…` : "Lo que tocaste a mano se respeta."}</p></div>`
+          + `<div class="hrow-ctl">${lvBtns}</div><div class="hrow-ex" data-ex="texto">${esc(ex)}</div></div>`;
+      }
+      const catRow = k => {
+        const n = k === "silencio" ? (cnt.silencio || 0) : ((st.by_kind[k] || {}).n || 0), on = C.kindOn(PLAN.cuts, k);
+        return `<div class="hrow cs-row cs-cat${on ? "" : " off"}" data-setting="clean.cat.${k}" style="--k:${CL.rgb(k)}"><div class="hrow-txt"><p class="cs-n"><i></i>${n} · ${fmtM(rem.cats[k] || 0)}</p></div>`
+          + `<div class="hrow-ctl"><button class="tgl${on ? " on" : ""}" role="switch" aria-checked="${on}" aria-label="${esc(C.TAKE_PLURAL[k])}" data-kind="${k}"${n ? "" : " disabled"}></button></div>`
+          + `<div class="hrow-ex" data-ex="audio"><span class="cs-ls" data-ls="${k}"></span></div></div>`;
+      };
+      h += `<div class="hrow narrow full cs-row cs-catsrow" data-setting="clean.cats"><div class="hrow-ctl"><div class="cs-cats cs-list">${kinds.map(catRow).join("")}</div></div></div>`;
+      h += `<div class="hrow narrow cs-row cs-silrow" data-setting="clean.sil"><div class="hrow-ctl"><button class="tgl" id="gSil" role="switch" aria-checked="${CL.sil}" data-a="sil" aria-label="${esc(ST("clean.sil.aria"))}"></button></div></div>`;
+      h += `<div class="hrow narrow full cs-row cs-restrow" data-setting="clean.restore"><div class="hrow-ctl"><div class="cs-acts"><button class="btn ghost mini" type="button" id="gRestAll" data-a="restall">Restaurar todo…</button>`
+        + (tk ? `<button class="btn ghost mini" type="button" data-a="retry"${CL.busy ? " disabled" : ""}>${ICO("spark")}${esc(ST("clean.retry"))}</button>` : "") + `</div></div>`
+        + `<div class="hrow-ex" data-ex="audio"><span class="cs-ls" data-ls="sel"></span></div></div>`;
+      box.innerHTML = h;
+      const E = ES();
+      E.Catalog.hydrateScreen(box);
+      box.querySelectorAll("[data-ls]").forEach(sp => {
+        const k = sp.dataset.ls;
+        if (k === "sel") {
+          sp.appendChild(E.ListenButton.create({ key: "clean:sel", name: ST("clean.listen.sel.name"), cls: "sm", label: ST("clean.listen.sel"),
+            why: () => (CL.sel >= 0 && PLAN.cuts[CL.sel] ? null : ST("clean.listen.sel.why")),
+            spec: () => { const c = PLAN.cuts[CL.sel]; if (!c) return null; const [a, b] = C.listenRange(tlObj(), c, 1); return { kind: "range", id: "sel", at: a, max: Math.max(0.5, b - a) + 0.1 }; } }).el);
+          return;
+        }
+        const label = C.TAKE_PLURAL[k] || k;
+        sp.appendChild(E.ListenButton.create({ key: "clean:" + k, name: ST("clean.listen.cat.name", { tipo: String(label).toLowerCase() }), cls: "sm", label: ST("clean.listen.cat"),
+          why: () => (firstCutOf(k) >= 0 ? null : ST("clean.listen.cat.why")),
+          spec: () => { const ci = firstCutOf(k), c = PLAN.cuts[ci]; if (!c) return null; return { kind: "range", id: k, at: Math.max(0, +c.start - 1), max: Math.min(8, +c.end - +c.start + 2), through: ci }; } }).el);
+      });
+      syncCleanCtl();
+      return;
+    }
+    if (tk) {
+      h += `<div class="cs-lvh"><h4>Nivel de limpieza</h4><span>${busy ? `<span class="spinner"></span> La IA está recalculando…` : "Lo que tocaste a mano se respeta"}</span></div>` + lvBtns;
+    }
     const tile = (k, n, full) => {
       const on = C.kindOn(PLAN.cuts, k);
       return `<div class="cs-cat${on ? "" : " off"}${full ? " full" : ""}" style="--k:${CL.rgb(k)}"><i></i><div><b>${esc(C.TAKE_PLURAL[k])}</b><span>${n} · ${fmtM(rem.cats[k] || 0)}</span></div>`
         + `<button class="tgl${on ? " on" : ""}" role="switch" aria-checked="${on}" aria-label="${esc(C.TAKE_PLURAL[k])}" data-kind="${k}"${n ? "" : " disabled"}></button></div>`;
     };
     h += `<div class="cs-cats">` + (tk ? C.TAKE_KINDS.map(k => tile(k, (st.by_kind[k] || {}).n || 0)).join("") : "") + tile("silencio", cnt.silencio || 0, true) + `</div>`;
+    h += `<div class="cs-foot"><span class="cs-silc"><button class="tgl" id="gSil" role="switch" aria-checked="${CL.sil}" data-a="sil" aria-labelledby="gSilLbl"></button><span id="gSilLbl">Mostrar silencios</span></span>`
+      + `<button class="btn ghost mini" type="button" id="gRestAll" data-a="restall">Restaurar todo…</button></div>`;
     box.innerHTML = h;
+    syncCleanCtl();
   }
   /** Contador de la pestaña y "Duración final" de la barra de modos (en los dos modos). */
   CL.chrome = function () {
@@ -4621,7 +4989,7 @@
   CL.step = step;
   /** Palabras del corte para los avisos: «las primeras cinco…» (o su duracion si no tiene). */
   const NOUN = { retoma: "la toma repetida", arranque_fallido: "el arranque en falso", autocorreccion: "la corrección",
-    tartamudeo: "el tartamudeo", error: "el error", digresion: "la parte fuera de tema", silencio: "el silencio",
+    tartamudeo: "el tartamudeo", error: "el comentario fuera de toma", digresion: "la parte fuera de tema", silencio: "el silencio",
     manual: "el corte manual", ai: "el recorte de la IA" };
   function excerpt(ci) {
     const sp = GW.spans[ci], c = PLAN.cuts[ci];
@@ -4759,10 +5127,13 @@
 
   // ---- modo, render y refresco
   CL.setMode = function (m) {
-    CL.mode = m === "clean" ? "clean" : "edit";
+    const prev = CL.mode;
+    CL.mode = m === "clean" ? "clean" : m === "style" && isPro() ? "style" : "edit";
     const st = document.querySelector(".studio");
-    if (st) st.classList.toggle("mclean", CL.mode === "clean");
+    if (st) { st.classList.toggle("mclean", CL.mode === "clean"); st.classList.toggle("mstyle", CL.mode === "style"); }
     document.body.classList.toggle("mclean", CL.mode === "clean");
+    document.body.classList.toggle("mstyle", CL.mode === "style");
+    if (prev === "style" && CL.mode !== "style" && window.Estilo) Estilo.hide();
     $$("#segMode button").forEach(b => { const on = b.dataset.v === CL.mode; b.classList.toggle("sel", on); b.setAttribute("aria-selected", String(on)); });
     if (JOB && JOB !== "demo") lsSet(`reelfy.mode.${JOB}`, CL.mode);
     toastTop();
@@ -4778,6 +5149,10 @@
       }
       CL.render();
       requestAnimationFrame(() => { drawMap(); placePop(); if (CL.sel >= 0) scrollToSel(); });
+    } else if (CL.mode === "style") {
+      // Estilo: la vista grande es un bucle con tus palabras (el reproductor se pausa)
+      CL.sel = -1; const pop = $("#gPop"); if (pop) pop.remove();
+      if (window.Estilo) Estilo.show();
     } else {
       const s = CL.sel; CL.sel = -1; const pop = $("#gPop"); if (pop) pop.remove();
       if (typeof renderTL === "function") renderTL();
@@ -4822,7 +5197,7 @@
     CL.sel = -1; CL.filter = "todos"; CL.listenRange = null;
     const saved = JOB && JOB !== "demo" ? lsGet(`reelfy.mode.${JOB}`) : null;
     const hasTakes = (PLAN.cuts || []).some(C.isTakeCut);
-    CL.setMode(saved === "clean" || saved === "edit" ? saved : hasTakes ? "clean" : "edit");
+    CL.setMode(saved === "clean" || saved === "edit" || saved === "style" ? saved : hasTakes ? "clean" : "edit");
     CL.chrome();
   };
   /** Cada cuadro: playhead del mapa y palabra que suena en el guion. */
@@ -4889,12 +5264,13 @@
     });
     ["wheel", "touchmove"].forEach(ev => tr.addEventListener(ev, () => { CL.userScroll = Date.now(); }, { passive: true }));
     $("#gChips").addEventListener("click", e => { const b = e.target.closest("[data-f]"); if (b && !b.disabled) CL.setFilter(b.dataset.f); });
-    $("#gSil").onclick = () => CL.setSil(!CL.sil);
     $("#gPrev").onclick = () => step(-1);
     $("#gNext").onclick = () => step(1);
-    $("#gRestAll").onclick = () => CL.restoreAll();
     $("#cSum").addEventListener("click", e => {
+      if (e.target.closest(".listen")) return;
       const lv = e.target.closest("[data-lv]"); if (lv && !lv.disabled) { CL.setLevel(lv.dataset.lv); return; }
+      const ctl = e.target.closest('[data-a="sil"],[data-a="restall"]');
+      if (ctl && !ctl.disabled) { if (ctl.dataset.a === "sil") CL.setSil(!CL.sil); else CL.restoreAll(); return; }
       const k = e.target.closest("[data-kind]"); if (k && !k.disabled) { CL.setKind(k.dataset.kind, k.getAttribute("aria-checked") !== "true"); return; }
       const a = e.target.closest("[data-a]");
       if (a && a.dataset.a === "retry") CL.findTakes((PLAN.takes && PLAN.takes.sensitivity) || "normal", { llm: true });

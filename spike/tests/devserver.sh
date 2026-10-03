@@ -4,6 +4,10 @@
 # - DATA aislado (jobs.db, input, output, work propios) para que varios servidores no se roben jobs.
 # - REELFY_GATED=0: sin licencia en pruebas.
 # - Enlaza los modelos pesados ya descargados (whisper, alineador, matte) en vez de copiarlos.
+# - Para probar con una COPIA de otro proyecto: copia jobs.db y enlaza sus archivos UNO POR UNO
+#   (ln -s por archivo) o copialos. Nunca enlaces una carpeta entera (input/, input/sources/...): la
+#   limpieza del disco al arrancar borraria las fuentes "sin uso" del proyecto original (el servidor
+#   ya no limpia dentro de carpetas enlazadas o fuera de su DATA: server._gc_dir_ok).
 # Variables utiles: REELFY_OLLAMA_URL (default http://127.0.0.1:11498), REELFY_LLM_MODEL (qwen3.5:4b).
 set -euo pipefail
 PORT="${1:?puerto}"

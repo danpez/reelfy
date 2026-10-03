@@ -170,7 +170,7 @@ try {
   // ---------------------------------------------------------------- 5. filtros y silencios
   const chips = await ev(() => [...document.querySelectorAll("#gChips .gchip")].map(b => b.innerText.replace(/\s+/g, " ").trim()));
   log("chips", chips.join(" | "));
-  for (const lbl of ["Todos", "Tomas repetidas", "Arranques", "Correcciones", "Tartamudeos", "Errores"]) assert.ok(chips.some(c => c.startsWith(lbl)), `chip ${lbl}`);
+  for (const lbl of ["Todos", "Tomas repetidas", "Arranques", "Correcciones", "Tartamudeos", "Comentarios"]) assert.ok(chips.some(c => c.startsWith(lbl)), `chip ${lbl}`);
   await page.click('#gChips [data-f="tartamudeo"]');
   st = await ev(() => ({ n: FXCore.reviewItems(PLAN.cuts, FX.clean.filter, FX.clean.sil).map(i => FXCore.cutKind(PLAN.cuts[i])), dim: document.querySelectorAll("#gTr .gcut.dim").length }));
   assert.ok(st.n.length > 0 && st.n.every(k => k === "tartamudeo")); assert.ok(st.dim > 0, "lo demas queda atenuado");

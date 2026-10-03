@@ -35,7 +35,7 @@ def test_fxcore_unitarias_node():
 def test_sintaxis_de_los_scripts(tmp_path):
     inline = tmp_path / "inline.js"
     inline.write_text(_inline_script())
-    for f in (STATIC / "fxcore.js", STATIC / "fx.js", STATIC / "profile.js", inline):
+    for f in (STATIC / "fxcore.js", STATIC / "capdraw.js", STATIC / "fx.js", STATIC / "estilo.js", STATIC / "profile.js", inline):
         r = subprocess.run([NODE, "--check", str(f)], capture_output=True, text=True, timeout=60)
         assert r.returncode == 0, f"{f.name}: {r.stderr[-2000:]}"
 
@@ -135,7 +135,8 @@ def test_ids_referenciados_existen():
     """Cada $("#id") / getElementById del Studio apunta a un elemento que existe en el HTML
     o que el propio codigo crea (id="..." en plantillas)."""
     html = (STATIC / "index.html").read_text()
-    fxjs = (STATIC / "fx.js").read_text() + (STATIC / "profile.js").read_text()
+    fxjs = ((STATIC / "fx.js").read_text() + (STATIC / "profile.js").read_text() + (STATIC / "estilo.js").read_text()
+            + (STATIC / "estilo_proyecto.js").read_text() + (STATIC / "estilo_catalog.js").read_text())
     declared = set(re.findall(r'id="([A-Za-z][\w-]*)"', html)) | set(re.findall(r'id="([A-Za-z][\w-]*)"', fxjs))
     declared |= set(re.findall(r'\.id\s*=\s*"([\w-]+)"', html + fxjs))
     used = set(re.findall(r'\$\("#([A-Za-z][\w-]*)"\)', html + fxjs))
@@ -146,7 +147,8 @@ def test_ids_referenciados_existen():
 
 def test_iconos_del_sprite_existen():
     html = (STATIC / "index.html").read_text()
-    fxjs = (STATIC / "fx.js").read_text() + (STATIC / "profile.js").read_text()
+    fxjs = ((STATIC / "fx.js").read_text() + (STATIC / "profile.js").read_text() + (STATIC / "estilo.js").read_text()
+            + (STATIC / "estilo_proyecto.js").read_text() + (STATIC / "estilo_catalog.js").read_text())
     sprite = set(re.findall(r'<g id="i-([\w-]+)"', html))
     used = set(re.findall(r'#i-([a-z][\w-]*)', html + fxjs)) - {"${n}"}
     used |= set(re.findall(r'ICO\("([\w-]+)"\)', html + fxjs))
@@ -171,7 +173,7 @@ def test_inspector_cubre_el_esquema():
 
 def test_sin_emojis_en_el_studio():
     emoji = re.compile("[\U0001F300-\U0001FAFF☀-➿⭐⭕]")
-    for f in ("index.html", "fx.js", "fx.css", "fxcore.js", "profile.js"):
+    for f in ("index.html", "fx.js", "fx.css", "fxcore.js", "profile.js", "capdraw.js", "estilo.js", "estilo_proyecto.js", "estilo_catalog.js"):
         txt = (STATIC / f).read_text()
         # drawEmoji pinta los emojis que vienen en el PLAN (dato del usuario), no UI propia
         hits = [m.group(0) for m in emoji.finditer(txt)]
@@ -181,16 +183,15 @@ def test_sin_emojis_en_el_studio():
 def test_estaticos_se_sirven(tmp_path, monkeypatch):
     """Los archivos nuevos del Studio se sirven por /static con su tipo MIME."""
     import mimetypes
-    for f in ("fx.js", "fxcore.js", "profile.js", "fx.css"):
+    for f in ("fx.js", "fxcore.js", "capdraw.js", "estilo.js", "estilo_catalog.js", "profile.js", "fx.css"):
         assert (STATIC / f).exists()
         assert mimetypes.guess_type(f)[0] in ("application/javascript", "text/javascript", "text/css"), f
     html = (STATIC / "index.html").read_text()
-    for ref in ("/static/fx.css", "/static/fxcore.js", "/static/fx.js", "/static/profile.js"):
+    for ref in ("/static/fx.css", "/static/fxcore.js", "/static/capdraw.js", "/static/fx.js", "/static/estilo.js", "/static/profile.js"):
         assert ref in html
-    # fxcore antes que fx, fx antes que profile y todos antes del script en linea
-    i1, i2, i4, i3 = (html.index("/static/fxcore.js"), html.index("/static/fx.js"), html.index("/static/profile.js"),
-                      html.index("<script>"))
-    assert i1 < i2 < i4 < i3
+    # fxcore -> capdraw -> fx -> estilo -> profile, y todos antes del script en linea
+    order = [html.index(f"/static/{f}") for f in ("fxcore.js", "capdraw.js", "fx.js", "estilo.js", "profile.js")]
+    assert order == sorted(order) and order[-1] < html.index("<script>")
 
 
 def test_humo_e2e_en_navegador():
@@ -1150,10 +1151,12 @@ def test_recursos_y_aceleraciones_cableado():
     assert "FloatCard" in js and "/static/floatcard.js" in html
     # Studio: pista Recursos (seleccionar, mover, recortar, quitar, cambiar archivo) y vista previa
     assert 'media: { label: "Recursos"' in fx and "function inspectMedia(" in fx and "FX.replaceMedia" in fx
-    assert "FCm.drawCard(" in fx and "FCm.bgFilter(" in fx and 'HITS.push({ track: "media", id: it.id, bb, fixed: true })' in fx
-    # color de acento: un solo control, amarillo por defecto, sin azul
-    assert 'id="accentBody"' in html and "Color de acento" in html and "C.applyAccent(PLAN" in fx
-    assert 'p.k !== "accent"' in fx, "el color de la palabra activa es el acento del proyecto"
+    assert "FCm.drawCard(" in fx and "FCm.bgFilter(" in fx and 'push({ track: "media", id: it.id, bb, fixed: true })' in fx
+    # color de tu marca: un solo control (Estilo › Color de tu marca), amarillo por defecto, sin azul;
+    # la palabra que dices usa ese color (fila enlazada, sin selector propio)
+    es = (STATIC / "estilo.js").read_text()
+    assert 'id="stBrand"' in html and "C.applyAccent(PLAN" in fx and "FX.setAccent(" in es
+    assert 'mode: "linked"' in (STATIC / "fxcore.js").read_text() and 'E.open("stBrand", { focus: "project.accent" })' in es
     for f in ("index.html", "fx.js", "fxcore.js", "fx.css"):
         assert "84a2f8" not in (STATIC / f).read_text().lower(), f"{f}: azul fijo"
     assert "--trk-media" in css and ".rampmk" in css and ".mt-res" in css
@@ -1247,7 +1250,8 @@ def test_revision_ui_cableado():
     cambiar el archivo de un recurso vuelve al de antes; el marcador de la aceleracion no tapa el
     agarre de recorte."""
     fx = (STATIC / "fx.js").read_text()
-    live = fx[fx.index("FX.drawLive = function"):]
+    # el cuerpo de la composicion en vivo (FX.drawLive -> FX.drawLiveTo -> liveBody)
+    live = fx[fx.index("function liveBody("):]
     live = live[:live.index("pauseIdleMedia(")]
     assert live.index('activeRange("media", t)') < live.index('activeRange("graphics", t)')
     assert live.index('activeRange("cutaways", t)') < live.index('activeRange("media", t)')

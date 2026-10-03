@@ -185,7 +185,8 @@ try {
     });
   }
   await check("pistas fx dibujadas", async () => {
-    await page.waitForFunction(() => document.querySelectorAll(".fxrow").length === 7, null, { timeout: 20000 });
+    // 7 pistas (+ «Recursos» cuando el proyecto o el catalogo la traen: fx.mediaTrackOn)
+    await page.waitForFunction(() => document.querySelectorAll(".fxrow").length >= 7, null, { timeout: 20000 });
     return { pistas: await page.evaluate(() => [...document.querySelectorAll(".fxrow")].map(r => r.dataset.track)) };
   });
   await page.waitForTimeout(800);
@@ -223,6 +224,12 @@ try {
     if (n || docW > 390) throw new Error(JSON.stringify({ proyecto: a, elemento: b, musica: c, perfil: d, docW }).slice(0, 600));
     return { recortados: 0, docW };
   });
+
+  // Estilo (tecla 3) es el hogar de la edicion con IA (tarjetas de estilo, «Probar otra versión», el
+  // aviso de la musica IA), de quien sale (perfil), del formato, el idioma y el logo: se entra ahi para
+  // hacer clic y se vuelve a Edicion para el reproductor y el timeline
+  const inEstilo = async () => { await page.evaluate(() => FX.clean.setMode("style")); await page.waitForTimeout(250); };
+  const inEdicion = async () => { await page.evaluate(() => FX.clean.setMode("edit")); await page.waitForTimeout(150); };
 
   // ---------------------------------------------------------------- titulo con lines
   const title = await page.evaluate(() => {
@@ -262,9 +269,11 @@ try {
   await check("cambiar estilo y deshacer NO saltan a la pestana Elemento", async () => {
     await page.evaluate(id => { FX.select("text", id); setPanelTab("proj"); }, title.id);
     const target = await page.evaluate(() => ["dinamico", "elegante"].find(s => s !== FX.dirStyle()));
-    await page.click(`.dircard[data-v="${target}"]`);
+    await inEstilo();
+    await page.click(`#stDirector .dircard[data-v="${target}"]`);
     await page.waitForFunction(() => FX.busy(), null, { timeout: 5000 }).catch(() => {});
     await idle();
+    await inEdicion();
     const a = await page.evaluate(() => document.querySelector(".ptabs button.sel").dataset.tab);
     await page.keyboard.press("ControlOrMeta+z");
     const b = await page.evaluate(() => document.querySelector(".ptabs button.sel").dataset.tab);
@@ -281,9 +290,11 @@ try {
         const t = PLAN.fx.text.find(x => x.preset !== "counter" && FXCore.titleText(x).trim());
         FX.select("text", t.id); if (!t.locked) FX.action("lock");
       });
-      await page.click(`.dircard[data-v="${st}"]`);
+      await inEstilo();
+      await page.click(`#stDirector .dircard[data-v="${st}"]`);
       await page.waitForFunction(() => FX.busy(), null, { timeout: 5000 }).catch(() => {});
       await idle();
+      await inEdicion();
       const dup = await page.evaluate(() => {
         const L = PLAN.fx.text.filter(t => t.locked);
         return L.flatMap(l => PLAN.fx.text.filter(t => t !== l && FXCore.normText(FXCore.titleText(t)) === FXCore.normText(FXCore.titleText(l))
@@ -350,7 +361,9 @@ try {
     await page.route("**/direct/**", async route => { await sleep(3500); await route.continue(); });
     try {
       const s0 = await page.evaluate(() => { FX.select("text", PLAN.fx.text[0].id); setPanelTab("proj"); return JSON.stringify(PLAN); });
+      await inEstilo();
       await page.click("#dirVar");
+      await inEdicion();                                     // la capa cubre el editor tambien en Edicion
       await page.waitForSelector("#busyOv.on");
       await page.waitForTimeout(400);                        // termina el fundido de la capa
       await shot("05_dirigiendo_bloqueado");
@@ -371,12 +384,16 @@ try {
       const want = (s.pro_langs || []).filter(l => !FXCore.PRO_LANGS.includes(l));
       if (want.length) throw new Error(`idiomas del servidor sin habilitar: ${want}`);
       if (langsOff.some(l => (s.pro_langs || []).includes(l))) throw new Error(`idiomas deshabilitados: ${langsOff}`);
-      if ((s.pro_opts || []).includes("logo") && document.querySelector("#logoOn").disabled) throw new Error("logo deshabilitado aunque el render pro lo aplica");
+      // (sin logo subido «Mostrar el logo» se apaga a proposito: no haria nada; la nota pide subirlo)
+      if ((s.pro_opts || []).includes("logo") && logoImg && document.querySelector("#logoOn").disabled) throw new Error("logo deshabilitado aunque el render pro lo aplica");
+      if (!logoImg && !document.querySelector("#logoOn").disabled) throw new Error("«Mostrar el logo» prendible sin logo subido");
       if ((s.pro_opts || []).includes("enhance_audio") && document.querySelector("#enhance").disabled) throw new Error("audio de estudio deshabilitado");
       const airOpt = (s.pro_opts_optin || []).includes("air");
       const airUser0 = !!FX.engineOpts().air_user;
       if (airOpt && !FX.airUser && airUser0) throw new Error("se manda air_user sin que el usuario moviera el aire");
-      if (airOpt && document.querySelector("#air").disabled) throw new Error("el control de aire quedo deshabilitado");
+      // (con un video que ya llena el cuadro el margen no cambiaria nada: se apaga y la nota lo dice)
+      if (airOpt && !FX.airFills() && document.querySelector("#air").disabled) throw new Error("el control de aire quedo deshabilitado");
+      if (FX.airFills() && (!document.querySelector("#air").disabled || document.querySelector("#airNote").hidden)) throw new Error("margen prendible con un video que ya llena el cuadro");
       return { proOpts: s.pro_opts, optin: s.pro_opts_optin, idiomas: FXCore.PRO_LANGS, airUser: airUser0, nota: document.querySelector("#airNote").textContent.slice(0, 60) };
     });
   });
@@ -438,7 +455,7 @@ try {
   // ---------------------------------------------------------------- perfil en el editor
   await check("perfil en el editor: pegar descripcion -> aplicar cambia rotulo y Seguir AL INSTANTE; deshacer vuelve (tambien en el servidor)", async () => {
     const before = await page.evaluate(() => ({ prof: PLAN.profile ? PLAN.profile.name : null, lt: PLAN.fx.graphics.filter(g => g.kind === "lower_third").map(g => g.title), undo: UNDO.length }));
-    await page.evaluate(() => setPanelTab("proj"));
+    await inEstilo();                                       // Estilo › Quién sale y tu logo
     await page.click("#profEdit");
     // otro nombre para ver el cambio aunque el trabajo ya traiga este perfil
     const d = await profileFromText(PROFILE_TEXT);
@@ -452,6 +469,7 @@ try {
       follow: PLAN.fx.graphics.filter(g => g.kind === "cta" && g.variant === "follow").map(g => [g.title, g.handle, g.platform]), undo: UNDO.length, grupo: document.querySelector("#profBody").innerText.split("\n")[1] }));
     if (!after.lt.includes(d.name + " Demo")) throw new Error(`rotulo sin el nombre nuevo: ${after.lt}`);
     if (after.undo !== before.undo + 1) throw new Error(`pasos de deshacer: ${after.undo - before.undo}`);
+    await inEdicion();
     await page.evaluate(async () => { const t = PLAN.fx.graphics.find(g => g.kind === "lower_third"); if (t) { V.pause(); V.currentTime = t.start + 0.8; } await new Promise(r => setTimeout(r, 900)); });
     await shot("10_perfil_aplicado_vivo");
     await page.evaluate(() => document.activeElement && document.activeElement.blur());
@@ -463,7 +481,7 @@ try {
     return { entendido: d, aplicar_ms: ms, rotulo: after.lt, seguir: after.follow, restaurado: back.prof };
   });
   await check("perfil: 'Usar estos datos' con OTRA persona reemplaza TODO (ni enlaces, ni estrella, ni telefono del anterior); 'Era la misma' completa", async () => {
-    await page.evaluate(() => { setPanelTab("proj"); });
+    await inEstilo();
     await page.click("#profEdit");
     await page.waitForSelector("#pfm.on");
     const before = await page.evaluate(() => { const d = PF.draft(); return { name: d.name, links: (d.links || []).map(l => String(l.handle || l.url || "").toLowerCase()), phone: d.phone || d.whatsapp || "" }; });
@@ -488,6 +506,7 @@ try {
     await page.evaluate(() => PF.close());
     const kept = before.links.filter(h => merged.links.includes(h)).length;
     if (!kept && before.links.length) throw new Error(`'completar' perdio los enlaces anteriores: ${JSON.stringify(merged)}`);
+    await inEdicion();
     return { antes: before.name, otra: { nombre: d.name, enlaces: d.links }, completado: merged };
   });
 
@@ -574,13 +593,13 @@ try {
     await page.evaluate(async () => { await FX.saveNow(); });
     await page.reload();
     await page.waitForSelector("#s-editor.on", { timeout: 120000 });
-    await page.waitForFunction(() => FX.isPro() && document.querySelectorAll(".fxrow").length === 7, null, { timeout: 60000 });
+    await page.waitForFunction(() => FX.isPro() && document.querySelectorAll(".fxrow").length >= 7, null, { timeout: 60000 });
     const r = await page.evaluate(() => ({ lang: LANG, seg: document.querySelector("#segLang button.on, #segLang button.sel") ? document.querySelector("#segLang button.on, #segLang button.sel").dataset.v : null,
-      subs: FX.planForServer().phrases === PLAN.phrases_pt, logo: LOGO_ON, check: document.querySelector("#logoOn").checked, aviso: !!document.querySelector("#langWarn.on") }));
+      subs: FX.planForServer().phrases === PLAN.phrases_pt, logo: LOGO_ON, check: document.querySelector("#logoOn").checked, hasLogo: !!logoImg, aviso: !!document.querySelector("#langWarn.on") }));
     await page.evaluate(async () => { await setLang("es"); document.querySelector("#logoOn").checked = false; document.querySelector("#logoOn").dispatchEvent(new Event("change")); await FX.saveNow(); });
     await exactHash(await page.evaluate(() => Math.min(PLAN.duration - 0.5, 4.6)));
     if (r.lang !== "pt" || !r.subs) throw new Error(`idioma tras recargar: ${JSON.stringify(r)}`);
-    if (!r.logo || !r.check) throw new Error(`logo tras recargar: ${JSON.stringify(r)}`);
+    if (!r.logo || (r.hasLogo && !r.check)) throw new Error(`logo tras recargar: ${JSON.stringify(r)}`);
     if (r.aviso) throw new Error("aviso de idiomas mezclados sin titulos traducidos");
     return r;
   });
@@ -592,6 +611,7 @@ try {
     for (let i = 0; i < 8; i++) {
       const rev0 = await page.evaluate(() => FX.serverRev);
       const k0 = reqs.length;
+      await inEstilo();
       await page.click("#dirVar");
       await page.waitForFunction(r => !FX.busy() && FX.serverRev !== r, rev0, { timeout: 120000 });
       if (await page.evaluate(() => FX.musicSide.state === "generating")) return k0;
@@ -602,6 +622,7 @@ try {
       sincronizada (rejilla de beats, sin cambios pendientes), sin aviso ni boton de "Sincronizar", y
       ningun PUT /plan desde el /direct (quitar algo de la propuesta haria que no fuera automatica). */
   async function autoSynced(k0, label) {
+    await inEstilo();                                       // el aviso vive en Estilo › Edición con IA
     // el aviso de "componiendo" lleva un spinner redondo (no una barra estirada)
     const sp = await page.evaluate(() => { const e = document.querySelector("#dirMusic .spinner"); if (!e) return null; const b = e.getBoundingClientRect(); return [Math.round(b.width), Math.round(b.height)]; });
     await page.waitForFunction(() => ["synced", "superseded", "error", "canceled"].includes(FX.musicSide.state) || FX.musicSide.resync === "available", null, { timeout: 300000 });
@@ -639,6 +660,7 @@ try {
     return out;
   });
   async function previewRefresh(out) {
+    await inEdicion();
     await page.click("#btnReal");
     await page.waitForSelector("#pvmVid.on", { timeout: 900000 });
     const f1 = await page.evaluate(() => document.querySelector("#pvmVid").src);
@@ -665,6 +687,7 @@ try {
   });
 
   // ---------------------------------------------------------------- flujo base
+  await inEdicion();
   await check("agrega un SFX en el playhead desde el menu", async () => {
     const n0 = await page.evaluate(() => PLAN.fx.sfx.length);
     await page.click("#addAny");
