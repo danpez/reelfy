@@ -2,6 +2,43 @@
 
 Formato: cada versión = un tag `reelfy-v*` que dispara el build de los 3 instaladores.
 
+## v0.6.1 — 2026-10-04
+
+**Armar con IA entiende tus grabaciones de pantalla y tus videos de apoyo.**
+
+### Grabaciones de pantalla
+- Si una grabación de pantalla (teléfono o escritorio) suena igual que una de tus tomas, Reelfy la
+  reconoce: nunca la usa como toma; la muestra como ventana flotante sincronizada al cuadro durante
+  toda esa toma (sigue cada corte), y de la cámara solo usa el audio. Quita el marco del emulador.
+- En Tomas se ve «Grabación de pantalla sincronizada con…» con deshacer, y en el Studio es un elemento
+  que puedes ajustar.
+- Si al final de esa toma la pantalla ya no cambia mientras sigues hablando, propone «Terminar aquí».
+
+### Videos de apoyo sin guion
+- De un video largo sin voz toma fragmentos de distintos momentos según lo que dices: solo tomas de
+  pantallas, productos, personajes o logos (nunca personas a cuadro), armados como mini montajes con
+  cortes secos a la medida de cada frase, alternando ventana flotante y pantalla completa (recorte
+  centrado en la pantalla de cada toma). El logo o título va donde nombras el producto.
+- Una demo de teléfono sobre fondo liso se muestra recortada al teléfono.
+
+### Edición
+- Minimal es de verdad sobrio en montajes: sin títulos de gancho, sin efectos de sonido, sin
+  aceleraciones en cambios de cámara y sin corrección de color.
+- Detecta el arranque en falso «… no, …» que se repite de inmediato.
+- Subtítulos sin grupos que solo parpadean (mínimo ~0.4 s) y con fondo oscuro suave cuando caen sobre
+  pantallas claras o con texto.
+- El glosario arregla nombres escritos juntos o con guion.
+- El botón «Seguir» toma el color de tu marca.
+
+### Correcciones
+- El audio ya no se desfasa al unir muchos clips a mano (antes ~27 ms por unión): todas las uniones son
+  exactas y el export en 4K rehace la misma edición.
+- «Desde qué segundo del clip» de un recurso del guion ya se respeta en la vista previa y en el export.
+- Grabaciones con huecos de cuadros (frecuencia variable) ya no se desfasan.
+- Cancelar mientras Reelfy revisa tus videos de apoyo cancela de verdad.
+
+---
+
 ## v0.6.0 — 2026-10-03
 
 **Cada ajuste dice qué hace y lo muestra con tu propio video.**

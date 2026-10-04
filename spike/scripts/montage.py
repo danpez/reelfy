@@ -56,17 +56,39 @@ ni la red (el LLM es opcional, solo desempata y nunca da tiempos) y decide:
      (plan_ramps): la parte que sale acelera sus ultimos 0.30 s (mostrando cuadros de despues de
      su "out") o la que entra empieza 0.30 s antes en su fuente a 2x; el audio sigue a 1x y la
      duracion no cambia. El lado es el que cae en una pausa y tiene esos cuadros extra.
+  9. Grabaciones de pantalla sincronizadas (detect_screens): un archivo que PUEDE ser pantalla
+     (metadatos de grabacion de pantalla como ReplayKit, o sin metadatos de camara y sin cara) y que
+     SUENA igual que una toma de camara (screensync: correlacion normalizada de envolventes, traslape
+     y pico unico; afinado a ~1 ms) nunca es toma: queda en "screens" con su desfase en segundos de los
+     archivos (t_pantalla = offset + rate * t_camara; el audio de una grabacion del iPhone empieza
+     0.128 s despues de su video y eso se suma) y el recorte de su marco (content_rect: el marco de un
+     dispositivo emulado en el tramo que se usa), y compose la pone encima de esa toma, muda y
+     siguiendo cada corte. Lo que grabo fuera del traslape (preparar la app, una cuenta regresiva)
+     nunca entra. Dos camaras que suenan igual (multicamara) no se tocan.
+  10. Videos de APOYO (split_broll): un video sin voz (mudo, o con musica o ambiente: voiced() no cuenta
+     las frases que whisper inventa sobre la musica, "Gracias por ver el video.", ni unas pocas palabras
+     sueltas en un clip largo) de al menos BROLL_MIN_DUR s nunca es toma (ni descarte): queda en
+     "broll_src" y el servidor lo ve toma por toma (scripts/brollscan.py) para usarlo en fragmentos
+     mientras se dice lo que muestra (scripts/brollplan.py, al componer). Si ningun clip tiene voz, nada
+     cambia.
+  11. CIERRE: la ultima parte del video se queda hasta END_TAIL s en su toma despues de la ultima palabra
+     (sin voz nueva): el boton de seguir y el enlace del final se alcanzan a ver.
+  Glosario: la escritura de sus terminos se aplica a las palabras de cada clip (glossary.apply, sin
+  unir ni partir palabras) antes de todo: "NUBIs" -> "Nubis" en las tomas y el guion detectado.
 
 API
-  build(clips, script=None, *, intercut=True, glossary=None, llm=None, assets=None, ramps=None)
-      -> plan["montage"]
+  build(clips, script=None, *, intercut=True, glossary=None, llm=None, assets=None, ramps=None,
+        screens_off=None) -> plan["montage"]
       clips = [{"sid", "name", "created", "dur", "words": [{text,start,end}], "audio": ruta wav
                 16 kHz | None, "setup": int | None, "takes": [cortes de takes.detect] | None}]
       (sin "takes" se corre takes.detect aqui). llm: None (sin juez), callable(prompt) -> str | None
       o True (= local_llm()). Con "frames"/"thumb" y sin "setup" se agrupan las camaras aqui.
       assets = [{"sid", "name", "kind": "image"|"video"|None, "dur"}] (recursos para las marcas del
       guion; un clip que el guion pide o que es imagen pasa aqui solo). ramps = {slot de la parte
-      que entra | indice: bool | None}: lo que el usuario eligio por union (gana).
+      que entra | indice: bool | None}: lo que el usuario eligio por union (gana). Cada clip puede traer
+      "capture" ("screen" | "camera" | None, de sus metadatos) y "screen_like" (bool); screens_off =
+      sids que el usuario dijo que NO son grabacion de pantalla.
+  detect_screens(files, off=None) -> (screens, resto) ; screen_like(clip) -> bool
   parse_script(text, assets=None) -> {"sections": [{"id", "lines": [ids]}],
       "lines": [{"id", "text" (sin marcas), "inserts": [nombres]}]}
       (una linea de texto = una linea del guion; linea en blanco = seccion nueva).
@@ -98,6 +120,15 @@ Contrato de salida (plan["montage"]):
    "inserts": [{"id", "line", "name", "sid" | None, "kind": "image"|"video"|None, "start", "end"
                 (None: su linea no esta en la linea de tiempo), "fit": "hold"|"speed"|"trim", "speed",
                 "src_in", "status": "ok"|"missing"}],
+   "screens": [{"id", "sid", "name", "cam" (sid de la toma), "cam_name", "offset" (s de los ARCHIVOS:
+                t_pantalla = offset + rate * t_camara, con el start_time de cada audio), "rate", "corr",
+                "margin", "overlap": [a, b] (s de la camara con pantalla), "other": [a, b] (s de la
+                pantalla), "audio_offset" (el de los wavs), "lead": [camara, pantalla] (s antes de la
+                1a muestra de audio de cada archivo), "checks": [{t, offset, corr}] (inicio/medio/final,
+                en s de los wavs), "dur", "w", "h", "capture", "crop": [x0, y0, x1, y1] | None
+                (fracciones: dentro del marco de un dispositivo emulado), "content": [x, y, w, h] | None
+                (px), "enabled"}],
+   "broll_src": [{"sid", "name", "dur", "w", "h", "has_audio", "path"}],
    "stats": {...}, "ms": int}
   join: None en el primero; "section" (empieza seccion: se permite transicion), "line" (empieza
   linea: corte seco) o "splice" (corte a media linea: corte seco, a lo mas un salto de zoom).
@@ -123,6 +154,8 @@ from functools import lru_cache
 
 import numpy as np
 
+import glossary as GL
+import screensync as SS
 import takes as TK
 
 VERSION = 1
@@ -1772,6 +1805,26 @@ def _cut_out(c: _Clip, tj1: int) -> float:
     return round(min(c.dur, _quiet_point(c, lo, min(hi, target + 0.12), target)), 3)
 
 
+END_TAIL = 1.0     # s despues de la ultima palabra del video (el cierre: el boton de seguir y el enlace)
+
+
+def _end_tail(c: _Clip, tj1: int, out: float) -> float:
+    """Salida de la ULTIMA parte del video: hasta END_TAIL s de la toma despues de su ultima palabra (v6:
+    Kevin le dio 0.9 s mas "para el boton de seguir"; sin ella el video terminaba 0.31 s despues de la
+    ultima palabra y el «Siguiendo» casi no se veia), sin pasar a voz nueva (la palabra siguiente de la
+    transcripcion o una racha de voz sin transcribir) ni al final del archivo. Nunca acorta. Sin audio
+    medido (solo texto) no se sabe si hay voz sin transcribir: no cambia."""
+    if c.db is None:
+        return out
+    w = c.toks[tj1]
+    last = tj1 + 1 >= len(c.toks)
+    hi = (c.toks[tj1 + 1].start - P["pre_roll"]) if not last else c.dur - 0.05
+    runs = _voiced_runs(c, max(out, w.end) + 0.12, hi)
+    if runs:
+        hi = min(hi, runs[0][0] - 0.05)
+    return round(max(out, min(hi, w.end + END_TAIL)), 3)
+
+
 # ----------------------------------------------------------------------------- textos (UI)
 def _clean(raw: str) -> str:
     return str(raw).strip().strip("¿¡.,;:!?…\"'«»“”")
@@ -2949,12 +3002,216 @@ def _session_stats(clips: list[_Clip], hits: list[_Hit]) -> dict:
             "med_rate": float(np.median(rates)) if rates else None}
 
 
+# ----------------------------------------------------------------------------- videos de apoyo
+BROLL_MIN_DUR = 3.0       # s: un video mudo mas corto sigue como clip (descartado "sin_audio")
+# Whisper INVENTA texto sobre musica instrumental o ruido (medido con ggml-large-v3-turbo sobre un
+# instrumental sintetico de 25 s: "Gracias por ver el video."): un video de producto con soundtrack quedaba
+# como TOMA (con su musica y ese subtitulo) y no se usaba como apoyo. Estas frases solas no son voz.
+HALLUCINATIONS = frozenset((
+    "gracias", "gracias por ver", "gracias por ver el video", "gracias por ver este video", "gracias por mirar",
+    "gracias por su atencion", "muchas gracias", "suscribete", "suscribete al canal", "no olvides suscribirte",
+    "dale like", "subtitulos realizados por la comunidad de amara org", "subtitulos por la comunidad de amara org",
+    "subtitulado por la comunidad de amara org", "subtitulos en espanol", "musica", "musica de fondo",
+    "aplausos", "risas", "amen", "thank you", "thanks for watching", "thank you for watching",
+    "subscribe", "please subscribe", "music", "applause", "you", "bye", "adios", "hasta la proxima",
+    "nos vemos en el proximo video"))
+VOICE_LONG = 12.0         # s: en un clip asi de largo...
+VOICE_COVER_MIN = 0.06    # ...con menos de esta fraccion con palabras (y pocas palabras) no hay voz
+VOICE_FEW_WORDS = 12
+HALLU_DUR = 8.0           # s: solo frases de HALLUCINATIONS en un clip de al menos esto...
+HALLU_COVER = 0.3         # ...que cubren menos de esta fraccion = musica (un "¡Gracias!" de 3 s es toma)
+
+
+def _sentences_norm(text: str) -> list[str]:
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(text or "").lower())
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    out = []
+    for part in re.split(r"[.!?¡¿…\n♪]+", t):
+        q = re.sub(r"[^a-z0-9ñ ]+", " ", part)
+        q = re.sub(r"\s+", " ", q).strip()
+        if q:
+            out.append(q)
+    return out
+
+
+def _word_cover(ws: list[dict]) -> float:
+    """s cubiertos por palabras (tramos unidos)."""
+    spans = sorted((float(w.get("start") or 0.0), float(w.get("end") or 0.0)) for w in ws)
+    cov, a0, b0 = 0.0, None, None
+    for a, b in spans:
+        if b0 is None or a > b0:
+            if b0 is not None:
+                cov += b0 - a0
+            a0, b0 = a, b
+        else:
+            b0 = max(b0, b)
+    if b0 is not None:
+        cov += b0 - a0
+    return cov
+
+
+def voiced(d: dict) -> bool:
+    """El clip tiene VOZ de verdad, no solo palabras que whisper invento sobre musica o ruido:
+      - un clip de HALLU_DUR s o mas cuyas oraciones son TODAS de HALLUCINATIONS y cubren menos de
+        HALLU_COVER de su duracion no tiene voz ("Gracias por ver el video." sobre 147 s de musica);
+      - un clip de VOICE_LONG s o mas con a lo mas VOICE_FEW_WORDS palabras que cubren menos de
+        VOICE_COVER_MIN de su duracion tampoco (palabras sueltas inventadas sobre la musica)."""
+    ws = [w for w in d.get("words") or [] if isinstance(w, dict) and str(w.get("text") or "").strip()]
+    if not ws:
+        return False
+    try:
+        dur = float(d.get("dur") or 0.0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    cover = _word_cover(ws) / dur if dur > 0 else 1.0
+    sents = _sentences_norm(" ".join(str(w["text"]) for w in ws))
+    if not sents:
+        return False
+    if dur >= HALLU_DUR and cover < HALLU_COVER and all(x in HALLUCINATIONS for x in sents):
+        return False
+    if dur >= VOICE_LONG and len(ws) <= VOICE_FEW_WORDS and cover < VOICE_COVER_MIN:
+        return False
+    return True
+
+
+def split_broll(files: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Videos de APOYO de la sesion -> (broll, el resto). Un video sin voz (mudo, o con musica o ambiente:
+    voiced(), que no cuenta lo que whisper inventa sobre la musica) de al menos BROLL_MIN_DUR s nunca es
+    toma: es material de apoyo que se usa en fragmentos mientras se habla (scripts/brollscan.py +
+    brollplan.py). Si NINGUN clip tiene voz no hay que armar y todo sigue como siempre; un clip cuya
+    transcripcion fallo (`error`) tampoco es apoyo."""
+    vids = [d for d in files if asset_kind(d) != "image"]
+    if not any(voiced(d) for d in vids):
+        return [], files
+    out = []
+    for d in vids:
+        if voiced(d) or d.get("error"):
+            continue
+        try:
+            dur = float(d.get("dur") or 0.0)
+        except (TypeError, ValueError):
+            dur = 0.0
+        if dur < BROLL_MIN_DUR:
+            continue
+        out.append(d)
+    ids = {id(d) for d in out}
+    return ([{"sid": str(d.get("sid")), "name": d.get("name") or d.get("sid"), "dur": round(float(d.get("dur") or 0.0), 3),
+              "w": d.get("w"), "h": d.get("h"), "has_audio": bool(d.get("has_audio", d.get("audio"))),
+              "path": d.get("path")} for d in out],
+            [d for d in files if id(d) not in ids])
+
+
+# ----------------------------------------------------------------------------- pantallas sincronizadas
+def screen_like(d: dict) -> bool:
+    """El archivo PUEDE ser una grabacion de pantalla: sus metadatos lo dicen (capture "screen":
+    ReplayKit, grabadores de pantalla) o, sin metadatos de camara, el servidor lo vio como pantalla
+    (screen_like: proporcion que no es de camara y sin cara). Una camara (marca/modelo) nunca."""
+    cap = d.get("capture")
+    if cap == "screen":
+        return True
+    if cap == "camera":
+        return False
+    return bool(d.get("screen_like"))
+
+
+def detect_screens(files: list[dict], off=None) -> tuple[list[dict], list[dict]]:
+    """Grabaciones de pantalla que SUENAN igual que una toma de camara (screensync.match: correlacion
+    de envolventes + afinado a ~1 ms) -> (screens, el resto): una entrada por cada toma con la que suena
+    igual (una grabacion larga puede cubrir dos tomas). Una pantalla sincronizada NUNCA es toma:
+    se ve encima de su toma, muda (la voz es la de la camara), y lo que grabo antes o despues de la
+    toma (preparar la app) nunca entra. `off`: sids que el usuario dijo que NO
+    son grabacion de pantalla (siguen como toma). Sin coincidencia (otra sesion, otra toma), el
+    archivo sigue su camino de siempre."""
+    off = {str(x) for x in off or []}
+    cands = [d for d in files if d.get("audio") and screen_like(d) and str(d.get("sid")) not in off
+             and asset_kind(d) != "image"]
+    if not cands:
+        return [], files
+    refs = [d for d in files if d.get("audio") and not screen_like(d) and asset_kind(d) != "image"]
+    cache: dict[int, tuple] = {}
+
+    def audio(d):
+        k = id(d)
+        if k not in cache:
+            y, sr = SS.read_wav(d.get("audio"))
+            cache[k] = (y, sr, SS.envelope(y, sr) if y is not None else None)
+        return cache[k]
+
+    screens, taken = [], set()
+    for c in cands:
+        cy, csr, cenv = audio(c)
+        if cy is None or cenv is None:
+            continue
+        # TODAS las tomas que suenan igual: una grabacion de pantalla larga puede cubrir dos tomas (se
+        # siguio grabando mientras se repetia la toma) o dos camaras de la misma toma (multicamara)
+        found = []
+        for r in refs:
+            ry, rsr, renv = audio(r)
+            if ry is None or renv is None:
+                continue
+            got = SS.match_env(renv, cenv)
+            if not got or not got["ok"]:
+                continue
+            fine = SS.match(ry, rsr, cy, csr, env_cam=renv, env_scr=cenv)
+            if fine and fine.get("ok"):
+                found.append((fine, r))
+        if not found:
+            continue
+        taken.add(id(c))
+        sdur = len(cy) / float(csr)
+        try:
+            dur = float(c.get("dur") or 0.0) or sdur
+        except (TypeError, ValueError):
+            dur = sdur
+        scr_lead = _audio_lead(c)
+        for res, r in sorted(found, key=lambda f: f[0]["other"][0]):
+            # wav -> segundos de cada ARCHIVO: cada wav empieza en la 1a muestra de audio de su archivo
+            cam_lead = _audio_lead(r)
+            off = round(SS.file_offset(res["offset"], cam_lead, scr_lead), 5)
+            ov = [round(res["overlap"][0] + cam_lead, 3), round(res["overlap"][1] + cam_lead, 3)]
+            other = [round(res["other"][0] + scr_lead, 3), round(res["other"][1] + scr_lead, 3)]
+            # el marco de un dispositivo emulado (o bandas fijas) en el tramo que se usa: se recorta
+            rect = SS.content_rect(c.get("path"), other[0], other[1]) if c.get("path") else None
+            screens.append({"id": f"sc{len(screens) + 1:02d}", "sid": str(c.get("sid")),
+                            "name": c.get("name") or c.get("sid"),
+                            "cam": str(r.get("sid")), "cam_name": r.get("name") or r.get("sid"),
+                            "offset": off, "rate": res.get("rate", 1.0), "corr": res["corr"],
+                            "margin": res.get("margin"), "overlap": ov, "other": other,
+                            "audio_offset": res["offset"], "lead": [round(cam_lead, 6), round(scr_lead, 6)],
+                            "checks": res.get("checks") or [], "dur": round(dur, 3),
+                            "w": c.get("w"), "h": c.get("h"), "capture": c.get("capture"),
+                            "crop": SS.crop_frac(rect),
+                            "content": [rect[k] for k in ("x", "y", "w", "h")] if rect else None,
+                            "enabled": True})
+    return screens, [d for d in files if id(d) not in taken]
+
+
+def _audio_lead(d: dict) -> float:
+    """Segundos del archivo antes de su primera muestra de audio ("a_lead" del clip o, con su
+    "path", el del probe; 0 si no se sabe): el wav de 16 kHz empieza ahi."""
+    v = d.get("a_lead")
+    if v is None and d.get("path"):
+        try:
+            from motion import video_io as V
+            v = V.audio_lead(V.probe(d["path"]))
+        except Exception:  # noqa: sin probe, como si el audio empezara con el video
+            v = 0.0
+    try:
+        v = float(v or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) and 0.0 <= v < 30.0 else 0.0
+
+
 def build(clips: list[dict], script: str | None = None, *, intercut: bool = True, glossary=None,
-          llm=None, assets=None, ramps=None) -> dict:
+          llm=None, assets=None, ramps=None, screens_off=None) -> dict:
     """Auto-montaje de la sesion -> plan["montage"] (contrato en el docstring del modulo).
     `assets`: recursos de la sesion ([{sid, name, kind?, dur?}]) para las marcas del guion; un clip
     que el guion pide o que es imagen tambien pasa a recurso (nunca es toma). `ramps`: lo que el
-    usuario decidio por union ({sid de la parte que entra | indice: bool}), gana a lo automatico."""
+    usuario decidio por union ({sid de la parte que entra | indice: bool}), gana a lo automatico.
+    Grabaciones de pantalla sincronizadas (detect_screens) quedan en "screens", nunca como toma;
+    `screens_off`: sids que el usuario dijo que no son grabacion de pantalla."""
     t_start = time.time()
     tm: dict[str, float] = {}
     if llm is True:
@@ -2963,6 +3220,11 @@ def build(clips: list[dict], script: str | None = None, *, intercut: bool = True
     gloss = _gloss_map(glossary)
     user_text = str(script or "").strip()
     files = [d for d in (clips or []) if isinstance(d, dict)]
+    if glossary:
+        # la escritura del glosario en lo que se ve (tomas, guion detectado): "NUBIs" -> "Nubis"; sin unir
+        # ni partir palabras (w0/w1 son indices de la transcripcion por clip guardada)
+        files = [dict(d, words=GL.apply(d["words"], glossary, same_count=True)) if d.get("words") else d
+                 for d in files]
     res_assets = [a for a in (assets or []) if isinstance(a, dict)]
     parsed = parse_script(user_text, files + res_assets) if user_text else None
     clean = " ".join(L["text"] for L in parsed["lines"]) if parsed else ""
@@ -2980,6 +3242,10 @@ def build(clips: list[dict], script: str | None = None, *, intercut: bool = True
                 res_assets.append(d)
         else:
             take_clips.append(d)
+    broll_src, take_clips = split_broll(take_clips)
+    t = time.time()
+    screens, take_clips = detect_screens(take_clips, screens_off)
+    tm["screens"] = time.time() - t
     t = time.time()
     cl = _prep_clips(take_clips, gloss, script_norms)
     tm["prep"] = time.time() - t
@@ -3006,7 +3272,8 @@ def build(clips: list[dict], script: str | None = None, *, intercut: bool = True
                                     "status": det_info.get("status", {})}
     out = {"version": VERSION, "order": res["order"], "script": res["script"], "slots": res["slots"],
            "timeline": res["timeline"], "discarded": res["discarded"], "uncovered": res["uncovered"],
-           "extra": res["extra"], "stats": res["stats"], "ms": 0}
+           "extra": res["extra"], "stats": res["stats"], "ms": 0, "screens": screens,
+           "broll_src": broll_src}
     plan_ramps(out, [{"sid": c.sid, "words": c.words, "dur": c.dur} for c in cl], overrides=ramps)
     out["inserts"] = plan_inserts(out, res_assets)
     st = out["stats"]
@@ -3015,6 +3282,8 @@ def build(clips: list[dict], script: str | None = None, *, intercut: bool = True
                      "missing": sum(1 for x in out["inserts"] if x["status"] != "ok"),
                      "unplaced": [x["name"] for x in out["inserts"] if x["start"] is None]}
     st["assets"] = [a.get("sid") for a in res_assets]
+    st["screens"] = [{"sid": x["sid"], "cam": x["cam"], "offset": x["offset"], "corr": x["corr"]} for x in screens]
+    st["broll"] = [x["sid"] for x in broll_src]
     out["ms"] = int(round((time.time() - t_start) * 1000))
     return out
 
@@ -3234,6 +3503,15 @@ def _assemble(cl: list[_Clip], sc: _Script, *, intercut: bool, judge: _Judge, en
             p["out"] = x["in"] = round(cut, 3)
             slot_by[p["slot"]]["cands"][0]["out"] = p["out"]
             slot_by[x["slot"]]["cands"][0]["in"] = x["in"]
+    if timeline:
+        # el cierre: la ultima parte se queda un poco mas en la toma (el CTA final se alcanza a ver)
+        x = timeline[-1]
+        new = _end_tail(x["_c"], x["_k"][1], x["out"])
+        if new > x["out"] + 1e-3:
+            x["out"] = new
+            cand0 = slot_by[x["slot"]]["cands"][0]
+            if cand0.get("id") == x["cand"]:
+                cand0["out"] = new
     for x in timeline:
         x.pop("_c", None)
         x.pop("_k", None)

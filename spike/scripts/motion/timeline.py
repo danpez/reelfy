@@ -41,6 +41,46 @@ Q_EPS = 1e-6        # tolerancia (en cuadros) para limites que ya caen en la ret
 FX_SNAP = 1.5
 
 
+OVERLAY_GAP = 0.25  # s: entre dos recursos (o un recurso y un cambio de toma) menos que esto es un destello
+
+
+def overlay_continuity(wins: list, frames: Iterable[int], fps: float, tol: float = OVERLAY_GAP) -> list:
+    """Ventanas FINALES de los recursos que tapan la camara (fragmentos de apoyo, tarjetas) sin destellos de
+    la camara de 1-7 cuadros: `wins` = [[fs, fe, mueve_inicio, mueve_fin]] (s finales); `frames`: cuadros
+    de las uniones y cambios de toma (content_frames). Un fin que queda a menos de `tol` s ANTES de un
+    cambio de toma se alarga hasta el (no asoma un cuadro de la toma anterior); un inicio a menos de `tol`
+    s DESPUES de uno se adelanta a el; dos recursos separados por menos de `tol` s se pegan (el primero
+    termina donde empieza el segundo). Solo se mueven los bordes marcados. -> [[fs, fe]] (mismo orden)."""
+    f = float(fps)
+    fr = sorted(set(int(x) for x in frames or []))
+    out = [[float(w[0]), float(w[1])] for w in wins]
+    mv_s = [len(w) > 2 and bool(w[2]) for w in wins]
+    mv_e = [len(w) > 3 and bool(w[3]) for w in wins]
+    order = sorted(range(len(out)), key=lambda i: out[i][0])
+    # 1) dos recursos casi seguidos: se pegan
+    for a, b in zip(order, order[1:]):
+        gap = out[b][0] - out[a][1]
+        if 0.0 < gap < tol - EPS:
+            if mv_e[a]:
+                out[a][1] = out[b][0]
+            elif mv_s[b]:
+                out[b][0] = out[a][1]
+    # 2) bordes junto a un cambio de toma: hasta el (sin pasar al recurso vecino)
+    for j, i in enumerate(order):
+        o = out[i]
+        nxt = out[order[j + 1]][0] if j + 1 < len(order) else float("inf")
+        prv = out[order[j - 1]][1] if j > 0 else -float("inf")
+        if mv_e[i]:
+            k = bisect.bisect_right(fr, o[1] * f + Q_EPS)
+            if k < len(fr) and fr[k] / f - o[1] < tol - EPS and fr[k] / f <= nxt + EPS:
+                o[1] = fr[k] / f
+        if mv_s[i]:
+            k = bisect.bisect_left(fr, o[0] * f - Q_EPS) - 1
+            if k >= 0 and o[0] - fr[k] / f < tol - EPS and fr[k] / f >= prv - EPS and fr[k] / f < o[1] - 1.0 / f:
+                o[0] = fr[k] / f
+    return out
+
+
 def shot_frame(t: float, fps: float) -> int:
     """Primer cuadro de la reticula de salida (k / fps) que muestra la toma que empieza en `t` s.
 

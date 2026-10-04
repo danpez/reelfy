@@ -357,7 +357,11 @@
     }
     if (track === "cutaways") { const tx = getPath(it, "text.text"); return tx ? `${kindLabel(schema, track, it.kind)}: ${String(tx).replace(/\s+/g, " ")}` : kindLabel(schema, track, it.kind); }
     if (track === "sfx") return String(it.name || "").replace(/_/g, " ");
-    if (track === "media") return it.name ? String(it.name) : "Recurso";
+    if (track === "media") {
+      // un fragmento de un video de apoyo: lo que se dice mientras se ve (las primeras palabras)
+      if (it.style === "reel" && it.text) return "Apoyo: " + String(it.text).replace(/\s+/g, " ").trim().split(" ").slice(0, 5).join(" ");
+      return it.name ? String(it.name) : "Recurso";
+    }
     return kindLabel(schema, track, itemKind(schema, track, it));
   }
 
@@ -2356,6 +2360,8 @@
     let stage = j.state === "queued" ? "queued" : "words";
     if (j.stage === "words") stage = "words";
     else if (j.stage === "montage" || j.stage === "match") stage = "match";
+    // viendo los videos de apoyo (despues de elegir las tomas): sigue en "Eligiendo..." con su mensaje
+    else if (j.stage === "broll") return { state: "running", stage: "match", broll: true, n: null, N: null, errors: 0, message: msg, pct: +j.pct || 0 };
     else if (/escuch|transcrib/i.test(msg)) stage = "words";
     else if (/elig|arm|compar|guion/i.test(msg)) stage = "match";
     const n = w && isFinite(+w.done) && w.done !== null ? +w.done : nn ? +nn[1] : null;
@@ -2845,6 +2851,11 @@
     ["text", "graphics", "cutaways", "transitions", "effects"].forEach(tk => (fx[tk] || []).forEach(it => walk(it, 0)));
     // los titulos con palabras de acento sin color propio lo toman del proyecto
     (fx.text || []).forEach(it => { if (it && (it.accent_words || []).length && !it.accent) { it.accent = a; n++; } });
+    // el boton «Seguir» que la IA pinto con el oscuro de la paleta (acento del estilo blanco: Minimal;
+    // button_auto) toma el color de tu marca si se lee como boton (= server._accent_apply)
+    (fx.graphics || []).forEach(it => {
+      if (it && it.kind === "cta" && it.button_auto && it.src !== "user" && engineLum(a) <= 0.85 && normHex(it.button_color) !== a) { it.button_color = a; n++; }
+    });
     fx.captions = fx.captions || {};
     // la pastilla propia (aunque sea del color de la marca de antes) no se recolorea
     if (fx.captions.highlight && olds.has(normHex(fx.captions.highlight)) && !pillOwn(plan)) fx.captions.highlight = a;
@@ -3289,6 +3300,15 @@
     const n = parseInt((normHex(hex) || "#FFFFFF").slice(1), 16);
     return 0.2126 * ((n >> 16) & 255) / 255 + 0.7152 * ((n >> 8) & 255) / 255 + 0.0722 * (n & 255) / 255;
   }
+  /** = text.caption_contrast: (trazo, sombra) de un grupo de subtitulos de tinta `color` sobre un fondo de
+      luminancia `bgLum` (0..1, null = no se sabe). Tinta clara (>= 0.6) sobre fondo claro (>= 0.55): al
+      menos un trazo oscuro fino (2) y la sombra completa (1.0); si no, lo del estilo. */
+  const CONTRAST = { ink: 0.6, lum: 0.55, stroke: 2.0, shadow: 1.0 };
+  function captionContrast(color, bgLum, stroke, shadow) {
+    const st = +stroke || 0, sh = +shadow || 0, lum = bgLum == null ? null : +bgLum;
+    if (lum == null || !isFinite(lum) || lum < 0 || engineLum(color || "#FFFFFF") < CONTRAST.ink || lum < CONTRAST.lum) return { stroke: st, shadow: sh };
+    return { stroke: Math.max(st, CONTRAST.stroke), shadow: Math.max(sh, CONTRAST.shadow) };
+  }
   /** Color del boton «Seguir» de la invitacion (graphics._cta_follow): button_color, si no `color`,
       si no rojo; uno casi blanco (> 0.85) no se ve sobre la pastilla blanca y el motor lo pinta rojo. */
   const CTA_BTN_FALLBACK = "#FF3B5C";
@@ -3486,7 +3506,7 @@
     elegante: { captions: { preset: "clean_bold", y: 0.73, size: 0.058, font: "Poppins-Bold", case: "none", max_words: 3 }, title: "serif_elegant", titleFont: "DMSerifDisplay", look: "cinematic",
       grade: { look: "cinematic", vignette: 0.24, grain: 0.03, sharpen: 0.1 } },
     minimal: { captions: { preset: "clean_bold", y: 0.73, size: 0.06, font: "Montserrat-ExtraBold", case: "none", max_words: 3 }, title: "title_pop", titleFont: "Montserrat-ExtraBold", look: "natural",
-      grade: { look: "natural", vignette: 0.08, grain: 0.0, sharpen: 0.1 } },
+      grade: { look: "natural", vignette: 0.0, grain: 0.0, sharpen: 0.0, enabled: false, match_shots: false } },
     energetico: { captions: { preset: "bold_caps", y: 0.725, size: 0.056, font: "Poppins-Black", case: "upper", max_words: 3 }, title: "stack", titleFont: "Anton", look: "bright_pop",
       grade: { look: "bright_pop", vignette: 0.12, grain: 0.02, sharpen: 0.2 } },
   };
@@ -3499,17 +3519,23 @@
   const CAP_LOOK = ["enabled", "preset", "font", "color", "case", "max_words", "highlight", "stroke", "shadow", "box", "kw_accent", "recenter", "max_lines"];
   const dirStyleOf = st => (DIRECTOR_CARDS[st] ? st : "dinamico");
   const sameKeep = (a, b) => (a !== null && b !== null && typeof a === "object" && typeof b === "object" ? JSON.stringify(a) === JSON.stringify(b) : a === b);
-  /** El color del plan lo ajusto el usuario (algun valor difiere del color del estilo `style`). */
+  /* = director._GRADE_PREV: el color que dejaba cada estilo en versiones anteriores (sin tocar = no es
+     del usuario; un Minimal de v0.6.0 con correccion encendida toma el Minimal nuevo al re-dirigir). */
+  const GRADE_PREV = { minimal: [{ enabled: true, look: "natural", match_shots: true, vignette: 0.08, grain: 0.0, sharpen: 0.1 }] };
+  const gradeDiffers = (g, base) => Object.keys(g).some(k => {
+    if (!Object.prototype.hasOwnProperty.call(base, k)) return false;
+    const d = base[k], v = g[k];
+    if (typeof d === "number" && typeof v === "number") return Math.abs(v - d) > 1e-4;
+    return !sameKeep(v, d);
+  });
+  /** El color del plan lo ajusto el usuario (algun valor difiere del color del estilo `style`, el de
+      ahora y los de versiones anteriores). */
   function gradeTuned(g, style) {
     if (!g || typeof g !== "object" || Array.isArray(g)) return false;
-    const gc = DIRECTOR_CARDS[dirStyleOf(style)].grade;
-    const base = Object.assign({}, GRADE_NEUTRAL, { enabled: true, look: gc.look, match_shots: true, vignette: gc.vignette, grain: gc.grain, sharpen: gc.sharpen });
-    return Object.keys(g).some(k => {
-      if (!Object.prototype.hasOwnProperty.call(base, k)) return false;
-      const d = base[k], v = g[k];
-      if (typeof d === "number" && typeof v === "number") return Math.abs(v - d) > 1e-4;
-      return !sameKeep(v, d);
-    });
+    const st = dirStyleOf(style), gc = DIRECTOR_CARDS[st].grade;
+    const bases = [{ enabled: gc.enabled !== false, look: gc.look, match_shots: gc.match_shots !== false, vignette: gc.vignette, grain: gc.grain, sharpen: gc.sharpen }]
+      .concat(GRADE_PREV[st] || []);
+    return bases.every(b => gradeDiffers(g, Object.assign({}, GRADE_NEUTRAL, b)));
   }
   /** Subtitulos y color que deja el director al dirigir `plan` con `style`:
       {captions, capsKept: [campos del usuario], grade, gradeKept}. */
@@ -3528,7 +3554,7 @@
     }
     const gc = DIRECTOR_CARDS[st].grade;
     const gradeKept = locked.has("grade") || gradeTuned(f.grade, old);
-    const grade = gradeKept ? clone(f.grade || {}) : { enabled: true, look: gc.look, match_shots: true, vignette: gc.vignette, grain: gc.grain, sharpen: gc.sharpen };
+    const grade = gradeKept ? clone(f.grade || {}) : { enabled: gc.enabled !== false, look: gc.look, match_shots: gc.match_shots !== false, vignette: gc.vignette, grain: gc.grain, sharpen: gc.sharpen };
     return { captions, capsKept, grade, gradeKept };
   }
   /** «Qué cambia con …» con lo que se conserva: el renglon de los subtitulos y el del color cambian
@@ -3963,7 +3989,7 @@
     keptMarks, unionLen, takeStats, removedByCategory, kindCounts, levelOn, applyLevel, levelFinal,
     setCutEnabled, toggleCut, setCutsEnabled, kindOn, setKindEnabled, reviewItems, cleanSections, scriptParagraphs, listenRange, fmtLen,
     markEdges, adoptTakeCuts, takeReason, isLongLandscape, defaultFormat, projectFormat, shortsFor,
-    spring, pillWordRect, pillAt, contrastOn, CAPTION_ROLES, captionColorRoles, captionStyleNote, captionCardOf, highlightLinked, paintsAccent, engineLum, ctaButtonColor, CTA_BTN_FALLBACK,
+    spring, pillWordRect, pillAt, contrastOn, CAPTION_ROLES, captionColorRoles, captionStyleNote, captionCardOf, highlightLinked, paintsAccent, engineLum, ctaButtonColor, CTA_BTN_FALLBACK, CONTRAST, captionContrast,
     spokenWords, pickSampleShot, otherShot, sampleWindow, nearestChoice, fillExample, humanNum, humanValue, copyFor, visibleRows,
     CAPTION_COLOR_IDS, colorName, presetFromPlan, captionGroupsFor,
     LOOK_ORDER, srgbToLin, linToSrgb, vignetteAt, vignetteBwAt, lookVigCenter, shapeAt, shapeInv, percentileOf, bwGain, bwGainOf, bwTable,
@@ -3971,6 +3997,6 @@
     DIRECTOR_CARDS, DIRECTOR_ORDER, directorCounts, directorExample, musicSourceOf, musicBpmOf, musicBpmSet, KEYSCALES, keyscaleEs,
     moodSampleUrl, PROFILE_USE, profileUseOf, logoRect, FORMAT_ORDER, FORMAT_SHAPE,
     fmtTime, parseTime, paramCopyId, VARIANT_FIELDS, variantShows, paramHidden, colorFromBrand, relChoices, zStep, inspectorGroups, unitEs, plainValue,
-    shortsWanted, LOOK_POLL, lookPollDelay, STYLE_FONTS, captionFonts, pillOwn, setPillOwn, colorWhereWords, captionOptionApplies, MONO_LOOKS, GRADE_COLOR_KEYS, gradeOptionApplies, musicReadyText, musicPromptShown, setMusicPrompt, airApplies, GRADE_NEUTRAL, CAP_LOOK, gradeTuned, directorOutcome, directorQueCambia,
+    shortsWanted, LOOK_POLL, lookPollDelay, STYLE_FONTS, captionFonts, pillOwn, setPillOwn, colorWhereWords, captionOptionApplies, MONO_LOOKS, GRADE_COLOR_KEYS, gradeOptionApplies, musicReadyText, musicPromptShown, setMusicPrompt, airApplies, GRADE_NEUTRAL, GRADE_PREV, CAP_LOOK, gradeTuned, directorOutcome, directorQueCambia,
   };
 });

@@ -1132,7 +1132,8 @@ def test_wave2_style_defaults():
     for st, cfg in D.STYLES.items():
         c = cfg["captions"]
         assert c["preset"] != "minimal_small" and c["size"] >= 0.056 and c["y"] <= 0.735, st
-        assert cfg["music"]["gain_db"] == (-14.0 if st in ("dinamico", "energetico") else -17.0)
+        # minimal: el piano suave de la edicion aprobada, mas bajo (-19)
+        assert cfg["music"]["gain_db"] == {"dinamico": -14.0, "energetico": -14.0, "minimal": -19.0}.get(st, -17.0)
         assert cfg["music"].get("mood")
     p = D.direct(synthetic_plan(), use_llm=False)
     assert p["fx"]["music"].get("mood") and p["fx"]["music"]["gain_db"] == -14.0

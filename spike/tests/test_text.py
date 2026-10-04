@@ -1055,9 +1055,20 @@ def test_caption_group_hidden_at_start_stays_hidden():
     groups = T.caption_groups(ph, cfg, _ctx())
     g = groups[0]
     cfg_h = dict(cfg, _hide=[[g["start"] - 0.2, g["end"] - 0.2]])     # el titulo acaba antes que el grupo
+    # (el agrupado cuenta solo lo visible fuera de los titulos: el grupo que el titulo tapa termina con el
+    # titulo y lo dicho despues va en el siguiente; lo tapado no reaparece en ningun cuadro)
+    gh = T.caption_groups(ph, cfg_h, _ctx())
+    hid = [x for x in gh if x["start"] < g["end"] - 0.2 and x["start"] + 0.13 <= g["end"] - 0.2]
+    assert hid
+    for x in hid:
+        for tt in (x["start"] + 0.2, (x["start"] + x["end"]) / 2, x["end"] - 0.05):
+            arr, cv = _canvas()
+            T.draw_captions(cv, ph, cfg_h, tt, _ctx(tt))
+            assert _alpha_bbox(arr) is None, (x["text"], tt)
+    nxt = next(x for x in gh if x not in hid)
     arr, cv = _canvas()
-    T.draw_captions(cv, ph, cfg_h, g["end"] - 0.05, _ctx(g["end"] - 0.05))
-    assert _alpha_bbox(arr) is None
+    T.draw_captions(cv, ph, cfg_h, nxt["end"] - 0.1, _ctx(nxt["end"] - 0.1))
+    assert _alpha_bbox(arr) is not None
     arr2, cv2 = _canvas()
     T.draw_captions(cv2, ph, cfg, g["end"] - 0.05, _ctx(g["end"] - 0.05))
     assert _alpha_bbox(arr2) is not None

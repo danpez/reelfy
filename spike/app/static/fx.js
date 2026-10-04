@@ -126,6 +126,8 @@
   FX.timeline = tlObj;
   FX.invalidateTimeline = () => { TLCACHE.at = 0; };
   FX.finalTime = t => tlObj().remapClamped(t);
+  /** Tiempo ORIGINAL que muestra el cuadro final tf (Timeline.inverse). */
+  FX.tlInverse = tf => tlObj().inverse(tf);
 
   // ------------------------------------------------------------------ red
   async function jget(url) { const r = await fetch(url); if (!r.ok) throw Object.assign(new Error(`${r.status}`), { status: r.status }); return r.json(); }
@@ -624,7 +626,7 @@
   function mediaTrackOn() { return items("media").length > 0 || !!(SCHEMA && SCHEMA.tracks && SCHEMA.tracks.media); }
   FX.mediaTrackOn = mediaTrackOn;
   function kindIcon(track, it) {
-    if (track === "media") return it && it.kind === "video" ? "film" : "image";
+    if (track === "media") return it && it.style === "screen" ? "phone" : it && it.style === "reel" ? "layers" : it && it.kind === "video" ? "film" : "image";
     if (track === "text") return "type";
     if (track === "graphics") return { doodle: "spark", icon: "star", card: "card", lower_third: "lowerthird", cta: "pointer", progress: "minus", sticker_text: "tag", media: "image" }[it.kind] || "shapes";
     if (track === "cutaways") return it.kind === "photo" ? "image" : "scene";
@@ -899,7 +901,7 @@
       + `<button data-a="dup">${ICO("copy")}Duplicar<small>⌘D</small></button>`
       + `<button data-a="en">${ICO(allOff ? "eye" : "eyeoff")}${allOff ? "Activar" : "Desactivar"}<small>H</small></button>`
       + `<button data-a="lock">${ICO("lock")}${allLocked ? "Desbloquear" : "Bloquear"}<small>L</small></button>`
-      + (sel.every(s => s.track === "media") ? `<button data-a="rfile">${ICO("upload")}Reemplazar archivo</button>` : `<button data-a="regen">${ICO("spark")}Regenerar con IA</button>`)
+      + (sel.every(s => s.track === "media") ? (sel.some(s => s.item && (s.item.style === "screen" || s.item.style === "reel")) ? "" : `<button data-a="rfile">${ICO("upload")}Reemplazar archivo</button>`) : `<button data-a="regen">${ICO("spark")}Regenerar con IA</button>`)
       + `<button data-a="del">${ICO("trash")}Eliminar<small>Supr</small></button>`;
     openMenu(x, y, html, m => m.querySelectorAll("[data-a]").forEach(b => b.onclick = () => { m.classList.remove("on"); FX.action(b.dataset.a); }));
   };
@@ -1545,14 +1547,18 @@
   }
   /** Ajuste de un recurso de video a su tramo (al moverlo, recortarlo o cambiar el ajuste). */
   function mediaRefit(it, fit) {
-    if (!it) return;
+    if (!it || it.style === "screen" || it.style === "reel") return;   // pantalla: sigue su toma; apoyo: sus tomas se reparten el tramo
     if (it.kind !== "video") { it.fit = "hold"; it.speed = 1; it.src_in = 0; return; }
     const d = mediaDurOf(it), L = Math.max(0.1, (+it.end || 0) - (+it.start || 0));
     it.fit = fit || it.fit || "hold";
     // la regla de compose._media_fit: se acelera hasta x4 o se alenta hasta x0.8 para llenar el tramo
     if (it.fit === "speed") it.speed = r3(d > 0 ? clamp(d / L, C.INS.slowMin, 4) : (+it.speed || 1));
     else it.speed = 1;
-    it.src_in = it.fit === "trim" ? r3(clamp(+it.src_in || 0, 0, Math.max(0, d - L))) : 0;
+    // "Desde qué segundo del clip": dentro del clip (que no se acabe antes del tramo). Sin la duracion
+    // del archivo (aun no carga) se respeta lo que puso el usuario: antes se iba a 0 y el recurso
+    // siempre empezaba al inicio del archivo
+    const si = Math.max(0, +it.src_in || 0);
+    it.src_in = it.fit === "trim" ? r3(d > 0 ? Math.min(si, Math.max(0, d - L)) : si) : 0;
   }
   FX.mediaRefit = mediaRefit;
   const MEDIA_FIT_ES = { hold: "Completo (se queda en su último cuadro)", speed: "Ajustar la velocidad para que llene su tramo", trim: "Recortar: se ve lo que cabe" };
@@ -1594,7 +1600,7 @@
     const op = o || {}, box = document.createElement("div"); box.className = "ins-actions";
     box.innerHTML = `<button class="btn ghost mini" type="button" data-a="en" aria-pressed="${it.enabled === false}" title="${esc(ST("insp.act.visible.title"))}">${ICO(it.enabled === false ? "eyeoff" : "eye")}${esc(ST(it.enabled === false ? "insp.act.hidden" : "insp.act.visible"))}</button>`
       + (op.noLock ? "" : `<button class="btn ghost mini ${it.locked ? "on" : ""}" type="button" data-a="lock" aria-pressed="${!!it.locked}" title="${esc(ST("insp.act.lock.title"))}">${ICO("lock")}${esc(ST(it.locked ? "insp.act.locked" : "insp.act.lock"))}</button>`)
-      + `<button class="btn ghost mini" type="button" data-a="dup" title="${esc(ST("insp.act.dup.title"))}">${ICO("copy")}${esc(ST("insp.act.dup"))}</button>`
+      + (op.noDup ? "" : `<button class="btn ghost mini" type="button" data-a="dup" title="${esc(ST("insp.act.dup.title"))}">${ICO("copy")}${esc(ST("insp.act.dup"))}</button>`)
       + `<button class="btn ghost mini" type="button" data-a="del" title="${esc(ST("insp.act.del.title"))}">${ICO("trash")}${esc(ST("insp.act.del"))}</button>`
       + (op.noRegen ? "" : `<button class="btn ghost mini full" type="button" data-a="regen" title="${esc(ST("insp.act.regen.title"))}"${DIRECTING ? " disabled" : ""}>${ICO("spark")}${esc(ST("insp.act.regen"))}</button>`);
     box.querySelectorAll("[data-a]").forEach(x => x.onclick = () => { if (x.dataset.a === "regen") FX.regenerate([it.id]); else FX.action(x.dataset.a); });
@@ -1650,6 +1656,8 @@
 
   /** Inspector de un recurso (fx.media): archivo, tiempo y ajuste. Siempre centrado (simetria) y sin audio. */
   function inspectMedia(b, it) {
+    if (it.style === "screen") { inspectScreen(b, it); return; }
+    if (it.style === "reel") { inspectReel(b, it); return; }
     head(b, "media", it, it.name || "Recurso", `${TRACK_META.media.label} · ${C.fmtTime(FX.finalTime(+it.start))} a ${C.fmtTime(FX.finalTime(+it.end))} (${C.humanNum(Math.max(0, FX.finalTime(+it.end) - FX.finalTime(+it.start)))} s)`);
     if (!hasCopy()) { b.insertAdjacentHTML("beforeend", `<div class="hint">Cargando el catálogo de ajustes…</div>`); return; }
     levelBar(b);
@@ -1660,7 +1668,7 @@
     fr.innerHTML = `<span class="md-th">${th ? `<img alt="" src="${th}">` : ICO("alert")}</span><span class="md-nm"><b class="ucontent">${esc(it.name || "")}</b><span>${esc(ST(it.sid ? (it.kind === "video" ? "media.file.video" : "media.file.image") : "media.file.none"))}</span></span>`;
     const rb = document.createElement("button"); rb.type = "button"; rb.className = "btn ghost mini"; rb.innerHTML = `${ICO("upload")}${esc(ST(it.sid ? "media.file.replace" : "media.file.add"))}`;
     rb.onclick = () => FX.replaceMedia(it); fr.appendChild(rb);
-    rows.appendChild(rowOf(null, opt, "", fr, null, { id: "media.file", full: true, note: it.src === "script" ? ST("media.file.script") : undefined }));
+    rows.appendChild(rowOf(null, opt, "", fr, null, { id: "media.file", full: true, note: it.src === "script" ? ST(it.off_why === "screen" && it.enabled === false ? "media.file.under_screen" : "media.file.script") : undefined }));
     const ts = insSection(b, "time");
     ["start", "end"].forEach(k => {
       const p = (C.commonParams(SCHEMA, "media") || []).find(x => x.k === k) || { k, type: "num", label: k };
@@ -1694,6 +1702,130 @@
     // nunca una posicion X: la tarjeta va centrada (simetria)
     const skip = new Set(["sid", "path", "name", "kind", "fit", "speed", "src_in", "x"]);
     const ps = C.kindParams(SCHEMA, "media", it.style || "float_card").filter(p => !p.internal && !skip.has(p.k));
+    if (ps.length) renderParams(insSection(b, "style"), ps, it, opt);
+    dropEmpty(b);
+  }
+  /** Inspector de una grabacion de pantalla sincronizada (fx.media "screen", motion/screen.py): con que
+      toma va (el audio), sin su sonido, quitarla/ponerla, su tiempo (las orillas en la pista Recursos) y
+      su presentacion (movimiento, ancho, fondo, esquinas). Siempre centrada (simetria). */
+  function inspectScreen(b, it) {
+    const span = `${TRACK_META.media.label} · ${C.fmtTime(FX.finalTime(+it.start))} a ${C.fmtTime(FX.finalTime(+it.end))} (${C.humanNum(Math.max(0, FX.finalTime(+it.end) - FX.finalTime(+it.start)))} s)`;
+    head(b, "media", it, ST("media.screen.title") || "Grabación de pantalla", span);
+    if (!hasCopy()) { b.insertAdjacentHTML("beforeend", `<div class="hint">Cargando el catálogo de ajustes…</div>`); return; }
+    levelBar(b);
+    const rows = rowsBox(b), opt = { track: "media", item: it, kind: "screen" };
+    rows.appendChild(actionsRow(it, { noLock: true, noRegen: true, noDup: true }));
+    const th = it.sid ? `/tlsource/${encodeURIComponent(it.sid)}/thumb` : "";
+    const fr = document.createElement("div"); fr.className = "md-file scr-file";
+    const off = it.enabled === false;
+    fr.innerHTML = `<span class="md-th">${th ? `<img alt="" src="${th}">` : ICO("alert")}</span><span class="md-nm"><b class="ucontent">${esc(it.name || "")}</b>`
+      + `<span>${esc(ST("media.screen.sync", { toma: it.cam_name || "tu toma" }))}</span><span>${esc(ST(off ? "media.screen.off" : "media.screen.mute"))}</span></span>`;
+    const tb = document.createElement("button"); tb.type = "button"; tb.className = "btn ghost mini"; tb.dataset.a = "scrtoggle";
+    tb.innerHTML = `${ICO(off ? "restore" : "eyeoff")}${esc(ST(off ? "media.screen.show" : "media.screen.hide"))}`;
+    tb.onclick = () => FX.action("en"); fr.appendChild(tb);
+    const notes = [];
+    const SCm = window.ScreenCard, w0 = +it.w || 0, h0 = +it.h || 0;
+    if (SCm && w0 > 0 && h0 > 0) {
+      const crop = SCm.cropOf(it);
+      if (crop) notes.push(ST("media.screen.crop", { w: Math.round(w0 * (crop[2] - crop[0])), h: Math.round(h0 * (crop[3] - crop[1])) }));
+      // a 4K (2160 de ancho) la ventana mide w * 2160: si eso pasa los pixeles del archivo, se dice
+      const pl = curPlan(), cov = SCm.coverage(it) || [it.start, it.end], pcap = pl.fx.captions, capOn = !!(pcap && pcap.enabled !== false);
+      const FCm = window.FloatCard;
+      const card = SCm.layout(w0, h0, 9 / 16, FCm.captionTop(pcap, capOn, cov[0], cov[1], 9 / 16), FCm.captionBottom(pcap, capOn, cov[0], cov[1], 9 / 16), it.width, crop);
+      const vis = w0 * (crop ? crop[2] - crop[0] : 1), x = card.w * 2160 / vis;
+      if (x > 1.05) notes.push(ST("media.screen.upscale", { w: Math.round(vis), h: Math.round(h0 * (crop ? crop[3] - crop[1] : 1)), x: x.toFixed(1) }));
+    }
+    rows.appendChild(rowOf(null, { track: "media", kind: "screen" }, "", fr, null, { id: "media.screen", full: true, note: notes.join(" ") || undefined }));
+    const ts = insSection(b, "time");
+    ["start", "end"].forEach(k => {
+      const p = (C.commonParams(SCHEMA, "media") || []).find(x => x.k === k) || { k, type: "num", label: k };
+      const tf = ES().Catalog.timeField({ name: C.copyFor(SCHEMA.ui, `common.${k}`).label, get: () => it[k], set: v => edit(() => {
+        const t = r3(clamp(+v, 0, dur()));
+        if (k === "start") it.start = clamp(t, 0, it.end - 0.3);
+        else it.end = r3(clamp(t, it.start + 0.3, dur()));
+      }, { rebuild: true }) });
+      tf.input.dataset.k = k;
+      ts.appendChild(rowOf(p, opt, p.label, tf.el, null, k === "end" ? { note: ST("media.screen.time") } : undefined));
+    });
+    const ps = C.kindParams(SCHEMA, "media", "screen").filter(p => !p.internal && !["sid", "path", "name", "kind", "fit", "speed", "src_in", "x"].includes(p.k));
+    if (ps.length) renderParams(insSection(b, "style"), ps, it, opt);
+    dropEmpty(b);
+  }
+  /** Inspector de un video de apoyo en fragmentos (fx.media "reel", motion/reel.py): por que esta ahi (la
+      frase), su formato (ventana flotante o pantalla completa), sus tomas (cambiar una por otra que sirve, o
+      quitarla), su tiempo y su presentacion. Las opciones son SOLO tomas que sirven en ese formato (sin
+      personas, sin cortar textos: plan.montage.broll) y que no estan en otro fragmento. */
+  function inspectReel(b, it) {
+    const R = window.ReelCard, pl = curPlan();
+    const span = `${TRACK_META.media.label} · ${C.fmtTime(FX.finalTime(+it.start))} a ${C.fmtTime(FX.finalTime(+it.end))} (${C.humanNum(Math.max(0, FX.finalTime(+it.end) - FX.finalTime(+it.start)))} s)`;
+    head(b, "media", it, ST("media.reel.title") || "Video de apoyo", span);
+    if (!hasCopy() || !R) { b.insertAdjacentHTML("beforeend", `<div class="hint">Cargando el catálogo de ajustes…</div>`); return; }
+    levelBar(b);
+    const rows = rowsBox(b), opt = { track: "media", item: it, kind: "reel" };
+    rows.appendChild(actionsRow(it, { noLock: true, noRegen: true, noDup: true }));
+    const src = R.sourceOf(pl, it.sid), lay = R.layoutOf(it);
+    // por que esta aqui: la frase que se dice y de que video salen sus tomas
+    const why = document.createElement("div"); why.className = "md-file reel-why";
+    const th = it.sid ? `/tlsource/${encodeURIComponent(it.sid)}/thumb` : "";
+    why.innerHTML = `<span class="md-th">${th ? `<img alt="" src="${th}">` : ICO("alert")}</span><span class="md-nm"><b class="ucontent">${esc(it.name || (src && src.name) || "")}</b>`
+      + `<span>${esc(it.text ? ST("media.reel.said", { frase: String(it.text).slice(0, 140) }) : ST("media.reel.mine.item"))}</span></span>`;
+    rows.appendChild(rowOf(null, opt, "", why, null, { id: "media.reel", full: true, note: !src ? ST("media.reel.nolib") : undefined }));
+    // formato: ventana flotante o pantalla completa (solo si alcanzan las tomas que sirven ahi)
+    const alt = lay === "full" ? "window" : "full", altPieces = src ? R.relayout(pl, it, alt, ST("media.reel.mine")) : null;
+    const fp = (C.kindParams(SCHEMA, "media", "reel") || []).find(x => x.k === "layout") || { k: "layout", type: "seg", label: "layout" };
+    const seg = ES().Segmented.create({ choices: R.LAYOUTS.map(v => ({ v, label: lbl(v, "media.layout") || v, disabled: v !== lay && !altPieces })), value: lay,
+      onPick: v => { if (v === lay || !altPieces) return; edit(() => { it.layout = v; it.pieces = altPieces; }, { rebuild: true }); } });
+    const swapped = altPieces ? altPieces.filter((q, k) => (it.pieces[k] || {}).shot !== q.shot).length : 0;
+    rows.appendChild(rowOf(fp, opt, "", seg.el, null, { note: !altPieces && src ? ST(alt === "full" ? "media.reel.nofull" : "media.reel.nowindow")
+      : swapped ? ST("media.reel.swapnote", { n: swapped }) : undefined }));
+    // las tomas
+    const ts = insSection(b, "content");
+    const list = document.createElement("div"); list.className = "reel-shots";
+    const f0 = FX.finalTime(+it.start), f1 = FX.finalTime(+it.end), rws = R.fit(R.piecesOf(it), Math.max(0.05, f1 - f0), 30);
+    const byI = {}; ((src && src.shots) || []).forEach(sh => { byI[sh.i] = sh; });
+    const open = FX._reelOpen === it.id ? FX._reelSlot : -1;
+    (it.pieces || []).forEach((p, j) => {
+      const sh = byI[p.shot] || {}, rw = rws.find(r => r[3] === j), d = rw ? rw[1] - rw[0] : (+p.out - +p.in);
+      const card = document.createElement("div"); card.className = "reel-shot" + (open === j ? " open" : ""); card.dataset.j = j;
+      card.innerHTML = `<span class="rs-th"><img alt="" loading="lazy" src="/broll/${encodeURIComponent(it.sid)}/shot/${encodeURIComponent(p.shot)}.jpg"></span>`
+        + `<span class="rs-main"><b>${esc(ST("media.reel.shot", { n: j + 1, s: C.humanNum(Math.max(0, d)), desde: C.fmtTime(+p.in) }))}</b>`
+        + `<span class="rs-why">${esc(p.why || sh.what || "")}</span></span>`
+        + `<span class="rs-acts"><button class="btn ghost mini" type="button" data-a="swap" aria-expanded="${open === j}">${ICO("restore")}${esc(ST("media.reel.change"))}</button>`
+        + ((it.pieces || []).length > 2 ? `<button class="btn ghost mini" type="button" data-a="drop" title="${esc(ST("media.reel.drop.title"))}">${ICO("minus")}${esc(ST("media.reel.drop"))}</button>` : "") + `</span>`;
+      card.querySelector('[data-a="swap"]').onclick = () => { FX._reelOpen = it.id; FX._reelSlot = open === j ? -1 : j; FX.inspect(SEL, true); };
+      const db = card.querySelector('[data-a="drop"]');
+      if (db) db.onclick = () => edit(() => { it.pieces = it.pieces.filter((q, k) => k !== j); }, { rebuild: true });
+      list.appendChild(card);
+      if (open === j) {
+        const opts = R.options(pl, it, lay, +p.in).slice(0, 12);
+        const g = document.createElement("div"); g.className = "reel-pick";
+        g.innerHTML = opts.length ? opts.map(o => `<button type="button" class="rp-opt" data-i="${o.i}" title="${esc(o.what || "")}"><img alt="" loading="lazy" src="/broll/${encodeURIComponent(it.sid)}/shot/${o.i}.jpg"><span>${esc(o.what || ST("media.reel.shot.n", { n: o.i + 1 }))}</span></button>`).join("")
+          : `<div class="hint">${esc(ST("media.reel.none"))}</div>`;
+        g.querySelectorAll(".rp-opt").forEach(bt => bt.onclick = () => {
+          const sh2 = byI[+bt.dataset.i]; if (!sh2) return;
+          FX._reelSlot = -1;
+          edit(() => { it.pieces = R.swap(it, j, sh2, ST("media.reel.mine")); }, { rebuild: true });
+        });
+        list.appendChild(g);
+      }
+    });
+    ts.appendChild(rowOf(null, opt, "", list, null, { id: "media.reel.shots", full: true, note: ST("media.reel.rule") }));
+    // tiempo (las tomas se reparten el tramo)
+    const tsec = insSection(b, "time");
+    ["start", "end"].forEach(k => {
+      const p = (C.commonParams(SCHEMA, "media") || []).find(x => x.k === k) || { k, type: "num", label: k };
+      const tf = ES().Catalog.timeField({ name: C.copyFor(SCHEMA.ui, `common.${k}`).label, get: () => it[k], set: v => edit(() => {
+        const t = r3(clamp(+v, 0, dur()));
+        if (k === "start") it.start = clamp(t, 0, it.end - 0.5);
+        else it.end = r3(clamp(t, it.start + 0.5, dur()));
+      }, { rebuild: true }) });
+      tf.input.dataset.k = k;
+      tsec.appendChild(rowOf(p, opt, p.label, tf.el, null, k === "end" ? { note: ST("media.reel.time") } : undefined));
+    });
+    // presentacion: la ventana (movimiento, ancho, fondo, esquinas) o la pantalla completa (vineta)
+    const winOnly = new Set(["motion", "width", "blur", "dim", "radius", "shadow", "border"]);
+    const ps = (C.kindParams(SCHEMA, "media", "reel") || []).filter(q => !q.internal && q.k !== "layout"
+      && !["sid", "path", "name", "kind", "fit", "speed", "src_in", "x"].includes(q.k) && (lay === "window" ? q.k !== "vignette" : !winOnly.has(q.k)));
     if (ps.length) renderParams(insSection(b, "style"), ps, it, opt);
     dropEmpty(b);
   }
@@ -2132,8 +2264,8 @@
         host.innerHTML = "";
         host.appendChild(e.Catalog.colorPick({ value: x, resolved, fromBrand, nullable: !!p.nullable && !followBtn, none: p.k === "box" ? ST("color.none.box") : null,
           skip: followBtn ? h => C.engineLum(h) > 0.85 : null,
-          onPick: y => { edit(() => { set(y); after(obj, o2, true); }, { inspector: false }); draw(); },
-          input: inp => gesture(inp, () => { set(inp.value.toUpperCase()); after(obj, o2, false); }, d => { if (d) { after(obj, o2, true); draw(); } }) }));
+          onPick: y => { edit(() => { set(y); if (followBtn) delete obj.button_auto; after(obj, o2, true); }, { inspector: false }); draw(); },
+          input: inp => gesture(inp, () => { set(inp.value.toUpperCase()); if (followBtn) delete obj.button_auto; after(obj, o2, false); }, d => { if (d) { after(obj, o2, true); draw(); } }) }));
       };
       draw();
       return wrap(host, ex0());
@@ -2580,8 +2712,23 @@
       else if (e.kind === "bg_blur") f += ` blur(${(0.6 * k).toFixed(2)}px)`;
     });
     // recurso flotante activo: el orador se desenfoca y oscurece detras de la tarjeta (FloatCard.bgFilter)
-    const FCm = window.FloatCard, mc = FCm ? activeRange("media", t).find(it => it.sid) : null;
-    if (mc) { const bf = FCm.bgFilter(mc, FCm.cardAnim(t - mc.start, mc.end - mc.start, FCm.param(mc, "in_dur"), FCm.param(mc, "out_dur"), FCm.param(mc, "float")).bg, LB.w); if (bf) f += " " + bf; }
+    const FCm = window.FloatCard, SCm = window.ScreenCard, mc = FCm ? activeRange("media", t).find(it => it.sid) : null;
+    if (mc && mc.style === "reel") {
+      // video de apoyo: en ventana tu toma se desenfoca y oscurece detras; a pantalla completa la tapa
+      const RCm = window.ReelCard;
+      if (RCm && RCm.layoutOf(mc) === "window") {
+        const f0 = FX.finalTime(+mc.start), f1 = FX.finalTime(+mc.end), L = Math.max(0.05, f1 - f0);
+        const bf = RCm.bgFilter(mc, RCm.anim(clamp(FX.finalTime(t) - f0, 0, L), L, RCm.motionOf(mc, (PLAN.director || {}).style)).bg, LB.w);
+        if (bf) f += " " + bf;
+      }
+    } else if (mc && mc.style === "screen") {
+      // grabacion de pantalla: su toma se desenfoca y oscurece detras (solo donde esta sincronizada)
+      const cov = SCm ? SCm.coverage(mc) : null;
+      if (cov && t >= cov[0] && t < cov[1]) {
+        const bf = SCm.bgFilter(mc, SCm.anim(t - cov[0], cov[1] - cov[0], SCm.motionOf(mc, (PLAN.director || {}).style)).bg, LB.w);
+        if (bf) f += " " + bf;
+      }
+    } else if (mc) { const bf = FCm.bgFilter(mc, FCm.cardAnim(t - mc.start, mc.end - mc.start, FCm.param(mc, "in_dur"), FCm.param(mc, "out_dur"), FCm.param(mc, "float")).bg, LB.w); if (bf) f += " " + bf; }
     // el render ancla los zooms en la cara de la toma: se escala alrededor de ese punto
     const fc = faceAt(t);
     return { z: cam.z, dx: cam.dx, dy: cam.dy, ax: fc ? clamp(fc[0], 0.15, 0.85) : 0.5, ay: fc ? clamp(fc[1], 0.15, 0.85) : 0.5,
@@ -3169,7 +3316,7 @@
   const MEDIA_EL = {};
   function mediaEl(m) {
     if (!m || !m.sid) return null;
-    const key = `${m.type}|${m.sid}`;
+    const key = `${m.type}|${m.sid}${m.slot ? "#" + m.slot : ""}`;
     let e = MEDIA_EL[key];
     if (!e) {
       e = MEDIA_EL[key] = { err: false, used: 0 };
@@ -3442,6 +3589,8 @@
       (el filtro va en FX.videoLook), entrada con resorte, flotado, Ken Burns en imagenes, salida
       limpia; deja libre la franja de los subtitulos. El video va silenciado en FloatCard.srcTime. */
   function drawMediaCard(c, it, t) {
+    if (it.style === "screen") return drawScreenItem(c, it, t);
+    if (it.style === "reel") return drawReelItem(c, it, t);
     const FCm = window.FloatCard; if (!FCm) return null;
     const B = LB, lt = t - it.start, L = Math.max(0.05, it.end - it.start);
     const m = { sid: it.sid, type: it.kind === "video" ? "video" : "image", dur: +it.media_dur || 0, name: it.name };
@@ -3475,6 +3624,92 @@
     return r;
   }
   FX.drawMediaCard = drawMediaCard;
+  /** fx.media "screen": grabacion de pantalla sincronizada con su toma (window.ScreenCard = port de
+      motion/screen.py). El <video> de la pantalla va silenciado en ScreenCard.syncTime(it, t): sigue cada
+      corte (al saltar mas de 0.12 s se vuelve a colocar); la ventana va arriba de los subtitulos, centrada,
+      con lo que hay dentro de su marco (`crop`), y la toma desenfocada detras (FX.videoLook). */
+  function drawScreenItem(c, it, t) {
+    const SCm = window.ScreenCard, FCm = window.FloatCard; if (!SCm || !FCm) return null;
+    const cov = SCm.coverage(it); if (!cov || t < cov[0] || t >= cov[1]) return null;
+    const B = LB, lt = t - cov[0], L = Math.max(0.05, cov[1] - cov[0]), pl = curPlan();
+    const m = { sid: it.sid, type: "video", dur: +it.media_dur || 0, name: it.name };
+    const e = mediaEl(m);
+    let f = null;
+    if (e && e.vid) {
+      e.used = performance.now();
+      const v = e.vid, tt = SCm.syncTime(it, t), playing = V && !V.paused;
+      if (tt != null) {
+        if (playing) {
+          if (Math.abs(v.playbackRate - 1) > 1e-3) v.playbackRate = 1;
+          if (v.paused) { try { v.currentTime = tt; } catch (x) { /* nada */ } v.play().catch(() => {}); }
+          else if (Math.abs(v.currentTime - tt) > 0.12) { try { v.currentTime = tt; } catch (x) { /* nada */ } }
+        } else {
+          if (!v.paused) v.pause();
+          if (Math.abs(v.currentTime - tt) > 0.02 && !v.seeking) { try { v.currentTime = tt; } catch (x) { /* nada */ } }
+        }
+      }
+      if (v.readyState >= 2 && v.videoWidth) f = { src: v, w: v.videoWidth, h: v.videoHeight };
+      else { const th = e.thumb; f = th && th.complete && th.naturalWidth ? { src: th, w: th.naturalWidth, h: th.naturalHeight } : null; }
+    }
+    const pcap = pl.fx.captions, capOn = !!(pcap && pcap.enabled !== false);
+    const card = SCm.layout(+it.w || (f ? f.w : 0), +it.h || (f ? f.h : 0), B.w / B.h, FCm.captionTop(pcap, capOn, cov[0], cov[1], B.w / B.h),
+      FCm.captionBottom(pcap, capOn, cov[0], cov[1], B.w / B.h), it.width, SCm.cropOf(it));
+    const st = SCm.anim(lt, L, SCm.motionOf(it, (pl.director || {}).style));
+    const r = SCm.draw(c, f, B, card, st, it, lt, L);
+    if (!f && r && e && e.err) mediaPlaceholder(c, r.x, r.y, r.w, r.h, m, true);
+    return r;
+  }
+  FX.drawScreenItem = drawScreenItem;
+  /** fx.media "reel": un video de apoyo en fragmentos (window.ReelCard = port de motion/reel.py). Sus tomas
+      se reparten el tramo FINAL (sin los silencios recortados) como en el render; cortes secos. Dos <video>
+      del archivo se turnan (toma par / impar): mientras uno se ve, el otro ya espera en el inicio de la
+      siguiente toma (el corte no espera a que el navegador busque). Pantalla completa: cada toma recortada a
+      la caja (su centro `cx`); ventana: la tarjeta arriba de los subtitulos sobre tu toma desenfocada. */
+  function drawReelItem(c, it, t) {
+    const R = window.ReelCard, FCm = window.FloatCard; if (!R || !FCm) return null;
+    const B = LB, pl = curPlan();
+    const f0 = FX.finalTime(+it.start), f1 = FX.finalTime(+it.end), L = Math.max(0.05, f1 - f0);
+    const lt = clamp(FX.finalTime(t) - f0, 0, L - 1e-4);
+    const ps = R.piecesOf(it), rows = R.fit(ps, L, 30);
+    if (!rows.length) return null;
+    const j = R.pieceAt(rows, lt), row = rows[j], p = ps[row[3]] || {};
+    const playing = V && !V.paused;
+    const elOf = k => mediaEl({ sid: it.sid, type: "video", dur: +it.media_dur || 0, name: it.name, slot: "r" + (k % 2) });
+    const e = elOf(j);
+    let f = null;
+    if (e && e.vid) {
+      e.used = performance.now();
+      const v = e.vid, tt = R.srcTime(rows, lt);
+      if (playing) {
+        if (Math.abs(v.playbackRate - 1) > 1e-3) v.playbackRate = 1;
+        if (v.paused) { try { v.currentTime = tt; } catch (x) { /* nada */ } v.play().catch(() => {}); }
+        else if (Math.abs(v.currentTime - tt) > 0.15) { try { v.currentTime = tt; } catch (x) { /* nada */ } }
+        // la siguiente toma espera en su inicio en el otro <video>
+        const nx = rows[j + 1];
+        if (nx) { const e2 = elOf(j + 1); if (e2 && e2.vid) { e2.used = performance.now(); const w = e2.vid; if (!w.paused) w.pause(); if (Math.abs(w.currentTime - nx[2]) > 0.05 && !w.seeking) { try { w.currentTime = nx[2]; } catch (x) { /* nada */ } } } }
+      } else {
+        if (!v.paused) v.pause();
+        if (Math.abs(v.currentTime - tt) > 0.02 && !v.seeking) { try { v.currentTime = tt; } catch (x) { /* nada */ } }
+      }
+      if (v.readyState >= 2 && v.videoWidth) f = { src: v, w: v.videoWidth, h: v.videoHeight };
+      else { const th = e.thumb; f = th && th.complete && th.naturalWidth ? { src: th, w: th.naturalWidth, h: th.naturalHeight } : null; }
+    }
+    const w0 = +it.w || (f ? f.w : 0), h0 = +it.h || (f ? f.h : 0);
+    if (R.layoutOf(it) === "full") {
+      c.save(); c.beginPath(); c.rect(B.x, B.y, B.w, B.h); c.clip();
+      const r = R.drawFull(c, f, B, R.fullCrop(p.cx, w0, h0, B.w / B.h), it);
+      c.restore();
+      return r;
+    }
+    const pcap = pl.fx.captions, capOn = !!(pcap && pcap.enabled !== false);
+    const card = R.windowLayout(it, w0, h0, B.w / B.h, FCm.captionTop(pcap, capOn, +it.start, +it.end, B.w / B.h),
+      FCm.captionBottom(pcap, capOn, +it.start, +it.end, B.w / B.h));
+    const st = R.anim(lt, L, R.motionOf(it, (pl.director || {}).style));
+    const r = R.drawWindow(c, f, B, card, st, it, lt, L, R.winView(p, w0, h0, card.aspect));
+    if (!f && r && e && e.err) mediaPlaceholder(c, r.x, r.y, r.w, r.h, { sid: it.sid, type: "video", name: it.name }, true);
+    return r;
+  }
+  FX.drawReelItem = drawReelItem;
   /** Cajas de lo dibujado en el ultimo cuadro y la caja de layout (pruebas: simetria medida). */
   FX.hits = () => ({ hits: HITS.map(h => ({ track: h.track, id: h.id, bb: Object.assign({}, h.bb) })), box: Object.assign({}, LB) });
 
@@ -3691,8 +3926,29 @@
     // como text.draw_captions: un grupo que empezo tapado por un titulo no reaparece al terminar
     // el titulo (repetiria lo que el titulo ya mostro)
     if (C.captionGroupSuppressed(plan.fx, g.gr, t, LB.w / LB.h)) return null;
-    return CapDraw.drawGroup(c, LB, g.gr, t, capOpt(plan, t, ra, g.srv));
+    const o = capOpt(plan, t, ra, g.srv);
+    // como el export (text.caption_contrast): con una tarjeta, pantalla, video de apoyo o escena encima de
+    // la toma, el contraste se mide en lo que de verdad queda detras de los subtitulos
+    if (main && (activeRange("media", t).some(x => x.sid) || activeRange("cutaways", t).length)) o.bgLum = r => canvasLum(c, r);
+    return CapDraw.drawGroup(c, LB, g.gr, t, o);
   }
+  /** Luminancia media (pesos 709 sobre sRGB, como text._bg_lum) del lienzo bajo el rectangulo (px del
+      lienzo), en una rejilla de 16x8. null si no se puede leer. */
+  let LUMC = null;
+  function canvasLum(c, r) {
+    try {
+      if (!r || !(r.w > 2) || !(r.h > 2)) return null;
+      if (!LUMC) { LUMC = document.createElement("canvas"); LUMC.width = 16; LUMC.height = 8; }
+      const g = LUMC.getContext("2d", { willReadFrequently: true });
+      g.clearRect(0, 0, 16, 8);
+      g.drawImage(c.canvas, Math.max(0, r.x), Math.max(0, r.y), r.w, r.h, 0, 0, 16, 8);
+      const d = g.getImageData(0, 0, 16, 8).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+      return sum / (d.length / 4) / 255;
+    } catch (e) { return null; }
+  }
+  FX.canvasLum = canvasLum;
   /** Subtitulos sobre el canvas del Studio (con sus cajas para seleccionar). */
   FX.drawCaptions = function (t) {
     const bb = drawCaptionsTo(CTX, t, true);

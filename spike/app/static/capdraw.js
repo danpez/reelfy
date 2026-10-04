@@ -150,7 +150,11 @@
     let ga = go.a * ra, gdy = 0;
     if (D.reveal === "group") { const gi = groupIn(t - +gr.start, fs); ga *= gi.a; gdy = gi.dy; }
     if (ga <= 0.003) return null;
-    const stroke = 2 * D.stroke * s;
+    // contraste con lo que de verdad queda detras (o.bgLum: luminancia del lienzo bajo el grupo, como el
+    // cuadro compuesto del export): tinta clara sobre fondo claro lleva trazo oscuro fino y sombra completa
+    const lum = typeof o.bgLum === "function" ? o.bgLum({ x: B.x + Math.min(...L.rows.map(r => r.x0)), y: top, w: Math.max(...L.rows.map(r => r.w)), h: L.height }) : null;
+    const cc = C.captionContrast ? C.captionContrast(color, lum, D.stroke, D.shadow) : { stroke: D.stroke, shadow: D.shadow };
+    const stroke = 2 * cc.stroke * s, shadowK = cc.shadow;
     // 1) cada palabra visible: posicion, escala, alfa y color (mismo calculo que el motor)
     const units = [];
     L.rows.forEach(r => {
@@ -186,7 +190,7 @@
     const drawUnits = (list, over) => list.forEach(U => {
       c.save(); c.globalAlpha = U.a; c.font = o.fontCss(D.font, fs * U.sc);
       if (U.wsc !== 1) { const px = U.x + U.wd / 2, py = U.cy - M[U.i].asc * U.sc / 2; c.translate(px, py); c.scale(U.wsc, U.wsc); c.translate(-px, -py); }
-      if (!over && D.shadow > 0) { c.shadowColor = `rgba(0,0,0,${Math.min(0.85, 0.62 * D.shadow)})`; c.shadowBlur = 10 * s * D.shadow; c.shadowOffsetY = 3 * s; }
+      if (!over && shadowK > 0) { c.shadowColor = `rgba(0,0,0,${Math.min(0.85, 0.62 * shadowK)})`; c.shadowBlur = 10 * s * shadowK; c.shadowOffsetY = 3 * s; }
       if (!over && stroke > 0) { c.lineWidth = stroke; c.strokeStyle = cfg.stroke_color || "#000000"; c.lineJoin = "round"; c.strokeText(U.txt, U.x, U.cy); }
       let fill = over ? over : U.fill;
       if (!over && U.wipe) { const g = c.createLinearGradient(U.wipe[0], 0, U.wipe[1], 0); g.addColorStop(0, accent); g.addColorStop(1, color); fill = g; }

@@ -16,7 +16,7 @@ import paths
 
 FF = str(paths.FFMPEG)
 KEYS = {"id", "start", "end", "sid", "path", "kind", "fit", "speed", "src_in", "style", "enabled",
-        "locked", "src", "name"}
+        "locked", "src", "name", "media_dur"}
 
 
 @pytest.fixture(scope="module")
@@ -98,6 +98,8 @@ def test_recursos_anclados_en_la_fuente_aunque_cambie_otra_toma(assets):
     # video de 3 s en un hueco de 2.3 s: <= 1.4x -> se acelera
     assert (b["kind"], b["fit"], b["src_in"]) == ("video", "speed", 0.0)
     assert b["speed"] == pytest.approx(3.0 / 2.3, abs=1e-3)
+    # la duracion de su clip viaja con el recurso (el inspector acota «Desde qué segundo del clip»)
+    assert b["media_dur"] == pytest.approx(3.0, abs=0.05) and a["media_dur"] is None and miss["media_dur"] is None
     # plan.montage.inserts: t0/t1 del video combinado, start/end en la linea de tiempo COMPUESTA y
     # el faltante sigue faltando (el ensamble muestra su aviso)
     ins = {i["id"]: i for i in plan["montage"]["inserts"]}
@@ -176,7 +178,9 @@ def test_media_fit_reglas():
     assert f("video", 2.0, 3.5, {"fit": "speed", "speed": 1.2}) == ("hold", 1.0, 0.0)
     assert f("video", 3.5, 3.5, ins) == ("hold", 1.0, 0.0)
     assert f("video", 10.0, 2.0, {"fit": "trim", "src_in": 4.0}) == ("trim", 1.0, 4.0)
-    assert f("video", 5.0, 2.0, {"fit": "trim", "src_in": 4.0}) == ("trim", 1.0, 0.0)  # no cabe: desde 0
+    # el inicio que eligio el usuario se ACOTA para que el clip llene su hueco (antes volvia a 0: el
+    # recurso salia desde el inicio del archivo)
+    assert f("video", 5.0, 2.0, {"fit": "trim", "src_in": 4.0}) == ("trim", 1.0, 3.0)
     assert f("video", None, 2.0, {"fit": "speed", "speed": 1.3}) == ("speed", 1.3, 0.0)   # sin medir
     assert f("video", 3.0, 2.0, {"fit": "raro"}) == ("trim", 1.0, 0.0)
 

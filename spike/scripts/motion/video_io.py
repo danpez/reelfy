@@ -100,6 +100,27 @@ def _rotation(stream: dict) -> int:
     return min((0, 90, 180, 270, 360), key=lambda v: abs(v - r)) % 360
 
 
+def _start(d: dict | None) -> float | None:
+    """start_time (s) de un stream o del contenedor de ffprobe, o None."""
+    try:
+        v = float((d or {}).get("start_time"))
+    except (TypeError, ValueError):
+        return None
+    return round(v, 6) if math.isfinite(v) else None
+
+
+def audio_lead(info: dict | None) -> float:
+    """Segundos del archivo (los de "-ss", desde el start_time del contenedor) que pasan antes de la
+    primera muestra de su 1a pista de audio. Un wav extraido con ffmpeg empieza en esa muestra: su
+    segundo w es el segundo w + audio_lead del archivo (una grabacion de pantalla del iPhone trae el
+    audio 0.128 s despues del video; una toma de camara, 0)."""
+    try:
+        v = float((info or {}).get("audio_lead") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) and 0.0 <= v < 30.0 else 0.0
+
+
 _IMAGE_CODECS = {"png", "mjpeg", "jpeg2000", "webp", "bmp", "tiff", "gif", "heif", "jpegls"}
 
 
@@ -125,7 +146,11 @@ def _probe_cached(path: str, size: int, mtime: int) -> dict:
             "pix_fmt": None, "bit_depth": 8, "hdr": None, "color_transfer": None,
             "color_primaries": None, "color_space": None, "color_range": None, "dovi": False,
             "has_audio": bool(auds), "audio_index": None, "audio_rate": 0, "audio_channels": 0,
-            "nb_frames": 0, "type": "video" if dur > 0 else "image"}
+            "nb_frames": 0, "type": "video" if dur > 0 else "image",
+            "start": _start(fmt) or 0.0, "v_start": _start(v), "a_start": _start(auds[0] if auds else None),
+            "audio_lead": 0.0}
+    if info["a_start"] is not None:
+        info["audio_lead"] = round(max(0.0, info["a_start"] - info["start"]), 6)
     if v:
         cw, ch = int(v.get("width") or 0), int(v.get("height") or 0)
         rot = _rotation(v)
@@ -158,7 +183,10 @@ def probe(path) -> dict:
     Claves: w, h (display), coded_w, coded_h, rotation (0/90/180/270), fps (promedio),
     fps_nominal, duration, codec, pix_fmt, bit_depth, hdr (None|'hlg'|'pq'), dovi,
     has_audio, audio_index (indice entre pistas de audio), audio_rate, audio_channels,
-    nb_frames, type ('video'|'image').
+    nb_frames, type ('video'|'image'), start (start_time del contenedor: el 0 de "-ss"),
+    v_start / a_start (start_time del video y de la 1a pista de audio; None si no hay) y
+    audio_lead (s del archivo antes de la primera muestra de audio = a_start - start: el wav
+    extraido con ffmpeg empieza ahi; ver audio_lead()).
     """
     p = Path(path)
     try:

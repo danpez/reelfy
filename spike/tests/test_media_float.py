@@ -225,7 +225,8 @@ def test_tiempo_del_clip_speed_trim_hold():
 def test_pista_recursos_en_el_esquema():
     tr = S.schema()["tracks"]["media"]
     assert tr["label"] == "Recursos" and tr["key"] == "style" and tr["common"] == "range"
-    assert set(tr["items"]) == set(MF.STYLES)
+    # + la grabacion de pantalla (motion/screen.py) y el video de apoyo en fragmentos (motion/reel.py)
+    assert set(tr["items"]) == set(MF.STYLES) | {"screen", "reel"}
     ps = {p["k"]: p for p in tr["items"]["float_card"]["params"]}
     assert {"sid", "path", "kind", "name", "fit", "speed", "src_in"} <= set(ps)
     assert all(ps[k].get("internal") for k in ("sid", "path", "kind", "name"))

@@ -49,7 +49,7 @@ SPIKE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SPIKE / "scripts"))
 import paths  # noqa: E402
 
-ENGINE_VERSION = "0.6.0"
+ENGINE_VERSION = "0.6.1"
 
 # ---- LLM embebido: si el binario de ollama viene en el bundle, corre en un
 # puerto propio con modelos en DATA. El pipeline (highlights/translate) y el director
@@ -1317,6 +1317,15 @@ def _hex(v):
     return "#" + "".join(c * 2 for c in m.group(1)).upper() if m else None
 
 
+def _btn_lum(h):
+    """Luma de un "#RRGGBB" (= director._luma / fxcore.engineLum); 1.0 si no es un color."""
+    h = _hex(h)
+    if not h:
+        return 1.0
+    n = int(h[1:], 16)
+    return 0.2126 * (n >> 16 & 255) / 255 + 0.7152 * (n >> 8 & 255) / 255 + 0.0722 * (n & 255) / 255
+
+
 def _chromatic(h):
     h = _hex(h)
     if not h:
@@ -1376,6 +1385,12 @@ def _accent_apply(plan):
         for it in fx.get("text") or []:
             if ai(it) and it.get("accent_words") and not it.get("accent"):
                 it["accent"] = acc
+        # el boton «Seguir» que la IA pinto con el oscuro de la paleta porque el acento del estilo no se lee
+        # como boton (Minimal: blanco; button_auto) toma el color de tu marca si se lee como boton
+        for it in fx.get("graphics") or []:
+            if isinstance(it, dict) and it.get("kind") == "cta" and it.get("button_auto") \
+                    and it.get("src") != "user" and _btn_lum(acc) <= 0.85:
+                it["button_color"] = acc
         caps = fx.get("captions") if isinstance(fx.get("captions"), dict) else {}
         if isinstance(caps.get("highlight"), str) and _hex(caps["highlight"]) in olds:
             caps["highlight"] = acc
@@ -1498,7 +1513,8 @@ def _plan_from(body, job_id):
 def _media_paths(plan):
     """Recursos (plan.fx.media: imagen o video como tarjeta flotante) con la ruta de su archivo en
     este equipo: el Studio solo conoce el `sid` (uno agregado o reemplazado ahi no trae `path`). Sin
-    archivo -> path None (el motor no lo dibuja). En sitio; nunca lanza."""
+    archivo -> path None (el motor no lo dibuja). Tambien la duracion de un clip que no la traiga
+    (_media_durs). En sitio; nunca lanza."""
     try:
         fx = plan.get("fx") if isinstance(plan, dict) else None
         for it in (fx or {}).get("media") or []:
@@ -1510,7 +1526,38 @@ def _media_paths(plan):
                 it["kind"] = "image" if _is_image(src) else "video"
     except Exception:  # noqa: sin rutas el recurso no sale, el resto del plan si
         traceback.print_exc()
+    return _media_durs(plan)
+
+
+def _media_durs(plan):
+    """`media_dur` de cada clip de plan.fx.media que no la traiga (los recursos del guion de antes de
+    v0.6.1): el inspector ajusta «Desde qué segundo del clip» dentro del clip y, sin la duracion, lo
+    dejaba en 0. En sitio; nunca lanza."""
+    try:
+        fx = plan.get("fx") if isinstance(plan, dict) else None
+        for it in (fx or {}).get("media") or []:
+            if not isinstance(it, dict) or not it.get("sid") or it.get("kind") != "video":
+                continue
+            if _fnum(it.get("media_dur")):
+                continue
+            d = _fnum(_source_meta(it["sid"]).get("dur"))
+            if not d:
+                src = _resolve_source(it["sid"])
+                d = _fnum(compose_probe_dur(src)) if src else None
+            if d and d > 0:
+                it["media_dur"] = round(d, 3)
+    except Exception:  # noqa: sin la duracion el Studio la toma del clip cuando carga
+        traceback.print_exc()
     return plan
+
+
+def compose_probe_dur(src):
+    """Duracion (s) de un archivo con el probe del motor, o None."""
+    try:
+        from motion import video_io as V
+        return float(V.probe(str(src)).get("duration") or 0.0) or None
+    except Exception:  # noqa
+        return None
 
 
 # ---- opciones del proyecto para el motor pro (marca, aire, audio de estudio) ----
@@ -2228,7 +2275,15 @@ def _compose(job_id, job):
     plan = pipeline.analyze(video, gloss, p.get("n", 2),
                             on_step=_analysis_progress(bar, *PHASE_ANALYZE_AFTER_COMPOSE), **kw)
     if hasattr(compose_mod, "finish_plan"):
-        compose_mod.finish_plan(plan, info, spec=spec, montage=montage)
+        kw = {}
+        if ((montage or {}).get("broll") or {}).get("sources") and _accepts(compose_mod.finish_plan, "broll_pick"):
+            # videos de apoyo: el LLM local elige y ordena las tomas de cada frase (sin el, el orden fijo)
+            try:
+                import brollplan
+                kw["broll_pick"] = brollplan.ollama_picker()
+            except Exception:  # noqa: sin LLM los fragmentos salen igual (reglas)
+                traceback.print_exc()
+        compose_mod.finish_plan(plan, info, spec=spec, montage=montage, **kw)
     else:                                    # compose sin montaje (version anterior)
         dur = float(plan.get("duration") or 0) or None
         shots = []
@@ -2307,6 +2362,7 @@ def _montage(job_id, job):
     clips = _montage_clips(sids)
     if not clips:
         raise RuntimeError("Ningún clip de la sesión se pudo leer.")
+    _broll_prefetch(clips)       # los videos mudos se empiezan a ver ya (en paralelo a lo demas)
     assets = [a for a in (_asset_item(x) for x in p.get("assets") or [] if isinstance(x, str)) if a]
     lo, hi = PHASE_MONTAGE_BUILD
     bar.set(lo, "Eligiendo las mejores tomas…", "montage", force=True)
@@ -2322,11 +2378,16 @@ def _montage(job_id, job):
         res = _montage_build(clips, script=(sc or {}).get("text") or None,
                              glossary=p.get("glossary") or "", intercut=p.get("intercut", True) is not False,
                              on_step=step, cancel=prog.cancel.canceled, llm=p.get("llm", True) is not False,
-                             **({"assets": assets} if _accepts(_montage_build, "assets") else {}))
+                             **({"assets": assets} if _accepts(_montage_build, "assets") else {}),
+                             **({"screens_off": p.get("screens_off") or []}
+                                if _accepts(_montage_build, "screens_off") else {}))
     finally:
         bar.stop_creep()
     prog.cancel.check()
     m = _montage_result(res, clips, p, time.time() - t1, assets=assets)
+    _montage_broll(m, bar, prog)
+    if prog is not None:
+        prog.cancel.check()          # cancelado justo al terminar de ver el apoyo: no se guarda en revision
     m.setdefault("stats", {})
     if isinstance(m["stats"], dict):
         m["stats"].setdefault("words_wait_s", round(t_words, 1))
@@ -2379,10 +2440,65 @@ def _montage_wait_words(job_id, sids, bar, prog):
         time.sleep(0.3)
 
 
+_CAMERA_ASPECTS = (16 / 9, 9 / 16, 4 / 3, 3 / 4, 1.0, 3 / 2, 2 / 3, 1.85, 1 / 1.85, 2.39, 1 / 2.39, 17 / 9, 9 / 17)
+
+
+def _no_faces(img_bgr) -> bool:
+    import cv2
+    det = cv2.FaceDetectorYN.create(str(paths.YUNET), "", (img_bgr.shape[1], img_bgr.shape[0]), 0.6, 0.3, 5000)
+    _n, faces = det.detect(img_bgr)
+    return faces is None or len(faces) == 0
+
+
+def _screen_like(sid, meta):
+    """Un video SIN metadatos de camara que parece grabacion de pantalla: su proporcion no es de
+    camara (16:9, 4:3, 1:1, 3:2...) y su miniatura no tiene caras (YuNet); o, con proporcion de camara
+    (una grabacion de la compu de OBS, Loom, Zoom: 1920x1080 sin etiqueta del grabador), lo que se ve en
+    dos cuadros es una INTERFAZ (screensync.ui_like: fondos lisos con lineas de texto) sin caras. El
+    montaje solo lo toma como pantalla si ademas suena igual que una toma (montage.detect_screens); un
+    archivo con marca/modelo de camara nunca llega aqui (capture "camera")."""
+    try:
+        w, h = float(meta.get("w") or 0), float(meta.get("h") or 0)
+        if w <= 0 or h <= 0:
+            return False
+        a = w / h
+        import cv2
+        if any(abs(a - c) / c <= 0.02 for c in _CAMERA_ASPECTS):
+            return _ui_like_source(sid, meta)
+        thumb = SOURCES / f"{sid}_t.jpg"
+        if not thumb.exists():
+            return False
+        img = cv2.imread(str(thumb))
+        if img is None:
+            return False
+        return _no_faces(img)
+    except Exception:  # noqa: sin poder mirarlo, es toma (como siempre)
+        traceback.print_exc()
+        return False
+
+
+def _ui_like_source(sid, meta) -> bool:
+    """Dos cuadros (30 % y 70 %) del video `sid` se ven como una interfaz y sin caras."""
+    import cv2
+    import brollscan
+    import screensync
+    from motion import video_io as V
+    src = _resolve_source(sid)
+    dur = float(meta.get("dur") or 0.0)
+    if src is None or dur <= 0:
+        return False
+    info = V.probe(str(src))
+    frames = [brollscan._frame(src, dur * u, info) for u in (0.3, 0.7)]
+    if any(f is None for f in frames) or not screensync.ui_like(frames):
+        return False
+    return all(_no_faces(cv2.cvtColor(f, cv2.COLOR_RGB2BGR)) for f in frames)
+
+
 def _montage_clips(sids):
     """Clips de la sesion EN ORDEN DE GRABACION con lo que el motor de montaje (montage.build)
     necesita: [{sid, name, rec, created, dur, words, takes, audio (ruta del wav 16 kHz de su 1a
-    pista, None sin voz), thumb (miniatura: grupos de camara), setup (None: lo decide el motor)}]
+    pista, None sin voz), thumb (miniatura: grupos de camara), setup (None: lo decide el motor),
+    capture ("screen" | "camera" | None: metadatos), screen_like (sin metadatos: parece pantalla)}]
     + {path, wav, has_audio, created_src, w, h, fps, rotation, hdr, error}. `words`/`takes` en
     segundos del clip. `created` solo si es la fecha de GRABACION de los metadatos (la del archivo
     es la de la copia: el motor ordena esos clips por nombre, como rec_order)."""
@@ -2398,7 +2514,9 @@ def _montage_clips(sids):
         wav_s = str(wav) if has and wav.exists() else None
         thumb = SOURCES / f"{sid}_t.jpg"
         strong = meta.get("created_src") in ("apple", "creation_time")
+        cap = meta.get("capture")
         items.append({"sid": sid, "name": meta.get("name") or src.name, "upload": k,
+                      "capture": cap, "screen_like": _screen_like(sid, meta) if cap is None and has else False,
                       "created": meta.get("created") if strong else None,
                       "created_src": meta.get("created_src"), "created_ts": meta.get("created_ts"),
                       "dur": meta.get("dur") or doc.get("dur"), "words": doc.get("words") or [],
@@ -2416,7 +2534,7 @@ def _montage_clips(sids):
 
 
 def _montage_build(clips, script=None, glossary="", intercut=True, on_step=None, cancel=None,
-                   llm=True, assets=None):
+                   llm=True, assets=None, screens_off=None):
     """montage.build (scripts/montage.py, importado al usarlo) -> dict del contrato plan.montage.
     Solo pasa los argumentos que build acepta (el motor puede crecer sin romper el servidor).
     `llm`: el LLM local como juez de casi-empates y del material extra (montage.local_llm; sin
@@ -2434,13 +2552,127 @@ def _montage_build(clips, script=None, glossary="", intercut=True, on_step=None,
             traceback.print_exc()
     kw = {}
     for k, v in (("script", script), ("glossary", glossary), ("intercut", intercut),
-                 ("on_step", on_step), ("cancel", cancel), ("llm", judge), ("assets", assets or [])):
+                 ("on_step", on_step), ("cancel", cancel), ("llm", judge), ("assets", assets or []),
+                 ("screens_off", screens_off or [])):
         if _accepts(fn, k):
             kw[k] = v
     if script and "script" in kw and not _accepts(fn, "assets"):
         # un motor sin recursos del guion compara el guion SIN las anotaciones ("- Agregar x")
         kw["script"] = _strip_refs(script)
     return fn(clips, **kw)
+
+
+# ---- videos de apoyo (b-roll mudo): un video de la sesion sin voz nunca es toma (montage.split_broll); se
+# ve toma por toma (scripts/brollscan.py: cortes, personas, textos y que muestra cada una con el VLM local,
+# en cache por archivo) y queda en plan.montage.broll = {"sources": [catalogo compacto + sid + enabled]}.
+# compose.finish_plan lo usa en fragmentos (scripts/brollplan.py) mientras se dice lo que muestra.
+PHASE_BROLL = (90.0, 98.0)
+_BROLL_LOCKS: dict = {}
+_BROLL_LOCK = threading.Lock()
+
+
+def _broll_lock(path):
+    with _BROLL_LOCK:
+        return _BROLL_LOCKS.setdefault(str(path), threading.Lock())
+
+
+_BROLL_PROG: dict = {}      # sid -> (hechas, total, mensaje) del analisis en curso (lo ve quien espera)
+
+
+def _broll_analyze(sid, on_step=None, cancel=None):
+    """Catalogo de tomas del video de apoyo `sid` (brollscan.analyze, en cache; un analisis a la vez por
+    archivo: el de fondo y el del montaje no se duplican; quien espera ve el avance del que ya corre) o
+    None."""
+    src = _resolve_source(sid)
+    if src is None or _is_image(src):
+        return None
+    import brollscan
+    lock = _broll_lock(src)
+    while not lock.acquire(timeout=0.5):
+        if callable(cancel) and cancel():
+            raise RuntimeError("cancelado")
+        pr = _BROLL_PROG.get(sid)
+        if pr and callable(on_step):
+            on_step(*pr)
+    try:
+        def step(done, total, msg):
+            _BROLL_PROG[sid] = (done, total, msg)
+            if callable(on_step):
+                on_step(done, total, msg)
+        return brollscan.analyze(src, on_step=step, cancel=cancel)
+    finally:
+        _BROLL_PROG.pop(sid, None)
+        lock.release()
+
+
+def _broll_prefetch(clips):
+    """Los videos SIN pista de audio de la sesion (seguro no son tomas) se empiezan a ver en segundo plano
+    mientras se transcribe lo demas (el VLM y whisper corren a la vez)."""
+    for c in clips or []:
+        try:
+            if c.get("has_audio") or _is_image(c.get("path") or "") or float(c.get("dur") or 0) < 3.0:
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        def run(sid=c["sid"]):
+            try:
+                _broll_analyze(sid)
+            except Exception:  # noqa: el montaje lo vuelve a intentar (y lo reporta)
+                traceback.print_exc()
+        threading.Thread(target=run, daemon=True, name=f"reelfy-broll-{c['sid']}").start()
+
+
+def _canceled_now(prog) -> bool:
+    try:
+        return bool(prog.cancel.canceled())
+    except Exception:  # noqa
+        return False
+
+
+def _montage_broll(m, bar=None, prog=None):
+    """plan.montage.broll de un montaje con videos de apoyo (m["broll_src"]): el catalogo compacto de cada
+    uno (brollscan.compact) con su sid, nombre y `enabled`. Progreso en la barra (PHASE_BROLL); un video que
+    no se pudo ver queda sin tomas (con `error`), sin tumbar el montaje."""
+    srcs = [x for x in m.get("broll_src") or [] if isinstance(x, dict) and x.get("sid")]
+    if not srcs:
+        m.pop("broll", None)
+        return
+    import brollscan
+    lo, hi = PHASE_BROLL
+    out = []
+    for k, x in enumerate(srcs):
+        name = x.get("name") or x["sid"]
+
+        def step(done, total, msg, k=k, name=name):
+            if bar is not None:
+                frac = (k + (done / max(1, total))) / len(srcs)
+                bar.set(lo + (hi - lo) * frac, f"Viendo tu video de apoyo «{name}» ({min(done + 1, total)}/{total} tomas)…"
+                        if total > 1 else f"Viendo tu video de apoyo «{name}»…", "broll", force=False)
+        t0 = time.time()
+        try:
+            doc = _broll_analyze(x["sid"], on_step=step, cancel=prog.cancel.canceled if prog else None)
+        except JobCanceled:
+            raise                       # Cancelar mientras "Viendo tu video de apoyo…" cancela el trabajo
+        except RuntimeError as e:
+            if str(e) == "cancelado" or (prog is not None and _canceled_now(prog)):
+                raise JobCanceled() from e
+            traceback.print_exc()
+            out.append({"sid": x["sid"], "name": name, "shots": [], "enabled": True, "error": str(e)[:200]})
+            continue
+        except Exception as e:  # noqa: un video de apoyo ilegible no tumba el montaje
+            if prog is not None and _canceled_now(prog):
+                raise JobCanceled() from e
+            traceback.print_exc()
+            out.append({"sid": x["sid"], "name": name, "shots": [], "enabled": True, "error": str(e)[:200]})
+            continue
+        c = brollscan.compact(doc) or {"shots": []}
+        c.update(sid=x["sid"], name=name, enabled=True)
+        out.append(c)
+        sm = c.get("summary") or {}
+        print(f"   apoyo {x['sid']} ({name}): {sm.get('shots')} tomas, {sm.get('usable')} utiles "
+              f"({sm.get('window')} ventana, {sm.get('full')} completa), {time.time() - t0:.1f}s")
+    m["broll"] = {"version": 1, "sources": out}
 
 
 # ---- recursos del guion: "texto. - Agregar video_x" / "[agregar x]" / "[x]" / "{x}" al final de una
@@ -2757,6 +2989,11 @@ def _montage_result(res, clips, params, build_s, assets=None):
         if not isinstance(m.get(k), list):
             m[k] = []
     m["timeline"] = [t for t in m["timeline"] if isinstance(t, dict) and t.get("sid") in known]
+    m["screens"] = _screens_norm(m.get("screens"), known)
+    m["broll_src"] = [{k: x.get(k) for k in ("sid", "name", "dur", "w", "h", "has_audio")}
+                      for x in m.get("broll_src") or [] if isinstance(x, dict) and x.get("sid") in known]
+    # los que el usuario dijo que NO son grabacion de pantalla (el panel Tomas los muestra para deshacer)
+    m["screens_off"] = [x for x in params.get("screens_off") or [] if x in known]
     if not isinstance(m.get("stats"), dict):
         m["stats"] = {}
     m["ms"] = int(m.get("ms") or round(build_s * 1000))
@@ -2765,6 +3002,46 @@ def _montage_result(res, clips, params, build_s, assets=None):
     # el glosario con el que se armo: el ensamble lo muestra (y lo que el usuario deje ahi manda)
     m["glossary"] = str(params.get("glossary") or "")
     return m
+
+
+def _screens_norm(raw, known):
+    """plan.montage.screens saneadas: grabaciones de pantalla sincronizadas con una toma de ESTA
+    sesion ({id, sid, name, cam, cam_name, offset (s de los archivos), rate, corr, overlap, other,
+    audio_offset, lead, checks, dur, w, h, crop (fracciones del marco recortado) | None, content,
+    enabled}); lo demas se descarta."""
+    out = []
+    for k, x in enumerate(raw if isinstance(raw, list) else []):
+        if not isinstance(x, dict) or x.get("sid") not in known or x.get("cam") not in known or x.get("sid") == x.get("cam"):
+            continue
+        off, rate = _fnum(x.get("offset")), _fnum(x.get("rate"))
+        ov = x.get("overlap") if isinstance(x.get("overlap"), list) and len(x["overlap"]) == 2 else None
+        if off is None or ov is None or _fnum(ov[0]) is None or _fnum(ov[1]) is None:
+            continue
+        d = {"id": str(x.get("id") or f"sc{k + 1:02d}")[:40], "sid": x["sid"], "name": str(x.get("name") or "")[:200],
+             "cam": x["cam"], "cam_name": str(x.get("cam_name") or "")[:200], "offset": round(off, 5),
+             "rate": rate if rate and 0.9 < rate < 1.1 else 1.0, "corr": _fnum(x.get("corr")),
+             "overlap": [round(float(ov[0]), 3), round(float(ov[1]), 3)],
+             "other": [_fnum(v) for v in (x.get("other") or [None, None])[:2]],
+             "checks": [c for c in (x.get("checks") or []) if isinstance(c, dict)][:5],
+             "dur": _fnum(x.get("dur")), "w": x.get("w"), "h": x.get("h"),
+             "audio_offset": _fnum(x.get("audio_offset")),
+             "lead": [_fnum(v) or 0.0 for v in x["lead"][:2]] if isinstance(x.get("lead"), list) and len(x["lead"]) >= 2 else None,
+             "crop": _crop_param(x.get("crop")),
+             "content": [int(v) for v in x["content"][:4]] if isinstance(x.get("content"), list) and len(x["content"]) >= 4
+             and all(isinstance(v, (int, float)) for v in x["content"][:4]) else None,
+             "enabled": x.get("enabled", True) is not False}
+        out.append(d)
+    return out
+
+
+def _crop_param(c):
+    """[x0, y0, x1, y1] (fracciones de la fuente, x1 > x0, y1 > y0) o None."""
+    if not isinstance(c, list) or len(c) != 4:
+        return None
+    v = [_fnum(x) for x in c]
+    if any(x is None or not 0.0 <= x <= 1.0 for x in v) or v[2] - v[0] < 0.1 or v[3] - v[1] < 0.1:
+        return None
+    return [round(x, 5) for x in v]
 
 
 def _montage_inserts(m, clips, assets):
@@ -3514,8 +3791,13 @@ def _shorts_frames(plan, fps=30):
 
 
 def _hires_spec(rec):
-    """Spec del registro con el archivo de HOY de cada clip (por sid). FileNotFoundError si falta."""
+    """Spec del registro con el archivo de HOY de cada clip (por sid) y el MISMO modo de uniones con que
+    se compuso (un registro anterior a v0.6.1 no lo trae: solo "Armar con IA" iba exacto).
+    FileNotFoundError si falta."""
+    import compose as compose_mod
     spec = json.loads(json.dumps(rec["spec"]))
+    if not isinstance(spec.get("exact_joins"), bool):
+        spec["exact_joins"] = compose_mod.legacy_exact_joins(spec)
     missing = []
     for it in (spec.get("main") or []) + (spec.get("overlays") or []):
         p = _item_path(it)
@@ -4921,7 +5203,7 @@ def _storage_scan():
             for q in _ls(p):
                 if str(q) not in counted:
                     add("cache", q)
-        elif p.name in ("music", "director_cache") or p.name.startswith("compose_") or \
+        elif p.name in ("music", "director_cache", "broll") or p.name.startswith("compose_") or \
                 p.name.endswith(_WORK_CACHE_SUF):
             add("cache", p)
         else:
@@ -5658,6 +5940,19 @@ def source_thumb(sid: str):
     return FileResponse(f, media_type="image/jpeg")
 
 
+@app.get("/broll/{sid}/shot/{i}.jpg")
+def broll_shot_thumb(sid: str, i: int):
+    """Miniatura de la toma `i` del video de apoyo `sid` (la guarda brollscan al verlo). 404 si aun no."""
+    src = _resolve_source(Path(sid).stem)
+    if src is None:
+        raise HTTPException(404, "No existe")
+    import brollscan
+    f = brollscan.thumb_path(src, i)
+    if f is None:
+        raise HTTPException(404, "Aún no")
+    return FileResponse(f, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+
+
 def _resolve_source(sid):
     stem = Path(str(sid)).stem
     for p in SOURCES.glob(f"{stem}.*"):
@@ -5694,7 +5989,7 @@ def _source_meta_full(sid, src=None):
     """_meta.json de la fuente con fecha de grabacion y fps (una fuente importada antes de que el
     probe los trajera se completa una vez y se guarda)."""
     meta = _source_meta(sid)
-    if meta.get("created") and "fps" in meta:
+    if meta.get("created") and "fps" in meta and "capture" in meta:
         return meta
     src = src or _resolve_source(sid)
     if src is None:
@@ -5938,7 +6233,8 @@ def compose_timeline(body: dict = Body(...)):
     plan.montage y su guion; `script` (texto) = el guion editado en el ensamble (si no, el del
     montaje). Cada item principal puede traer "montage": {slot, cand, join, conf, setup?} y "vol":
     numero | "auto" (nivel de la voz medido; compose lo iguala entre segmentos). Director, perfil y
-    glosario que no vengan se toman del montaje."""
+    glosario que no vengan se toman del montaje. `screens`: [{id, enabled}] de las grabaciones de
+    pantalla sincronizadas del montaje (compose las pone encima de su toma: plan.fx.media "screen")."""
     _require_engine()
     _require_license()
     mjob = str(body.get("montage_job") or "").strip() or None
@@ -6033,6 +6329,8 @@ def compose_timeline(body: dict = Body(...)):
     glossary = body.get("glossary") if "glossary" in body else mparams.get("glossary")
     glossary = "" if glossary is None else glossary
     director = body.get("director") if body.get("director") is not None else mparams.get("director")
+    if mjob and isinstance(director, dict) and director.get("style") == "minimal":
+        _minimal_cuts(main)
     params = {"spec": spec, "glossary": str(glossary or ""), "n": int(body.get("highlights", 2)),
               "director": _director_params(director), **({"profile": prof} if prof else {})}
     if script:
@@ -6053,6 +6351,19 @@ def compose_timeline(body: dict = Body(...)):
             spec["inserts_timeline"] = "main"    # ya en s del ensamble que se compone (no del montaje guardado)
         if mont.get("inserts"):
             spec["inserts"] = [dict(x) for x in mont["inserts"] if x.get("sid") and x.get("enabled", True)]
+        if isinstance(body.get("screens"), list) and mont.get("screens"):
+            # grabaciones de pantalla como quedaron en el ensamble (encendidas o quitadas)
+            mont = dict(mont, screens=_screens_param(body["screens"], mont))
+        if mont.get("screens"):
+            spec["screens"] = [dict(x, path=str(_resolve_source(x["sid"]))) for x in mont["screens"]
+                               if _resolve_source(x["sid"]) is not None]
+        if isinstance(body.get("broll"), list) and (mont.get("broll") or {}).get("sources"):
+            # videos de apoyo como quedaron en el ensamble (se usan o no)
+            mont = dict(mont, broll=_broll_param(body["broll"], mont))
+        if (mont.get("broll") or {}).get("sources"):
+            spec["broll"] = [{"sid": x["sid"], "path": str(_resolve_source(x["sid"]))}
+                             for x in mont["broll"]["sources"] if isinstance(x, dict) and x.get("sid")
+                             and _resolve_source(x["sid"]) is not None]
         jobstore.requeue(mjob, kind="compose", params=params, plan={"montage": mont},
                          phase="analyzing", message="En cola…")
         _initial_engine(mjob, body.get("engine"))
@@ -6063,6 +6374,19 @@ def compose_timeline(body: dict = Body(...)):
     _initial_engine(job_id, body.get("engine"))
     _gc_later("nuevo trabajo")
     return {"job_id": job_id}
+
+
+def _minimal_cuts(main):
+    """Minimal en un montaje: los cambios de camara van con CORTE SECO. Las aceleraciones automaticas
+    (montage.plan_ramps) se quitan; la que el usuario prendio a proposito ("ramp_user": true) se queda."""
+    for it in main:
+        mm = it.get("montage") if isinstance(it.get("montage"), dict) else None
+        if mm is not None and mm.get("ramp_user") is True:
+            continue
+        it.pop("ramp_in", None)
+        it.pop("ramp_out", None)
+        if mm is not None and mm.get("ramp") is not None:
+            mm["ramp"] = False
 
 
 RAMP_MAX_DUR, RAMP_MAX_SPEED = 1.5, 4.0
@@ -6123,6 +6447,40 @@ def _inserts_param(raw, mont):
             ins["media_dur"] = float(_source_meta(sid).get("dur") or 0)
         out.append(ins)
     return out
+
+def _screens_param(raw, mont):
+    """"screens" de /compose ([{id, enabled}]: lo que el usuario dejo en el ensamble) sobre las del
+    montaje: solo cambia `enabled` (la sincronia la mide el motor; un id desconocido se ignora)."""
+    want = {str(x.get("id")): x for x in raw[:50] if isinstance(x, dict) and x.get("id")}
+    out = []
+    for x in (mont or {}).get("screens") or []:
+        if not isinstance(x, dict):
+            continue
+        y = dict(x)
+        w = want.get(str(x.get("id")))
+        if w is not None:
+            y["enabled"] = w.get("enabled", True) is not False
+        out.append(y)
+    return out
+
+
+def _broll_param(raw, mont):
+    """"broll" de /compose ([{sid, enabled}]: los videos de apoyo que el usuario dejo en el ensamble) sobre
+    los del montaje: solo cambia `enabled` (el catalogo lo hizo el motor; un sid desconocido se ignora)."""
+    want = {str(x.get("sid")): x for x in raw[:50] if isinstance(x, dict) and x.get("sid")}
+    b = dict((mont or {}).get("broll") or {})
+    out = []
+    for x in b.get("sources") or []:
+        if not isinstance(x, dict):
+            continue
+        y = dict(x)
+        w = want.get(str(x.get("sid")))
+        if w is not None:
+            y["enabled"] = w.get("enabled", True) is not False
+        out.append(y)
+    b["sources"] = out
+    return b
+
 
 def _montage_name(mont, sid):
     """Nombre del clip `sid` en el orden de grabacion de un montaje (None si no esta)."""
@@ -6195,7 +6553,8 @@ def _script_param(raw):
 def montage_start(body: dict = Body(...)):
     """"Armar con IA": body {sids: [...] (TODOS los clips de la sesion), script?: str, glossary?,
     intercut?: bool (default true), llm?: bool (juez LLM local, default true si esta disponible),
-    profile?, profile_id?, director?, engine?, job_id?} ->
+    profile?, profile_id?, director?, engine?, job_id?, screens_off?: [sids que NO son grabacion de
+    pantalla aunque suenen igual que una toma: "No es grabación de pantalla"]} ->
     {job_id}. Trabajo kind "montage", fase "assembly" (carril propio): espera la transcripcion de
     cada clip (progreso real en /status: stage words|montage, words_done/words_total), elige la
     mejor toma de cada parte del guion y deja el resultado en plan.montage (GET /plan, /status?plan=1).
@@ -6216,8 +6575,9 @@ def montage_start(body: dict = Body(...)):
     if len(sids) > MONTAGE_MAX_CLIPS:
         raise HTTPException(400, f"Demasiados clips para un montaje (máximo {MONTAGE_MAX_CLIPS}).")
     prof = _profile_param(body.get("profile"), body.get("profile_id"))
+    soff = [Path(str(x or "")).stem for x in (body.get("screens_off") or []) if isinstance(x, str)][:50]
     params = {"sids": sids, "script": script, "glossary": str(body.get("glossary") or "")[:500],
-              "assets": assets,
+              "assets": assets, **({"screens_off": [x for x in soff if x in sids]} if soff else {}),
               # {"sid": ...}: la limpieza del disco no borra los recursos mientras el proyecto exista
               "asset_items": [{"sid": a} for a in assets],
               "intercut": body.get("intercut", True) is not False, "llm": body.get("llm", True) is not False,
@@ -7315,6 +7675,7 @@ def get_plan(job_id: str):
         raise HTTPException(404, "Sin plan")
     plan, rev = _sym_stored(job_id, plan, rev)     # planes de antes de la regla de simetria
     plan, rev = _lm_stored(job_id, plan, rev)      # foto/logo de los enlaces que ya bajaron
+    _media_durs(plan)                              # recursos del guion sin la duracion de su clip
     try:                               # proyectos de antes del proxy: se genera al abrirlos
         j = jobstore.get_light(job_id)
         if j and j.get("state") not in ("queued", "running"):
@@ -8619,6 +8980,7 @@ def status(job_id: str, plan: int | None = None, rev: int | None = None):
             _PHASE_SEEN.pop(next(iter(_PHASE_SEEN)))
     if want:
         st["plan"], st["plan_rev"] = _lm_stored(job_id, *_sym_stored(job_id, *jobstore.get_plan(job_id)))
+        _media_durs(st["plan"])                    # recursos del guion sin la duracion de su clip
     # poco disco: se AVISA (antes se purgaban proyectos viejos sin decir nada)
     disk = _disk_state()
     st["low_space"], st["disk_free_gb"] = disk["low_space"], disk["free_gb"]

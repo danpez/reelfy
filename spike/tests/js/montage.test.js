@@ -263,6 +263,9 @@ test("montageStatus: en cola, escuchando n/N, eligiendo, listo y error", () => {
   assert.equal(w.state, "running"); assert.equal(w.stage, "words"); assert.equal(w.n, 12); assert.equal(w.N, 39);
   assert.equal(C.montageStatus({ phase: "assembly", state: "running", message: "Eligiendo las mejores tomas" }).stage, "match");
   assert.equal(C.montageStatus({ phase: "assembly", state: "running", stage: "match", message: "Escuchando" }).stage, "match");
+  // viendo un video de apoyo: sigue en "Eligiendo..." con su mensaje (el n/m de tomas no son clips escuchados)
+  const b = C.montageStatus({ phase: "assembly", state: "running", stage: "broll", message: "Viendo tu video de apoyo «a.mov» (3/20 tomas)…" });
+  assert.equal(b.stage, "match"); assert.equal(b.broll, true); assert.equal(b.n, null); assert.match(b.message, /apoyo/);
   const m = synthMontage();
   const r = C.montageStatus({ phase: "assembly", state: "review", has_plan: true, plan: { montage: m } });
   assert.equal(r.state, "ready"); assert.equal(r.montage, m);

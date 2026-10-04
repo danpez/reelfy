@@ -18,6 +18,8 @@ con reglas deterministas y generales del espanol hablado (sin frases propias de 
                   preposicion, intensificador, copula) -> se quita la oracion inconclusa.
   R4 correccion : "X, no, Y" / "perdon" / "mejor dicho" / ", digo," con un elemento anterior del
                   mismo tipo (numero por numero, palabra por palabra) -> se quita X + marcador.
+  R4b corregido : arranque corto que termina en "no," y se rehace enseguida repitiendo sus palabras
+                  ("Con un punto no, a un punto le asignas...") -> se quita el arranque y el "no,".
   R5 error      : groserias o comentarios meta ("me equivoque", "va de nuevo"); solo se cortan solos
                   dentro de una cadena de retomas (aislados quedan como sugerencia).
   R6 tartamudeo : repeticion inmediata de una palabra funcional sin puntuacion ("de de", "el el").
@@ -832,6 +834,64 @@ def detect_corrections(toks: list[Tok], opts: Opts) -> list[Cut]:
     return cuts
 
 
+# ----------------------------------------------------------------------------- R4b arranque corregido
+NEGATIONS = {"no", "nunca", "ni", "tampoco", "jamas", "nada"}
+# un "no" despues de estas es parte de lo que se dice ("unos dicen que no, otros que si"), no un tropiezo
+NO_ANSWER = {"que", "si", "o", "porque", "creo", "digo", "dije", "dice", "dijo", "pienso", "ya", "todavia",
+             "aun", "como", "pero", "y", "e", "pues", "claro", "obvio", "bueno", "dijeron", "dicen"}
+NO_RESTART_S = 2.0      # s: la repeticion llega a lo mas esto despues del "no,"
+
+
+def _common_run(a: list[Tok], b: list[Tok]) -> tuple[int, int, int]:
+    """(largo, i en a, j en b) del tramo comun contiguo mas largo (palabras iguales: _eq)."""
+    best = (0, 0, 0)
+    for i in range(len(a)):
+        for j in range(len(b)):
+            k = 0
+            while i + k < len(a) and j + k < len(b) and _eq(a[i + k], b[j + k]):
+                k += 1
+            if k > best[0]:
+                best = (k, i, j)
+    return best
+
+
+def detect_no_restart(toks: list[Tok], opts: Opts) -> list[Cut]:
+    """'Con un punto no, a un punto tu le asignas...': un arranque corto (<= 5 palabras desde el inicio de su
+    clausula) que termina en "no," (o "no." si whisper cerro ahi la oracion) y se REHACE enseguida (<=
+    NO_RESTART_S) repitiendo 2+ de sus palabras seguidas (o una de contenido) en las primeras 3 de la toma
+    nueva: se quita el arranque y el "no,". Vetos: un contraste con negacion dentro del arranque ('no es
+    para un dia no, es para un ano'), un "no" que es respuesta ('unos dicen que no, otros dicen que si':
+    NO_ANSWER), una toma nueva que empieza con 'sino', el enfasis ('no, no') y una pregunta ('¿no?')."""
+    cuts = []
+    n = len(toks)
+    for m in range(1, n - 2):
+        t = toks[m]
+        if t.n != "no" or t.punct not in ("comma", "stop") or t.raw.rstrip()[-1:] in "?!" or t.lead_q \
+                or toks[m - 1].n == "no" or toks[m + 1].n == "no":
+            continue                   # (pregunta "¿no?", enfasis "no, no, no")
+        if toks[m - 1].n in NO_ANSWER:
+            continue                   # "creo que no", "o no", "si no": el "no" es la respuesta
+        if toks[m - 1].punct in ("stop", "ellipsis"):
+            continue
+        f = m - 1
+        while f > 0 and m - f < 5 and toks[f - 1].punct not in ("stop", "ellipsis", "comma") \
+                and toks[f].pause_before < 0.35:
+            f -= 1
+        if not (f == 0 or toks[f - 1].punct in ("stop", "ellipsis", "comma") or toks[f].pause_before >= 0.35):
+            continue                   # el arranque es mas largo que 5 palabras: no es un tropiezo
+        frag = [x for x in toks[f:m] if not x.filler]
+        if not frag or any(x.n in NEGATIONS for x in frag):
+            continue
+        after = [x for x in toks[m + 1:m + 8] if not x.filler and x.start - t.end <= NO_RESTART_S]
+        if not after or after[0].n == "sino":
+            continue
+        L, i, j = _common_run(frag, after)
+        if j > 2 or L == 0 or (L < 2 and not (after[j].content and len(after[j].n) >= 4)):
+            continue
+        cuts.append(Cut(f, m + 1, "false_start", "medium", 0.74, "R4b", "arranque corregido con 'no'"))
+    return cuts
+
+
 # ----------------------------------------------------------------------------- R5 error
 def detect_bloopers(toks: list[Tok], opts: Opts) -> list[Cut]:
     cuts = []
@@ -1110,7 +1170,7 @@ def detect_raw(words: list[dict], opts: Opts | None = None, mask=None,
     jn = _norm_joins(joins)
     raw: list[Cut] = []
     for fn in (detect_restarts, detect_micro, detect_dead_repeats, detect_abandoned,
-               detect_corrections, detect_bloopers, detect_word_stutter):
+               detect_corrections, detect_no_restart, detect_bloopers, detect_word_stutter):
         raw += fn(toks, opts, mask) if fn is detect_abandoned else fn(toks, opts)
     if opts.restatement:
         raw += detect_restatements(toks, opts)

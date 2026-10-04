@@ -404,11 +404,17 @@
       }
     }
     // medio: ventana fuente con Ken Burns y paralaje (solo imagenes; un clip va tal cual, como el export)
+    // (`frame.rect` = [x, y, w, h] de la fuente que se ve: la grabacion de pantalla dentro de su marco)
     let src = null;
     if (frame && frame.src) {
       const z = baked ? 1 : kenburnsZoom(lt, dur, isVideo(it) ? 0 : param(it, "kenburns"));
-      src = baked ? [0, 0, frame.w, frame.h] : coverRect(frame.w, frame.h, w, h, z);
-      if (!baked) src[1] += parallaxPx(st.fdy, B.h, h, z) * src[3] / h;
+      if (Array.isArray(frame.rect) && frame.rect.length === 4) {
+        const c = coverRect(frame.rect[2], frame.rect[3], w, h, 1);
+        src = [frame.rect[0] + c[0], frame.rect[1] + c[1], c[2], c[3]];
+      } else {
+        src = baked ? [0, 0, frame.w, frame.h] : coverRect(frame.w, frame.h, w, h, z);
+        if (!baked) src[1] += parallaxPx(st.fdy, B.h, h, z) * src[3] / h;
+      }
     }
     const bwid = Math.max(1, 0.0028 * w), border = param(it, "border");
     g.save();
@@ -455,7 +461,7 @@
   }
 
   return {
-    SAFE, XC, SYM_W, CARD_W, ASPECT, ASPECT_TALL, RADIUS, IN_DUR, OUT_DUR, KENBURNS, DEFAULTS, LIVE_DEFAULTS, STYLES, FITS, ROOM_OK, CARD_BG,
+    SAFE, XC, SYM_W, CARD_W, ASPECT, ASPECT_TALL, ASPECT_MAX, RADIUS, IN_DUR, OUT_DUR, KENBURNS, DEFAULTS, LIVE_DEFAULTS, STYLES, FITS, ROOM_OK, CARD_BG,
     FLOAT_AMP, FLOAT_T, BREATH, SWAY, SWAY_T, PERSP, KB_LEAD, PARALLAX, PARALLAX_MAX, SHEEN_A, SHEEN_DELAY, SHEEN_EVERY,
     SHEEN_DUR, SHEEN_MIN, SHEEN_OUT, SHEEN_EASE, SHUTTER, SHUTTER_N, GLOSS_A, HOLO_A, RIM_A, WARP_STEP, WARP_MIN, WARP_MAX,
     param, isVideo, sheenAmount, captionTop, captionBottom, cardBand, cardLayout, cardPx, cardAnim, kenburnsZoom, parallaxPx,

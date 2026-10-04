@@ -232,7 +232,7 @@ FIELDS = {
                            "badge_color", "title", "subtitle", "value", "items", "icon", "theme",
                            "label", "handle", "thickness", "text", "bg", "fg", "map", "bend",
                            "shadow", "button", "arrow_color", "aspect", "double", "arrow_scale",
-                           "button_color", "avatar", "style", "media", "radius", "border",
+                           "button_color", "button_auto", "avatar", "style", "media", "radius", "border",
                            "border_color", "fit", "caption", "platform", "display", "initials",
                            "links", "layout", "icon_style", "stagger", "opacity", "width", "cols",
                            "backdrop", "align", "logo"},
@@ -333,9 +333,16 @@ STYLES: dict[str, dict] = {
         "transitions": [("flash", 2), ("slide", 2), ("zoom_blur", 1)],
         "scene_trans": [("flash", 1)],
         "trans_dur": 0.8,
-        "look": {"look": "natural", "vignette": 0.08, "grain": 0.0, "sharpen": 0.1},
-        "music": {"prompt": "minimal ambient electronic instrumental, soft pulses, clean and airy",
-                  "bpm": 100, "gain_db": -17.0, "duck_db": -8.0, "mood": "chill", "intro_fade": 0.5},
+        # el color como salio de la camara (solo HDR -> SDR): "Ajustar el color" apagado; se prende en Estilo
+        "look": {"look": "natural", "vignette": 0.0, "grain": 0.0, "sharpen": 0.0, "enabled": False,
+                 "match_shots": False},
+        # la musica de la edicion aprobada: piano suave, sin golpes ni cortes de musica, salida en fundido
+        "music": {"prompt": "minimal elegant instrumental, soft felt piano and warm airy pads, gentle pulse, "
+                            "calm premium technology mood, no vocals",
+                  "bpm": 92, "gain_db": -19.0, "duck_db": -9.0, "mood": "chill", "intro_fade": 0.8,
+                  "fade_out": 2.0, "ending": "fade", "events": False,
+                  # el prompt APROBADO tal cual: sin ", for a video about <tema>" (otra pista distinta)
+                  "topic": False},
         "doodles": ["underline", "sparkle"],
         "backgrounds": ["color"],
         "drama": {"effect": None, "contrast": 1.2, "giant": False, "shake": False,
@@ -1397,6 +1404,12 @@ def ramp_join(shots: list[dict], k: int) -> bool:
     return k > 0 and isinstance(shots[k - 1], dict) and _ramp_on(shots[k - 1].get("ramp_out"))
 
 
+# grabacion de pantalla sincronizada (fx.media "screen"): la toma va desenfocada detras; los movimientos de
+# camara ahi no se ven (media_guard los quita; uno que empezo antes y dura >= SCREEN_FX_KEEP s se acorta)
+SCREEN_CAMERA_FX = ("zoom", "punch", "shake", "kenburns")
+SCREEN_FX_KEEP = 0.6
+
+
 def media_items(plan: dict) -> list[dict]:
     """Recursos del guion activos (plan.fx.media, tiempo ORIGINAL): contenido BLOQUEADO del
     usuario. El director no pone titulos, tarjetas, escenas, garabatos ni transiciones encima
@@ -1447,12 +1460,17 @@ _GRADE_NEUTRAL = {"strength": 1.0, "exposure": 0.0, "temperature": 0.0, "tint": 
                   "contrast": 0.0, "clarity": None}
 
 
-def _grade_tuned(g: Any, style: str | None) -> bool:
-    """El color del plan lo ajusto el usuario: algun valor difiere del look del estilo con que se
-    dirigio (exposicion, contraste, saturacion, look, vineta, grano, nitidez, apagado...)."""
-    if not isinstance(g, dict):
-        return False
-    base = dict(_GRADE_NEUTRAL, **_grade_cfg(style if style in STYLES else "dinamico"))
+# el color que dejaba cada estilo en versiones ANTERIORES (sin tocar = no es del usuario): un proyecto
+# dirigido en Minimal antes de v0.6.1 traia la correccion encendida con vineta 0.08 y nitidez 0.1; al
+# re-dirigir debe tomar el Minimal nuevo (sin correccion), no "conservar tu color". Paridad:
+# fxcore.GRADE_PREV (test_estilo.py).
+_GRADE_PREV = {
+    "minimal": [{"enabled": True, "look": "natural", "match_shots": True, "vignette": 0.08, "grain": 0.0,
+                 "sharpen": 0.1}],
+}
+
+
+def _grade_differs(g: dict, base: dict) -> bool:
     for k, v in g.items():
         if k not in base:
             continue
@@ -1464,6 +1482,17 @@ def _grade_tuned(g: Any, style: str | None) -> bool:
         elif v != d:
             return True
     return False
+
+
+def _grade_tuned(g: Any, style: str | None) -> bool:
+    """El color del plan lo ajusto el usuario: algun valor difiere del look del estilo con que se
+    dirigio (exposicion, contraste, saturacion, look, vineta, grano, nitidez, apagado...), ni del que
+    ese estilo dejaba en una version anterior (_GRADE_PREV)."""
+    if not isinstance(g, dict):
+        return False
+    st = style if style in STYLES else "dinamico"
+    bases = [_grade_cfg(st)] + [dict(b) for b in _GRADE_PREV.get(st, [])]
+    return all(_grade_differs(g, dict(_GRADE_NEUTRAL, **b)) for b in bases)
 
 
 def _keep_grade(fx: dict, old: dict, style: str | None) -> dict:
@@ -3917,12 +3946,16 @@ class _Choreo:
         # sobre el video desenfocado). Ocupan todas las franjas (nada de titulos, tarjetas, escenas
         # ni garabatos encima; los subtitulos se quedan) y cuentan como eventos para el ritmo
         self.media_win: list[tuple[float, float, str]] = []
+        self.screen_win: list[tuple[float, float]] = []     # grabaciones de pantalla (style "screen")
         for it in media_items(plan):
             a, b = self.f(float(it["start"])), self.f(float(it["end"]))
             if b - a <= 0.05:
                 continue
             iid = "media:" + str(it.get("id"))
             self.media_win.append((a, b, iid))
+            if it.get("style") in ("screen", "reel"):
+                # (tambien un video de apoyo: tapa la toma o la deja desenfocada detras de su ventana)
+                self.screen_win.append((a, b))
             for z in ("top", "center", "low", "full", "accent"):
                 self.occ[z].append((a, b, iid))
             t = a
@@ -7413,7 +7446,7 @@ class _Choreo:
                 fields["arrow_scale"] = arrow
             fields.update(extra)
             if variant == "follow":
-                fields["button_color"] = self.button_color()
+                fields.update(self.button_fields())
             it = self.add("graphics", "cta", fields, zone=z)
             if it:
                 hh = self._link_h(size, two) if variant == "link_below" else size * 0.17 * 1080 / 1920
@@ -8072,6 +8105,15 @@ class _Choreo:
         acc = self.pal["accent"]
         return acc if _luma(acc) <= 0.85 else self.pal["dark"]
 
+    def button_fields(self) -> dict:
+        """button_color del Seguir y, si salio del oscuro de la paleta porque el acento del estilo no se
+        lee como boton (Minimal: blanco), `button_auto`: al poner el color de tu marca en Estilo
+        (fxcore.applyAccent / server._accent_apply) el boton lo toma (el verde de la marca, no negro)."""
+        acc = self.pal["accent"]
+        if _luma(acc) <= 0.85:
+            return {"button_color": acc}
+        return {"button_color": self.pal["dark"], "button_auto": True}
+
     def _follow_fields(self) -> dict | None:
         """Textos del CTA seguir: @usuario, o el nombre publicable (+ rol), o SOLO el rol si el
         nombre no esta confirmado (nunca el nombre de un letrero sin confirmar). Con perfil:
@@ -8409,7 +8451,7 @@ class _Choreo:
              "handle": (ff or {}).get("handle", "") if v == "follow" else self.ent.get("handle", ""),
              "size": sz, "color": self.pal["accent"], "anim_in": "pop", "anim_out": "none", "rotation": 0.0}
         if v == "follow":
-            f["button_color"] = self.button_color()
+            f.update(self.button_fields())
             f.update({k_: v_ for k_, v_ in (ff or {}).items() if k_ not in ("label", "handle")})
         else:
             f.update({k_: v_ for k_, v_ in bf.items() if k_ != "label"})
@@ -9781,7 +9823,8 @@ class _Choreo:
         """Red de seguridad: lo de la IA que termino encima de un recurso del guion (un CTA o un
         rotulo que se alargo despues de colocarse, una transicion pegada) se quita con sus SFX, y
         ninguna transicion queda en una union con rampa. La barra de progreso y la marca de agua
-        (franja 'edge') se quedan."""
+        (franja 'edge') se quedan. Debajo de una grabacion de pantalla tampoco quedan movimientos de
+        camara (SCREEN_CAMERA_FX): la toma va desenfocada y no se verian."""
         if not self.media_win and not any(sh.get("ramp_join") for sh in self.shots):
             return
         for tr in ("text", "graphics", "cutaways"):
@@ -9795,6 +9838,19 @@ class _Choreo:
         for it in list(self.fx["transitions"]):
             fa = self.f(float(it["at"]))
             if self.on_media(fa - MEDIA_TRANS_PAD, fa + MEDIA_TRANS_PAD) or self.near_ramp(fa, 0.3):
+                self._unplace(it)
+        # debajo de una grabacion de pantalla la toma va desenfocada: un movimiento de camara ahi no se
+        # ve (y su golpe de sonido sobra en la demo). El que ya venia de antes termina al entrar la pantalla
+        for it in list(self.fx["effects"]):
+            if it.get("kind") not in SCREEN_CAMERA_FX or not any(x is it for x in self.fx["effects"]):
+                continue
+            fa, fb = self.f(float(it["start"])), self.f(float(it["end"]))
+            hit = next(((a, b) for a, b in self.screen_win if fa < b - 1e-6 and a < fb - 1e-6), None)
+            if hit is None:
+                continue
+            if hit[0] - fa >= SCREEN_FX_KEEP:
+                it["end"] = round(self.o(hit[0] - 0.02), 3)
+            else:
                 self._unplace(it)
 
     # ---------------------------------------------------------- orquestacion
@@ -9860,8 +9916,8 @@ def _captions_cfg(style: str, pal: dict, ch: "_Choreo | None" = None) -> dict:
 
 def _grade_cfg(style: str) -> dict:
     g = STYLES[style]["look"]
-    return {"enabled": True, "look": g["look"], "match_shots": True, "vignette": g["vignette"],
-            "grain": g["grain"], "sharpen": g["sharpen"]}
+    return {"enabled": bool(g.get("enabled", True)), "look": g["look"], "match_shots": bool(g.get("match_shots", True)),
+            "vignette": g["vignette"], "grain": g["grain"], "sharpen": g["sharpen"]}
 
 
 def _music_cfg(style: str, script: dict, ch: _Choreo) -> dict:
@@ -9869,10 +9925,13 @@ def _music_cfg(style: str, script: dict, ch: _Choreo) -> dict:
     # el rubro de la voz (la profesion escrita en el perfil no cambia la pista: misma musica)
     ent_ = script["entities"]
     topic = script.get("topic") or (ent_.get("topic_role") if "topic_role" in ent_ else ent_.get("role")) or ""
-    prompt = m["prompt"] + (f", for a video about {strip_accents(topic).lower()}" if topic else "")
-    stops = sorted(ch.music_stops, key=lambda s: s["at"])
+    prompt = m["prompt"] + (f", for a video about {strip_accents(topic).lower()}"
+                            if topic and m.get("topic", True) is not False else "")
+    # (un estilo sin eventos de musica -minimal- deja la cama quieta: sin cortes ni subidas)
+    events = m.get("events", True) is not False
+    stops = sorted(ch.music_stops, key=lambda s: s["at"]) if events else []
     swells = []
-    for sw in sorted(ch.music_swells, key=lambda s: s["start"]):
+    for sw in sorted(ch.music_swells, key=lambda s: s["start"]) if events else []:
         if swells and sw["start"] <= swells[-1]["end"]:
             swells[-1]["end"] = max(swells[-1]["end"], sw["end"])
             swells[-1]["db"] = max(swells[-1]["db"], sw["db"])
@@ -9886,9 +9945,9 @@ def _music_cfg(style: str, script: dict, ch: _Choreo) -> dict:
     # dinamico/energetico entran con el golpe, elegante/minimal con una entrada suave
     cfg = {"enabled": True, "source": "ai", "track": None, "file": None, "prompt": prompt,
            "mood": mood, "bpm": m["bpm"], "gain_db": m["gain_db"], "duck_db": m["duck_db"],
-           "intro_fade": float(m.get("intro_fade", 0.0)), "fade_out": 1.5, "stops": stops,
-           "swells": swells, "ending": "hit"}
-    if ch.drop_at is not None:
+           "intro_fade": float(m.get("intro_fade", 0.0)), "fade_out": float(m.get("fade_out", 1.5)), "stops": stops,
+           "swells": swells, "ending": m.get("ending", "hit")}
+    if ch.drop_at is not None and events:
         cfg["drop_at"] = ch.drop_at
     return cfg
 
@@ -10038,7 +10097,27 @@ def choreograph(plan: dict, shots: list[dict], script: dict, style: str = "dinam
         ch.auto_matte = bool(auto_matte)
     ch.grid = grid
     fx = ch.run()
+    if style == "minimal" and isinstance(plan.get("montage"), dict):
+        _minimal_montage(fx, ch)
     return fx, ch
+
+
+# Minimal en un montaje ("Armar con IA"): cortes secos y nada que distraiga (la edicion aprobada: v6 lleva
+# fx.text = [] y fx.sfx = []). De lo que propuso la IA (lo del usuario nunca se toca) se quitan
+# transiciones, efectos de camara (acercamientos, golpes, sacudidas), garabatos, iconos, etiquetas, TODOS
+# los titulos (los ganchos animados repetian los subtitulos palabra por palabra sobre el pecho del que
+# habla y escondian los subtitulos: grupos de 2 cuadros) y TODO el sonido de efectos (whoosh, pluma, pop y
+# los clics del boton de seguir). El CTA, las tarjetas de datos y el rotulo (si el perfil lo usa) se quedan.
+MINIMAL_GFX = ("cta", "card", "lower_third", "progress", "socials", "media")
+
+
+def _minimal_montage(fx: dict, ch: "_Choreo") -> None:
+    fx["transitions"] = []
+    fx["effects"] = []
+    fx["cutaways"] = [c for c in fx.get("cutaways") or [] if c.get("kind") == "info_card"]
+    fx["graphics"] = [g for g in fx.get("graphics") or [] if g.get("kind") in MINIMAL_GFX]
+    fx["text"] = []
+    fx["sfx"] = []
 
 
 def _music_ready() -> bool:
@@ -10149,6 +10228,42 @@ def propose_trims(plan: dict, shots: list[dict], words: list[dict], keep: float 
         if tl.remap_clamped(dur) - tl.remap_clamped(start) > 0.4:
             add(start, dur, "silencio al final")
     return out
+
+
+END_TAIL_KEEP = 1.0   # s que se quedan despues de la ultima palabra en un montaje (= montage.END_TAIL)
+
+
+def _keep_end_tail(plan: dict, keep: float = END_TAIL_KEEP) -> bool:
+    """Montaje ("Armar con IA"): el corte de silencio del analisis se comia la cola que el montaje dejo para
+    el cierre (montage.END_TAIL) y el video terminaba 0.1-0.3 s despues de la ultima palabra: el «Siguiendo»
+    del boton y el enlace casi no se veian (v6: Kevin le dio 0.9 s a mano). El corte de silencio FINAL (el que
+    llega al final del video, no de tomas ni del usuario) empieza `keep` s despues de la ultima palabra (o se
+    apaga si no queda nada que cortar). -> True si cambio algo. Un video suelto queda como siempre."""
+    if not isinstance(plan.get("montage"), dict):
+        return False
+    try:
+        dur = float(plan.get("duration") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    ends = [float(w.get("end") or 0.0) for ph in plan.get("phrases") or [] for w in ph or []
+            if isinstance(w, dict) and str(w.get("text") or "").strip()]
+    if not ends or dur <= 0:
+        return False
+    last = max(ends)
+    target = min(dur, last + keep)
+    changed = False
+    for c in plan.get("cuts") or []:
+        if not isinstance(c, dict) or c.get("enabled", True) is False or c.get("user") or \
+                c.get("src") in ("takes", "user", "manual"):
+            continue
+        a, b = float(c.get("start") or 0.0), float(c.get("end") or 0.0)
+        if b >= dur - 0.05 and last - 0.05 <= a < target - 1e-3:
+            if target >= b - 0.05:
+                c["enabled"] = False
+            else:
+                c["start"] = round(target, 3)
+            changed = True
+    return changed
 
 
 def _silence_notes(plan: dict, words: list[dict], limit: float = 2.5) -> list[str]:
@@ -10690,6 +10805,8 @@ def direct(plan: dict, style: str = "dinamico", intensity: float = 0.75, seed: i
             p["cuts"] = list(p.get("cuts") or []) + trims
             removed = sum(c["end"] - c["start"] for c in trims)
             notes.append(f"recortes IA propuestos: {len(trims)} ({removed:.1f} s de b-roll/silencio)")
+    if _keep_end_tail(p):
+        notes.append(f"cierre: {END_TAIL_KEEP:.1f} s despues de la ultima palabra (el boton de seguir se alcanza a ver)")
     _step(on_step, "coreografia", 0.0, "coreografiando la edicion")
     old = (plan.get("fx") or {}) if isinstance(plan.get("fx"), dict) else {}
     locked_ids = set((plan.get("director") or {}).get("locked") or [])

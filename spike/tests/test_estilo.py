@@ -47,6 +47,10 @@ UI_IDS = {
     "music.preview", "director.music_sync",
     # fase 4: los selectores de tipo del inspector (galerias con su ejemplo) y el archivo de un recurso
     "item.kind.text", "item.kind.graphics", "item.kind.cutaways", "item.kind.effects", "item.kind.transitions", "item.kind.sfx", "media.file",
+    # grabacion de pantalla sincronizada con una toma (inspector del Studio y panel Tomas)
+    "media.screen",
+    # video de apoyo en fragmentos (inspector del Studio: el porque y sus tomas)
+    "media.reel", "media.reel.shots",
 }
 # claves de los textos fijos de la UI que usa estilo.js (todas deben existir)
 EMOJI = re.compile("[\U0001F300-\U0001FAFF☀-➿⭐⭕]")
@@ -1217,7 +1221,9 @@ def test_tarjetas_de_edicion_conservan_lo_tuyo_igual_al_director(tmp_path):
     cards = _node_json(tmp_path, "dc.js", "process.stdout.write(JSON.stringify(C.DIRECTOR_CARDS));")
     for k in D.STYLES:
         g = D._grade_cfg(k)
-        assert cards[k]["grade"] == {x: g[x] for x in ("look", "vignette", "grain", "sharpen")}, k
+        cg = dict(cards[k]["grade"])
+        assert cg.pop("enabled", True) == g["enabled"] and cg.pop("match_shots", True) == g["match_shots"], k
+        assert cg == {x: g[x] for x in ("look", "vignette", "grain", "sharpen")}, k
     caps = [{"enabled": True, "preset": "clean_bold", "font": "Poppins-ExtraBold", "color": "#FFFFFF", "case": "none", "max_words": 3},
             {"enabled": True, "preset": "boxed", "highlight": "#FF5A3C", "font": "Poppins-ExtraBold", "color": "#FFFFFF", "case": "none", "max_words": 3},
             {"enabled": False, "preset": "karaoke", "font": None, "color": "#FFD23F", "case": "upper", "max_words": 4, "stroke": 3, "recenter": False},
@@ -1225,7 +1231,9 @@ def test_tarjetas_de_edicion_conservan_lo_tuyo_igual_al_director(tmp_path):
     grades = [{"enabled": True, "look": "warm_clean", "match_shots": True, "vignette": 0.15, "grain": 0.022, "sharpen": 0.15},
               {"enabled": True, "look": "natural", "match_shots": True, "vignette": 0.15, "grain": 0.022, "sharpen": 0.15},
               {"enabled": True, "look": "warm_clean", "match_shots": True, "vignette": 0.15, "grain": 0.022, "sharpen": 0.15, "exposure": 0.2},
-              {"enabled": False, "look": "cinematic"}, {"look": "moody", "temperature": 0.0, "clarity": None}]
+              {"enabled": False, "look": "cinematic"}, {"look": "moody", "temperature": 0.0, "clarity": None},
+              # el Minimal de v0.6.0 sin tocar (correccion encendida): NO es del usuario (director._GRADE_PREV)
+              {"enabled": True, "look": "natural", "match_shots": True, "vignette": 0.08, "grain": 0.0, "sharpen": 0.1}]
     cases = []
     for old in D.STYLES:
         for i, c in enumerate(caps):

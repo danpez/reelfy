@@ -62,11 +62,19 @@ insert gana t0/t1 (s del video combinado) y su start/end queda en la linea de ti
 Con spec["inserts_timeline"] == "main" los inserts YA estan en la linea de tiempo del ensamble que se
 compone (los recoloco la UI sobre los clips actuales: FXCore.placeInserts) y se anclan en ella, no en
 la linea de tiempo guardada del montaje (que puede ser la de antes de cambiar tomas).
+
+VIDEOS DE APOYO (plan.montage.broll: el catalogo de cada video mudo de la sesion, scripts/brollscan.py):
+finish_plan() los usa en FRAGMENTOS mientras se dice lo que muestran (broll_media -> brollplan.place
+sobre las frases del ensamble COMPUESTO, despues de las grabaciones de pantalla y los recursos del guion,
+sin encimarse con ellos) y los deja en plan.fx.media (style "reel", src "broll", locked; motion/reel.py los
+dibuja). `broll_pick`: el LLM local que elige y ordena las tomas de cada frase (opcional). Una fuente con
+"enabled": false (quitada en el ensamble) no se usa.
 """
 import contextvars
 import copy
 import math
 import os
+import re
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -96,8 +104,11 @@ LEVEL_DOWN_DB = 12.0    # lo mas que se baja
 LIMIT = 0.89            # techo (-1 dBFS: margen para el sobretiro del AAC) cuando una toma se sube
 SHOT_KEYS = ("join", "slot", "cand", "conf", "setup", "sid", "ramp")   # de info.shots a plan.shots
 # uniones exactas (segmentos de cuadros enteros + audio re-codificado al unir, ver compose()):
-# "montage" (default: solo "Armar con IA"), "all" (tambien el ensamble manual) u "off"
-EXACT_JOINS = os.environ.get("REELFY_COMPOSE_EXACT_JOINS", "montage").strip().lower()
+# "all" (default: TODO ensamble, "Armar con IA" y el manual), "montage" (solo "Armar con IA": lo de
+# antes de v0.6.1, que en el manual atrasaba la voz ~27 ms por union: 1.2 s tras 45 cortes) u "off".
+# Un spec con "exact_joins" (bool) manda: el registro de composicion lo guarda y el export en 4K
+# recompone con el MISMO modo que el video del proyecto.
+EXACT_JOINS = os.environ.get("REELFY_COMPOSE_EXACT_JOINS", "all").strip().lower()
 # rampas de velocidad (solo video) en los cambios de camara: ver el docstring del modulo
 RAMP_MIN = 0.10          # s de salida: una rampa mas corta (3 cuadros a 30 fps) no se nota
 RAMP_MAX = 1.0           # s de salida
@@ -305,17 +316,62 @@ def created(path):
     return {"created": got[0], "created_src": got[1], "created_ts": got[2]}
 
 
+_SCREEN_TAG = re.compile(r"replaykit|screen\s*-?\s*(record|captur|cast)|screenrecord|grabaci[oó]n de pantalla|"
+                         r"obs studio|obs\s+\d|capture d.?[eé]cran", re.IGNORECASE)
+_CAMERA_TAGS = ("com.apple.quicktime.make", "com.apple.quicktime.model", "make", "model",
+                "com.android.manufacturer", "com.android.model", "manufacturer")
+
+
+@lru_cache(maxsize=256)
+def _capture_cached(path, size, mtime_ns):
+    """"screen" | "camera" | None segun los metadatos del contenedor (ver capture())."""
+    try:
+        r = subprocess.run([FFPROBE, "-v", "error", "-show_entries", "format_tags:stream_tags", "-of", "json",
+                            path], capture_output=True, text=True, timeout=30)
+        import json
+        d = json.loads(r.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    tags = {}
+    for t in [(d.get("format") or {}).get("tags") or {}] + [(x or {}).get("tags") or {} for x in d.get("streams") or []]:
+        for k, v in t.items():
+            tags.setdefault(str(k).lower(), str(v))
+    for k in ("com.apple.quicktime.author", "author", "artist", "encoder", "software", "comment",
+              "com.apple.quicktime.software", "handler_name", "title", "description"):
+        v = tags.get(k)
+        if v and _SCREEN_TAG.search(v):
+            return "screen"
+    if any(tags.get(k, "").strip() for k in _CAMERA_TAGS):
+        return "camera"
+    return None
+
+
+def capture(path):
+    """Como se grabo un video segun sus metadatos: "screen" (grabacion de pantalla: ReplayKit del
+    iPhone, grabadores de pantalla, OBS), "camera" (trae marca/modelo de la camara) o None (no se
+    sabe: un video exportado o sin etiquetas). El montaje lo usa para reconocer una grabacion de
+    pantalla sincronizada con una toma."""
+    p = Path(path)
+    try:
+        stt = p.stat()
+    except OSError:
+        return None
+    return _capture_cached(str(p), stt.st_size, stt.st_mtime_ns)
+
+
 def probe(path):
     """dims de DISPLAY (rotación aplicada: un MOV de iPhone 3840x2160 con rotation -90
     es 2160x3840), duración, si tiene audio, si es HDR (HLG/PQ: 'hlg'|'pq'|None), rotacion,
-    fps (promedio; ~59.97 en un iPhone VFR) y fecha de grabacion (`created`, ver created())."""
+    fps (promedio; ~59.97 en un iPhone VFR), fecha de grabacion (`created`, ver created()) y como
+    se grabo (`capture`: "screen" | "camera" | None, ver capture())."""
     i = video_io.probe(path)
     if not i.get("w") and not i.get("duration"):
         return {"w": 0, "h": 0, "dur": 0.0, "audio": False, "type": "video",
-                "rotation": 0, "hdr": None, "fps": 0.0, **created(path)}
+                "rotation": 0, "hdr": None, "fps": 0.0, "capture": None, **created(path)}
     return {"w": i["w"], "h": i["h"], "dur": round(i["duration"], 3), "audio": i["has_audio"],
             "type": "video" if i["duration"] > 0 else "image", "rotation": i["rotation"],
-            "hdr": i["hdr"], "fps": round(float(i.get("fps") or 0.0), 3), **created(path)}
+            "hdr": i["hdr"], "fps": round(float(i.get("fps") or 0.0), 3),
+            "capture": capture(path) if i["duration"] > 0 else None, **created(path)}
 
 
 def _has_audio(path):
@@ -675,6 +731,23 @@ def _copy_video(src, out, info):
 
 
 # ---------------------------------------------------------------- montaje con IA
+def exact_joins(spec, montage=None):
+    """Las uniones del ensamble van exactas? `spec["exact_joins"]` (bool) manda; si no, EXACT_JOINS
+    ("all": siempre; "montage": solo un montaje con IA; "off": nunca)."""
+    v = (spec or {}).get("exact_joins")
+    if isinstance(v, bool):
+        return v
+    if montage is None:
+        montage = is_montage(spec)
+    return EXACT_JOINS == "all" or (EXACT_JOINS != "off" and bool(montage))
+
+
+def legacy_exact_joins(spec):
+    """Modo de uniones de un spec compuesto ANTES de que el registro lo guardara (v0.6.0 y antes: solo
+    "Armar con IA" iba exacto). Para recomponer en 4K la MISMA edicion."""
+    return bool(is_montage(spec))
+
+
 def is_montage(spec):
     """El montaje viene de "Armar con IA": algun clip principal trae su "montage" (o el spec trae
     el plan del montaje). Sin esto compose() se comporta exactamente como siempre."""
@@ -1283,9 +1356,12 @@ def _media_fit(kind, src_len, slot, ins):
         return fit, round(sp, 4), round(src_in, 3)
     avail = float(src_len)
     if avail > slot + 1e-3:
+        if fit == "trim" and src_in > 1e-3:
+            # el usuario eligio desde que segundo: se respeta (dentro del clip: el hueco no se queda sin cuadros)
+            return "trim", 1.0, round(min(src_in, avail - slot), 3)
         if avail <= MEDIA_SPEED_MAX * slot:
             return "speed", round(avail / slot, 4), 0.0
-        return "trim", 1.0, round(src_in if src_in + slot <= avail else 0.0, 3)
+        return "trim", 1.0, round(min(src_in, avail - slot), 3)
     if MEDIA_SLOW_MIN * slot - 1e-3 <= avail < slot - 1e-3:
         return "speed", round(avail / slot, 4), 0.0
     return ("hold" if fit in ("speed", "trim") else fit), 1.0, 0.0
@@ -1414,12 +1490,73 @@ def script_media(montage, info, dur=None, spec=None, resolve=None, timeline=None
         fit, sp, src_in = _media_fit(kind, src_len, t1 - t0, it)
         # sin archivo (falta): se queda en su lugar sin sid (el render lo omite con aviso y el Studio
         # pide subirlo en la pista Recursos)
+        # media_dur: el Studio ajusta "Desde qué segundo del clip" dentro del clip (sin la duracion lo
+        # dejaba en 0 y el recurso siempre empezaba al inicio del archivo)
         items.append({"id": iid, "start": round(t0, 3), "end": round(t1, 3),
                       "sid": it.get("sid") if path else None, "path": path, "kind": kind, "fit": fit,
                       "speed": sp, "src_in": src_in, "style": "float_card",
                       "enabled": it.get("enabled", True) is not False, "locked": True,
-                      "src": "script", "name": it.get("name")})
+                      "src": "script", "name": it.get("name"),
+                      "media_dur": round(src_len, 3) if src_len else None})
     return items, meta
+
+
+def screen_media(montage, info, dur=None, spec=None, resolve=None):
+    """plan.montage.screens (grabaciones de pantalla sincronizadas con una toma, montage.detect_screens)
+    + info["segs"] -> items de plan.fx.media con estilo "screen": uno por tramo CONTIGUO del video
+    combinado donde se ve su toma (screensync.runs), cada uno con su mapa de sincronia
+    {"offset", "rate", "pieces": [[t0, t1, cam_in]]} (t0/t1 en s del video combinado; cam_in = s de la
+    camara en t0; la pantalla en t es offset + rate * (cam_in + t - t0)) y el recorte de su marco
+    (`crop`, fracciones de la fuente). Siguen cada corte que el
+    montaje hizo dentro de la toma (cada pedazo trae su propio cam_in) y los recortes de silencio del
+    render (que trabaja en este mismo tiempo original). Solo donde la pantalla tiene cuadros; mudos
+    (la voz es la de la camara). `enabled` false (quitada en el ensamble) llega oculta."""
+    scr = (montage or {}).get("screens") if isinstance(montage, dict) else None
+    if not isinstance(scr, list) or not scr:
+        return []
+    import screensync as SS
+    segs = _segs(info)
+    table = {str(x.get("sid")): x.get("path") for x in (spec or {}).get("screens") or []
+             if isinstance(x, dict) and x.get("sid") and x.get("path")}
+    res = _asset_resolver(spec, resolve)
+    total = float(dur) if dur else None
+    items = []
+    for x in scr:
+        if not isinstance(x, dict) or not x.get("sid") or not x.get("cam"):
+            continue
+        path = table.get(str(x["sid"])) or res(x["sid"], x)
+        try:
+            sdur = float(x.get("dur") or 0.0) or (float(probe(path).get("dur") or 0.0) if path else 0.0)
+        except Exception:  # noqa
+            sdur = 0.0
+        ps = SS.pieces(segs, x["cam"], x, sdur or None)
+        for k, run in enumerate(SS.runs(ps)):
+            t0, t1 = run[0][0], run[-1][1]
+            if total:
+                t0, t1 = max(0.0, min(t0, total)), max(0.0, min(t1, total))
+            if t1 - t0 < MEDIA_MIN:
+                continue
+            items.append({"id": str(x.get("id") or "sc") + (f"_{k + 1}" if k else ""),
+                          "start": round(t0, 3), "end": round(t1, 3), "sid": x["sid"] if path else None,
+                          "path": path, "kind": "video", "style": "screen", "src": "screen",
+                          "enabled": x.get("enabled", True) is not False, "locked": True,
+                          "name": x.get("name"), "cam": x["cam"], "cam_name": x.get("cam_name"),
+                          "media_dur": round(sdur, 3) if sdur else None, "w": x.get("w"), "h": x.get("h"),
+                          "crop": _crop4(x.get("crop")),
+                          "sync": {"offset": x.get("offset"), "rate": x.get("rate") or 1.0,
+                                   "pieces": [[round(a, 4), round(b, 4), round(c, 4)] for a, b, c in run]}})
+    return items
+
+
+def _crop4(c):
+    """[x0, y0, x1, y1] (fracciones) saneado o None."""
+    try:
+        v = [float(x) for x in c]
+    except (TypeError, ValueError):
+        return None
+    if len(v) != 4 or not all(math.isfinite(x) and 0.0 <= x <= 1.0 for x in v) or v[2] <= v[0] or v[3] <= v[1]:
+        return None
+    return [round(x, 5) for x in v]
 
 
 def _rebase_inserts(inserts, meta, timeline):
@@ -1456,7 +1593,51 @@ def _rebase_inserts(inserts, meta, timeline):
             it["start"], it["end"] = mt["t0"], mt["t1"]
 
 
-def finish_plan(plan, info, spec=None, montage=None, resolve=None):
+def broll_media(m, plan, dur=None, spec=None, resolve=None, pick=None):
+    """plan.montage.broll (catalogos de los videos de apoyo, scripts/brollscan.py) + las frases del ensamble
+    compuesto (brollplan.line_spans de `m`, el montaje con su linea de tiempo en el video combinado) ->
+    items de plan.fx.media estilo "reel" (fragmentos a la medida de cada frase, brollplan.place). No se
+    enciman con lo que ya esta en fx.media (grabaciones de pantalla, recursos del guion). `pick`: el LLM que
+    elige las tomas de cada frase (opcional)."""
+    b = (m or {}).get("broll") if isinstance(m, dict) else None
+    srcs = [x for x in (b or {}).get("sources") or [] if isinstance(x, dict) and x.get("sid")
+            and x.get("enabled", True) is not False and x.get("shots")]
+    if not srcs:
+        return []
+    import brollplan
+    # oraciones (una linea detectada puede traer dos: "...para tu negocio. Se llama Nubis.") con las palabras del
+    # video compuesto (plan.phrases, el mismo tiempo)
+    words = [w for ph in plan.get("phrases") or [] for w in (ph or []) if isinstance(w, dict)]
+    lines = brollplan.sentences(brollplan.line_spans(m), words)
+    if not lines:
+        return []
+    fx = plan.get("fx") if isinstance(plan.get("fx"), dict) else {}
+    busy = []
+    for it in fx.get("media") or []:
+        if isinstance(it, dict) and it.get("enabled", True) is not False and it.get("src") != "broll":
+            try:
+                busy.append((float(it["start"]), float(it["end"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+    names = [t.strip() for t in re.split(r"[,;\n]+", str((m or {}).get("glossary") or "")) if t.strip()]
+    items = brollplan.place(lines, srcs, busy=busy, total=dur, names=names, pick=pick)
+    table = {str(x.get("sid")): x.get("path") for x in (spec or {}).get("broll") or []
+             if isinstance(x, dict) and x.get("sid") and x.get("path")}
+    res = _asset_resolver(spec, resolve)
+    by_sid = {x["sid"]: x for x in srcs}
+    out = []
+    for it in items:
+        src = by_sid.get(it["sid"]) or {}
+        path = table.get(str(it["sid"])) or res(it["sid"], {})
+        out.append({"id": it["id"], "start": it["start"], "end": it["end"], "sid": it["sid"] if path else None,
+                    "path": path, "kind": "video", "style": "reel", "src": "broll", "layout": it["layout"],
+                    "name": src.get("name") or it.get("name"), "w": src.get("w"), "h": src.get("h"),
+                    "media_dur": src.get("dur"), "enabled": True, "locked": True, "pieces": it["pieces"],
+                    "line": it.get("line"), "lines": it.get("lines"), "text": it.get("text"), "why": it.get("why")})
+    return out
+
+
+def finish_plan(plan, info, spec=None, montage=None, resolve=None, broll_pick=None):
     """Tras pipeline.analyze del video compuesto: plan.shots desde los limites reales (con join/
     setup/rampa del montaje) y, en un montaje, plan.montage mapeado a plan.shots, sin cortes de
     tomas que crucen una union y con las secciones de plan.takes sembradas desde el guion. Los
@@ -1503,6 +1684,42 @@ def finish_plan(plan, info, spec=None, montage=None, resolve=None):
             plan["fx"] = fx
         if items is not None and m is not None:
             _rebase_inserts(m.get("inserts"), meta, m.get("timeline"))
+    if isinstance(mont, dict) and isinstance(mont.get("screens"), list):
+        # grabaciones de pantalla sincronizadas con una toma: encima de esa toma, siguiendo sus cortes
+        try:
+            scr = screen_media(mont, info, dur, spec=spec, resolve=resolve)
+        except Exception as e:  # noqa: un extra; nunca tumba el montaje
+            print(f"   compose: grabaciones de pantalla no mapeadas ({e})")
+            scr = None
+        if scr is not None:
+            fx = plan.get("fx") if isinstance(plan.get("fx"), dict) else {}
+            keep = [it for it in fx.get("media") or [] if isinstance(it, dict) and it.get("src") != "screen"]
+            if scr or isinstance(plan.get("fx"), dict):
+                fx["media"] = sorted(keep + scr, key=lambda it: float(it.get("start") or 0.0))
+                plan["fx"] = fx
+    _screens_over_script(plan)
+    try:
+        _screen_static_tails(plan)
+    except Exception as e:  # noqa: una propuesta; nunca tumba el montaje
+        print(f"   compose: cola quieta de la pantalla no revisada ({e})")
+    if m is not None and ((m.get("broll") or {}).get("sources")):
+        # videos de apoyo en fragmentos mientras se dice lo que muestran (despues de las pantallas y los
+        # recursos del guion: nunca encima de ellos)
+        try:
+            rl = broll_media(m, plan, dur, spec=spec, resolve=resolve, pick=broll_pick)
+        except Exception as e:  # noqa: un extra; nunca tumba el montaje
+            print(f"   compose: videos de apoyo no colocados ({e})")
+            rl = None
+        if rl is not None:
+            fx = plan.get("fx") if isinstance(plan.get("fx"), dict) else {}
+            keep = [it for it in fx.get("media") or [] if isinstance(it, dict) and it.get("src") != "broll"]
+            if rl or isinstance(plan.get("fx"), dict):
+                fx["media"] = sorted(keep + rl, key=lambda it: float(it.get("start") or 0.0))
+                plan["fx"] = fx
+                try:
+                    _broll_continuity(plan)
+                except Exception as e:  # noqa: un ajuste fino; el render lo vuelve a hacer
+                    print(f"   compose: continuidad de los fragmentos no ajustada ({e})")
     import takes
     joins = takes.plan_joins(shots)
     if joins and plan.get("cuts"):
@@ -1518,6 +1735,169 @@ def finish_plan(plan, info, spec=None, montage=None, resolve=None):
                 tk["sections"] = secs
                 tk["sections_src"] = "guion"
     return plan
+
+
+def _broll_continuity(plan, fps=30.0):
+    """Los fragmentos de apoyo (src "broll") en tiempo FINAL sin destellos de la camara: dos fragmentos
+    separados por menos de timeline.OVERLAY_GAP se pegan y un borde a menos de eso de un cambio de toma se
+    lleva a el (timeline.overlay_continuity con los silencios y tomas del plan). Se guarda en tiempo
+    ORIGINAL (asi el Studio lo ve igual); el render lo vuelve a hacer con los cortes que agregue Aplicar IA."""
+    from motion import timeline as T
+    fx = plan.get("fx") if isinstance(plan.get("fx"), dict) else {}
+    items = [it for it in fx.get("media") or [] if isinstance(it, dict) and it.get("enabled", True) is not False]
+    if not any(it.get("src") == "broll" for it in items):
+        return 0
+    tl = T.Timeline.from_plan(plan, fps=fps)
+    rows, wins = [], []
+    for it in items:
+        r = tl.map_item(it)
+        if r is None:
+            continue
+        mv = it.get("src") == "broll"
+        rows.append((it, r))
+        wins.append([r[0], r[1], mv, mv])
+    bounds = tl.content_frames(plan.get("shots"), fps)
+    n = 0
+    for (it, r), (a, b) in zip(rows, T.overlay_continuity(wins, bounds, fps)):
+        if it.get("src") != "broll":
+            continue
+        if abs(a - r[0]) > 1e-6:
+            it["start"] = round(tl.inverse(a), 3)
+            n += 1
+        if abs(b - r[1]) > 1e-6:
+            it["end"] = round(tl.inverse(b) if b < tl.final_duration - 1e-6 else float(plan.get("duration") or b), 3)
+            n += 1
+    # (en tiempo original un fin llevado a una union de un silencio cae despues del corte: nunca encima del
+    # recurso que sigue)
+    srt = sorted(items, key=lambda x: float(x.get("start") or 0.0))
+    for x, y in zip(srt, srt[1:]):
+        if x.get("src") == "broll" and float(x["end"]) > float(y.get("start") or 0.0) > float(x["start"]):
+            x["end"] = round(float(y["start"]), 3)
+    return n
+
+
+SCREEN_SCRIPT_OVERLAP = 0.1     # s: un recurso del guion que se cruza esto con una grabacion de pantalla
+
+
+def _screens_over_script(plan):
+    """Una grabacion de pantalla sincronizada y un recurso del guion son tarjetas CENTRADAS arriba de los
+    subtitulos: juntas, la del guion tapaba la demo. La pantalla manda: un recurso del guion prendido que
+    se cruza con una ventana de pantalla prendida queda APAGADO con `off_why` "screen" (el Studio dice
+    por que y el usuario lo mueve a otra frase y lo prende). Devuelve los ids apagados."""
+    fx = plan.get("fx") if isinstance(plan.get("fx"), dict) else None
+    if not fx:
+        return []
+    media = [it for it in fx.get("media") or [] if isinstance(it, dict)]
+    scr = [(float(it.get("start") or 0.0), float(it.get("end") or 0.0)) for it in media
+           if it.get("src") == "screen" and it.get("enabled", True) is not False]
+    off = []
+    if not scr:
+        return off
+    for it in media:
+        if it.get("src") != "script" or it.get("enabled", True) is False:
+            continue
+        a, b = float(it.get("start") or 0.0), float(it.get("end") or 0.0)
+        if any(min(b, y) - max(a, x) > SCREEN_SCRIPT_OVERLAP for x, y in scr):
+            it["enabled"] = False
+            it["off_why"] = "screen"
+            off.append(str(it.get("id")))
+    if off:
+        print(f"   compose: recursos del guion apagados bajo una grabacion de pantalla: {', '.join(off)}")
+    return off
+
+
+STATIC_TAIL = 4.0        # s: una pantalla quieta asi de larga al FINAL de su toma mientras se sigue hablando...
+STATIC_THR = 1.0         # ...(cambio medio < esto, niveles 0-255, cada 0.25 s)...
+STATIC_WORDS = 3         # ...con al menos estas palabras dichas en ella...
+STATIC_CLOSE = (3.0, 3.5)  # ...y un cierre de oracion ("Listo.") a lo mas 3 s antes / 3.5 s despues
+#                          de que se queda quieta -> se propone terminar la toma ahi
+
+
+def _screen_static_tails(plan):
+    """«Terminar aquí» en una demo: la toma sincronizada con una grabacion de pantalla sigue hablando con la
+    pantalla QUIETA al final (v6 terminaba en el «Listo.» de la confirmacion; el producto dejaba 14 s mas con
+    la misma pantalla de confirmacion mientras se cambiaba de opinion). Si la pantalla no cambia en los ultimos
+    STATIC_TAIL s o mas de su ventana, se siguen diciendo STATIC_WORDS palabras ahi y una oracion se cierra
+    justo cuando se queda quieta, se propone un corte de tomas (src "takes", "digresion", nivel media:
+    encendido) desde esa oracion hasta el final de la toma (la union con la siguiente; nunca la cruza).
+    Devuelve los cortes agregados."""
+    import hashlib
+    import numpy as np
+    import screensync
+    import takes
+    from motion import screen as SC
+    fx = plan.get("fx") if isinstance(plan.get("fx"), dict) else {}
+    words = sorted((w for ph in plan.get("phrases") or [] for w in ph or [] if isinstance(w, dict)
+                    and str(w.get("text") or "").strip()), key=lambda w: float(w.get("start") or 0.0))
+    if not words:
+        return []
+    cuts = [c for c in plan.get("cuts") or [] if isinstance(c, dict)]
+    added = []
+    for it in fx.get("media") or []:
+        if not isinstance(it, dict) or it.get("src") != "screen" or it.get("enabled", True) is False:
+            continue
+        path = it.get("path")
+        if not path or not Path(str(path)).exists():
+            continue
+        a, b = float(it.get("start") or 0.0), float(it.get("end") or 0.0)
+        if b - a < STATIC_TAIL + 1.0:
+            continue
+        step = screensync.MOTION_STEP
+        ts = [a + k * step for k in range(int((b - a) / step) + 1)]
+        ss = [SC.sync_time(it, t) for t in ts]
+        if any(x is None for x in ss):
+            continue
+        cur = screensync.motion_curve(path, max(0.0, min(ss) - step), max(ss) + step, step)
+        if cur is None:
+            continue
+        times, d = cur
+        frames = np.clip(np.round((np.asarray(ss) - times[0]) / step).astype(int), 0, len(times) - 1)
+        # el cambio entre muestras consecutivas del video compuesto (un salto del montaje dentro de la toma
+        # compara las dos puntas)
+        chg = [0.0]
+        for k in range(1, len(frames)):
+            i0, i1 = frames[k - 1], frames[k]
+            if i1 == i0:
+                chg.append(0.0)
+            elif i1 == i0 + 1:
+                chg.append(float(d[i1]))
+            else:
+                chg.append(float(d[min(i0, i1) + 1:max(i0, i1) + 1].max()))
+        k = len(chg) - 1
+        while k > 0 and chg[k] < STATIC_THR:
+            k -= 1
+        t_s = ts[k] if chg[k] >= STATIC_THR else a
+        if b - t_s < STATIC_TAIL:
+            continue
+        said = [w for w in words if t_s <= float(w["start"]) < b]
+        if len(said) < STATIC_WORDS:
+            continue
+        close = [w for w in words if t_s - STATIC_CLOSE[0] <= float(w["end"]) <= t_s + STATIC_CLOSE[1]
+                 and re.search(r"[.!?…]$", str(w["text"]).strip()) and float(w["end"]) < b - STATIC_TAIL / 2]
+        if not close:
+            continue
+        w = close[-1]
+        c0 = round(float(w["end"]) + takes.GAP_PAD_OUT, 3)
+        if b - c0 < 2.0 or any(c.get("src") == "takes" and c.get("kind") == "digresion" and
+                               abs(float(c.get("start") or 0) - c0) < 0.5 for c in cuts):
+            continue
+        gone = [x for x in words if c0 <= float(x["start"]) < b]
+        ref = str(w["text"]).strip()
+        cut = {"id": "tk_scr_" + hashlib.sha1(f"{it.get('id')}|{c0:.1f}|{b:.1f}".encode()).hexdigest()[:8],
+               "start": c0, "end": round(b, 3), "enabled": True, "src": "takes", "kind": "digresion",
+               "conf": 0.72, "level": "media",
+               "reason": f"Después de «{ref}» tu pantalla ya no cambia ({b - t_s:.0f} s) mientras sigues "
+                         f"hablando: la toma termina ahí.",
+               "text": " ".join(str(x["text"]) for x in gone)[:300], "kept_text": "", "keep_ref": None,
+               "group": "tg_scr", "screen_tail": True}
+        cuts.append(cut)
+        added.append(cut)
+    if added:
+        plan["cuts"] = cuts
+        if isinstance(plan.get("takes"), dict):
+            plan["takes"]["stats"] = takes.stats(cuts)
+        print(f"   compose: «Terminar aquí» propuesto en {len(added)} demo(s) con la pantalla quieta al final")
+    return added
 
 
 def _canvas_src(spec, main):
@@ -1625,6 +2005,8 @@ def spec_record(spec, info):
     for k in ("canvas", "montage"):
         if spec.get(k) is not None:
             sp[k] = copy.deepcopy(spec[k])
+    # el modo de uniones con que se compuso (recomponer en 4K da los mismos cuadros)
+    sp["exact_joins"] = bool(info["exact"]) if isinstance(info.get("exact"), bool) else exact_joins(spec)
     rec = {"v": 1, "spec": sp, "W": info.get("W"), "H": info.get("H"),
            "native": list(info["native"]) if info.get("native") else None,
            "clips": [dict(c) for c in info.get("clips") or []],
@@ -1791,7 +2173,9 @@ def _compose(spec, out, work, on_step, info, max_canvas, canvas):
     # `-c copy` el concat deja en CADA union el relleno inicial del AAC (1024 muestras = 21 ms de
     # silencio digital) y el audio de cada segmento se atrasa ~21-28 ms mas que el anterior: en un
     # montaje de 15 uniones la voz terminaba ~0.4 s detras de la boca
-    exact = bool((EXACT_JOINS == "all" or (montage and EXACT_JOINS != "off")) and not has_trans)
+    exact = bool(exact_joins(spec, montage) and not has_trans)
+    if info is not None:
+        info["exact"] = exact
     # rampas de velocidad pedidas (solo en uniones validas) y las que de verdad se hicieron
     ramp_req = seq_ramps(seq)
     ramp_eff = [None] * len(seq)

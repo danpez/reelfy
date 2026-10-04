@@ -1778,6 +1778,15 @@
    "ex_ui": "",
    "where": "Elemento › Gráfico (Invitación)"
   },
+  "graphics.button_auto": {
+   "label": "Botón con el color de tu marca",
+   "help": "Dato interno del motor; no se muestra como control.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "—"
+  },
   "graphics.avatar": {
    "label": "Foto",
    "help": "Qué se ve en el círculo.",
@@ -3023,6 +3032,151 @@
    "ex": "en_video",
    "ex_ui": "",
    "where": "Elemento › Recurso"
+  },
+  "media.screen.motion": {
+   "label": "Movimiento",
+   "help": "Con el corte: aparece y se va con el corte de tu toma, sin animación (lo más limpio). Tranquila: entra con un acercamiento suave y se queda quieta. Con vida: entra con un rebote y flota un poco. Vacío: según el estilo de tu video.",
+   "level": "basic",
+   "units": "Con el corte · Tranquila · Con vida",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Grabación de pantalla"
+  },
+  "media.screen.width": {
+   "label": "Ancho de la pantalla",
+   "help": "Si lo dejas vacío, es lo más grande que cabe arriba de los subtítulos, centrada y con el mismo margen a los lados (los subtítulos nunca caen sobre tu pantalla).",
+   "level": "advanced",
+   "units": "% del ancho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Grabación de pantalla"
+  },
+  "media.screen.blur": {
+   "label": "Desenfoque del fondo",
+   "help": "Qué tan borrosa se ve tu toma detrás de la pantalla.",
+   "level": "basic",
+   "units": "Poco · Medio · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Grabación de pantalla",
+   "basic_choices": [
+    [
+     0.3,
+     "Poco"
+    ],
+    [
+     0.55,
+     "Medio"
+    ],
+    [
+     0.8,
+     "Mucho"
+    ]
+   ]
+  },
+  "media.screen.dim": {
+   "label": "Oscurecer el fondo",
+   "help": "Oscurece tu toma detrás de la pantalla para que resalte.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Grabación de pantalla"
+  },
+  "media.screen.cam": {
+   "label": "Toma sincronizada",
+   "help": "La toma de cámara que suena igual que la grabación de pantalla.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Grabación de pantalla"
+  },
+  "media.screen.cam_name": {
+   "label": "Toma sincronizada",
+   "help": "El nombre de la toma de cámara que suena igual.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Grabación de pantalla"
+  },
+  "media.screen.crop": {
+   "label": "Recorte del marco",
+   "help": "Lo que se ve de tu grabación: Reelfy quita el marco de un celular emulado o las bandas fijas de la orilla.",
+   "level": "hidden",
+   "units": "",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "where": "Elemento › Grabación de pantalla"
+  },
+  "media.reel.layout": {
+   "label": "Formato",
+   "help": "Ventana flotante: cada toma completa en una tarjeta arriba de los subtítulos, con tu toma desenfocada detrás. Pantalla completa: cada toma recortada a lo vertical, centrada en lo importante (sin personas ni textos cortados). Reelfy los alterna para que no se repita el mismo efecto.",
+   "level": "basic",
+   "units": "Ventana flotante · Pantalla completa",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Video de apoyo"
+  },
+  "media.reel.motion": {
+   "label": "Movimiento",
+   "help": "Solo la ventana. Con el corte: aparece y se va con el corte, sin animación (lo más limpio). Tranquila: entra con un acercamiento suave. Con vida: entra con un rebote y flota un poco. Vacío: según el estilo de tu video.",
+   "level": "basic",
+   "units": "Con el corte · Tranquila · Con vida",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Video de apoyo"
+  },
+  "media.reel.width": {
+   "label": "Ancho de la ventana",
+   "help": "Si lo dejas vacío, es lo más ancha que cabe arriba de los subtítulos, centrada y con el mismo margen a los lados.",
+   "level": "advanced",
+   "units": "% del ancho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Video de apoyo"
+  },
+  "media.reel.vignette": {
+   "label": "Viñeta",
+   "help": "Solo pantalla completa: oscurece un poco las orillas para que la vista vaya al centro y los subtítulos resalten.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Video de apoyo"
+  },
+  "media.reel.blur": {
+   "label": "Desenfoque del fondo",
+   "help": "Qué tan borrosa se ve tu toma detrás de la ventana.",
+   "level": "basic",
+   "units": "Poco · Medio · Mucho",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Video de apoyo",
+   "basic_choices": [
+    [
+     0.3,
+     "Poco"
+    ],
+    [
+     0.55,
+     "Medio"
+    ],
+    [
+     0.8,
+     "Mucho"
+    ]
+   ]
+  },
+  "media.reel.dim": {
+   "label": "Oscurecer el fondo",
+   "help": "Oscurece tu toma detrás de la ventana para que resalte.",
+   "level": "advanced",
+   "units": "%",
+   "ex": "en_video",
+   "ex_ui": "",
+   "where": "Elemento › Video de apoyo"
   }
  },
  "options": {
@@ -3136,11 +3290,11 @@
    },
    "minimal": {
     "label": "Minimal",
-    "help": "Poco texto, cortes limpios y color natural.",
+    "help": "Poco texto, cortes limpios y el color de tu cámara.",
     "ex": "loop",
-    "que_cambia": "Subtítulos «Palabra en color» · títulos simples y marcatextos · fogonazo y empuje · color Natural sin grano · electrónica tranquila · muy pocos efectos",
+    "que_cambia": "Subtítulos «Palabra en color» · títulos simples · cortes secos al armar con IA · el color de tu cámara · piano suave · muy pocos efectos",
     "qc_caps": "Subtítulos «Palabra en color»",
-    "qc_look": "color Natural sin grano"
+    "qc_look": "el color de tu cámara"
    },
    "energetico": {
     "label": "Energético",
@@ -4665,6 +4819,35 @@
     "help": "",
     "ex": ""
    }
+  },
+  "media.motion": {
+   "cut": {
+    "label": "Con el corte",
+    "help": "",
+    "ex": ""
+   },
+   "calm": {
+    "label": "Tranquila",
+    "help": "",
+    "ex": ""
+   },
+   "lively": {
+    "label": "Con vida",
+    "help": "",
+    "ex": ""
+   }
+  },
+  "media.layout": {
+   "window": {
+    "label": "Ventana flotante",
+    "help": "",
+    "ex": ""
+   },
+   "full": {
+    "label": "Pantalla completa",
+    "help": "",
+    "ex": ""
+   }
   }
  },
  "ui": {
@@ -5348,6 +5531,33 @@
    "ex": "ninguno",
    "ex_ui": "",
    "where": "Elemento › Recurso"
+  },
+  "media.screen": {
+   "label": "Grabación de pantalla",
+   "help": "Reelfy la reconoció porque suena igual que una de tus tomas: se ve encima de esa toma, al mismo tiempo que lo dices, sin su sonido y sin el marco del celular emulado (si lo trae).",
+   "level": "basic",
+   "ex": "texto",
+   "ex_ui": "Ej.: dices «primero abro el calendario» y justo entonces se ve tu pantalla abriéndolo.",
+   "units": "",
+   "where": "Elemento › Grabación de pantalla"
+  },
+  "media.reel": {
+   "label": "Video de apoyo",
+   "help": "Reelfy tomó estas tomas de tu video de apoyo (solo las que muestran pantallas, la aplicación, personajes o el logo; nunca personas) y las puso mientras dices lo que muestran, con cortes secos y a la medida de la frase.",
+   "level": "basic",
+   "ex": "texto",
+   "ex_ui": "Ej.: dices «cada asistente tiene su propia computadora» y se ve la pantalla de esa computadora.",
+   "units": "",
+   "where": "Elemento › Video de apoyo"
+  },
+  "media.reel.shots": {
+   "label": "Tomas",
+   "help": "Las tomas de este fragmento, en el orden en que se ven. «Cambiar» muestra otras tomas de tu video de apoyo que sirven en este formato y no salen en otro fragmento.",
+   "level": "basic",
+   "ex": "ninguno",
+   "ex_ui": "",
+   "units": "",
+   "where": "Elemento › Video de apoyo"
   }
  },
  "sections": {
@@ -5644,6 +5854,7 @@
   "media.file.replace": "Reemplazar",
   "media.file.add": "Agregar archivo",
   "media.file.script": "Lo pidió tu guion: aparece mientras dices esa línea.",
+  "media.file.under_screen": "Lo pidió tu guion, pero lo apagué: cae mientras se ve tu grabación de pantalla y la taparía. Muévelo a otra frase y préndelo si lo quieres.",
   "media.fit.note": "El clip dura {clip} s y su tramo {tramo} s.",
   "mus.insp.title": "Música de fondo",
   "mus.stop.here": "Pausa dramática aquí",
@@ -5727,7 +5938,32 @@
   "listen.ai.other": "Elige «Creada con IA» y créala para escucharla.",
   "mus.source.note": "«Creada con IA» se escucha cuando ya la creaste; «Rápida (sin IA)» toca una muestra al momento.",
   "dir.keep.caps": "Tus subtítulos se quedan en «{estilo}»",
-  "dir.keep.look": "tu color se queda en «{color}»"
+  "dir.keep.look": "tu color se queda en «{color}»",
+  "media.screen.title": "Grabación de pantalla",
+  "media.screen.sync": "Sincronizada con {toma} por el audio: se ve encima de esa toma, al mismo tiempo que lo dices, y sigue cada corte.",
+  "media.screen.mute": "Va sin su sonido: se oye tu voz de la cámara. Lo que grabaste antes o después de la toma no se usa.",
+  "media.screen.time": "Para que empiece después o termine antes, arrastra sus orillas en la pista Recursos.",
+  "media.screen.upscale": "Tu grabación mide {w}×{h}: en 4K se amplía ×{x} (es el límite del archivo).",
+  "media.screen.off": "Quitaste la pantalla del video: se ve tu toma de cámara.",
+  "media.screen.hide": "Quitar del video",
+  "media.screen.show": "Volver a ponerla",
+  "media.screen.crop": "Reelfy quitó el marco de tu grabación ({w}×{h} px de pantalla).",
+  "media.reel.title": "Video de apoyo",
+  "media.reel.said": "Mientras dices «{frase}».",
+  "media.reel.mine.item": "Fragmento de tu video de apoyo.",
+  "media.reel.nolib": "Este proyecto no trae el catálogo de tomas: puedes cambiar el tiempo y la presentación, pero no las tomas.",
+  "media.reel.nofull": "No alcanzan las tomas que sirven a pantalla completa (sin personas ni textos cortados) para este fragmento.",
+  "media.reel.nowindow": "No alcanzan las tomas que sirven en ventana (sin personas a la vista) para este fragmento.",
+  "media.reel.swapnote": "Al cambiar de formato, {n} toma(s) se cambian por otras que sí sirven ahí.",
+  "media.reel.shot": "Toma {n} · {s} s · desde {desde}",
+  "media.reel.shot.n": "Toma {n}",
+  "media.reel.change": "Cambiar",
+  "media.reel.drop": "Quitar",
+  "media.reel.drop.title": "Quita esta toma: las demás se reparten su tiempo.",
+  "media.reel.none": "No quedan más tomas que sirvan en este formato (las demás muestran personas o ya salen en otro fragmento).",
+  "media.reel.rule": "Solo tomas de pantallas, la aplicación, personajes o el logo; nunca personas. Cada toma se usa una vez en el video.",
+  "media.reel.mine": "La elegiste tú.",
+  "media.reel.time": "Sus tomas se reparten el tramo: si lo alargas, la última sigue hasta donde termina su toma y luego se queda en su último cuadro."
  },
  "aliases": {
   "cutaways.text.preset": "text.preset",

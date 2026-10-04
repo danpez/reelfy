@@ -420,7 +420,7 @@
   .rdlg .rbtns .rdel{background:#d33c3c;box-shadow:none}
   @media (max-width:480px){ #recent .rrow .ro{display:none} }   /* telefono: la fila entera abre; mas lugar para el nombre */
 </style>
-<link rel="stylesheet" href="/static/fx.css?v=e340f4bc">
+<link rel="stylesheet" href="/static/fx.css?v=563f3b6d">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute">
@@ -472,6 +472,7 @@
     <g id="i-eyeoff"><path d="M3 3l18 18M10.6 5.6c.5-.1.9-.1 1.4-.1 6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-3 3.8M6.6 6.6C4 8.3 2.5 12 2.5 12S6 18.5 12 18.5c1.8 0 3.3-.5 4.6-1.3M9.9 9.9a3 3 0 0 0 4.2 4.2"/></g>
     <g id="i-user"><circle cx="12" cy="8" r="3.8"/><path d="M4.5 20.5c1.2-3.8 4-5.5 7.5-5.5s6.3 1.7 7.5 5.5"/></g>
     <g id="i-card"><rect x="3" y="5.5" width="18" height="13" rx="2.5"/><path d="M6.5 10h6M6.5 14h4"/><circle cx="16.5" cy="12" r="2"/></g>
+    <g id="i-phone"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></g>
     <g id="i-lowerthird"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M5.5 14.5h10M5.5 17.5h6"/></g>
     <g id="i-pointer"><path d="M7 3.5l11 8-5 1.2 3 6-2.4 1.2-3-6L7 17.5z"/></g>
     <g id="i-contrast"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor" stroke="none"/></g>
@@ -995,15 +996,17 @@
 
 <video id="srcVid" style="display:none" playsinline></video>
 
-<script src="/static/floatcard.js?v=5c7b07c9"></script>
-<script src="/static/fxcore.js?v=e340f4bc"></script>
-<script src="/static/capdraw.js?v=e564c834"></script>
+<script src="/static/floatcard.js?v=f7bc8002"></script>
+<script src="/static/screencard.js?v=000ed644"></script>
+<script src="/static/reelcard.js?v=1abb8060"></script>
+<script src="/static/fxcore.js?v=563f3b6d"></script>
+<script src="/static/capdraw.js?v=51f58312"></script>
 <script src="/static/lookgl.js?v=4b75522a"></script>
-<script src="/static/fx.js?v=e340f4bc"></script>
+<script src="/static/fx.js?v=563f3b6d"></script>
 <script src="/static/estilo.js?v=55d8b18c"></script>
 <script src="/static/estilo_proyecto.js?v=77b318ea"></script>
 <script src="/static/estilo_catalog.js?v=8820f028"></script>
-<script src="/static/profile.js?v=e340f4bc"></script>
+<script src="/static/profile.js?v=563f3b6d"></script>
 <script>
 const $=s=>document.querySelector(s);
 /* tooltips flotantes (position:fixed) para que NO se corten dentro de paneles con overflow */
@@ -1187,7 +1190,7 @@ const asmFresh=()=>({sources:[],clips:[],overlays:[],sel:null,t:0,playing:false,
   montage:null,montageJob:null,script:"",mtOpen:new Set(),preview:null,stopAt:null,listen:null,
   // recursos del guion (ediciones del usuario por id), palabras por clip (aceleraciones y recursos que
   // se mueven con su linea) y marcas de cambio de camara del timeline
-  insEdits:{},inserts:[],insSel:null,words:{},wordsPend:new Set(),rampMarks:[]});
+  insEdits:{},inserts:[],insSel:null,words:{},wordsPend:new Set(),rampMarks:[],scrEdits:{},brollEdits:{}});
 function asmCopyGloss(){
   // Arrastra al editor lo que el usuario escribió en la pantalla de subida:
   // nombres propios/marcas y cuántos shorts quiere. Así SÍ se respetan.
@@ -1423,8 +1426,16 @@ function insFitLabel(x){
 /** Pista "Recursos" del ensamble: donde aparece cada recurso del guion (sigue a su linea). */
 function asmRenderMedia(px){
   const trk=$("#asmMediaTrk"), lane=$("#asmMedia"); if(!trk||!lane) return;
-  const ins=ASM.montage?(ASM.inserts||[]):[];
-  trk.hidden=!ins.length; lane.innerHTML="";
+  const ins=ASM.montage?(ASM.inserts||[]):[], scr=asmScreenSpans();
+  trk.hidden=!ins.length&&!scr.length; lane.innerHTML="";
+  // grabaciones de pantalla: encima de cada tramo de su toma (donde la pantalla tiene cuadros)
+  scr.forEach(z=>{ const x=z.scr, on=mtScreenOn(x);
+    const el=document.createElement("button"); el.type="button"; el.className="mdb scr"+(on?"":" off");
+    el.style.left=(z.a*px)+"px"; el.style.width=Math.max(14,(z.b-z.a)*px)+"px"; el.dataset.scr=x.id;
+    el.innerHTML=`${ICO("phone")}<span>${mtEsc(x.name||"Pantalla")}</span>`;
+    el.title=`Grabación de pantalla sincronizada con ${x.cam_name||"tu toma"} · ${FXCore.fmtSrc(z.a)}–${FXCore.fmtSrc(z.b)}${on?" · sin su sonido":" · quitada"}`;
+    el.onclick=()=>asmSelectScreen(x.id);
+    lane.appendChild(el); });
   ins.forEach(x=>{ if(!x.placed) return;
     const el=document.createElement("button"); el.type="button";
     el.className="mdb"+(x.sid?"":" miss")+(x.enabled===false?" off":"")+(ASM.insSel===x.id?" sel":"");
@@ -1434,6 +1445,20 @@ function asmRenderMedia(px){
     el.title=`Recurso «${x.name}» · ${FXCore.fmtSrc(x.start)}–${FXCore.fmtSrc(x.end)}${x.sid?" · "+insFitLabel(x):" · falta el archivo"}${x.enabled===false?" · quitado":""}`;
     el.onclick=()=>asmSelectInsert(x.id,true);
     lane.appendChild(el); });
+}
+/** Tramos del ensamble donde se ve cada grabacion de pantalla: los clips de su toma (por posicion) recortados a
+    donde la pantalla tiene cuadros (t_pantalla = offset + rate * t_camara en [0, dur]). -> [{scr, clip, a, b}]. */
+function asmScreenSpans(){
+  const out=[]; if(!ASM.montage) return out;
+  (ASM.montage.screens||[]).forEach(x=>{ const off=+x.offset||0, rate=+x.rate||1, dur=+x.dur||1e9;
+    ASM.clips.forEach(c=>{ if(c.sid!==x.cam||c.type==="image"||(c.layer||0)>0) return;
+      const s0=c.start||0, i0=+c.in||0, i1=+c.out||0, lo=Math.max(i0,-off/rate), hi=Math.min(i1,(dur-off)/rate);
+      if(hi-lo>0.05) out.push({scr:x,clip:c,a:s0+(lo-i0),b:s0+(hi-i0)}); }); });
+  return out;
+}
+function asmSelectScreen(id){
+  asmSideMode("takes"); const z=asmScreenSpans().find(q=>q.scr.id===id); if(z) asmGoto(z.a+0.05,true);
+  mtRender(); const el=document.querySelector(`#asmTakes [data-scr="${CSS.escape(id)}"]`); if(el) el.scrollIntoView({block:"nearest"});
 }
 function asmSelectInsert(id,go){
   // un recurso seleccionado deja de lado el clip que estaba seleccionado: Supr actua sobre el recurso
@@ -1461,9 +1486,9 @@ function asmDrag(e,onMove,onEnd){
 }
 /* ---- deshacer / rehacer del editor ---- */
 let ASM_UNDO=[], ASM_REDO=[];
-function asmSnapshot(){ return JSON.stringify({clips:ASM.clips,overlays:ASM.overlays,insEdits:ASM.insEdits||{}}); }
+function asmSnapshot(){ return JSON.stringify({clips:ASM.clips,overlays:ASM.overlays,insEdits:ASM.insEdits||{},scrEdits:ASM.scrEdits||{},brollEdits:ASM.brollEdits||{}}); }
 function asmPush(){ ASM_UNDO.push(asmSnapshot()); if(ASM_UNDO.length>80)ASM_UNDO.shift(); ASM_REDO=[]; ASM.dirty=true; }
-function asmRestore(snap){ const d=JSON.parse(snap); ASM.clips=d.clips; ASM.overlays=d.overlays; ASM.insEdits=d.insEdits||{};
+function asmRestore(snap){ const d=JSON.parse(snap); ASM.clips=d.clips; ASM.overlays=d.overlays; ASM.insEdits=d.insEdits||{}; ASM.scrEdits=d.scrEdits||{}; ASM.brollEdits=d.brollEdits||{};
   ASM.sel=null; ASM.ci=-1; asmFit(); asmInspector(); asmGoto(Math.min(ASM.t,asmMainDur()),true); mtRender(); }
 function asmUndo(){ if(!ASM_UNDO.length)return; ASM_REDO.push(asmSnapshot()); asmRestore(ASM_UNDO.pop()); }
 function asmRedo(){ if(!ASM_REDO.length)return; ASM_UNDO.push(asmSnapshot()); asmRestore(ASM_REDO.pop()); }
@@ -1568,12 +1593,45 @@ function ovXY(o){   // centro como fracción 0..1 (usa x/y libres o deriva del p
     geometria y la animacion del render (window.FloatCard = port de motion/media.py; aproximada: sin la
     inclinacion 3D). Se deja libre la franja de los subtitulos que tendra el video. */
 const ASM_CAPS={preset:"clean_bold",y:0.72,size:0.052,enabled:true};
+/** Grabacion de pantalla en la vista previa del ensamble: encima de su toma, sincronizada por el audio
+    (ScreenCard.layout: la ventana del video final, con lo que hay dentro de su marco), con su toma
+    desenfocada detras. -> true si se ve. */
+function asmRenderScreen(t){
+  const pb=$("#asmPlayerBox"), SC=window.ScreenCard, FC=window.FloatCard; let el=$("#asmScard");
+  const z=SC&&FC&&ASM.montage&&!ASM.preview?asmScreenSpans().find(q=>mtScreenOn(q.scr)&&t>=q.a&&t<q.b):null;
+  if(!z){ if(el){ el.hidden=true; const v=el.querySelector("video"); if(v&&!v.paused) v.pause(); } return false; }
+  if(!el){ el=document.createElement("div"); el.id="asmScard"; el.className="asm-fcard asm-scard"; pb.appendChild(el); }
+  const x=z.scr;
+  if(el.dataset.sid!==x.sid){ el.dataset.sid=x.sid; el.innerHTML=`<video muted playsinline preload="auto" src="/tlsource/${encodeURIComponent(x.sid)}"></video>`; }
+  el.hidden=false;
+  const media=[asmP(),asmI()], on=media.find(m=>m.style.display!=="none")||media[0], pr=pb.getBoundingClientRect(), vr=on.getBoundingClientRect();
+  // el cuadro que se ve (contain): el del elemento si ya tiene tamano; mientras el clip carga (0 px), el
+  // de su fuente centrado en el visor
+  const s0=ASM.sources.find(s=>s.id===z.clip.sid)||{}, nw=on.videoWidth||+s0.w||9, nh=on.videoHeight||+s0.h||16;
+  let W, H, ox, oy;
+  if((on.videoWidth||on.naturalWidth)&&vr.width>2&&vr.height>2){ W=vr.width; H=vr.height; ox=vr.left-pr.left-pb.clientLeft; oy=vr.top-pr.top-pb.clientTop; }
+  else { W=pb.clientWidth; H=pb.clientHeight; ox=0; oy=0; }
+  { const k=Math.min(W/nw,H/nh), dw=nw*k, dh=nh*k; ox+=(W-dw)/2; oy+=(H-dh)/2; W=dw; H=dh; }
+  const crop=SC.cropOf(x), card=SC.layout(+x.w||670,+x.h||1436,W/H,FC.captionTop(ASM_CAPS,true,null,null,W/H),null,null,crop);
+  const [x0,y0,w,h]=FC.cardPx(card,W,H), st=SC.anim(t-z.a,Math.max(0.05,z.b-z.a),SC.motionOf({},$("#asmStyle").value==="none"?null:$("#asmStyle").value));
+  Object.assign(el.style,{left:(ox+x0)+"px",top:(oy+y0)+"px",width:w+"px",height:h+"px",borderRadius:(SC.RADIUS*w)+"px",
+    opacity:Math.max(0,Math.min(1,st.alpha)).toFixed(3),transform:`translateY(${(st.dy*H).toFixed(2)}px) scale(${st.scale.toFixed(4)})`});
+  const bf=SC.bgFilter(x,st.bg,W); media.forEach(mm=>{ mm.style.filter=bf; });
+  const m=el.firstElementChild, tt=(+x.offset||0)+(+x.rate||1)*((+z.clip.in||0)+(t-(z.clip.start||0)));
+  // el marco de la grabacion queda fuera de la ventana: el <video> se agranda y se corre (la ventana recorta)
+  if(m){ const c=crop||[0,0,1,1], vw=w/(c[2]-c[0]), vh=h/(c[3]-c[1]);
+    Object.assign(m.style,{position:"absolute",objectFit:"fill",width:vw+"px",height:vh+"px",left:(-c[0]*vw)+"px",top:(-c[1]*vh)+"px"}); }
+  if(m){ if(ASM.playing){ if(m.paused) m.play().catch(()=>{}); if(Math.abs(m.currentTime-tt)>0.15) try{ m.currentTime=tt; }catch(e){} }
+    else { if(!m.paused) m.pause(); if(Math.abs(m.currentTime-tt)>0.03&&!m.seeking) try{ m.currentTime=tt; }catch(e){} } }
+  return true;
+}
 function asmRenderCard(t){
   const pb=$("#asmPlayerBox"), FC=window.FloatCard; if(!pb||!FC) return;
   const x=ASM.montage&&!ASM.preview?(ASM.inserts||[]).find(i=>i.placed&&i.enabled!==false&&i.sid&&t>=i.start&&t<i.end):null;
   let el=$("#asmFcard");
   const media=[asmP(),asmI()];
-  if(!x){ if(el){ el.hidden=true; const v=el.querySelector("video"); if(v&&!v.paused) v.pause(); } media.forEach(m=>{ m.style.filter=""; }); return; }
+  if(!x){ if(el){ el.hidden=true; const v=el.querySelector("video"); if(v&&!v.paused) v.pause(); } if(!asmRenderScreen(t)) media.forEach(m=>{ m.style.filter=""; }); return; }
+  asmRenderScreen(-1);
   if(!el){ el=document.createElement("div"); el.id="asmFcard"; el.className="asm-fcard"; pb.appendChild(el); }
   const src=ASM.sources.find(s=>s.id===x.sid)||{}, img=x.kind==="image";
   if(el.dataset.sid!==x.sid){ el.dataset.sid=x.sid; el.innerHTML=img?`<img alt="" src="/tlsource/${encodeURIComponent(x.sid)}">`:`<video muted playsinline preload="auto" src="/tlsource/${encodeURIComponent(x.sid)}"></video>`; }
@@ -1581,7 +1639,13 @@ function asmRenderCard(t){
   // el cuadro del video (lo que sale en el export) dentro del visor
   const on=media.find(m=>m.style.display!=="none")||media[0], pr=pb.getBoundingClientRect(), vr=on.getBoundingClientRect();
   // (la tarjeta se posiciona dentro del borde del visor: clientLeft/Top)
-  const W=vr.width||pr.width, H=vr.height||pr.height, ox=(vr.width?vr.left:pr.left)-pr.left-pb.clientLeft, oy=(vr.height?vr.top:pr.top)-pr.top-pb.clientTop;
+  // el cuadro que se ve (contain): el del elemento si ya cargo; mientras carga, el de su fuente en el visor
+  const at0=asmClipAt(t), s0=(at0&&ASM.sources.find(s=>s.id===at0.clip.sid))||{};
+  const nw0=on.videoWidth||on.naturalWidth||+s0.w||9, nh0=on.videoHeight||on.naturalHeight||+s0.h||16;
+  let W, H, ox, oy;
+  if((on.videoWidth||on.naturalWidth)&&vr.width>2&&vr.height>2){ W=vr.width; H=vr.height; ox=vr.left-pr.left-pb.clientLeft; oy=vr.top-pr.top-pb.clientTop; }
+  else { W=pb.clientWidth; H=pb.clientHeight; ox=0; oy=0; }
+  { const k=Math.min(W/nw0,H/nh0), dw=nw0*k, dh=nh0*k; ox+=(W-dw)/2; oy+=(H-dh)/2; W=dw; H=dh; }
   const m=el.firstElementChild, mw=+src.w||(m&&(m.naturalWidth||m.videoWidth))||1080, mh=+src.h||(m&&(m.naturalHeight||m.videoHeight))||1350;
   const lt=t-x.start, L=Math.max(0.05,x.end-x.start);
   const card=FC.cardLayout(mw,mh,W/H,FC.captionTop(ASM_CAPS,true,null,null,W/H));
@@ -1884,6 +1948,10 @@ async function asmApply(){
   const body=FXCore.composeBody({clips:ASM.clips,overlays:ASM.overlays,glossary:$("#asmGloss").value||"",
     highlights:$("#highlights").value,director:($("#asmStyle").value==="none"?false:{style:$("#asmStyle").value,intensity:0.75}),
     montageJob:ASM.montage?ASM.montageJob:null,script:ASM.montage?mtScriptNow():null,inserts:ASM.montage?asmInserts():null});
+  // grabaciones de pantalla sincronizadas: encendidas o quitadas en el ensamble (compose las pone encima de su toma)
+  if(ASM.montage&&(ASM.montage.screens||[]).length) body.screens=ASM.montage.screens.map(x=>({id:x.id,enabled:mtScreenOn(x)}));
+  // videos de apoyo: se usan en fragmentos o el usuario los quito
+  if(ASM.montage&&((ASM.montage.broll||{}).sources||[]).length) body.broll=ASM.montage.broll.sources.map(x=>({sid:x.sid,enabled:mtBrollOn(x)}));
   // un solo video horizontal de mas de 3 min (un video de YouTube): el proyecto nace en 16:9 y el
   // primer analisis prepara el video base en ese formato (el Studio abre con el mismo por defecto)
   if(body.director&&ASM.clips.length===1&&ASM.clips[0].type!=="image"){
@@ -2034,6 +2102,9 @@ async function mtStart(){
     glossary:(MT.back?(($("#asmGloss").value||"").trim()||($("#glossary").value||"").trim()):(($("#glossary").value||"").trim()||($("#asmGloss").value||"").trim()))||null,intercut:true,
     profile:(window.PF&&PF.forCompose())||null,
     director:$("#asmStyle").value==="none"?null:{style:$("#asmStyle").value,intensity:0.75}};
+  // archivos que el usuario dijo que NO son grabacion de pantalla (al rearmar se conservan)
+  const soff=MT.screensOff||(MT.back&&ASM.montage&&ASM.montage.screens_off)||[];
+  if(soff.length) body.screens_off=soff;
   if(MT.rearm&&ASM.montageJob) body.job_id=ASM.montageJob;   // rearmar = el MISMO proyecto con otro guion
   let r=null,d={};
   try{ r=await fetch("/montage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); d=await r.json().catch(()=>({})); }
@@ -2102,7 +2173,7 @@ function mtRenderProg(){
   const pct=0.35*upPct+0.5*(N?heard/N*100:0)+(ph==="match"?Math.min(14,4+(st.pct||0)/10):0);
   setBar("#mt-fill",Math.min(99,pct));
   const cur=rows.find(r=>r.state==="up");
-  let msg=bad?MT.err:ph==="up"?(cur?`Subiendo ${cur.name}…`:"Subiendo…"):ph==="words"?(st.stage==="queued"?"En cola: empieza al terminar el trabajo anterior…":"Escuchando cada clip…"):"Eligiendo la mejor toma de cada parte del guion…";
+  let msg=bad?MT.err:ph==="up"?(cur?`Subiendo ${cur.name}…`:"Subiendo…"):ph==="words"?(st.stage==="queued"?"En cola: empieza al terminar el trabajo anterior…":"Escuchando cada clip…"):(st.broll&&st.message?st.message:"Eligiendo la mejor toma de cada parte del guion…");
   const m=$("#mt-msg"); m.textContent=msg; m.classList.toggle("err",bad);
   // archivos: subida y transcripcion de cada uno
   const list=nUp?rows:mtVideos().map(s=>({name:s.name||s.id,size:0,state:"ok",src:s,loaded:1,total:1}));
@@ -2160,10 +2231,12 @@ async function mtOpenJob(job,note){
 async function mtSources(m,known){
   const by={}; (known||[]).forEach(s=>{ if(s&&s.id) by[s.id]=s; });
   // tambien los recursos del guion (miniatura y duracion para el panel y la vista previa)
-  const miss=[...new Set((m.order||[]).map(o=>o.sid).concat((m.assets||[]).map(a=>a&&a.sid),(m.inserts||[]).map(x=>x&&x.sid)))].filter(id=>id&&!by[id]);
+  const miss=[...new Set((m.order||[]).map(o=>o.sid).concat((m.assets||[]).map(a=>a&&a.sid),(m.inserts||[]).map(x=>x&&x.sid),
+    (m.screens||[]).map(x=>x&&x.sid),m.screens_off||[]))].filter(id=>id&&!by[id]);
   if(miss.length){ try{ const r=await fetch("/sources?ids="+miss.map(encodeURIComponent).join(","));
     if(r.ok){ const d=await r.json(); (Array.isArray(d)?d:(d&&d.sources)||[]).forEach(s=>{ if(s&&s.id) by[s.id]=s; }); } }catch(e){} }
   (m.assets||[]).forEach(a=>{ if(a&&a.sid&&!by[a.sid]) by[a.sid]={id:a.sid,name:a.name||a.sid,type:a.kind==="image"?"image":"video",thumb:`/tlsource/${a.sid}/thumb`,dur:+a.dur||0,w:a.w,h:a.h}; });
+  (m.screens||[]).forEach(x=>{ if(x&&x.sid&&!by[x.sid]) by[x.sid]={id:x.sid,name:x.name||x.sid,type:"video",thumb:`/tlsource/${x.sid}/thumb`,dur:+x.dur||0,w:x.w,h:x.h}; });
   (m.order||[]).forEach(o=>{ if(!o||!o.sid) return;
     if(!by[o.sid]) by[o.sid]={id:o.sid,name:o.name||o.sid,type:"video",created:o.created,thumb:`/tlsource/${o.sid}/thumb`,dur:0};
     else if(by[o.sid].created==null&&o.created) by[o.sid]=Object.assign({},by[o.sid],{created:o.created}); });
@@ -2192,7 +2265,7 @@ function asmSaveLater(){
 function asmSaveNow(){
   clearTimeout(ASM_SAVE_T);
   if(!ASM.montageJob||!ASM.dirty) return;
-  asmSaved(ASM.montageJob,{sig:mtSig(ASM.montage),clips:ASM.clips,overlays:ASM.overlays,script:ASM.scriptEdit==null?null:ASM.scriptEdit,insEdits:ASM.insEdits||{},at:Date.now()});
+  asmSaved(ASM.montageJob,{sig:mtSig(ASM.montage),clips:ASM.clips,overlays:ASM.overlays,script:ASM.scriptEdit==null?null:ASM.scriptEdit,insEdits:ASM.insEdits||{},scrEdits:ASM.scrEdits||{},brollEdits:ASM.brollEdits||{},at:Date.now()});
 }
 /** Abre el ensamblado con el resultado del montaje. */
 function openMontage(job,m,sources){
@@ -2207,7 +2280,7 @@ function openMontage(job,m,sources){
   ASM.sources=FXCore.recordingOrder(sources);
   ASM.clips=FXCore.montageClips(m,ASM.sources,uid);
   const sv=asmSaved(job); let restored=false;
-  if(sv&&sv.sig===mtSig(m)&&Array.isArray(sv.clips)&&sv.clips.length){ ASM.clips=sv.clips; ASM.overlays=sv.overlays||[]; ASM.scriptEdit=sv.script; ASM.insEdits=sv.insEdits||{}; ASM.dirty=true; restored=true; }
+  if(sv&&sv.sig===mtSig(m)&&Array.isArray(sv.clips)&&sv.clips.length){ ASM.clips=sv.clips; ASM.overlays=sv.overlays||[]; ASM.scriptEdit=sv.script; ASM.insEdits=sv.insEdits||{}; ASM.scrEdits=sv.scrEdits||{}; ASM.brollEdits=sv.brollEdits||{}; ASM.dirty=true; restored=true; }
   else if(sv) asmSaved(job,null);      // cambios de un montaje anterior (se rearmo): ya no aplican
   JOB=job; if(new URLSearchParams(location.search).get("job")!==job) history.replaceState(null,"","?job="+encodeURIComponent(job));
   asmCopyGloss();
@@ -2290,6 +2363,8 @@ function mtRender(){
     +(detected?`<div class="mnote">No había guion: Reelfy lo dedujo de lo que repites. Revísalo abajo y rearma si algo no cuadra.</div>`:"")
     +mtRampSummary()+`</div>`;
   h+=mtResHtml(m);
+  h+=mtScreensHtml(m);
+  h+=mtBrollHtml(m);
   const insOf={}; (ASM.inserts||[]).forEach(x=>{ (insOf[x.line]=insOf[x.line]||[]).push(x); });
   rows.forEach(r=>{
     if(r.type==="section"){ h+=`<div class="mt-sec">Sección ${r.n}</div>`; return; }
@@ -2370,7 +2445,90 @@ function mtRender(){
 function mtRampSummary(){
   const mk=ASM.rampMarks||[]; if(!mk.length) return "";
   const on=mk.filter(x=>x.on).length;
+  // Minimal: cortes secos (el servidor quita las aceleraciones automaticas; las que prendiste tu se quedan)
+  const st=$("#asmStyle"), mine=mk.filter(x=>x.on&&x.user).length;
+  if(st&&st.value==="minimal") return `<div class="mt-ramps">${ICO("bolt")}<span><b>Minimal:</b> los cambios de cámara van con corte seco. ${mine?`Solo ${mine===1?"queda la aceleración que activaste tú":`quedan las ${mine} aceleraciones que activaste tú`}.`:"Las aceleraciones automáticas no se usan."}</span></div>`;
   return `<div class="mt-ramps">${ICO("bolt")}<span><b>${on} de ${mk.length}</b> cambios de cámara con aceleración: el video acelera en la pausa y el audio sigue normal. Actívalos o quítalos en los marcadores ${ICO("bolt")} del timeline.</span></div>`;
+}
+/** Seccion "Grabaciones de pantalla" del panel "Tomas": cada archivo que Reelfy reconocio como grabacion de
+    pantalla de una toma (suena igual: montage.detect_screens). Dice con que toma va; se quita o vuelve
+    (con deshacer) y, si no lo es, "No es grabación de pantalla" rearma tratandolo como toma (y al reves). */
+const mtScreenOn=x=>{ const e=(ASM.scrEdits||{})[x.id]; return e&&e.enabled!=null?e.enabled!==false:x.enabled!==false; };
+function mtScreensHtml(m){
+  const scr=(m&&m.screens)||[], off=(m&&m.screens_off)||[];
+  if(!scr.length&&!off.length) return "";
+  let h=`<div class="mt-resh">${ICO("phone")}<b>Grabaciones de pantalla</b><span class="cnt">${scr.length}</span></div>`;
+  scr.forEach(x=>{
+    const on=mtScreenOn(x), src=ASM.sources.find(s=>s.id===x.sid), inV=ASM.clips.some(c=>c.sid===x.cam);
+    h+=`<div class="mt-res mt-scr${on?"":" off"}" data-scr="${mtEsc(x.id)}">`
+      +`<button class="mt-rtop" data-act="ssee" title="${inV?"Ver la toma con la que va":"Su toma no está en el video"}"><span class="mt-rth">${src&&src.thumb?`<img alt="" src="${src.thumb}">`:ICO("phone")}</span>`
+      +`<span class="mt-rmain"><span class="mt-tk"><b>${mtEsc(x.name||"")}</b></span>`
+      +`<span class="mt-rline">Grabación de pantalla sincronizada con ${mtEsc(x.cam_name||"tu toma")}</span>`
+      +`<span class="mt-why">${!on?"La quitaste del video: se ve tu toma de cámara.":!inV?"Su toma no está en el video: no aparece.":"Se ve encima de esa toma mientras hablas, sin su sonido. Lo que grabó antes y después de la toma no se usa."}</span>`
+      +`</span></button><div class="mt-acts">`
+      +(on?`<button class="mt-btn" data-act="soff">${ICO("minus")}<span>Quitar del video</span></button>`:`<button class="mt-btn pri" data-act="soff">${ICO("restore")}<span>Volver a ponerla</span></button>`)
+      +`<button class="mt-btn" data-act="snot" title="Rearma tratando este archivo como una toma más">${ICO("undo")}<span>No es grabación de pantalla</span></button>`
+      +`</div></div>`;
+  });
+  off.forEach(sid=>{ const src=ASM.sources.find(s=>s.id===sid)||{name:sid};
+    h+=`<div class="mt-res mt-scr" data-scrsid="${mtEsc(sid)}"><div class="mt-rtop"><span class="mt-rth">${src.thumb?`<img alt="" src="${src.thumb}">`:ICO("film")}</span><span class="mt-rmain"><span class="mt-tk"><b>${mtEsc(src.name||sid)}</b></span>`
+      +`<span class="mt-why">Lo tratas como una toma más, no como grabación de pantalla.</span></span></div>`
+      +`<div class="mt-acts"><button class="mt-btn" data-act="sredo">${ICO("restore")}<span>Es grabación de pantalla</span></button></div></div>`; });
+  return h;
+}
+function mtScreenToggle(id){
+  const x=((ASM.montage||{}).screens||[]).find(s=>s.id===id); if(!x) return;
+  asmPush(); const on=!mtScreenOn(x); ASM.scrEdits=Object.assign({},ASM.scrEdits||{},{[id]:{enabled:on}});
+  asmSaveLater(); mtRender();
+  FX.toast(on?"La grabación de pantalla volvió al video.":"Quitaste la grabación de pantalla del video: se ve tu toma.","check",false,[["Deshacer",()=>asmUndo()]]);
+}
+/** Seccion "Videos de apoyo" del panel "Tomas": cada video de la sesion sin voz (nunca es toma). Reelfy lo vio toma
+    por toma (scripts/brollscan.py) y al aplicar lo usa en fragmentos mientras dices lo que muestra (solo tomas de
+    pantallas, la aplicacion, personajes o el logo; nunca personas). Se quita o vuelve (con deshacer). */
+const mtBrollOn=x=>{ const e=(ASM.brollEdits||{})[x.sid]; return e&&e.enabled!=null?e.enabled!==false:x.enabled!==false; };
+function mtBrollHtml(m){
+  const srcs=((m&&m.broll)||{}).sources||[], pend=(m&&m.broll_src||[]).filter(x=>!srcs.some(s=>s.sid===x.sid));
+  if(!srcs.length&&!pend.length) return "";
+  let h=`<div class="mt-resh">${ICO("layers")}<b>Videos de apoyo</b><span class="cnt">${srcs.length+pend.length}</span></div>`;
+  srcs.forEach(x=>{
+    const on=mtBrollOn(x), src=ASM.sources.find(s=>s.id===x.sid), sm=x.summary||{};
+    const why=x.error?"No se pudo ver este video: no se usa.":!on?"Lo quitaste: no se usa en el video.":
+      !sm.usable?"Ninguna de sus tomas sirve (todas muestran personas o casi nada): no se usa.":
+      `${sm.usable} de ${sm.shots} tomas sirven: pantallas, la aplicación, personajes o el logo (sin personas). Al aplicar, Reelfy las pone en fragmentos de 2 a 5 tomas mientras dices lo que muestran, alternando ventana flotante y pantalla completa.`;
+    h+=`<div class="mt-res mt-broll${on?"":" off"}" data-broll="${mtEsc(x.sid)}"><div class="mt-rtop"><span class="mt-rth">${src&&src.thumb?`<img alt="" src="${src.thumb}">`:ICO("film")}</span>`
+      +`<span class="mt-rmain"><span class="mt-tk"><b>${mtEsc(x.name||"")}</b></span><span class="mt-rline">Video sin voz: no es toma</span><span class="mt-why">${mtEsc(why)}</span></span></div>`
+      +`<div class="mt-acts">`+(on?`<button class="mt-btn" data-act="boff">${ICO("minus")}<span>No usarlo</span></button>`:`<button class="mt-btn pri" data-act="boff">${ICO("restore")}<span>Volver a usarlo</span></button>`)+`</div></div>`;
+  });
+  pend.forEach(x=>{ const src=ASM.sources.find(s=>s.id===x.sid);
+    h+=`<div class="mt-res mt-broll"><div class="mt-rtop"><span class="mt-rth">${src&&src.thumb?`<img alt="" src="${src.thumb}">`:ICO("film")}</span><span class="mt-rmain"><span class="mt-tk"><b>${mtEsc(x.name||"")}</b></span>`
+      +`<span class="mt-why">Video sin voz: no es toma. Rearma para que Reelfy lo vea y lo use como apoyo.</span></span></div></div>`; });
+  return h;
+}
+function mtBrollToggle(sid){
+  const x=(((ASM.montage||{}).broll||{}).sources||[]).find(s=>s.sid===sid); if(!x) return;
+  asmPush(); const on=!mtBrollOn(x); ASM.brollEdits=Object.assign({},ASM.brollEdits||{},{[sid]:{enabled:on}});
+  asmSaveLater(); mtRender();
+  FX.toast(on?"Ese video de apoyo vuelve a usarse en fragmentos.":"Ese video de apoyo ya no se usa.","check",false,[["Deshacer",()=>asmUndo()]]);
+}
+function mtScreenSee(id){
+  const x=((ASM.montage||{}).screens||[]).find(s=>s.id===id); if(!x) return;
+  const c=ASM.clips.find(c=>c.sid===x.cam); if(c) asmSelect("clip",c._id);
+}
+/** "No es grabación de pantalla" (asTake = true) o "Es grabación de pantalla": rearma el MISMO proyecto con
+    screens_off (los archivos que se tratan como toma). El guion detectado se vuelve a deducir; uno escrito o
+    corregido se conserva. */
+async function mtScreenRearm(sid,asTake){
+  const cur=new Set(((ASM.montage||{}).screens_off)||[]); if(asTake) cur.add(sid); else cur.delete(sid);
+  const nm=(ASM.sources.find(s=>s.id===sid)||{}).name||"el archivo";
+  const d=await mtDialog({icon:asTake?"undo":"restore",title:asTake?"No es grabación de pantalla":"Es grabación de pantalla",
+    body:`<p>${asTake?`Reelfy va a rearmar tratando ${mtEsc(nm)} como una toma más: su audio puede usarse y ya no se verá encima de otra toma.`:`Reelfy va a rearmar y, si ${mtEsc(nm)} suena igual que una de tus tomas, se verá encima de ella sin su sonido.`}${ASM.dirty?" Reemplaza tu línea de tiempo actual.":""}</p>`,
+    ok:"Rearmar",alt:"Cancelar"});
+  if(!d||d.pick!=="ok") return;
+  asmPause(); asmStopPreview(true); toastOff();
+  const sc=(ASM.montage||{}).script||{}, txt=(sc.source==="detected"&&ASM.scriptEdit==null)?"":(mtScriptNow()||"").trim();
+  MT=mtFresh(); MT.rearm=true; MT.back=true; MT.script=txt||null; MT.phase="match"; MT.screensOff=[...cur];
+  MT.sources=ASM.sources.slice(); MT.assetIds=mtClassifySources(MT.sources,MT.script); mtVideos().forEach(s=>{ MT.words[s.id]="ready"; });
+  show("#s-montage"); mtRenderProg(); await mtStart();
 }
 /** Seccion "Recursos del guion" del panel "Tomas": cada imagen o video que pide el guion. */
 function mtResHtml(m){
@@ -2542,6 +2700,8 @@ function mtExtra(k){
 }
 (function wireTakes(){
   const box=$("#asmTakes");
+  // el estilo cambia lo que dice el panel (Minimal: cortes secos)
+  const sty=$("#asmStyle"); if(sty) sty.addEventListener("change",()=>{ if(ASM.montage) mtRender(); });
   box.addEventListener("click",e=>{
     const b=e.target.closest("[data-act]"); if(!b||b.disabled) return;
     const card=b.closest("[data-slot]"), slot=card&&card.dataset.slot, act=b.dataset.act;
@@ -2550,6 +2710,13 @@ function mtExtra(k){
     if(act==="rfile"){ mtInsertFile(iid); return; }
     if(act==="roff"){ mtInsertToggle(iid); return; }
     if(act==="rsel"){ asmSelectInsert(iid,true); return; }
+    const sc=b.closest("[data-scr]"), scid=sc&&sc.dataset.scr, ss=b.closest("[data-scrsid]");
+    if(act==="soff"){ mtScreenToggle(scid); return; }
+    if(act==="ssee"){ mtScreenSee(scid); return; }
+    if(act==="snot"){ const x=((ASM.montage||{}).screens||[]).find(s=>s.id===scid); if(x) mtScreenRearm(x.sid,true); return; }
+    if(act==="sredo"&&ss){ mtScreenRearm(ss.dataset.scrsid,false); return; }
+    const bs=b.closest("[data-broll]");
+    if(act==="boff"&&bs){ mtBrollToggle(bs.dataset.broll); return; }
     if(act==="sel"){ const ix=FXCore.slotClipIdx(ASM.clips,slot); if(ix.length) asmSelect("clip",ASM.clips[ix[0]]._id); }
     else if(act==="alts"){ ASM.mtOpen.has(slot)?ASM.mtOpen.delete(slot):ASM.mtOpen.add(slot); mtRender(); }
     else if(act==="use") mtUse(slot,b.dataset.cand);

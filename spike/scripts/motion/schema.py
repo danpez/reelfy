@@ -112,10 +112,14 @@ TRANSITION_MIXERS = ["film_burn", "torn_paper", "circle", "slide"]
 FACE_ANCHORS = ["face", "face_left", "face_right", "face_top"]
 BW_TONES = ["neutral", "warm", "cool", "sepia"]
 # recursos del guion (pista fx.media): estilo de presentacion, ajuste del clip al hueco y origen
-MEDIA_STYLES = ["float_card"]
+MEDIA_STYLES = ["float_card", "screen", "reel"]
+SCREEN_MOTIONS = ["cut", "calm", "lively"]
+REEL_LAYOUTS = ["window", "full"]
 MEDIA_FITS = ["hold", "speed", "trim"]
 MEDIA_FILE_KINDS = ["image", "video"]
-ITEM_SRCS = ("ai", "user", "script")          # script = lo puso el guion (montaje con recursos)
+ITEM_SRCS = ("ai", "user", "script", "screen", "broll")  # script = lo puso el guion (montaje con recursos);
+# screen = grabacion de pantalla sincronizada con una toma (montaje, compose.screen_media); broll = video de
+# apoyo en fragmentos (compose.broll_media)
 EASINGS = ["linear", "in_quad", "out_quad", "in_out_quad", "in_cubic", "out_cubic",
            "in_out_cubic", "out_quart", "in_expo", "out_expo", "in_out_expo", "out_back",
            "in_back", "out_elastic", "out_bounce", "smoothstep"]
@@ -469,6 +473,9 @@ GRAPHIC_KIND_PARAMS = {
         P("button", "text", "Botón", "Seguir"),
         P("button_done", "text", "Botón pulsado", "Siguiendo"),
         P("button_color", "color", "Color del botón", None, nullable=True),
+        # el color del boton lo puso la IA (oscuro de la paleta: el acento del estilo no se lee como boton):
+        # al poner el color de tu marca el boton lo toma (fxcore.applyAccent / server._accent_apply)
+        P("button_auto", "bool", "Botón con el color de tu marca", None, nullable=True, internal=True, nofill=True),
         sel("avatar", "Avatar", ["initial", "face", "image"], "initial", seg=True,
             hint="Link abajo: imagen = la foto redonda en lugar del icono"),
         P("initials", "text", "Iniciales", "", hint="Vacío = del nombre"),
@@ -797,7 +804,45 @@ FLOAT_CARD_PARAMS = [
     num("in_dur", "Duración de la entrada", 0.35, 0.1, 1.5, 0.05, unit="s"),
     num("out_dur", "Duración de la salida", 0.25, 0.1, 1.5, 0.05, unit="s"),
 ]
-MEDIA_STYLE_PARAMS = {"float_card": {"label": "Tarjeta flotante", "params": FLOAT_CARD_PARAMS}}
+# grabacion de pantalla sincronizada con una toma (motion/screen.py; defaults espejo de screen.DEFAULTS,
+# tests/test_screen_card.py los compara): la sincronia (`sync`), la toma (`cam`) y el recorte del marco
+# de un dispositivo emulado (`crop`) los pone el montaje
+SCREEN_PARAMS = [
+    sel("motion", "Movimiento", SCREEN_MOTIONS, None, seg=True, nullable=True,
+        hint="Vacío = según el estilo: con el corte en Minimal, tranquila en Elegante, con vida en Dinámico y Energético"),
+    num("width", "Ancho de la pantalla", None, 0.3, SYM_W, 0.01, nullable=True,
+        hint="Vacío = lo más grande que cabe arriba de los subtítulos (centrada)"),
+    num("blur", "Desenfoque del fondo", 0.55, 0.0, 1.0, 0.05),
+    num("dim", "Oscurecer el fondo", 0.28, 0.0, 0.8, 0.02),
+    num("radius", "Esquinas redondeadas", 0.055, 0.0, 0.2, 0.005, hint="Fracción del ancho de la pantalla"),
+    num("shadow", "Sombra", 0.6, 0.0, 1.0, 0.05),
+    P("border", "bool", "Borde claro", True),
+    P("cam", "text", "Toma sincronizada", None, nullable=True, internal=True),
+    P("cam_name", "text", "Toma sincronizada", "", internal=True),
+    num("crop", "Recorte del marco", None, 0.0, 1.0, 0.0001, len=4, nullable=True, internal=True,
+        hint="[x0, y0, x1, y1] de la grabación (fracciones): lo que hay dentro del marco de un dispositivo emulado"),
+]
+# video de apoyo en fragmentos (motion/reel.py; defaults espejo de reel.DEFAULTS, tests/test_reel_card.py los
+# compara): las tomas (`pieces`) las elige el montaje (scripts/brollplan.py) y el Studio las cambia
+REEL_PARAMS = [
+    sel("layout", "Formato", REEL_LAYOUTS, "window", seg=True,
+        hint="Ventana flotante: cada toma completa en una tarjeta arriba de los subtítulos, sobre tu toma "
+             "desenfocada. Pantalla completa: cada toma recortada a lo vertical, centrada en lo importante"),
+    sel("motion", "Movimiento", SCREEN_MOTIONS, None, seg=True, nullable=True,
+        hint="Solo la ventana. Vacío = según el estilo: con el corte en Minimal, tranquila en Elegante, "
+             "con vida en Dinámico y Energético"),
+    num("width", "Ancho de la ventana", None, 0.4, SYM_W, 0.01, nullable=True,
+        hint="Vacío = lo más ancho que cabe (centrada)"),
+    num("vignette", "Viñeta", 0.0, 0.0, 1.0, 0.05, hint="Solo pantalla completa: oscurece un poco las orillas"),
+    num("blur", "Desenfoque del fondo", 0.55, 0.0, 1.0, 0.05),
+    num("dim", "Oscurecer el fondo", 0.28, 0.0, 0.8, 0.02),
+    num("radius", "Esquinas redondeadas", 0.055, 0.0, 0.2, 0.005, hint="Fracción del ancho de la ventana"),
+    num("shadow", "Sombra", 0.6, 0.0, 1.0, 0.05),
+    P("border", "bool", "Borde claro", True),
+]
+MEDIA_STYLE_PARAMS = {"float_card": {"label": "Tarjeta flotante", "params": FLOAT_CARD_PARAMS},
+                      "screen": {"label": "Grabación de pantalla", "params": SCREEN_PARAMS},
+                      "reel": {"label": "Video de apoyo", "params": REEL_PARAMS}}
 
 
 def _with_defaults(params: list[dict], overrides: dict, hints: dict | None = None) -> list[dict]:

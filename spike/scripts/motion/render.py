@@ -79,6 +79,8 @@ import paths
 from . import ctx as C
 from . import media as MF
 from . import schema
+from . import reel as RL
+from . import screen as SC
 from . import timeline as T
 from . import video_io as V
 
@@ -590,8 +592,18 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
     # termina arriba de la franja de subtitulos (motion/media.py)
     float_media = []
     lb = layout_box(W, H)
-    for it in mapped("media"):
-        if (it.get("style") or "float_card") not in MF.STYLES:
+    media_items = mapped("media")
+    # sin destellos de la camara entre dos recursos ni junto a un cambio de toma (1-7 cuadros: la cara nitida
+    # entre dos fragmentos de apoyo, o la toma anterior un cuadro antes del cambio): timeline.overlay_continuity.
+    # Una grabacion de pantalla sincronizada no se mueve (su ventana es la de su toma)
+    if media_items:
+        wins = [[it["_fs"], it["_fe"], it.get("style") != SC.STYLE, it.get("style") != SC.STYLE]
+                for it in media_items]
+        for it, (a, b) in zip(media_items, T.overlay_continuity(wins, bounds, fps)):
+            it["_fs"], it["_fe"] = a, min(b, fdur)
+    for it in media_items:
+        style = it.get("style") or "float_card"
+        if style not in MF.STYLES and style not in (SC.STYLE, RL.STYLE):
             skip(f"media:{it.get('style')}")
             continue
         spec = float_spec(it, opts)
@@ -599,6 +611,20 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
             skip(f"media:{it.get('id')}:no_encontrado")
             continue
         it["_media"], it["_float"] = spec, True
+        if style == RL.STYLE:
+            # video de apoyo en fragmentos: sus tomas a la medida del tramo FINAL, ventana o pantalla completa
+            if not _reel_job(it, spec, plan, opts, lb, cap, captions_on):
+                skip(f"media:{it.get('id')}:sin_tomas")
+                continue
+            float_media.append(it)
+            continue
+        if style == SC.STYLE:
+            # grabacion de pantalla sincronizada: ventana, sincronia en tiempo FINAL, tarjeta y cara
+            if not _screen_job(it, spec, tl, plan, opts, lb, cap, captions_on, bounds, fdur):
+                skip(f"media:{it.get('id')}:sin_sincronia")
+                continue
+            float_media.append(it)
+            continue
         wh = _media_src_wh(it)
         span = (cap, captions_on, _num_or(it.get("start"), 0.0), _num_or(it.get("end"), 0.0), lb[2] / lb[3])
         it["_card"] = MF.card_layout(wh[0] if wh else None, wh[1] if wh else None, lb[2] / lb[3],
@@ -654,6 +680,99 @@ def build_job(plan: dict, tl: T.Timeline, opts: dict, mods: dict) -> tuple[dict,
     }
     caption_layout(job)
     return job, skipped
+
+
+def _screen_job(it: dict, spec: dict, tl: T.Timeline, plan: dict, opts: dict, lb, cap: dict,
+                captions_on: bool, bounds, fdur: float) -> bool:
+    """Grabacion de pantalla sincronizada (fx.media "screen", motion/screen.py) en el job: ventana final
+    acotada a sus pedazos sincronizados, filas de sincronia en TIEMPO FINAL `_sync_out` = [[fs, fe,
+    s0]] (el cuadro final T muestra la pantalla s0 + rate * (T - fs): cada pedazo por cada tramo
+    conservado tras los recortes), ventana (screen.layout arriba de los subtitulos, con la proporcion de
+    lo que hay dentro de su marco `crop`) y movimiento segun el estilo. False si no queda nada."""
+    cov = SC.coverage(it)
+    if cov is None:
+        return False
+    r = tl.map_range(cov[0], cov[1])
+    if r is None:
+        return False
+    fps = float(opts["fps"])
+    fs, fe = T.snap_window(r[0], min(r[1], fdur), bounds, fps)
+    if fe - fs <= 1e-6:
+        return False
+    sync = it.get("sync") or {}
+    off, rate = SC._num(sync.get("offset"), 0.0), SC._num(sync.get("rate"), 1.0) or 1.0
+    rows = []
+    for t0, t1, c in SC.sync_pieces(it):
+        a0, b0 = max(t0, cov[0]), min(t1, cov[1])
+        if b0 - a0 <= 1e-6:
+            continue
+        for ka, kb in tl.keeps:
+            a, b = max(a0, ka), min(b0, kb)
+            if b - a <= 1e-6:
+                continue
+            f0 = tl.remap(a)
+            if f0 is None:
+                continue
+            rows.append([round(f0, 6), round(f0 + (b - a), 6), round(off + rate * (c + a - t0), 6)])
+    if not rows:
+        return False
+    rows.sort(key=lambda x: x[0])
+    it["_fs"], it["_fe"] = fs, fe
+    it["_screen"] = True
+    it["_sync_out"] = rows
+    lo = min(x[2] for x in rows)
+    hi = max(x[2] + rate * (x[1] - x[0]) for x in rows)
+    it["_motion"] = SC.motion_of(it, (plan.get("director") or {}).get("style"))
+    crop = SC.crop_of(it)
+    wh = _media_src_wh(it)
+    span = (cap, captions_on, cov[0], cov[1], lb[2] / lb[3])
+    it["_card"] = SC.layout(wh[0] if wh else it.get("w"), wh[1] if wh else it.get("h"), lb[2] / lb[3],
+                            MF.caption_top(*span), MF.caption_bottom(*span), it.get("width"), crop)
+    spec.update(kind="screen", card=[it["_card"]["w"], it["_card"]["aspect"]], crop=crop, sync_out=rows,
+                fs=fs, rate=rate, scr_lo=round(lo, 6), scr_hi=round(hi, 6), media_in=round(max(0.0, lo), 6))
+    return True
+
+
+def _reel_job(it: dict, spec: dict, plan: dict, opts: dict, lb, cap: dict, captions_on: bool) -> bool:
+    """Video de apoyo en fragmentos (fx.media "reel", motion/reel.py) en el job: las tomas repartidas en su
+    tramo FINAL (reel.fit -> spec["reel"] = [[t0, t1, src_in, recorte, j, src_max]] locales) con el recorte de cada una (pantalla completa:
+    reel.full_crop a la proporcion de la caja; ventana: su recorte `win` agrandado a la proporcion de la
+    tarjeta, reel.win_view, o el cuadro completo, que la normalizacion cubre) y la tarjeta (ventana) arriba
+    de los subtitulos.
+    False si no queda ninguna toma."""
+    fps = float(opts["fps"])
+    ps = RL.pieces_of(it)
+    rows = RL.fit(ps, it["_fe"] - it["_fs"], fps)
+    if not rows:
+        return False
+    wh = None
+    try:
+        info = V.probe(spec["src"])
+        wh = (int(info.get("w") or 0), int(info.get("h") or 0))
+    except Exception:  # noqa: las del plan
+        wh = None
+    if not wh or not wh[0] or not wh[1]:
+        wh = (_num_or(it.get("w"), 0.0), _num_or(it.get("h"), 0.0))
+    if not wh[0] or not wh[1]:
+        return False
+    ba = lb[2] / lb[3]
+    lay = RL.layout_of(it)
+    it["_reel"], it["_layout"] = True, lay
+    it["_motion"] = RL.motion_of(it, (plan.get("director") or {}).get("style"))
+    if lay == "window":
+        span = (cap, captions_on, _num_or(it.get("start"), 0.0), _num_or(it.get("end"), 0.0), ba)
+        it["_card"] = RL.window_layout(it, wh[0], wh[1], ba, MF.caption_top(*span), MF.caption_bottom(*span))
+        spec["card"] = [it["_card"]["w"], it["_card"]["aspect"]]
+    else:
+        it["_card"] = None
+    out = []
+    for t0, t1, src_in, j, src_max in rows:
+        p = ps[int(j)]
+        crop = RL.full_crop(p.get("cx"), wh[0], wh[1], ba) if lay == "full" else \
+            RL.win_view(p, wh[0], wh[1], it["_card"]["aspect"])
+        out.append([t0, t1, src_in, crop, int(j), src_max])
+    spec.update(kind="reel", layout=lay, reel=out, loop=False, speed=1.0, media_in=round(out[0][2], 6))
+    return True
 
 
 GRAPHIC_ANCHORS = ("face", "face_left", "face_right", "face_top")
@@ -753,7 +872,7 @@ OPTIONAL_MEDIA = {"graphics": ("cta",)}
 MEDIA_IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".avif", ".bmp", ".gif",
                    ".tif", ".tiff")
 MEDIA_VIDEO_EXT = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi")
-MEDIA_VERSION = 2
+MEDIA_VERSION = 3          # 3: busqueda sin descarte (VFR) y tope de lectura de las tomas de apoyo
 _HEIF_EXT = (".heic", ".heif", ".avif")
 # hueco de la foto de cutaways.photo: ancho 0.91*pw y alto 1.104*pw (borde 4.5 % y marco)
 PHOTO_ASPECT = 0.91 / 1.104
@@ -1159,8 +1278,17 @@ def _clip_target(it: dict, m: dict, sw: int, sh: int, box: tuple[int, int]):
     cw, ch = max(2.0, sw * (x1 - x0)), max(2.0, sh * (y1 - y0))
     fit, zoom = m.get("fit", "cover"), float(m.get("zoom") or 1.0)
     kind = m.get("kind")
-    if kind == "float_card":
-        # recurso flotante: la tarjeta completa con el recorte cover centrado ya aplicado (baked)
+    if kind == "reel":
+        # fragmentos de apoyo: cada toma se recorta al normalizar (_reel_cmd); ventana = la tarjeta,
+        # pantalla completa = la caja entera
+        if m.get("layout") == "full":
+            return _even(bw), _even(bh), None, True
+        card = m.get("card") or [MF.CARD_W, RL.ASPECT_DEFAULT]
+        _x0, _y0, tw, th = MF.card_px({"w": card[0], "aspect": card[1], "cy": 0.5}, bw, bh)
+        return max(16, _even(tw)), max(16, _even(th)), None, True
+    if kind in ("float_card", "screen"):
+        # recurso flotante / pantalla: la tarjeta completa con el recorte cover centrado ya aplicado
+        # (baked; la pantalla tiene la proporcion de su tarjeta: sin recorte)
         card = m.get("card") or [MF.CARD_W, MF.ASPECT]
         x0_, _y0, tw, th = MF.card_px({"w": card[0], "aspect": card[1], "cy": 0.5}, bw, bh)
         sx, sy, sw_, sh_ = MF.cover_rect(cw, ch, tw, th)
@@ -1189,8 +1317,18 @@ def _clip_target(it: dict, m: dict, sw: int, sh: int, box: tuple[int, int]):
 
 def _clip_window(m: dict, info: dict, fps: float, n: int) -> tuple[float, int]:
     """(inicio efectivo en la fuente, cuadros utiles del clip desde ahi, <= n). Con `speed`
-    (recurso flotante con fit 'speed') cada cuadro de salida avanza speed/fps en la fuente."""
+    (recurso flotante con fit 'speed') cada cuadro de salida avanza speed/fps en la fuente. Una
+    grabacion de pantalla sincronizada normaliza TODO su tramo [scr_lo, scr_hi] (los recortes saltan
+    dentro de el: _MediaFrames.local_frame elige el cuadro por la sincronia)."""
     dur = float(info.get("duration") or 0.0)
+    if m.get("reel"):
+        return float(m["reel"][0][2]), n            # cada toma va desde su propio segundo (_reel_cmd)
+    if m.get("sync_out"):
+        t0 = max(0.0, float(m.get("scr_lo") or 0.0))
+        hi = float(m.get("scr_hi") or t0)
+        if dur > 0:
+            hi = min(hi, dur)
+        return t0, max(1, int(math.ceil((hi - t0) * fps - 1e-6)) + 2)
     t0 = float(m.get("media_in") or 0.0)
     sp = float(m.get("speed") or 1.0)
     if dur > 0.2 and t0 >= dur - 0.5 / fps:
@@ -1200,16 +1338,85 @@ def _clip_window(m: dict, info: dict, fps: float, n: int) -> tuple[float, int]:
     return t0, max(1, min(n, int(math.floor((dur - t0) * fps / sp + 0.5))))
 
 
+def _reel_crop(crop, sw: float, sh: float, w: int, h: int) -> list[float] | None:
+    """Recorte efectivo de una toma de un fragmento: dentro de su recorte (pantalla completa o `win`, o
+    el cuadro completo) lo que CUBRE la proporcion w x h, centrado (fracciones; None = todo)."""
+    x0, y0, x1, y1 = crop or (0.0, 0.0, 1.0, 1.0)
+    cw, ch = max(2.0, sw * (x1 - x0)), max(2.0, sh * (y1 - y0))
+    sx, sy, sw_, sh_ = MF.cover_rect(cw, ch, w, h)
+    eff = [x0 + sx / sw, y0 + sy / sh, x0 + (sx + sw_) / sw, y0 + (sy + sh_) / sh]
+    eff = [round(min(1.0, max(0.0, v)), 5) for v in eff]
+    return None if eff == [0.0, 0.0, 1.0, 1.0] else eff
+
+
+# Busqueda de un clip desde t0 que aguanta fuentes de cuadros VARIABLES (ReplayKit no escribe cuadros
+# mientras la pantalla esta quieta: huecos de 0.5-1.3 s o mas). Con la busqueda exacta normal (-ss antes
+# de -i) ffmpeg TIRA los cuadros anteriores a t0 y, si t0 cae en un hueco, el clip arranca en el cuadro
+# SIGUIENTE: todo lo leido por indice (sync_frame) se corre lo que dure el hueco. Sin descarte
+# (-noaccurate_seek) la decodificacion arranca en el cuadro clave anterior (los mismos cuadros que ya
+# decodificaba la busqueda exacta, sin costo extra) con t0 en 0, y `fps` con start_time=0 fija la
+# reticula en t0: el cuadro 0 es el ultimo cuadro de la fuente en o antes de t0 (lo que se ve en
+# pantalla en ese instante) y cada cuadro j el vigente en t0 + j/fps.
+_FPS_AT_T0 = "fps=fps={fps}:start_time=0:round=near"
+
+
+def _seek_t0(t0: float) -> list[str]:
+    return ["-noaccurate_seek", "-ss", f"{max(0.0, float(t0)):.6f}"]
+
+
+def _fit_row(row: list) -> list:
+    """Fila del render [t0, t1, src_in, crop, j, src_max] -> fila de reel.fit [t0, t1, src_in, j, src_max]
+    (sin src_max en filas viejas: sin tope)."""
+    return [row[0], row[1], row[2], row[4] if len(row) > 4 else 0] + list(row[5:6])
+
+
+def _reel_cmd(m: dict, info: dict, w: int, h: int, fps: float, n: int, out) -> list[str]:
+    """ffmpeg de un fragmento de apoyo: cada toma (fila de m["reel"]: [t0, t1, src_in, crop, j, src_max])
+    desde su segundo, sus cuadros exactos, recortada y escalada a (w, h), normalizada a SDR bt709; todas
+    unidas con cortes secos (concat) -> n cuadros. Nunca lee la fuente en o despues de src_max (el fin de su
+    toma: reel.hold_frames): si la toma no alcanza, su ultimo cuadro se queda. Sin -t de entrada: con la
+    busqueda sin descarte (_seek_t0) el -t contaria desde el cuadro clave anterior; trim corta y ffmpeg deja
+    de leer esa entrada en cuanto su cadena termina."""
+    sw, sh = float(info.get("w") or w), float(info.get("h") or h)
+    cmd = [V.FFMPEG, "-y", "-v", "error", "-nostdin"]
+    hw = V.hwaccel_args(info)
+    chains, F0 = [], 0
+    rows = m.get("reel") or []
+    for j, row in enumerate(rows):
+        t0, t1, src_in, crop = row[:4]
+        F1 = int(math.floor(t1 * fps + 0.5)) if j < len(rows) - 1 else int(n)
+        k = max(1, F1 - F0)
+        F0 = F1
+        kk = min(k, RL.hold_frames(_fit_row(row), fps))
+        cmd += hw + _seek_t0(float(src_in)) + ["-i", str(m["src"])]
+        eff = _reel_crop(crop, sw, sh, w, h)
+        chain = [_FPS_AT_T0.format(fps=fps)] + _crop_filter(eff) + [
+            f"scale={w}:{h}:flags=lanczos+accurate_rnd+full_chroma_int"] + V.tonemap_filters(info) + [
+            "setsar=1", f"trim=end_frame={kk}", "setpts=PTS-STARTPTS"]
+        # una toma que se acaba antes (fin de su toma o del archivo): su ultimo cuadro se queda hasta completar
+        chain += [f"tpad=stop_mode=clone:stop={k}", f"trim=end_frame={k}"]
+        chains.append(f"[{j}:v:0]" + ",".join(chain) + f"[v{j}]")
+    fc = ";".join(chains) + ";" + "".join(f"[v{j}]" for j in range(len(rows))) + \
+        f"concat=n={len(rows)}:v=1:a=0[v]"
+    return cmd + ["-filter_complex", fc, "-map", "[v]", "-an", "-frames:v", str(int(n)), "-r", str(fps)] + \
+        V.encoder_args(w, h, fps, "inter") + [str(out)]
+
+
 def _media_video_cmd(m: dict, info: dict, w: int, h: int, fps: float, n: int, t0: float,
                      out, single: bool = False) -> list[str]:
     """ffmpeg: clip del usuario desde t0 -> hasta n cuadros a fps (los que tenga), recortado,
     escalado a (w, h) y normalizado a SDR bt709 (tonemap si es HDR). El loop y el congelado
-    del ultimo cuadro los resuelve la lectura (_MediaFrames), no el archivo."""
+    del ultimo cuadro los resuelve la lectura (_MediaFrames), no el archivo. Un fragmento de apoyo
+    ("reel") une sus tomas (_reel_cmd); el cuadro suelto usa el recorte de la toma que toca."""
+    if m.get("reel") and not single:
+        return _reel_cmd(m, info, w, h, fps, n, out)
     sp = float(m.get("speed") or 1.0)
-    # velocidad horneada (recurso flotante 'speed'): la fuente corre sp veces mas rapido
-    pre = [f"setpts=(PTS-STARTPTS)/{sp:.6f}"] if abs(sp - 1.0) > 1e-6 and not single else []
-    chain = pre + [f"fps=fps={fps}:round=near"] + _crop_filter(m.get("crop_eff", m.get("crop"))) \
-        + [f"scale={w}:{h}:flags=bicubic+accurate_rnd+full_chroma_int"] + V.tonemap_filters(info)
+    # velocidad horneada (recurso flotante 'speed'): la fuente corre sp veces mas rapido (t0 sigue en 0:
+    # sin STARTPTS, que con la busqueda sin descarte seria el cuadro clave anterior)
+    pre = [f"setpts=PTS/{sp:.6f}"] if abs(sp - 1.0) > 1e-6 and not single else []
+    flags = "lanczos" if m.get("kind") in ("screen", "reel") else "bicubic"    # pantalla: texto nitido al ampliar
+    chain = pre + [_FPS_AT_T0.format(fps=fps)] + _crop_filter(m.get("crop_eff", m.get("crop"))) \
+        + [f"scale={w}:{h}:flags={flags}+accurate_rnd+full_chroma_int"] + V.tonemap_filters(info)
     if single:
         # misma conversion a RGBA que FrameReader sobre el clip (bt709, rango tv): el cuadro
         # suelto de /frame y el export se ven iguales
@@ -1217,7 +1424,7 @@ def _media_video_cmd(m: dict, info: dict, w: int, h: int, fps: float, n: int, t0
                   "flags=bicubic+accurate_rnd+full_chroma_int", "format=rgba"]
     # decodificacion por hardware en Mac (HEVC 4K HLG del iPhone: ~3x mas rapido)
     cmd = [V.FFMPEG, "-y", "-v", "error", "-nostdin"] + V.hwaccel_args()
-    cmd += ["-ss", f"{max(0.0, t0):.6f}", "-i", str(m["src"]), "-map", "0:v:0", "-an", "-sn", "-dn",
+    cmd += _seek_t0(t0) + ["-i", str(m["src"]), "-map", "0:v:0", "-an", "-sn", "-dn",
             "-vf", ",".join(chain), "-frames:v", str(int(n))]
     if single:
         return cmd + ["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"]
@@ -1359,13 +1566,16 @@ def prepare_media(job: dict, opts: dict, cancel=None, only_images: bool = False)
             if not sw or not sh:
                 raise RuntimeError("clip ilegible")
             nw, nh, crop, baked = _clip_target(it, m, sw, sh, ebox)
-            n = _item_frames(it, fps)
+            n = _item_frames(it, fps) if not m.get("sync_out") else 1 << 30
             t0, n_seg = _clip_window(m, info, fps, n)
+            if m.get("sync_out"):
+                n = n_seg
             m.update(nw=nw, nh=nh, w=max(2, _even(nw * scale)), h=max(2, _even(nh * scale)),
                      crop_eff=crop, baked=baked, n=n, n_seg=n_seg, t0=round(t0, 4), fps=fps,
                      info_dur=float(info.get("duration") or 0.0))
             sp = float(m.get("speed") or 1.0)          # velocidad horneada (recurso flotante)
-            extra = [nw, nh, fps, n_seg, round(t0, 3), crop] + ([round(sp, 4)] if abs(sp - 1.0) > 1e-6 else [])
+            extra = [nw, nh, fps, n_seg, round(t0, 3), crop] + ([round(sp, 4)] if abs(sp - 1.0) > 1e-6 else []) \
+                + ([m.get("reel")] if m.get("reel") else [])
             out = cache / f"media_{_media_key(m, extra)}.mp4"
             got = _clip_meta(out, nw, nh)
             if not got and not only_images:
@@ -1423,7 +1633,8 @@ def media_signature(job: dict) -> str | None:
                      round(m.get("media_in", 0.0), 3), m.get("loop"), m.get("fit"), m.get("focus"),
                      m.get("zoom"), it.get("_size0", it.get("size")), it.get("aspect"),
                      round(it["_fe"] - it["_fs"], 3)]
-                    + ([m.get("speed"), m.get("card")] if it.get("_float") else []))
+                    + ([m.get("speed"), m.get("card")] if it.get("_float") else [])
+                    + ([m.get("sync_out"), m.get("scr_lo"), m.get("scr_hi")] if m.get("sync_out") else []))
     return hashlib.sha1(json.dumps([MEDIA_VERSION, job["fps"], list(_export_box(job)), rows],
                                    default=str).encode()).hexdigest()[:16]
 
@@ -1526,7 +1737,28 @@ class _MediaFrames:
         self.placeholders: dict[tuple, skia.Image] = {}
 
     @staticmethod
+    def sync_frame(m: dict, lt: float, fps: float) -> int:
+        """Grabacion de pantalla sincronizada: el cuadro del clip normalizado (desde scr_lo, a fps) que
+        corresponde al cuadro final fs + lt (fila de `sync_out` que lo contiene; en una union gana la
+        fila siguiente, como Timeline.inverse)."""
+        T_ = float(m.get("fs") or 0.0) + lt
+        rows = m.get("sync_out") or []
+        hit = None
+        for r in rows:
+            if r[0] - 1e-6 <= T_ < r[1] - 1e-6:
+                hit = r
+                break
+        if hit is None:
+            hit = min(rows, key=lambda r: 0.0 if r[0] <= T_ <= r[1] else min(abs(T_ - r[0]), abs(T_ - r[1])))
+        tt = min(max(T_, hit[0]), hit[1])
+        s_ = hit[2] + float(m.get("rate") or 1.0) * (tt - hit[0])
+        j = int(math.floor((s_ - float(m.get("t0") or 0.0)) * fps + 0.5))
+        return min(max(0, j), max(0, int(m.get("n_eff") or m.get("n") or 1) - 1))
+
+    @staticmethod
     def local_frame(m: dict, lt: float, fps: float) -> int:
+        if m.get("sync_out"):
+            return _MediaFrames.sync_frame(m, lt, fps)
         k = min(max(0, int(math.floor(lt * fps + 1e-6))), max(0, int(m.get("n") or 1) - 1))
         ne = max(1, int(m.get("n_eff") or m.get("n") or 1))
         return (k % ne) if m.get("loop", True) else min(k, ne - 1)
@@ -1569,7 +1801,19 @@ class _MediaFrames:
             info = V.probe(m["src"])
             w, h = int(m["w"]), int(m["h"])
             t_src = m.get("t0", 0.0) + k * float(m.get("speed") or 1.0) / fps
-            r = subprocess.run(_media_video_cmd(m, info, w, h, fps, 1, t_src, None, single=True),
+            mm = m
+            if m.get("sync_out"):
+                t_src = m.get("t0", 0.0) + k / fps
+            if m.get("reel"):
+                # la toma que toca en el cuadro local k, con su recorte
+                rows = m["reel"]
+                lt = k / fps
+                j = RL.piece_at(rows, lt)
+                r0 = rows[j]
+                t_src = RL.src_cap(_fit_row(r0), float(r0[2]) + min(max(lt, r0[0]), r0[1]) - r0[0], fps)
+                mm = dict(m, crop_eff=_reel_crop(r0[3], float(info.get("w") or w), float(info.get("h") or h),
+                                                 int(m.get("nw") or w), int(m.get("nh") or h)))
+            r = subprocess.run(_media_video_cmd(mm, info, w, h, fps, 1, t_src, None, single=True),
                                capture_output=True)
             if len(r.stdout) < w * h * 4:
                 return None
@@ -1921,6 +2165,21 @@ class _Grain:
         cv2.subtract(arr, self.neg[dy:dy + self.H, dx:dx + self.W], dst=arr)
 
 
+def _draw_full(cv, img, bw: int, bh: int, vignette: float = 0.0) -> None:
+    """Toma de apoyo a pantalla completa (ya normalizada al tamano de la caja) + vineta opcional."""
+    if img is not None:
+        if img.width() == bw and img.height() == bh:
+            cv.drawImage(img, 0, 0)
+        else:
+            cv.drawImageRect(img, skia.Rect.MakeWH(bw, bh), C.SAMPLING_CUBIC)
+    v = max(0.0, min(1.0, float(vignette or 0.0)))
+    if v > 1e-3:
+        p = skia.Paint(Shader=skia.GradientShader.MakeRadial(
+            skia.Point(bw / 2, bh * 0.45), bh * 0.75, [skia.Color4f(0, 0, 0, 0).toColor(),
+                                                       skia.Color4f(0, 0, 0, 0.55 * v).toColor()], [0.33, 1.0]))
+        cv.drawRect(skia.Rect.MakeWH(bw, bh), p)
+
+
 class Compositor:
     """Compone cuadros finales segun el orden normativo 4.3. Uno por proceso."""
 
@@ -1984,8 +2243,15 @@ class Compositor:
             if it.get("_media_image") is None and not it.get("_media_placeholder"):
                 continue                          # sin cuadro que mostrar: ni tarjeta ni fondo
             lt, dur = t - it["_fs"], it["_fe"] - it["_fs"]
-            st = MF.card_anim(lt, dur, MF.param(it, "in_dur"), MF.param(it, "out_dur"),
-                              MF.param(it, "float"))
+            if it.get("_reel"):
+                st = RL.anim(lt, dur, it.get("_motion") or "cut")
+                if it.get("_layout") == "full":
+                    st["bg"] = 0.0                    # la toma cubre todo: sin fondo desenfocado
+            elif it.get("_screen"):
+                st = SC.anim(lt, dur, it.get("_motion") or "cut")
+            else:
+                st = MF.card_anim(lt, dur, MF.param(it, "in_dur"), MF.param(it, "out_dur"),
+                                  MF.param(it, "float"))
             k = _num_or(it.get("intensity"), 1.0)
             st["alpha"] *= min(1.0, max(0.0, k))
             states.append((it, st, lt, dur))
@@ -1993,12 +2259,12 @@ class Compositor:
             return
         top = max(states, key=lambda s: s[1]["bg"])
         amt = top[1]["bg"] * min(1.0, max(0.0, _num_or(top[0].get("intensity"), 1.0)))
+        P = RL.param if top[0].get("_reel") else SC.param if top[0].get("_screen") else MF.param
         cv = self.canvas
         try:
             if amt > 0.003:
                 snap = self.surf.makeImageSnapshot()
-                MF.draw_background(cv, snap, self.W, self.H, amt, MF.param(top[0], "blur"),
-                                   MF.param(top[0], "dim"))
+                MF.draw_background(cv, snap, self.W, self.H, amt, P(top[0], "blur"), P(top[0], "dim"))
             for it, st, lt, dur in states:
                 m = it.get("_media") or {}
                 img = it.get("_media_image")
@@ -2007,7 +2273,14 @@ class Compositor:
                 if self.boxed:
                     cv.translate(self.box[0], self.box[1])
                 try:
-                    MF.draw_card(cv, img, bw, bh, it["_card"], st, it, lt, dur, baked=baked)
+                    if it.get("_reel") and it.get("_layout") == "full":
+                        _draw_full(cv, img, bw, bh, _num_or(RL.param(it, "vignette"), 0.0))
+                    elif it.get("_reel"):
+                        MF.draw_card(cv, img, bw, bh, it["_card"], st, RL.look(it), lt, dur, baked=True)
+                    elif it.get("_screen"):
+                        MF.draw_card(cv, img, bw, bh, it["_card"], st, SC.look(it), lt, dur, baked=baked)
+                    else:
+                        MF.draw_card(cv, img, bw, bh, it["_card"], st, it, lt, dur, baked=baked)
                 finally:
                     cv.restoreToCount(1)
         except Exception as e:  # noqa
@@ -2506,16 +2779,21 @@ class Compositor:
                 a_text = [it for it in a_text if not it.get("_behind")]
                 a_gfx = [it for it in a_gfx if not it.get("_behind")]
         # 4) escenas a pantalla completa
-        self._cutaways(self._active(self.cutaways, t), t, lctx)
+        a_cut = self._active(self.cutaways, t)
+        self._cutaways(a_cut, t, lctx)
         # 4b) recursos flotantes del guion: fondo desenfocado + tarjeta (subtitulos encima)
-        if self.float_media:
-            a_fm = self._active(self.float_media, t)
-            if a_fm:
-                self._float_media(a_fm, t)
+        a_fm = self._active(self.float_media, t) if self.float_media else []
+        if a_fm:
+            self._float_media(a_fm, t)
         # 5) graficos, texto, subtitulos
         self._draw("graphics", a_gfx, t, lctx, "kind", boxed=True)
         self._draw("text", a_text, t, lctx, "preset", boxed=True)
         if self.job.get("captions_on") and self.reg["captions"] is not None:
+            # contraste de los subtitulos con lo que de verdad queda detras: con una escena, una tarjeta, una
+            # pantalla o un video de apoyo encima de la toma, el cuadro ya compuesto (text.caption_contrast)
+            if a_cut or a_fm:
+                snap = self.surf.makeImageSnapshot()
+                lctx._cache["caption_bg"] = snap.makeSubset(skia.IRect.MakeXYWH(*self.box)) if self.boxed else snap
             cv.save()
             if self.boxed:
                 cv.translate(self.box[0], self.box[1])
@@ -2526,6 +2804,7 @@ class Compositor:
                 self._err("captions", e)
             finally:
                 cv.restoreToCount(1)
+                lctx._cache.pop("caption_bg", None)
                 self._prof("captions", ta)
         # 6) transiciones (prev = ultimo cuadro compuesto antes de la union, congelado)
         if n in self.prev_needed:

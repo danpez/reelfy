@@ -267,6 +267,58 @@ def test_uniones_exactas_tambien_en_el_ensamble_manual_si_se_pide(media, monkeyp
     assert off.max() - off.min() < 6.0, off
 
 
+def _video_switches(path, w=180, h=320, fps=FPS):
+    """Instantes (s) en que el video del archivo cambia entre blanco y azul (primer cuadro nuevo)."""
+    raw = subprocess.run([str(paths.FFMPEG), "-v", "error", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "gray",
+                          "-"], capture_output=True, check=True).stdout
+    g = np.frombuffer(raw, np.uint8).reshape(-1, h * w).mean(axis=1)
+    white = g > 128
+    return [k / fps for k in range(1, len(white)) if white[k] != white[k - 1]]
+
+
+def test_ensamble_manual_de_45_cortes_sin_deriva_por_defecto(media):
+    """Regresion (v0.6.1): el ensamble MANUAL (clips sin "montage", lo que arma "Montar clips" a mano)
+    iba con `-c copy` por defecto y cada union atrasaba el audio ~27 ms: tras 45 cortes la voz quedaba
+    1.2 s detras de la imagen. Ahora las uniones exactas son el default de todo ensamble: en el ULTIMO
+    segmento de un ensamble de 46 tramos, el audio cambia a menos de un cuadro de donde cambia la
+    imagen (medido en el archivo: tono vs color), y en ninguna union se acumula desfase."""
+    assert compose.EXACT_JOINS == "all"
+    d = media["d"]
+    rng = np.random.default_rng(45)
+    durs = [round(float(x), 3) for x in rng.uniform(0.37, 0.73, 46)]          # duraciones fuera de la reticula
+    main, t = [], 0.0
+    for k, du in enumerate(durs):
+        src = media["va"] if k % 2 == 0 else media["vc"]
+        main.append(_item(src, 0.1, 0.1 + du, t, f"S{k}", None, vol=1.0))
+        t += du
+    info = {}
+    out = compose.compose({"fps": FPS, "main": main}, str(d / "manual45.mp4"), d / "w_manual45", info=info)
+    assert info["exact"] is True
+    rec = compose.spec_record({"fps": FPS, "main": main}, info)
+    assert rec["spec"]["exact_joins"] is True                       # el 4K recompone con el mismo modo
+    vs = np.array(_video_switches(out))
+    asw = np.array(_tone_switches(compose._pcm(out)))
+    assert len(vs) == len(durs) - 1 and len(asw) == len(vs), (len(vs), len(asw))
+    off = (asw - vs) * 1000.0
+    assert abs(off[-1]) < 1000.0 / FPS, off[-1]                     # el ultimo segmento: < 1 cuadro
+    assert np.abs(off).max() < 1000.0 / FPS, off                    # ninguna union se desfasa
+    assert abs(np.polyfit(np.arange(len(off)), off, 1)[0]) < 0.5    # y no hay deriva (ms por union)
+
+
+def test_modo_de_uniones_del_spec_manda(monkeypatch):
+    monkeypatch.setattr(compose, "EXACT_JOINS", "all")
+    assert compose.exact_joins({"main": []}) is True
+    assert compose.exact_joins({"main": [], "exact_joins": False}) is False
+    monkeypatch.setattr(compose, "EXACT_JOINS", "montage")
+    assert compose.exact_joins({"main": [{"montage": {}}]}) is True and compose.exact_joins({"main": [{}]}) is False
+    monkeypatch.setattr(compose, "EXACT_JOINS", "off")
+    assert compose.exact_joins({"main": [{"montage": {}}]}) is False
+    assert compose.exact_joins({"main": [{}], "exact_joins": True}) is True
+    # un registro de antes de v0.6.1 (sin el modo): solo "Armar con IA" iba exacto
+    assert compose.legacy_exact_joins({"main": [{"montage": {"slot": "s1"}}]}) is True
+    assert compose.legacy_exact_joins({"main": [{"path": "x"}]}) is False
+
+
 def test_sin_montaje_no_hay_micro_fundidos_ni_limitador(media, monkeypatch):
     d = media["d"]
     cmds = _capture(monkeypatch)
@@ -452,3 +504,22 @@ def test_montaje_de_punta_a_punta_compose_plan_director(media):
     assert not any(abs(t - tl.remap_clamped(j1)) < 0.3 for t in trs), trs
     assert any(abs(t - tl.remap_clamped(j2)) < 0.12 for t in trs), trs
     assert p["montage"]["composed"] is True
+
+
+def test_export_4k_recompone_con_el_mismo_modo_de_uniones(tmp_path):
+    """El export en 4K recompone la MISMA edicion: un registro nuevo trae su modo de uniones; uno de
+    antes de v0.6.1 (sin el) usa el de entonces (solo "Armar con IA" iba exacto), asi un ensamble manual
+    viejo sigue cayendo en los mismos cuadros que el video del proyecto."""
+    from test_server_setup import _run
+    _run("""
+import server as S
+S.SOURCES.mkdir(parents=True, exist_ok=True)
+(S.SOURCES / "a1.mp4").write_bytes(b"x")
+viejo = {"spec": {"fps": 30, "main": [{"sid": "a1", "in": 0, "out": 1}]}}
+assert S._hires_spec(viejo)["exact_joins"] is False
+mont = {"spec": {"fps": 30, "main": [{"sid": "a1", "in": 0, "out": 1, "montage": {"slot": "s1"}}]}}
+assert S._hires_spec(mont)["exact_joins"] is True
+nuevo = {"spec": {"fps": 30, "main": [{"sid": "a1", "in": 0, "out": 1}], "exact_joins": True}}
+assert S._hires_spec(nuevo)["exact_joins"] is True
+print("OK")
+""", tmp_path)

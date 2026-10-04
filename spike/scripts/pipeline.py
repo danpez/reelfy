@@ -303,7 +303,7 @@ def transcribe_clip(video, wav, glossary="", align=True, detect_takes=True, dtw=
         except Exception as e:  # noqa: sin alineador quedan los tiempos de whisper
             print(f"   alineacion del clip fallo ({e}); tiempos de whisper")
     words = [{"text": w["text"], "start": round(float(w["start"]), 3), "end": round(float(w["end"]), 3)}
-             for w in words if str(w.get("text") or "").strip()]
+             for w in fix_glossary(words, glossary) if str(w.get("text") or "").strip()]
     out["words"] = words
     if detect_takes and words:
         try:
@@ -314,6 +314,23 @@ def transcribe_clip(video, wav, glossary="", align=True, detect_takes=True, dtw=
             print(f"   tomas del clip fallaron ({e})")
     out["ms"] = int(round((time.time() - t0) * 1000))
     return out
+
+
+def fix_glossary(words, glossary):
+    """Palabras corregidas contra el glosario del usuario (glossary.apply: el prompt de whisper solo
+    sugiere). Sin glosario o si algo falla, las mismas palabras."""
+    if not str(glossary or "").strip() or not words:
+        return words
+    try:
+        import glossary as glossary_mod
+        out = glossary_mod.apply(words, glossary)
+        n = sum(1 for a, b in zip(words, out) if a.get("text") != b.get("text")) + abs(len(words) - len(out))
+        if n:
+            print(f"   glosario: {n} palabras corregidas")
+        return out
+    except Exception as e:  # noqa: el glosario es una mejora; sin el quedan las de whisper
+        print(f"   glosario fallo ({e}); palabras de whisper")
+        return words
 
 
 def group_phrases(words):
@@ -810,6 +827,7 @@ def analyze(video, glossary="", n=2, align=True, on_step=None, joins=None):
             words = align_mod.align_words(wav, words)
         except Exception as e:  # noqa
             print(f"   alignment failed ({e}); whisper timings")
+    words = fix_glossary(words, glossary)       # "NUBIs" -> "Nubis", "Taller Prisa" -> "Taller Brisa"
     phrases = group_phrases(words)
     step(60, "Marcando palabras clave y emojis (IA)…")
     try:

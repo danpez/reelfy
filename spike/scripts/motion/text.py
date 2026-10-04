@@ -674,7 +674,10 @@ def _look(P: dict, ctx, fs: float, color) -> _Look:
 def _bg_lum(ctx, rect: skia.Rect) -> float | None:
     """Luminancia media (0..1) del cuadro base bajo `rect`, muestreada en una rejilla de 16x8
     (drawImageRect a una superficie diminuta). Se cachea por cuadro y rect en ctx._cache."""
-    img = ctx.base_image() if hasattr(ctx, "base_image") else None
+    # bajo los subtitulos: el cuadro ya compuesto (tarjetas, pantallas, videos de apoyo) si el render lo dio
+    img = ctx._cache.get("caption_bg") if getattr(ctx, "_cache", None) is not None else None
+    if img is None:
+        img = ctx.base_image() if hasattr(ctx, "base_image") else None
     if img is None:
         return None
     cache = ctx._cache.get("text_bg")
@@ -700,6 +703,7 @@ def _bg_lum(ctx, rect: skia.Rect) -> float | None:
             lum = (0.2126 * a[..., 0] + 0.7152 * a[..., 1] + 0.0722 * a[..., 2]) / 255.0
             v = float(lum.mean())
             cache.setdefault("s", {})[key] = float(lum.std())
+            cache.setdefault("c", {})[key] = tuple(int(round(x)) for x in a.reshape(-1, 3).mean(axis=0))
         except Exception:
             v = -1.0
         cache["v"][key] = v
@@ -738,6 +742,75 @@ def _bg_boost(ctx, rect: skia.Rect, color, item: dict | None = None) -> float:
     if lum is None:
         return 1.0
     return 1.0 + 0.7 * ease.clamp((lum - 0.45) / 0.4)
+
+
+# Contraste de los subtitulos (regla generica): una tinta CLARA (luminancia >= CONTRAST_INK) sobre un fondo
+# CLARO (la interfaz blanca de una app, una pared blanca; luminancia media bajo el grupo >= CONTRAST_LUM, del
+# cuadro YA compuesto: tarjetas, pantallas y videos de apoyo incluidos) lleva al menos un trazo oscuro fino
+# (CONTRAST_STROKE, en las unidades de `stroke`) y la sombra completa (CONTRAST_SHADOW): la edicion aprobada
+# (blanco con trazo 2 y sombra 1.0). Sobre un fondo oscuro todo queda como lo pidio el estilo.
+CONTRAST_INK = 0.6
+CONTRAST_LUM = 0.55
+CONTRAST_STROKE = 2.0
+CONTRAST_SHADOW = 1.0
+
+
+def caption_contrast(color, bg_lum, stroke: float, shadow: float) -> tuple[float, float]:
+    """(trazo, sombra) de un grupo de subtitulos de tinta `color` sobre un fondo de luminancia media
+    `bg_lum` (0..1, None = no se sabe): ver la regla arriba. Identico a FXCore.captionContrast."""
+    try:
+        lum = None if bg_lum is None else float(bg_lum)
+    except (TypeError, ValueError):
+        lum = None
+    if lum is None or lum < 0 or C.luminance(color) < CONTRAST_INK or lum < CONTRAST_LUM:
+        return float(stroke or 0.0), float(shadow or 0.0)
+    return max(float(stroke or 0.0), CONTRAST_STROKE), max(float(shadow or 0.0), CONTRAST_SHADOW)
+
+
+# Subtitulos SOBRE un recurso que tapa la toma (video de apoyo a pantalla completa, escena, tarjeta): si lo de
+# atras es una interfaz con texto (la luminancia cambia mucho bajo el grupo: renglones de un menu, botones) o
+# es muy claro, el grupo lleva una placa oscura difusa: el subtitulo y el texto de la interfaz no se leen
+# como un solo bloque y un acento de color sobre un personaje del mismo tono se sigue leyendo (v6 usaba
+# pastillas con fondo solido). Sobre la camara (sin `caption_bg`) nada cambia.
+PLATE_BUSY = 0.16
+PLATE_LIGHT = 0.62
+PLATE_ALPHA = 0.5
+
+
+def _bg_rgb(ctx, rect: skia.Rect):
+    """Color medio (r, g, b) del fondo bajo `rect` (el de _bg_lum) o None."""
+    if _bg_lum(ctx, rect) is None:
+        return None
+    cache = ctx._cache.get("text_bg") or {}
+    img = cache.get("img")
+    L, T = max(0.0, rect.left()), max(0.0, rect.top())
+    R = min(float(img.width()), rect.right()) if img is not None else rect.right()
+    B = min(float(img.height()), rect.bottom()) if img is not None else rect.bottom()
+    return (cache.get("c") or {}).get((int(L) >> 3, int(T) >> 3, int(R) >> 3, int(B) >> 3))
+
+
+ACCENT_MIN_CONTRAST = 3.0     # WCAG del acento (la palabra resaltada) contra el color de lo que hay detras
+PLATE_ALPHA_ACCENT = 0.7      # (placa mas firme: el acento sobre un color medio necesita un fondo oscuro de verdad)
+
+
+def caption_plate(ctx, rect, accent=None) -> float:
+    """Alfa de la placa de un grupo de subtitulos en `rect` (0 = sin placa); ver la regla arriba. Con
+    `accent` (el grupo pinta palabras con el acento: la que se dice o una clave) tambien si ese acento no
+    contrasta (WCAG < ACCENT_MIN_CONTRAST) con el COLOR medio de lo que hay detras: el verde de la marca sobre
+    un personaje azul de luminancia media se leia 1:1."""
+    cache = getattr(ctx, "_cache", None)
+    if cache is None or cache.get("caption_bg") is None:
+        return 0.0
+    lum = _bg_lum(ctx, rect)
+    if lum is None:
+        return 0.0
+    if _bg_busy(ctx, rect) >= PLATE_BUSY or lum >= PLATE_LIGHT:
+        return PLATE_ALPHA
+    if accent:
+        rgb = _bg_rgb(ctx, rect)
+        if rgb is not None and _wcag(accent, rgb) < ACCENT_MIN_CONTRAST:
+            return PLATE_ALPHA_ACCENT
+    return 0.0
 
 
 def _accent_plate(ctx, ln) -> float:
@@ -2682,16 +2755,67 @@ def _cap_metrics(D: dict, ctx) -> tuple[float, float, float]:
 
 _HARD_GAP = 0.45     # s: pausa que siempre corta un grupo
 _SQUEEZE = 1.1       # un grupo puede reducirse hasta ~9% para no dejar una palabra huerfana
+# un grupo que se ve menos de MIN_SHOW s (dos palabras rapidas antes del siguiente) parpadea: no se alcanza
+# a leer. Cuesta SHOW_COST + SHOW_K por segundo que le falta (se prefiere juntarlo con sus vecinas)
+MIN_SHOW = 0.42
+SHOW_COST, SHOW_K = 3.0, 40.0
+OVER_COST = 3.5      # un grupo con max_words + 1 palabras (solo para no dejar un grupo que parpadea)
+# un grupo que un titulo tapa en parte y del que queda VISIBLE menos de MIN_SHOW (asoma entre dos titulos o
+# cuando uno termina) no se dibuja: 1-9 cuadros de subtitulo son un parpadeo, no se leen (lo dicho lo mostraba
+# el titulo); el agrupado (_segment) ya evita que palabras dichas FUERA del titulo queden en un grupo asi
 
 
-def _segment(words: list, D: dict, ctx) -> list[list]:
+def hide_spans(ranges) -> list[list[float]]:
+    """Tramos donde los subtitulos se ocultan (titulos, escenas con texto: cfg["_hide"], tiempo final)
+    unidos cuando los separa menos de MIN_SHOW: entre dos titulos casi seguidos no asoma un grupo."""
+    rs = []
+    for r in ranges or []:
+        try:
+            a, b = float(r[0]), float(r[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if b > a:
+            rs.append([a, b])
+    rs.sort()
+    out: list[list[float]] = []
+    for a, b in rs:
+        if out and a - out[-1][1] < MIN_SHOW:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def _visible(a: float, b: float, hide) -> float:
+    """s de [a, b] fuera de los tramos ocultos."""
+    v = max(0.0, b - a)
+    for x, y in hide or []:
+        v -= max(0.0, min(b, y) - max(a, x))
+    return max(0.0, v)
+
+
+def _sliver(a: float, b: float, hide, words=None) -> bool:
+    """[a, b] lo tapa en parte un tramo oculto, lo visible dura menos de MIN_SHOW y (con `words`) la mayoria
+    de sus palabras se dicen bajo el titulo (lo mostro el titulo: nunca se pierden palabras dichas fuera)."""
+    vis = _visible(a, b, hide)
+    if not (vis < b - a - 1e-6 and vis < MIN_SHOW):
+        return False
+    if words:
+        inside = sum(1 for w in words if _in_ranges(float(w["start"]), hide))
+        return inside * 2 >= len(words)
+    return True
+
+
+def _segment(words: list, D: dict, ctx, hide=None) -> list[list]:
     """Agrupa el flujo de palabras (tiempo final) en subtitulos por programacion dinamica.
 
     Los limites de frase del plan NO son cortes (en v1 son trozos de 3 palabras); se corta
     siempre en fin de oracion [.!?] o pausa > 0.45 s. Dentro de cada tramo se minimiza:
     desviacion del tamano ideal (2-4 palabras), grupos de una palabra (salvo largas o aisladas),
-    terminar en palabra funcional ('y', 'de', 'como'...), ancho que no cabe; con bono por cortar
-    tras coma o en una pausa."""
+    terminar en palabra funcional ('y', 'de', 'como'...), ancho que no cabe, un grupo que se veria menos
+    de MIN_SHOW s antes del siguiente (parpadea) contando solo lo que queda FUERA de los tramos ocultos
+    (`hide`: titulos; un grupo que solo asoma entre dos titulos o al terminar uno tambien parpadea); con
+    bono por cortar tras coma o en una pausa."""
     n = len(words)
     if n == 0:
         return []
@@ -2714,12 +2838,16 @@ def _segment(words: list, D: dict, ctx) -> list[list]:
 
     def cost(a, b):
         m = b - a
-        if m > mw:
+        if m > mw + 1:
             return float("inf")
         for i in range(a, b - 1):
             if i in hard:
                 return float("inf")
         c = 0.3 * (m - ideal) ** 2
+        if m > mw:
+            # una palabra MAS que el maximo solo si evita un parpadeo (habla rapida: siete palabras en 1.3 s con 3
+            # por grupo dejan un grupo de 0.18 s): cuesta menos que un grupo de < MIN_SHOW
+            c += OVER_COST
         # una coma dentro del grupo (no al final) es un corte natural desperdiciado
         c += sum(1.5 for i in range(a, b - 1) if re.search(r"[,;:]$", words[i]["text"]))
         seg_start = a == 0 or (a - 1) in hard
@@ -2747,6 +2875,14 @@ def _segment(words: list, D: dict, ctx) -> list[list]:
         dur = last["end"] - words[a]["start"]
         if dur > 2.4:
             c += 0.5 * (dur - 2.4)
+        if not seg_end or hide:
+            # lo que se ve antes de que entre el siguiente grupo (el ultimo de un tramo se queda un poco),
+            # sin lo que tapa un titulo
+            t0 = words[a]["start"]
+            t1 = words[b]["start"] if not seg_end else last["end"] + 0.34
+            show = _visible(t0, t1, hide) if hide else t1 - t0
+            if (show > 0.02 or not hide) and show < MIN_SHOW:
+                c += SHOW_COST + SHOW_K * (MIN_SHOW - show)
         return c
 
     INF = float("inf")
@@ -2754,7 +2890,7 @@ def _segment(words: list, D: dict, ctx) -> list[list]:
     back = [0] * (n + 1)
     best[0] = 0.0
     for b in range(1, n + 1):
-        for a in range(max(0, b - mw), b):
+        for a in range(max(0, b - mw - 1), b):
             if best[a] == INF:
                 continue
             v = best[a] + cost(a, b)
@@ -2811,7 +2947,7 @@ def _caption_groups(phrases: list, cfg: dict, ctx) -> list[_Group]:
             words[i]["start"] = words[i - 1]["start"]
     for w in words:
         w["end"] = max(w["end"], w["start"] + 0.04)
-    gws = _split_wide(_segment(words, D, ctx), D, ctx)
+    gws = _split_wide(_segment(words, D, ctx, hide_spans(cfg.get("_hide"))), D, ctx)
     groups = []
     for gi, g in enumerate(gws):
         start = g[0]["start"] - 0.06
@@ -2892,6 +3028,8 @@ def _caps_key(phrases, cfg, ctx) -> tuple:
     h = hash("|".join(f"{w.get('text', '')}{'*' if w.get('kw') else ''}@{w.get('start', '')}-{w.get('end', '')}"
                       for p in phrases or [] for w in (p or [])))
     c = {k: v for k, v in (cfg or {}).items() if not k.startswith("_")}
+    # (los tramos ocultos cambian el agrupado: _segment)
+    c["_hide"] = hide_spans((cfg or {}).get("_hide"))
     return (n, h, json.dumps(c, sort_keys=True, default=str), ctx.W, ctx.H, ctx.style)
 
 
@@ -2907,7 +3045,8 @@ def draw_captions(canvas, phrases_final, cfg, t, ctx) -> None:
     """Subtitulos por preset. `t` = tiempo final absoluto (s)."""
     if not cfg or not cfg.get("enabled", True) or (cfg.get("preset") or "clean_bold") == "none":
         return
-    ha = min(_hide_alpha(t, cfg.get("_hide")), _yr_hide_alpha(cfg, ctx))
+    hide = hide_spans(cfg.get("_hide"))
+    ha = min(_hide_alpha(t, hide), _yr_hide_alpha(cfg, ctx))
     if ha <= 0.003:
         return
     groups = _CAPS.get_or(_caps_key(phrases_final, cfg, ctx), lambda: _caption_groups(phrases_final, cfg, ctx))
@@ -2927,9 +3066,11 @@ def draw_captions(canvas, phrases_final, cfg, t, ctx) -> None:
     g = groups[gi]
     # un grupo que ya estaba oculto al empezar (lo cubria un titulo) no reaparece al terminar el
     # titulo: repetiria como subtitulo lo que el titulo ya mostro (el precio justo despues del contador)
-    hide = cfg.get("_hide")
     if hide and t > g.start + 0.13 and _in_ranges(g.start + 0.13, hide) \
             and _in_ranges(max(g.start, g.words[-1]["start"]), hide):
+        return
+    # un grupo tapado en parte por un titulo que solo asoma un instante fuera de el no se dibuja: parpadearia
+    if hide and _sliver(g.start, g.end, hide, g.words):
         return
     D = _cap_cfg(cfg, ctx)
     dy = _cap_dy(cfg, D, ctx)
@@ -3056,7 +3197,9 @@ def _draw_group_body(canvas, g: _Group, D: dict, t: float, ctx, ga: float, gi: i
                      exit_p: float) -> None:
     fs = g.fs
     final = not ctx.draft
-    look = _Look(shadow=D["shadow"], stroke=2.0 * ctx.px(D["stroke"]), stroke_color="#000000")
+    # contraste con lo que REALMENTE hay detras (el cuadro compuesto si lo hay: caption_bg)
+    stroke, shadow = caption_contrast(D["color"], _bg_lum(ctx, g.rect), D["stroke"], D["shadow"])
+    look = _Look(shadow=shadow, stroke=2.0 * ctx.px(stroke), stroke_color="#000000")
     look.boost = _bg_boost(ctx, g.rect, D["color"])
     reveal, anim, active = D["reveal"], D["anim"], D["active"]
     # entrada del grupo completo (karaoke / boxed)
@@ -3113,6 +3256,10 @@ def _draw_group_body(canvas, g: _Group, D: dict, t: float, ctx, ga: float, gi: i
         dx = line_dx.get(pw.line, 0.0) if line_dx else 0.0
         units.append(dict(run=pw.run, ox=pw.ox, oy=pw.oy, look=look, color=col, alpha=a * ga, dx=dx,
                           dy=dy + gdy, sc=sc, rot=rot, blur=bl, shader=shader, pivot=0.5))
+    acc = D.get("accent") if (D.get("active") == "color" or g.acc) else None
+    pk = caption_plate(ctx, g.rect, acc) if D["preset"] != "boxed" and units else 0.0
+    if pk > 0:
+        _plate(canvas, g.rect.makeOffset(0, gdy), fs, pk * ga)
     if D["preset"] == "boxed":
         rr = _boxed_pill(canvas, g, D, t, ga, gdy, ctx)
         if rr is not None:

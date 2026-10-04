@@ -874,6 +874,34 @@ body.mclean .toast.on{transform:translateX(-50%) translateY(0)}
 .mdb.miss{border-color:rgba(255,138,138,.8);color:#ffd0c8;
   background:repeating-linear-gradient(-45deg,rgba(255,90,60,.2) 0 5px,rgba(255,90,60,.08) 5px 10px)}
 .mdb:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+/* grabacion de pantalla sincronizada (encima de su toma): mismo color de la pista, borde mas firme */
+.mdb.scr{background:rgba(var(--trk-media),.32);border-width:1.5px}
+.asm-scard{background:#000}
+.asm-scard video{object-fit:contain}
+/* panel "Tomas": grabaciones de pantalla */
+.mt-scr .mt-rline{color:var(--text);font-weight:600}
+.mt-res.mt-scr .mt-acts{grid-template-columns:minmax(0,1fr)}
+.mt-scr div.mt-rtop{display:flex;gap:10px;align-items:flex-start}
+.scr-file .md-nm span{display:block;line-height:1.4}
+/* videos de apoyo en fragmentos: el porque, sus tomas (miniatura, que se ve, cambiar / quitar) y la
+   rejilla de otras tomas que sirven */
+.reel-why .md-nm span{display:block;line-height:1.4;white-space:normal}
+.reel-shots{display:flex;flex-direction:column;gap:6px;width:100%}
+.reel-shot{display:grid;grid-template-columns:64px minmax(0,1fr);grid-template-areas:"th main" "acts acts";gap:6px 10px;
+  align-items:center;padding:6px;border:1px solid var(--line2);border-radius:9px;background:var(--sunken)}
+.reel-shot.open{border-color:var(--brand)}
+.rs-th{grid-area:th;width:64px;height:36px;border-radius:6px;overflow:hidden;background:#000;display:block}
+.rs-th img{width:100%;height:100%;object-fit:cover;display:block}
+.rs-main{grid-area:main;min-width:0;display:flex;flex-direction:column;gap:2px}
+.rs-main b{font-size:12px}
+.rs-why{font-size:11.5px;color:var(--muted);line-height:1.35}
+.rs-acts{grid-area:acts;display:grid;grid-template-columns:repeat(auto-fit,minmax(0,1fr));gap:6px}
+.reel-pick{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:2px 0 6px}
+.rp-opt{display:flex;flex-direction:column;gap:3px;padding:4px;border:1px solid var(--line2);border-radius:8px;background:var(--panel2);
+  color:var(--text);text-align:left;cursor:pointer;font:inherit}
+.rp-opt img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:5px;background:#000;display:block}
+.rp-opt span{font-size:11px;line-height:1.3;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.rp-opt:hover,.rp-opt:focus-visible{border-color:var(--brand);outline:none}
 /* ensamble: marcador del cambio de camara (centrado en la union: simetrico) */
 /* marcador de la aceleracion: una insignia chica en el BORDE DE ARRIBA de la pista (sobre la union),
    nunca encima del agarre de los bordes de recorte (.hnd2, centrados en la altura del clip) */

@@ -173,7 +173,9 @@ def test_con_guion_toma_limpia_mas_reciente_orden_y_contrato(tmp_path):
     r = M.build(clips, GUION)
     # contrato
     assert set(r) == {"version", "order", "script", "slots", "timeline", "discarded", "uncovered", "extra",
-                      "inserts", "stats", "ms"}
+                      "inserts", "stats", "ms", "screens", "broll_src"}
+    assert r["broll_src"] == []                          # ningun video de apoyo (todas las tomas tienen voz)
+    assert r["screens"] == []               # sin grabaciones de pantalla en esta sesion
     assert r["inserts"] == [] and all(L["inserts"] == [] for L in r["script"]["lines"])
     assert r["version"] == 1 and isinstance(r["ms"], int)
     assert [o["sid"] for o in r["order"]] == ["c1", "c2", "c3", "c4", "c5", "c6"]
@@ -241,7 +243,43 @@ def test_bordes_con_aire_en_el_silencio_y_nunca_dentro_de_una_palabra(tmp_path):
     for x in r["timeline"]:
         ws = [w for w in by[x["sid"]]["words"] if x["in"] <= (w["start"] + w["end"]) / 2 <= x["out"]]
         pre, post = ws[0]["start"] - x["in"], x["out"] - ws[-1]["end"]
-        assert 0.18 <= pre <= 0.42 and 0.15 <= post <= 0.40, (x, pre, post)
+        # (la ULTIMA parte se queda hasta END_TAIL s: el cierre con el boton de seguir)
+        post_max = M.END_TAIL + 1e-3 if x is r["timeline"][-1] else 0.40
+        assert 0.18 <= pre <= 0.42 and 0.15 <= post <= post_max, (x, pre, post)
+
+
+def test_la_ultima_parte_se_queda_para_el_cierre(tmp_path):
+    """El video terminaba 0.31 s despues de la ultima palabra: el «Siguiendo» del CTA final casi no se veia
+    (v6: Kevin le dio 0.9 s mas a mano). La ultima parte se queda hasta END_TAIL s en la toma (sin voz
+    nueva ni pasar del archivo); las demas no cambian."""
+    clips = panaderia(tmp_path)
+    for d in clips:                                   # toma con 3 s de aire al final
+        d["dur"] = round(d["words"][-1]["end"] + 3.0, 3)
+    r = M.build(clips, GUION)
+    x = r["timeline"][-1]
+    ws = [w for w in next(d for d in clips if d["sid"] == x["sid"])["words"] if w["start"] < x["out"]]
+    post = x["out"] - ws[-1]["end"]
+    assert abs(post - M.END_TAIL) < 0.02, post
+    s = next(s for s in r["slots"] if s["id"] == x["slot"])
+    assert s["cands"][0]["out"] == x["out"]
+    # una racha de voz sin transcribir despues de la ultima palabra ("Ah, perdón." que whisper no escribio):
+    # el cierre se detiene antes de ella
+    clips = panaderia(tmp_path)
+    c6 = mk(tmp_path, "c6", "Si quieres probar nuestro pan de elote, visítanos este sábado. |0.6| Ah perdón ya.", 8,
+            setup=2, tail=2.0)
+    spoken = c6["words"]
+    c6["words"] = [w for w in spoken if w["text"] not in ("Ah", "perdón", "ya.")]
+    clips[-1] = c6
+    r3 = M.build(clips, GUION)
+    x3 = r3["timeline"][-1]
+    assert x3["sid"] == "c6"
+    ah = next(w for w in spoken if w["text"] == "Ah")
+    assert c6["words"][-1]["end"] + 0.15 <= x3["out"] < ah["start"], (x3["out"], ah)
+    # sin audio (solo texto) no se sabe si hay voz sin transcribir: no se alarga
+    r2 = M.build(panaderia(None, audio=False), GUION)
+    x2 = r2["timeline"][-1]
+    assert x2["out"] - max(w["end"] for w in next(d for d in panaderia(None, audio=False) if d["sid"] == x2["sid"])["words"]
+                           if w["start"] < x2["out"]) <= 0.27 + 1e-6
 
 
 def test_sin_audio_funciona_solo_con_texto(tmp_path):
