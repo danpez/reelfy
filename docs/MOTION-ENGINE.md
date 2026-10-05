@@ -1074,8 +1074,33 @@ persona (`PF.otherPerson`: ninguno de los dos nombres, sin titulo ni acentos, co
 reemplaza TODO el borrador (enlaces, telefono, WhatsApp, direccion, foto e id del perfil guardado)
 con la opcion "Era la misma: completar en su lugar"; si es la misma, se completa (un enlace de la
 misma red reemplaza al anterior). En ambos casos la estrella pasa a la red social del texto. Perfiles guardados: selector,
-"Guardar perfil" (`POST /profiles`, con `id` al editar uno guardado; muestra el normalizado),
-eliminar (`DELETE`). En el editor, grupo "Perfil" (pestana Proyecto): "Aplicar al video" =
+"Guardar perfil" / "Guardar cambios" (`POST /profiles`, con `id` al editar uno guardado: lo ACTUALIZA;
+un doble clic guarda una sola vez; muestra el normalizado). Sin ligar y con el nombre de uno ya
+guardado (el mismo nombre sin titulo ni acentos, o dos palabras en comun: un nombre de pila solo no
+cuenta) el dialogo dice cual es (su resumen; con dos guardados, una opcion por cada uno) y pregunta
+"Guardar otro aparte" (enfocado: Enter nunca pisa nada) o "Completar ese perfil" (le agrega lo
+escrito y CONSERVA sus enlaces, telefonos, direccion y foto). Eliminar (`DELETE`, con la confirmacion
+propia de `dialog.js`: en la app de escritorio Tauri/wry `window.confirm` no existe y devolvia false).
+"Cambios sin guardar" = lo editado desde que se abrio el panel (o se eligio / guardo un perfil), no la
+diferencia con la version guardada; con ellos el boton principal dice "Guardar y usar en el próximo
+video" / "Guardar y aplicar al video" (sin editar nunca guarda). En el Studio los interruptores de
+"Dónde aparece" son de ese video: no cuentan como cambios del perfil guardado ni se escriben en el
+(salvo que se cambien en el panel y se pulse "Guardar cambios"). Si el panel tiene OTRA version que
+la guardada (la del video, o se guardo en otra ventana) lo dice arriba ("Usar la versión guardada" /
+"Mantener la de este video") y nunca la pisa sin preguntar (`base_updated`: 409 -> "Usar la versión
+guardada" / "Reemplazar con la de aquí"). Cerrar (Escape, X) o elegir otro perfil con cambios pregunta
+(enfocado "Seguir editando"); con el panel abierto los atajos del editor no corren detras. Guardar o
+eliminar (o volver a la ventana: `focus` -> `PF.load(true)`) pone al dia las listas de Inicio, Montar
+clips y Estilo sin recargar (`PF.syncAll`); dos guardados con el mismo nombre se distinguen ("Dra. Ana
+Demo · Abogada"). Telefono, WhatsApp y correo: el CAMPO manda sobre su enlace (`from_field`): cambiarlo
+rehace el wa.me / tel: / mailto: en su lugar (al instante con `POST /profile/normalize`, y la tarjeta
+final con el numero nuevo al aplicar), vaciarlo lo quita, quitar el enlace vacia el campo y un numero
+agregado aparte se queda. Cambiar la red o el @usuario de un enlace llama `POST /profile/normalize`:
+la url se rehace al instante y la foto/logo de la cuenta anterior se descartan (llegan los de la
+nueva); "Volver a buscar la foto/el logo en su página" los vuelve a bajar aunque ya hubiera uno
+(`POST /profile/media/refresh` forzado, solo ese enlace); si la pagina responde SIN imagen (un muro de
+inicio de sesion) se queda la que habia. En el Studio, si el video usa otra version del perfil
+guardado, "Usar la versión guardada" la aplica. En el editor, grupo "Perfil" (pestana Proyecto): "Aplicar al video" =
 `PUT /profile/{job}` con `base_rev` y el plan actual -> el Studio adopta el plan (rotulo, Seguir,
 reservas y cierre al instante, ~0.1 s) con UN paso de deshacer; tambien "Usar un perfil guardado" y
 "Quitar del video". Muestra las notas del director "perfil: sin espacio para…" y "tarjeta final como
@@ -1126,8 +1151,10 @@ Licencia (solo app empaquetada) en todo lo que procesa; `engine_ready` (whisper)
 | POST `/profile/parse` | `{text, use_llm? (true)}` (<= 4000 caracteres) | `{profile, notes, llm, ms}`: texto libre -> perfil (3.2) para que el Studio lo muestre y confirme (NO se guarda). Enlaces sin IA; nombre/profesion/negocio por reglas + LLM local si responde (`llm: false` y nota si no). 400 sin texto. |
 | GET `/profile/platforms` | – | `{platforms: [{id, label, icon, kind, color, cta?, svg}], kinds, use}`: catalogo para el selector de red de cada enlace (icono SVG Tabler de marca). |
 | GET `/profiles` | – | `{profiles: [...]}`: perfiles reutilizables (`DATA/assets/brand/profiles.json`, mas recientes primero, maximo 100). |
-| POST `/profiles` | `{profile, id?}` | `{ok, id, profile, profiles, replaced}`: con `id` (o `profile.id`) de uno guardado lo ACTUALIZA (`replaced: true`); sin id crea uno nuevo con id legible del nombre ('dra-ana-ruiz') y, si ya existe, con sufijo ('dra-ana-ruiz-2'): nunca pisa en silencio (homonimos o un guardado sin querer). 400 si esta vacio. La foto (`avatar.sid`) de un perfil guardado no la borra la limpieza del disco. |
+| POST `/profiles` | `{profile, id?, base_updated?}` | `{ok, id, profile, profiles, replaced}`: con `id` (o `profile.id`) de uno guardado lo ACTUALIZA (`replaced: true`); sin id crea uno nuevo con id legible del nombre ('dra-ana-ruiz') y, si ya existe, con sufijo ('dra-ana-ruiz-2'): nunca pisa en silencio (homonimos o un guardado sin querer). `updated` va al milisegundo y siempre crece; con `base_updated` (el `updated` de la version que abrio el Studio) y un guardado que cambio despues -> **409** `{detail, id, profile, profiles}` sin pisarlo (el Studio pregunta). 400 si esta vacio o `base_updated` no es un numero. La foto (`avatar.sid`) de un perfil guardado no la borra la limpieza del disco. |
 | DELETE `/profiles/{id}` | – | `{ok, profiles}`; 404 si no existe. |
+| POST `/profile/normalize` | `{profile}` | `{profile}` (con `media_status`): el perfil saneado COMO SE GUARDARIA, sin guardarlo. El Studio lo pide al cambiar la red o el @usuario de un enlace: la url armada con el usuario anterior se rehace con el nuevo (una url propia con otra ruta no se toca), el texto que mostraba el anterior se va y la foto/logo AUTOMATICOS de la otra cuenta tambien (lo subido por el usuario se queda); lo ya descargado del enlace nuevo entra y lo que falta baja en segundo plano. 400 sin perfil o vacio. |
+| POST `/profile/media/refresh` | `{profile}` \| `{profile_id}` \| `{job_id}` | `{ok, profile, urls, enabled}`: vuelve a bajar (forzado, en segundo plano) la foto/logo automaticos de los enlaces del perfil (el Studio manda solo el enlace de "Volver a buscar"). |
 | GET `/profile/{job}` | – | `{profile, plan_rev}` del plan guardado. |
 | PUT `/profile/{job}` | `{profile \| null, base_rev?, plan?, profile_id?, fmt?}` | `{ok, plan, plan_rev, profile, ms}`: pone (o quita con null) el perfil y re-dirige AL INSTANTE (`director.apply_profile`: sin LLM ni re-analisis, misma revision; rotulo, Seguir, reservas y cierre cambian; lo bloqueado se queda con los datos nuevos). Con `base_rev` es concurrencia optimista (**409** `{ok:false, plan_rev}` si cambio). 409 si el trabajo procesa o ya dirige; 400 sin perfil o invalido; 404 con un `profile_id` que no existe. Para cambiar la red de un enlace basta mandar el enlace con otro `platform` (3.2). |
 | PUT `/plan/{job}` | `{plan, base_rev?}` | `{ok, plan_rev}`: autoguardado del Studio (no relanza el analisis de fondo). Con `base_rev` (revision sobre la que edito) es concurrencia optimista: si `plan_rev` ya cambio (re-dirigir u otra ventana) -> **409** `{ok:false, plan_rev}` y NO se pisa. Excepcion: si la unica revision posterior es la sincronizacion automatica con la musica IA (tarea `music`, escrita sobre `base_rev`), no hay 409: con la propuesta tal cual se queda la sincronizada (`{ok, plan_rev, music_synced: true}`); con una edicion encima gana el usuario y `music` pasa a `superseded` con `music_resync: "available"`. Si `plan.profile` difiere del guardado (normalizado), el perfil se RE-APLICA (`director.apply_profile`, ~30 ms: rotulo, Seguir, reservas y cierre con los datos nuevos) y la respuesta trae `{ok, plan_rev, plan, profile_applied: true}`: el Studio adopta ese `plan`. Sin la clave `profile` se conserva la guardada (un cliente que no la conoce no la borra); `profile: null` la quita. Lo recomendado para editar el perfil sigue siendo PUT `/profile/{job}`. |

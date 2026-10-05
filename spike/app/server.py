@@ -49,7 +49,7 @@ SPIKE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SPIKE / "scripts"))
 import paths  # noqa: E402
 
-ENGINE_VERSION = "0.6.1"
+ENGINE_VERSION = "0.6.2"
 
 # ---- LLM embebido: si el binario de ollama viene en el bundle, corre en un
 # puerto propio con modelos en DATA. El pipeline (highlights/translate) y el director
@@ -8127,27 +8127,52 @@ def get_logo():
     return FileResponse(f, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
+# Plantillas de tu marca (Estilo › Quién sale y tu logo). Escritura atomica con candado: leer mientras
+# se guarda daba un JSON a medias (500) y un archivo corrupto dejaba sin plantillas para siempre.
+_PRESETS_LOCK = threading.Lock()
+
+
+def _presets_load():
+    try:
+        data = json.loads(PRESETS_F.read_text()) if PRESETS_F.exists() else {}
+    except Exception:  # noqa: archivo corrupto = sin plantillas (nunca un 500)
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def _presets_save(data):
+    PRESETS_F.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PRESETS_F.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    os.replace(tmp, PRESETS_F)
+
+
 @app.get("/presets")
 def get_presets():
-    return json.loads(PRESETS_F.read_text()) if PRESETS_F.exists() else {}
+    return _presets_load()
 
 
 @app.post("/presets")
 def save_preset(body: dict = Body(...)):
-    name, config = body.get("name", "").strip(), body.get("config", {})
+    name, config = str((body or {}).get("name") or "").strip(), (body or {}).get("config", {})
     if not name:
-        raise HTTPException(400, "Falta el nombre del preset")
-    data = json.loads(PRESETS_F.read_text()) if PRESETS_F.exists() else {}
-    data[name] = config
-    PRESETS_F.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+        raise HTTPException(400, "Falta el nombre de la plantilla")
+    with _PRESETS_LOCK:
+        data = _presets_load()
+        data[name] = config
+        _presets_save(data)
     return {"ok": True, "presets": list(data.keys())}
 
 
-@app.delete("/presets/{name}")
+@app.delete("/presets/{name:path}")
 def delete_preset(name: str):
-    data = json.loads(PRESETS_F.read_text()) if PRESETS_F.exists() else {}
-    data.pop(name, None)
-    PRESETS_F.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    """Elimina una plantilla (el nombre puede llevar «/»: «Marca 1/2»). 404 si no existe."""
+    with _PRESETS_LOCK:
+        data = _presets_load()
+        if name not in data:
+            raise HTTPException(404, "Esa plantilla ya no existe.")
+        data.pop(name, None)
+        _presets_save(data)
     return {"ok": True, "presets": list(data.keys())}
 
 
@@ -8307,13 +8332,21 @@ def _lm_cache():
 
 
 def _lm_cache_put(url, ent):
-    """Guarda el resultado de un enlace. Un intento SIN red no borra lo que ya se tenia."""
+    """Guarda el resultado de un enlace. Un intento SIN red no borra lo que ya se tenia, y una pagina
+    que respondio SIN foto o sin logo (un muro de inicio de sesion, una pagina caida a medias) tampoco:
+    se queda la foto/logo que ya se tenia de ESA url (si no, «Volver a buscar» o el refresco borraban
+    la buena de todos los perfiles y proyectos que la usan)."""
     with _LM_LOCK:
         d = _lm_cache()
         prev = d.get(url) if isinstance(d.get(url), dict) else None
         if not ent.get("ok") and prev and prev.get("ok"):
             prev["t_try"] = ent["t"]
             ent = prev
+        elif ent.get("ok") and prev and prev.get("ok"):
+            for k in ("photo", "logo"):
+                if not isinstance(ent.get(k), dict) and _lm_file(prev.get(k)):
+                    ent[k] = prev[k]
+                    ent.setdefault("kept", []).append(k)
         d[url] = ent
         if len(d) > LM_CACHE_MAX:
             for k in sorted(d, key=lambda k_: float((d[k_] or {}).get("t") or 0))[:len(d) - LM_CACHE_MAX]:
@@ -8449,11 +8482,12 @@ def _lm_run(todo):
                 traceback.print_exc()
                 res = {}
             ok = bool(reached)
-            _lm_cache_put(url, {"ok": ok, "t": round(time.time(), 1), "photo": res.get("photo"),
-                                "logo": res.get("logo")})
+            ent = {"ok": ok, "t": round(time.time(), 1), "photo": res.get("photo"), "logo": res.get("logo")}
+            _lm_cache_put(url, ent)
+            kept = " (sin imagen nueva: se queda la anterior)" if ent.get("kept") else ""
             print(f"   perfil: foto/logo de {url[:60]} -> "
                   f"{'sin red' if not ok else ('foto' if res.get('photo') else 'sin foto') + (' + logo' if res.get('logo') else '')}"
-                  f" ({time.time() - t0:.1f}s)")
+                  f"{kept} ({time.time() - t0:.1f}s)")
             done.append(url)
     finally:
         with _LM_LOCK:
@@ -8688,6 +8722,21 @@ def profile_media_refresh(body: dict = Body(...)):
     return {"ok": True, "profile": _lm_decorate(prof), "urls": urls, "enabled": _lm_enabled()}
 
 
+@app.post("/profile/normalize")
+def profile_normalize(body: dict = Body(...)):
+    """Perfil saneado COMO SE GUARDARIA, sin guardarlo ({profile}): el Studio lo pide al cambiar la
+    red o el @usuario de un enlace para ver al instante la url rehecha, el texto nuevo y la foto/logo
+    de ESA cuenta (los de la cuenta anterior se descartan; lo ya descargado entra y lo que falta
+    empieza a bajar en segundo plano). -> {profile (con media_status)}."""
+    raw = (body or {}).get("profile")
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "Falta el perfil.")
+    prof = _profile_param(raw)
+    if not prof:
+        raise HTTPException(400, "El perfil está vacío: agrega nombre, profesión o un enlace.")
+    return {"profile": _lm_decorate(prof)}
+
+
 @app.get("/profile/platforms")
 def profile_platforms():
     """Catalogo de plataformas del perfil: [{id, label, icon, kind, color, cta?, svg}]."""
@@ -8707,9 +8756,16 @@ def profiles_list():
 def profiles_save(body: dict = Body(...)):
     """Guarda un perfil reutilizable -> {ok, id, profile, profiles, replaced}. Con `id` (o
     `profile.id`) de uno guardado lo ACTUALIZA; sin id crea uno nuevo (id legible del nombre, con
-    sufijo -2, -3... si ya existe: nunca pisa en silencio)."""
+    sufijo -2, -3... si ya existe: nunca pisa en silencio). `base_updated` (opcional, al actualizar):
+    el `updated` de la version que el Studio abrio; si el guardado cambio despues (otra ventana, otro
+    video) -> 409 {detail, id, profile (el guardado), profiles} sin pisarlo: el Studio pregunta."""
     from motion import profile as PR
     raw = (body or {}).get("profile")
+    base = (body or {}).get("base_updated")
+    try:
+        base = None if base is None or isinstance(base, bool) else float(base)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "base_updated inválido.")
     prof = PR.normalize_profile(raw)
     if not prof:
         raise HTTPException(400, "El perfil está vacío: agrega nombre, profesión o un enlace.")
@@ -8722,7 +8778,12 @@ def profiles_save(body: dict = Body(...)):
         pid = str((body or {}).get("id") or prof.get("id") or "").strip()
         replaced = False
         if re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", pid):
-            replaced = any(x.get("id") == pid for x in items)
+            cur = next((x for x in items if x.get("id") == pid), None)
+            replaced = cur is not None
+            if cur is not None and base is not None and abs(float(cur.get("updated") or 0) - base) > 0.0005:
+                return JSONResponse({"detail": "El perfil guardado cambió después de abrirlo.", "id": pid,
+                                     "profile": _lm_decorate(cur), "profiles": _lm_decorate_all(items)},
+                                    status_code=409)
         else:
             pid = _profile_id(prof)
             if any(x.get("id") == pid for x in items):
@@ -8731,7 +8792,9 @@ def profiles_save(body: dict = Body(...)):
                     k += 1
                 pid = f"{pid}-{k}"
         prof["id"] = pid
-        prof["updated"] = round(time.time())
+        # al milisegundo: es la version que el Studio manda de vuelta como base_updated
+        prev_t = max((float(x.get("updated") or 0) for x in items if x.get("id") == pid), default=0.0)
+        prof["updated"] = max(round(time.time(), 3), round(prev_t + 0.001, 3))
         items = [x for x in items if x.get("id") != pid] + [prof]
         items.sort(key=lambda x: -float(x.get("updated") or 0))
         _profiles_save(items[:100])
@@ -8803,7 +8866,7 @@ def profile_put(job_id: str, body: dict = Body(...)):
 # capacidades de la API que el Studio puede consultar antes de usarlas
 API_FEATURES = ("captions", "source_proxy", "jobs_meta", "music_beats", "translate_texts",
                 "translate_titles", "preview_music_refresh", "music_sync", "air_optin", "media",
-                "profile", "profile_media", "takes", "storage", "export_options")
+                "profile", "profile_media", "profile_normalize", "takes", "storage", "export_options")
 
 
 @app.get("/settings")

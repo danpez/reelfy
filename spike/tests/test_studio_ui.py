@@ -35,7 +35,7 @@ def test_fxcore_unitarias_node():
 def test_sintaxis_de_los_scripts(tmp_path):
     inline = tmp_path / "inline.js"
     inline.write_text(_inline_script())
-    for f in (STATIC / "fxcore.js", STATIC / "capdraw.js", STATIC / "fx.js", STATIC / "estilo.js", STATIC / "profile.js", inline):
+    for f in (STATIC / "fxcore.js", STATIC / "capdraw.js", STATIC / "fx.js", STATIC / "estilo.js", STATIC / "dialog.js", STATIC / "profile.js", inline):
         r = subprocess.run([NODE, "--check", str(f)], capture_output=True, text=True, timeout=60)
         assert r.returncode == 0, f"{f.name}: {r.stderr[-2000:]}"
 
@@ -173,7 +173,7 @@ def test_inspector_cubre_el_esquema():
 
 def test_sin_emojis_en_el_studio():
     emoji = re.compile("[\U0001F300-\U0001FAFF☀-➿⭐⭕]")
-    for f in ("index.html", "fx.js", "fx.css", "fxcore.js", "profile.js", "capdraw.js", "estilo.js", "estilo_proyecto.js", "estilo_catalog.js"):
+    for f in ("index.html", "fx.js", "fx.css", "fxcore.js", "dialog.js", "profile.js", "capdraw.js", "estilo.js", "estilo_proyecto.js", "estilo_catalog.js"):
         txt = (STATIC / f).read_text()
         # drawEmoji pinta los emojis que vienen en el PLAN (dato del usuario), no UI propia
         hits = [m.group(0) for m in emoji.finditer(txt)]
@@ -183,14 +183,14 @@ def test_sin_emojis_en_el_studio():
 def test_estaticos_se_sirven(tmp_path, monkeypatch):
     """Los archivos nuevos del Studio se sirven por /static con su tipo MIME."""
     import mimetypes
-    for f in ("fx.js", "fxcore.js", "capdraw.js", "estilo.js", "estilo_catalog.js", "profile.js", "fx.css"):
+    for f in ("fx.js", "fxcore.js", "capdraw.js", "estilo.js", "estilo_catalog.js", "dialog.js", "profile.js", "fx.css"):
         assert (STATIC / f).exists()
         assert mimetypes.guess_type(f)[0] in ("application/javascript", "text/javascript", "text/css"), f
     html = (STATIC / "index.html").read_text()
-    for ref in ("/static/fx.css", "/static/fxcore.js", "/static/capdraw.js", "/static/fx.js", "/static/estilo.js", "/static/profile.js"):
+    for ref in ("/static/fx.css", "/static/fxcore.js", "/static/capdraw.js", "/static/fx.js", "/static/estilo.js", "/static/dialog.js", "/static/profile.js"):
         assert ref in html
     # fxcore -> capdraw -> fx -> estilo -> profile, y todos antes del script en linea
-    order = [html.index(f"/static/{f}") for f in ("fxcore.js", "capdraw.js", "fx.js", "estilo.js", "profile.js")]
+    order = [html.index(f"/static/{f}") for f in ("fxcore.js", "capdraw.js", "fx.js", "estilo.js", "dialog.js", "profile.js")]
     assert order == sorted(order) and order[-1] < html.index("<script>")
 
 

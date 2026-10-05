@@ -768,3 +768,24 @@ def test_locked_title_right_after_the_link_keeps_the_booking_pill(monkeypatch=No
     assert tl.remap_clamped(pill["end"]) - tl.remap_clamped(pill["start"]) >= D._Choreo.LINK_MIN
     assert abs(float(pill["y"]) - 0.5) > 0.06
     TD._check_catalog(q)
+
+
+def test_editing_whatsapp_and_phone_regenerates_the_end_card_chips():
+    """Reporte de Kevin («no se puede actualizar / re-generar»): cambiar el WhatsApp y el teléfono del
+    perfil y aplicarlo re-genera los chips de la tarjeta final con los números NUEVOS (antes seguían los
+    viejos: el enlace wa.me / tel: no cambiaba); vaciarlos los quita."""
+    lines = ["Si te duele la muela cuando tomas algo frio, esto te interesa.",
+             "Una resina bien hecha protege tu diente y se ve natural.",
+             "La limpieza profunda quita el sarro y deja tus dientes brillantes.",
+             "Te espero en el consultorio."]
+    saved = PR.normalize_profile({"name": "Dra. Ana Demo", "title": "Odontóloga", "links": ["instagram.com/dra.ana.demo"],
+                                  "whatsapp": "+52 55 0000 0001", "phone": "+52 33 0000 0001"})
+    p = _direct(_lines_plan(lines, broll_end=2.6), saved)
+    chips = lambda pl: [l["text"] for g in _items(pl, "socials", "chips") for l in g["links"]]
+    assert chips(p) == ["+52 55 0000 0001", "+52 33 0000 0001"], D.edit_table(p)
+    q = D.apply_profile(p, PR.normalize_profile(dict(saved, whatsapp="+52 55 0000 0002", phone="+52 33 0000 0002")))
+    assert chips(q) == ["+52 55 0000 0002", "+52 33 0000 0002"], D.edit_table(q)
+    assert "0000 0001" not in json.dumps(q["fx"], ensure_ascii=False)
+    r = D.apply_profile(q, PR.normalize_profile(dict(saved, whatsapp="", phone="")))
+    assert "0000 000" not in json.dumps(r["fx"], ensure_ascii=False)
+    TD._check_safe(q)

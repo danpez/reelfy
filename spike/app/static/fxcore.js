@@ -3645,6 +3645,29 @@
   const PROFILE_USE_DEF = { lower_third: true, follow_cta: true, booking_cta: true, end_card: true, handle_watermark: false };
   /** profile.use con sus valores por defecto (los del panel del perfil). */
   const profileUseOf = p => Object.assign({}, PROFILE_USE_DEF, (p && p.use) || {});
+  /** url comparable de un enlace (sin esquema, www ni barra final). */
+  const profileUrlKey = u => String(u || "").trim().toLowerCase().replace(/^https?:\/\/(www\.)?/, "").replace(/\/+$/, "");
+  /** Huella de los DATOS de un perfil (lo que la persona escribio o eligio): sin id, fecha de guardado,
+      estado de la descarga, campos internos del Studio (_...) ni la foto/logo que el servidor baja
+      solo (media_src 'auto'). Dos copias con la misma huella son el mismo perfil: el panel sabe si hay
+      cambios sin guardar y el Studio si el video usa otra version del perfil guardado.
+      o.use === false: sin los interruptores de «Dónde aparece» (eleccion de cada video). */
+  function profileDataKey(p, o) {
+    if (!p || typeof p !== "object") return "";
+    const s = v => String(v == null ? "" : v).trim();
+    const user = (l, k) => (l.media_src && l.media_src[k] === "user" && l[k] && l[k].sid) ? l[k].sid : "";
+    const out = {};
+    ["name", "title", "business", "tagline", "phone", "whatsapp", "email", "address"].forEach(k => { out[k] = s(p[k]); });
+    out.avatar = p.avatar && p.avatar.sid ? p.avatar.sid : "";
+    out.links = (p.links || []).filter(l => l && (l.url || l.handle)).map(l => ({
+      platform: s(l.platform), url: profileUrlKey(l.url), handle: s(l.handle).replace(/^@/, "").toLowerCase(),
+      display: s(l.display), label: s(l.label), primary: !!l.primary,
+      photo: user(l, "photo"), logo: user(l, "logo"),
+      off: ["photo", "logo"].filter(k => l.media_off && l.media_off[k]).join(","),
+    }));
+    if (!o || o.use !== false) out.use = profileUseOf(p);
+    return JSON.stringify(out);
+  }
   /** Logo del proyecto en un cuadro W x H (index.html drawLogo, opts.logo del motor): pos tl|tr|bl|br,
       size = fraccion del ancho, margen 3 % del ancho. -> {x, y, w, h}. */
   function logoRect(pos, size, W, H, iw, ih) {
@@ -3995,7 +4018,7 @@
     LOOK_ORDER, srgbToLin, linToSrgb, vignetteAt, vignetteBwAt, lookVigCenter, shapeAt, shapeInv, percentileOf, bwGain, bwGainOf, bwTable,
     lookShotAt, lookTablesAt, lookGray, applyLook, lookTotal, LOOK_STEPS, lookVariants,
     DIRECTOR_CARDS, DIRECTOR_ORDER, directorCounts, directorExample, musicSourceOf, musicBpmOf, musicBpmSet, KEYSCALES, keyscaleEs,
-    moodSampleUrl, PROFILE_USE, profileUseOf, logoRect, FORMAT_ORDER, FORMAT_SHAPE,
+    moodSampleUrl, PROFILE_USE, profileUseOf, profileUrlKey, profileDataKey, logoRect, FORMAT_ORDER, FORMAT_SHAPE,
     fmtTime, parseTime, paramCopyId, VARIANT_FIELDS, variantShows, paramHidden, colorFromBrand, relChoices, zStep, inspectorGroups, unitEs, plainValue,
     shortsWanted, LOOK_POLL, lookPollDelay, STYLE_FONTS, captionFonts, pillOwn, setPillOwn, colorWhereWords, captionOptionApplies, MONO_LOOKS, GRADE_COLOR_KEYS, gradeOptionApplies, musicReadyText, musicPromptShown, setMusicPrompt, airApplies, GRADE_NEUTRAL, GRADE_PREV, CAP_LOOK, gradeTuned, directorOutcome, directorQueCambia,
   };

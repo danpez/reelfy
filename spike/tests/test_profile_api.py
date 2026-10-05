@@ -161,6 +161,84 @@ def test_direct_and_put_profile_update_the_edit(srv):  # noqa: F811
     assert "profile" not in gone
 
 
+def test_presets_atomic_and_tolerant(srv):  # noqa: F811
+    """Plantillas de tu marca (Estilo › Quién sale y tu logo, con el dialogo propio de pedir nombre):
+    leer mientras se guarda nunca da un JSON a medias (500) y un archivo corrupto no deja sin
+    plantillas para siempre."""
+    import threading
+    api = srv["api"]
+    f = srv["data"] / "assets" / "brand" / "presets.json"
+    errs, stop = [], threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            code, _body, _h = api.req("GET", "/presets", raw=True)
+            if code != 200:
+                errs.append(code)
+    th = threading.Thread(target=reader)
+    th.start()
+    try:
+        big = {"pro": {"nota": "x" * 40000}}
+        for i in range(40):
+            assert api.post("/presets", {"name": f"Plantilla demo {i % 3}", "config": big})["ok"]
+    finally:
+        stop.set()
+        th.join()
+    assert errs == [], errs
+    assert sorted(api.get("/presets")) == ["Plantilla demo 0", "Plantilla demo 1", "Plantilla demo 2"]
+    f.write_text("{corrupto")
+    assert api.get("/presets") == {}
+    assert api.post("/presets", {"name": "Mi marca demo", "config": {}})["presets"] == ["Mi marca demo"]
+    code, body, _h = api.post("/presets", {"name": " "}, raw=True)
+    assert code == 400 and "plantilla" in json.loads(body)["detail"]
+    assert api.req("DELETE", "/presets/Mi%20marca%20demo")["presets"] == []
+    assert not list(f.parent.glob("presets.*.tmp"))
+
+
+
+def test_saved_profile_is_never_overwritten_with_an_older_copy(srv):  # noqa: F811
+    """Un video (u otra ventana) con una version VIEJA de un perfil guardado no lo pisa sin preguntar:
+    POST /profiles con `base_updated` (la version que abrio el Studio) -> 409 con el guardado de ahora
+    si cambio despues; sin base_updated (el usuario eligio «Reemplazar») si lo guarda. `updated` al
+    milisegundo y siempre creciente (dos guardados en el mismo segundo son versiones distintas)."""
+    api = srv["api"]
+    prof = api.post("/profile/parse", {"text": TEXT})["profile"]
+    a = api.post("/profiles", {"profile": dict(prof, name="Dra. Version Demo")})
+    pid, v1 = a["id"], a["profile"]["updated"]
+    b = api.post("/profiles", {"id": pid, "profile": dict(a["profile"], phone="55 0000 0002"), "base_updated": v1})
+    v2 = b["profile"]["updated"]
+    assert b["replaced"] and v2 > v1 and b["profile"]["phone"] == "55 0000 0002"
+    # el video tiene la version 1 y guarda encima: 409 con la de ahora, nada se pisa
+    code, body, _h = api.req("POST", "/profiles", {"id": pid, "profile": dict(a["profile"], title="Vieja"), "base_updated": v1}, raw=True)
+    d = json.loads(body)
+    assert code == 409 and d["id"] == pid and d["profile"]["updated"] == v2 and d["profile"]["phone"] == "55 0000 0002"
+    assert any(x["id"] == pid for x in d["profiles"]) and "cambió" in d["detail"]
+    cur = next(x for x in api.get("/profiles")["profiles"] if x["id"] == pid)
+    assert cur["title"] == prof["title"] and cur["phone"] == "55 0000 0002"
+    # con la version de ahora, o sin base (el usuario eligio reemplazar): se guarda
+    c = api.post("/profiles", {"id": pid, "profile": dict(cur, title="Ortodoncista"), "base_updated": v2})
+    assert c["profile"]["title"] == "Ortodoncista" and c["profile"]["updated"] > v2
+    f = api.post("/profiles", {"id": pid, "profile": dict(a["profile"], title="Reemplazada")})
+    assert f["profile"]["title"] == "Reemplazada"
+    assert api.post("/profiles", {"id": pid, "profile": prof, "base_updated": "x"}, raw=True)[0] == 400
+    # base_updated de un perfil que no existe: se crea (no hay nada que pisar)
+    n = api.post("/profiles", {"id": "perfil-nuevo-demo", "profile": dict(prof, name="Nuevo Demo"), "base_updated": 1.0})
+    assert n["id"] == "perfil-nuevo-demo" and n["replaced"] is False
+    for x in (pid, "perfil-nuevo-demo"):
+        api.req("DELETE", f"/profiles/{x}")
+
+
+def test_preset_names_with_a_slash_can_be_deleted(srv):  # noqa: F811
+    """Una plantilla «Marca 1/2» (el dialogo de nombre la acepta) se guarda Y se elimina (antes DELETE
+    daba 404 y el Studio decia «eliminada» aunque seguia); eliminar una que ya no existe da 404."""
+    api = srv["api"]
+    assert api.post("/presets", {"name": "Marca 1/2", "config": {"x": 1}})["ok"]
+    assert "Marca 1/2" in api.get("/presets")
+    assert api.req("DELETE", "/presets/Marca%201%2F2")["ok"]
+    assert "Marca 1/2" not in api.get("/presets")
+    assert api.req("DELETE", "/presets/Marca%201%2F2", raw=True)[0] == 404
+
+
 PRELUDE = '''
 import os, sys, json, time, threading
 sys.path.insert(0, "app")

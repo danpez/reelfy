@@ -2,6 +2,33 @@
 
 Formato: cada versión = un tag `reelfy-v*` que dispara el build de los 3 instaladores.
 
+## v0.6.2 — 2026-10-05
+
+**Los perfiles de «Quién sale en el video» se pueden eliminar, actualizar y volver a generar.**
+
+### Perfiles
+- Eliminar un perfil guardado ya funciona en la app de escritorio (antes el aviso de confirmación no
+  aparecía y no pasaba nada).
+- Editar un perfil guardado lo actualiza en su lugar («Guardar cambios»); «Guardar y aplicar al
+  video» regenera el rótulo, el botón Seguir, la invitación a reservar y la tarjeta final.
+- Cambiar el @usuario, el WhatsApp o el teléfono actualiza también su enlace y su foto (antes se
+  quedaba la cuenta o el número anterior).
+- «Volver a buscar la foto/el logo» en cada enlace; si la página no responde, se conserva la foto
+  que ya había.
+- Si guardas un perfil con el nombre de otro ya guardado, te pregunta si es otra persona o si
+  quieres completar ese perfil (sin borrar sus enlaces).
+- Las listas de perfiles se actualizan en Inicio, Montar clips y Estilo sin recargar; dos personas
+  con el mismo nombre se distinguen por su profesión o negocio.
+- Avisa antes de cerrar el panel con cambios sin guardar, y si el video usa una versión anterior del
+  perfil guardado te deja elegir cuál usar.
+
+### Diálogos
+- Todos los avisos y confirmaciones de la app usan un diálogo propio de Reelfy (los del navegador
+  no funcionan en la app de escritorio): eliminar y nombrar plantillas, clave de Pexels, salir con
+  cambios sin guardar, errores al subir el logo.
+
+---
+
 ## v0.6.1 — 2026-10-04
 
 **Armar con IA entiende tus grabaciones de pantalla y tus videos de apoyo.**

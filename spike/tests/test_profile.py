@@ -528,6 +528,37 @@ def test_studio_can_change_the_network_of_a_link():
     assert pr["links"][0]["platform"] == "threads" and pr["links"][0]["primary"]
 
 
+def test_studio_can_change_the_handle_of_a_link():
+    """Reporte de Kevin («no se pueden actualizar»): cambiar el @usuario de una red en el Studio no se
+    guardaba (la url armada con el usuario anterior mandaba) y se quedaba la foto de la cuenta vieja.
+    Ahora la url se rehace con el nuevo, el texto que mostraba el anterior se va y la foto/logo
+    AUTOMATICOS de la otra cuenta tambien; lo que subio o escribio el usuario se queda."""
+    foto = {"sid": "foto_demo_1", "type": "image"}
+    old = P.parse_link("https://instagram.com/cuenta.vieja")
+    l = P._norm_link(dict(old, handle="@cuenta.nueva", photo=foto, media_src={"photo": "auto"}, media_for=old["url"]))
+    assert (l["handle"], l["url"], l["display"]) == ("@cuenta.nueva", "https://instagram.com/cuenta.nueva", "@cuenta.nueva")
+    assert "photo" not in l and "media_for" not in l and "media_src" not in l
+    # sin media_for (una copia guardada antes) tampoco se queda la foto de la otra cuenta
+    assert "photo" not in P._norm_link(dict(old, handle="cuenta.nueva", photo=foto, media_src={"photo": "auto"}))
+    # la foto subida por el usuario y un texto propio se quedan
+    mine = P._norm_link(dict(old, handle="@cuenta.nueva", display="Mi cuenta", photo=foto, media_src={"photo": "user"}))
+    assert mine["display"] == "Mi cuenta" and mine["photo"]["sid"] == "foto_demo_1" and mine["url"].endswith("/cuenta.nueva")
+    # cada red con su forma de url; mayusculas o la arroba no cuentan como cambio
+    tk = P._norm_link({"url": "https://tiktok.com/@cuenta.vieja", "platform": "tiktok", "handle": "@cuenta.nueva"})
+    assert tk["url"] == "https://tiktok.com/@cuenta.nueva" and tk["handle"] == "@cuenta.nueva"
+    same = P._norm_link(dict(old, handle="Cuenta.Vieja", photo=foto, media_src={"photo": "auto"}, media_for=old["url"]))
+    assert same["url"] == old["url"] and same["photo"]["sid"] == "foto_demo_1"
+    # un @usuario que no es valido no rompe el enlace (se queda el de la url)
+    assert P._norm_link(dict(old, handle="no vale!"))["handle"] == "@cuenta.vieja"
+    # una url propia con otra ruta (una publicacion) no es la del usuario: no se toca
+    post = P._norm_link({"url": "https://www.instagram.com/p/Cx12AbCdEf/", "platform": "instagram", "handle": "@otra"})
+    assert "Cx12AbCdEf" in post["url"]
+    # por normalize_profile (guardar, PUT /profile, /profile/normalize) e idempotente
+    pr = P.normalize_profile({"name": "Dra. Demo", "links": [dict(old, handle="@cuenta.nueva")]})
+    assert pr["links"][0]["url"] == "https://instagram.com/cuenta.nueva" and pr["links"][0]["primary"]
+    assert P.normalize_profile(pr) == pr
+
+
 @pytest.mark.parametrize("url, display", [
     ("https://holdyfy.mixiuh.online/profesional/dra-maria-de-los-angeles-castaneda",
      "holdyfy/dra-maria-de-los-angeles-castaneda"),
@@ -669,3 +700,63 @@ def test_portada_de_plataforma_de_reservas_es_sitio_web(url):
     l = P.parse_link(url)
     assert l["kind"] == "web" and "Agenda" not in (l.get("label") or "") + (l.get("cta") or "")
     assert P.parse_link(url.rstrip("/") + "/business/dra-demo")["kind"] == "booking" or "holdyfy" in url
+
+
+def test_whatsapp_phone_and_email_fields_rule_their_links():
+    """Reporte de Kevin («no se puede actualizar / re-generar»): editar el WhatsApp o el teléfono de un
+    perfil cambiaba solo el campo; su enlace (wa.me / tel:) seguía con el número viejo (y la tarjeta final
+    también) y vaciarlo era imposible: se volvía a llenar con el enlace. Ahora el campo manda: su enlace
+    (from_field) se rehace en su lugar, vaciarlo lo quita, lo que el usuario agregó aparte se queda y el
+    texto propio del botón también. Idempotente."""
+    import json
+
+    def by(p):
+        return {l["platform"]: l for l in p["links"]}
+
+    def same(p):
+        return json.dumps(p, sort_keys=True) == json.dumps(P.normalize_profile(json.loads(json.dumps(p))), sort_keys=True)
+    saved = P.normalize_profile({"name": "Dra. Ana Demo", "whatsapp": "+52 55 0000 0001", "phone": "+52 33 0000 0001",
+                                 "email": "ana@demo.test", "links": ["instagram.com/dra.ana.demo"]})
+    assert [l["platform"] for l in saved["links"]] == ["instagram", "whatsapp", "phone", "email"]
+    assert by(saved)["whatsapp"]["url"] == "https://wa.me/525500000001" and by(saved)["whatsapp"]["from_field"] is True
+    assert "from_field" not in by(saved)["instagram"]
+    # editar el campo: su enlace se rehace EN SU LUGAR, nada del numero viejo
+    e = P.normalize_profile(dict(saved, whatsapp="+52 55 0000 0002", phone="33 0000 0002", email="ana2@demo.test"))
+    assert by(e)["whatsapp"]["url"] == "https://wa.me/525500000002" and by(e)["whatsapp"]["display"] == "+52 55 0000 0002"
+    assert by(e)["phone"]["url"] == "tel:+523300000002" and by(e)["email"]["url"] == "mailto:ana2@demo.test"
+    assert e["whatsapp"] == "+52 55 0000 0002" and "0001" not in json.dumps(e) and "ana@" not in json.dumps(e)
+    assert [l["platform"] for l in e["links"]] == [l["platform"] for l in saved["links"]]
+    # vaciarlo lo quita (antes se volvia a llenar con el enlace)
+    c = P.normalize_profile(dict(saved, whatsapp="", phone="", email=""))
+    assert c["whatsapp"] == c["phone"] == c["email"] == "" and [l["platform"] for l in c["links"]] == ["instagram"]
+    assert all(same(x) for x in (saved, e, c))
+    # un numero que el usuario agrego APARTE se queda al editar el campo; al vaciar el campo, ese pasa
+    # a ser el del campo
+    two = P.normalize_profile(dict(saved, links=saved["links"] + [{"url": "https://wa.me/525500000005", "platform": "whatsapp", "from_field": False}]))
+    wa = [(l["url"], l["from_field"]) for l in two["links"] if l["platform"] == "whatsapp"]
+    assert wa == [("https://wa.me/525500000001", True), ("https://wa.me/525500000005", False)]
+    two_e = P.normalize_profile(dict(two, whatsapp="55 0000 0003"))
+    assert [(l["url"], l["from_field"]) for l in two_e["links"] if l["platform"] == "whatsapp"] == [
+        ("https://wa.me/525500000003", True), ("https://wa.me/525500000005", False)]
+    two_c = P.normalize_profile(dict(two, whatsapp=""))
+    assert two_c["whatsapp"] == "+52 55 0000 0005" and [l["url"] for l in two_c["links"] if l["platform"] == "whatsapp"] == ["https://wa.me/525500000005"]
+    assert same(two) and same(two_e) and same(two_c)
+    # el texto propio del boton se queda al cambiar el numero
+    lab = json.loads(json.dumps(saved))
+    by(lab)["whatsapp"]["label"] = "Escríbeme"
+    lab_e = P.normalize_profile(dict(lab, whatsapp="+52 55 0000 0004"))
+    assert by(lab_e)["whatsapp"]["label"] == "Escríbeme" and by(lab_e)["whatsapp"]["url"] == "https://wa.me/525500000004"
+    # un perfil guardado ANTES de la marca, con el campo y el enlace distintos (el error de antes): manda
+    # el campo; con el campo vacio, el enlace lo llena (como siempre)
+    old = json.loads(json.dumps(saved))
+    for l in old["links"]:
+        l.pop("from_field", None)
+    old["whatsapp"] = "+52 55 0000 0009"
+    fixed = P.normalize_profile(old)
+    assert by(fixed)["whatsapp"]["url"] == "https://wa.me/525500000009" and by(fixed)["phone"]["url"] == "tel:+523300000001"
+    old["whatsapp"] = ""
+    assert P.normalize_profile(old)["whatsapp"] == "+52 55 0000 0001"
+    # un texto pegado con dos WhatsApp: el primero es el del campo, el otro va aparte
+    t = P.parse_profile_text("Dra. Ana Demo. WhatsApp 55 0000 0001 o al whatsapp 55 0000 0006", use_llm=False)["profile"]
+    assert t["whatsapp"] == "+52 55 0000 0001"
+    assert [l["from_field"] for l in t["links"] if l["platform"] == "whatsapp"] == [True, False]

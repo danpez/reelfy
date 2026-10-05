@@ -420,7 +420,7 @@
   .rdlg .rbtns .rdel{background:#d33c3c;box-shadow:none}
   @media (max-width:480px){ #recent .rrow .ro{display:none} }   /* telefono: la fila entera abre; mas lugar para el nombre */
 </style>
-<link rel="stylesheet" href="/static/fx.css?v=563f3b6d">
+<link rel="stylesheet" href="/static/fx.css?v=dd650c4d">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute">
@@ -999,14 +999,15 @@
 <script src="/static/floatcard.js?v=f7bc8002"></script>
 <script src="/static/screencard.js?v=000ed644"></script>
 <script src="/static/reelcard.js?v=1abb8060"></script>
-<script src="/static/fxcore.js?v=563f3b6d"></script>
+<script src="/static/fxcore.js?v=dd650c4d"></script>
 <script src="/static/capdraw.js?v=51f58312"></script>
 <script src="/static/lookgl.js?v=4b75522a"></script>
-<script src="/static/fx.js?v=563f3b6d"></script>
+<script src="/static/fx.js?v=dd650c4d"></script>
 <script src="/static/estilo.js?v=55d8b18c"></script>
 <script src="/static/estilo_proyecto.js?v=77b318ea"></script>
 <script src="/static/estilo_catalog.js?v=8820f028"></script>
-<script src="/static/profile.js?v=563f3b6d"></script>
+<script src="/static/dialog.js?v=0087939b"></script>
+<script src="/static/profile.js?v=dd650c4d"></script>
 <script>
 const $=s=>document.querySelector(s);
 /* tooltips flotantes (position:fixed) para que NO se corten dentro de paneles con overflow */
@@ -1941,7 +1942,7 @@ function asmDropTrack(track){
     const sid=e.dataTransfer.getData("sid"); if(sid){ track==="main"?asmAddClip(sid):asmAddOverlay(sid); } };
 }
 async function asmApply(){
-  if(!ASM.clips.length){ alert("Agrega al menos un clip a la pista Video."); return; }
+  if(!ASM.clips.length){ Dlg.alert({title:"Falta un clip",text:"Agrega al menos un clip a la pista Video para armar tu video."}); return; }
   asmPause(); asmStopPreview(true); toastOff();
   // desde un armado con IA: el servidor re-encola ESE trabajo (montage_job) como compose, conserva
   // plan.montage y usa el guion (el editado en el panel, si se corrigio) para glosario y secciones
@@ -2985,9 +2986,11 @@ function wireEditorOnce(){
     if(!e.target.checked){ renderBroll(); renderTL(); return; }
     const st = await (await fetch("/settings")).json();
     if(!st.pexels){
-      const k = prompt("El B-roll usa videos de stock de Pexels (gratis).\nPega tu API key de https://www.pexels.com/api/ :");
-      if(k && k.trim().length > 20){ await fetch("/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pexels_key:k.trim()})}); }
-      else { e.target.checked = false; alert("Sin clave de Pexels el B-roll queda desactivado."); return; }
+      const k = await Dlg.prompt({title:"Clave de Pexels",text:"Los videos de apoyo de stock vienen de Pexels (gratis). Pega tu clave de acceso de pexels.com/api.",
+        label:"Clave de acceso de Pexels",placeholder:"Pega aquí tu clave",ok:"Guardar clave",maxLength:200,
+        validate:v=>v.length>20?null:"Esa clave es muy corta: cópiala completa de pexels.com/api."});
+      if(k){ await fetch("/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pexels_key:k})}); }
+      else { e.target.checked = false; FX.toast("Sin clave de Pexels los videos de apoyo de stock quedan apagados.","alert"); return; }
     }
     renderBroll(); renderTL();
   });
@@ -3017,9 +3020,9 @@ function wireEditorOnce(){
       if(!fi.files[0])return;
       const fd=new FormData(); fd.append("logo",fi.files[0]);
       chip("Subiendo logo…");
-      try{ await fetch("/brand/logo",{method:"POST",body:fd}); loadLogo();
+      try{ const r=await fetch("/brand/logo",{method:"POST",body:fd}); if(!r.ok) throw new Error(String(r.status)); loadLogo();
         LOGO_ON=true; $("#logoOn").checked=true; }
-      catch(e){ alert("No se pudo subir el logo"); }
+      catch(e){ Dlg.alert({title:"No se pudo subir el logo",text:"Usa una imagen PNG, JPG o WEBP y vuelve a intentarlo."}); }
       chip(null);
     };
     fi.click();
@@ -3274,17 +3277,27 @@ async function loadPresets(){
     Object.keys(PRESETS).map(n=>`<option>${FX.esc(n)}</option>`).join("");
 }
 async function savePreset(){
-  const name=prompt("Nombre de la plantilla (por ejemplo: Mi marca):");
+  const name=await Dlg.prompt({title:"Guardar plantilla de tu marca",text:"Guarda tus subtítulos, colores, color de tu marca y música para usarlos en otro video.",
+    label:"Nombre de la plantilla",placeholder:"Por ejemplo: Mi marca",value:$("#presetSel").value||"",ok:"Guardar plantilla",maxLength:60});
   if(!name)return;
-  await fetch("/presets",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({name,config:gatherPreset()})});
+  if(PRESETS[name]&&!await Dlg.confirm({title:`¿Reemplazar la plantilla «${name}»?`,text:"Ya tienes una plantilla con ese nombre: se guarda con lo que tienes ahora.",ok:"Reemplazar"}))return;
+  // el aviso de listo solo si el servidor la guardo de verdad
+  let r=null; try{ r=await fetch("/presets",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({name,config:gatherPreset()})}); }catch(e){ r=null; }
+  if(!r||!r.ok){ let why=""; try{ why=(await r.json()).detail||""; }catch(e){}
+    Dlg.alert({title:"No se pudo guardar la plantilla",text:(why?why+". ":"")+"Vuelve a intentarlo en un momento."}); return; }
   await loadPresets(); $("#presetSel").value=name;
+  FX.toast(`Plantilla «${name}» guardada.`,"save");
 }
 async function deletePreset(){
-  const n=$("#presetSel").value; if(!n)return;
-  if(!confirm(`¿Eliminar la plantilla «${n}»?`))return;
-  await fetch("/presets/"+encodeURIComponent(n),{method:"DELETE"});
+  const n=$("#presetSel").value;
+  if(!n){ Dlg.alert({title:"Elige una plantilla",text:"Primero elige en la lista la plantilla que quieres eliminar."}); return; }
+  if(!await Dlg.confirm({title:`¿Eliminar la plantilla «${n}»?`,text:"Se quita de tus plantillas. Tus videos no cambian.",ok:"Eliminar plantilla",danger:true}))return;
+  let r=null; try{ r=await fetch("/presets/"+encodeURIComponent(n),{method:"DELETE"}); }catch(e){ r=null; }
   await loadPresets();
+  // 404: ya no estaba (otra ventana); la lista ya quedo al dia
+  if(!r||(!r.ok&&r.status!==404)){ Dlg.alert({title:"No se pudo eliminar la plantilla",text:"Sigue en tu lista. Vuelve a intentarlo en un momento."}); return; }
+  FX.toast(r.ok?`Plantilla «${n}» eliminada.`:`La plantilla «${n}» ya no existía.`,"trash");
 }
 function applyPreset(name){
   const c=PRESETS[name]; if(!c)return;
@@ -3891,7 +3904,7 @@ $("#cancel").onclick=async()=>{
   if(FX.busy()) return;
   const b=$("#cancel"); b.disabled=true;
   const ok=FX.isPro()?await FX.saveNow():true;
-  if(!ok&&FX.isDirty()&&!confirm("Tus últimos cambios no se pudieron guardar. ¿Salir de todos modos?")){ b.disabled=false; return; }
+  if(!ok&&FX.isDirty()&&!await Dlg.confirm({title:"Tus últimos cambios no se guardaron",text:"Si sales ahora se pierden. ¿Salir de todos modos?",ok:"Salir sin guardar",cancel:"Quedarme",danger:true,icon:"alert"})){ b.disabled=false; return; }
   location.href=location.pathname;
 };
 

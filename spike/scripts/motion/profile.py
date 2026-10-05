@@ -767,6 +767,8 @@ def dedupe_links(links: list[dict]) -> list[dict]:
             if l.get("primary"):
                 out[seen[k]]["primary"] = True
             keep = out[seen[k]]
+            if l.get("from_field") is True:          # el del campo de contacto sigue siendolo
+                keep["from_field"] = True
             for mk in ("photo", "logo"):          # la foto/logo del duplicado no se pierde
                 if isinstance(l.get(mk), dict) and not keep.get(mk):
                     keep[mk] = l[mk]
@@ -885,6 +887,18 @@ def _norm_link(v: Any) -> dict | None:
         base = _mk(hint, _profile_url(hint, h) if h else "", h)
     if base is None:
         return None
+    # el usuario cambio el @usuario de una red en el Studio: la url era la del perfil ARMADA con el
+    # usuario anterior (instagram.com/<usuario>) -> se rehace con el nuevo (antes la url mandaba y el
+    # cambio se perdia en silencio, con la foto de la cuenta vieja). Una url propia con otra ruta (una
+    # publicacion, un canal) no es la del usuario: esa no se toca.
+    edited_from = ""
+    nh = _clean_handle(v.get("handle")) if isinstance(v.get("handle"), str) and v.get("url") else ""
+    oh = str(base.get("handle") or "").lstrip("@")
+    if nh and oh and nh.lower() != oh.lower() and base["platform"] in _HANDLE_PLATS and \
+            _url_key(base["url"]) == _url_key(_profile_url(base["platform"], oh)):
+        edited_from = oh
+        amb = bool(base.get("ambiguous"))
+        base = _mk(base["platform"], _profile_url(base["platform"], nh), nh, ambiguous=amb)
     old = base["platform"]
     switched = False
     if hint and hint != old and base.get("handle"):
@@ -902,13 +916,109 @@ def _norm_link(v: Any) -> dict | None:
     auto = {PLATFORMS[old]["label"], PLATFORMS[old].get("cta") or "", "@" + str(v.get("handle") or "").lstrip("@")}
     for k, n in (("label", 40), ("display", 48)):
         t = _clean(v.get(k), n)
-        # al cambiar de red, la etiqueta/texto automaticos de la red anterior no se arrastran
-        if t and not (switched and t in auto | {base.get("handle", "")}):
+        # al cambiar de red, la etiqueta/texto automaticos de la red anterior no se arrastran; al
+        # cambiar el @usuario, tampoco el texto que mostraba el usuario anterior
+        if t and not (switched and t in auto | {base.get("handle", "")}) and \
+                not (edited_from and t.lstrip("@").lower() == edited_from.lower()):
             base[k] = t
     base["primary"] = bool(v.get("primary"))
-    stale = switched or (isinstance(v.get("media_for"), str) and _url_key(v["media_for"]) != _url_key(base["url"]))
+    # foto/logo automaticos de OTRA cuenta (otra red, otro @usuario u otra url) nunca se quedan
+    stale = switched or bool(edited_from) or \
+        (isinstance(v.get("media_for"), str) and _url_key(v["media_for"]) != _url_key(base["url"]))
     _keep_link_media(base, v, stale)
+    # enlace de telefono / WhatsApp / correo: si es el del campo del perfil (ver normalize_profile)
+    if base["platform"] in FIELD_LINKS.values() and isinstance(v.get("from_field"), bool):
+        base["from_field"] = v["from_field"]
     return base
+
+
+# ---------------------------------------------------------------- telefono, WhatsApp y correo
+# Cada campo (whatsapp, phone, email) tiene SU enlace (wa.me/..., tel:..., mailto:...), marcado
+# `from_field: true`; los que el usuario agrego aparte van con `from_field: false`. El CAMPO manda:
+# cambiarlo rehace su enlace (antes el enlace viejo se quedaba y la tarjeta final seguia con el numero
+# anterior) y vaciarlo lo quita (antes se volvia a llenar con el enlace). Un perfil anterior a la
+# marca (sin `from_field`): su primer enlace de esa red es el del campo.
+FIELD_LINKS = {"whatsapp": "whatsapp", "phone": "phone", "email": "email"}
+
+
+def _field_link(raw: str, plat: str) -> dict | None:
+    """Enlace del valor de un campo (numero o correo) o None si no es uno de esa red."""
+    l = parse_link(raw, hint=plat) if raw else None
+    return l if l is not None and l["platform"] == plat else None
+
+
+def _link_field_value(l: dict, plat: str) -> str:
+    """Valor del campo para un enlace de esa red ('' si no da uno: wa.me/message/...)."""
+    url = str(l.get("url") or "")
+    canon = ""
+    if plat == "email" and url.lower().startswith("mailto:"):
+        canon = url[7:]
+    elif plat == "phone" and url.lower().startswith("tel:") and len(_digits(url)) >= 8:
+        canon = "+" + _digits(url)
+    elif plat == "whatsapp":
+        m = re.match(r"^https?://(?:api\.)?wa\.me/(\d{8,})/?$", url, re.I)
+        canon = "+" + m.group(1) if m else ""
+    for cand in (str(l.get("display") or ""), canon):
+        x = _field_link(cand, plat) if cand else None
+        if x is not None and _url_key(x["url"]) == _url_key(url):
+            return x["display"]
+    return ""
+
+
+def _carry_link_text(old: dict, new: dict, plat: str) -> None:
+    """El enlace del campo cambio de numero: el texto propio del usuario (etiqueta del boton, texto
+    que no es el numero) y la estrella se quedan."""
+    auto = {PLATFORMS[plat]["label"], PLATFORMS[plat].get("cta") or ""}
+    lab = str(old.get("label") or "")
+    if lab and lab not in auto:
+        new["label"] = lab
+    disp = str(old.get("display") or "")
+    if disp and not _digits(disp) and "@" not in disp and disp not in auto:
+        new["display"] = disp
+    if old.get("primary"):
+        new["primary"] = True
+
+
+def _field_links(out: dict, p: dict, links: list[dict]) -> list[dict]:
+    """Pone al dia el enlace de cada campo de contacto (FIELD_LINKS) y el campo -> enlaces."""
+    for key, plat in FIELD_LINKS.items():
+        raw = _clean(p.get(key), 80)
+        out[key] = raw
+        fl = _field_link(raw, plat)
+        mine = [l for l in links if l["platform"] == plat]
+        if fl is not None:
+            out[key] = fl["display"]
+            keep = next((l for l in mine if _url_key(l["url"]) == _url_key(fl["url"])), None)
+            if keep is None:
+                # el campo cambio: su enlace (o el primero de un perfil sin marca) se rehace en su lugar
+                tgt = next((l for l in mine if l.get("from_field") is True), None) or \
+                    next((l for l in mine if "from_field" not in l), None)
+                if tgt is not None:
+                    _carry_link_text(tgt, fl, plat)
+                    links[next(i for i, x in enumerate(links) if x is tgt)] = fl
+                else:
+                    links.append(fl)
+                keep = fl
+            keep["from_field"] = True
+            # otro enlace marcado de esa red tenia el valor ANTERIOR del campo: fuera
+            links = [l for l in links if not (l["platform"] == plat and l is not keep and l.get("from_field") is True)]
+        else:
+            if key == "phone" and raw and len(_digits(raw)) >= 8:
+                out[key] = format_phone(raw)
+            # campo vaciado (o que ya no es un numero/correo): su enlace se va
+            links = [l for l in links if not (l["platform"] == plat and l.get("from_field") is True)]
+            if not raw:
+                # sin campo: lo toma de un enlace que el usuario agrego (o de un perfil sin marca)
+                for l in links:
+                    v = _link_field_value(l, plat) if l["platform"] == plat else ""
+                    if v:
+                        out[key] = v
+                        l["from_field"] = True
+                        break
+        for l in links:
+            if l["platform"] == plat and l.get("from_field") is not True:
+                l["from_field"] = False
+    return links
 
 
 # ---------------------------------------------------------------- foto y logo de los enlaces
@@ -1028,27 +1138,11 @@ def normalize_profile(p: Any) -> dict | None:
     g = p.get("gender")
     if g in ("f", "m"):
         out["gender"] = g
-    links = [l for l in (_norm_link(x) for x in (p.get("links") or [])[:40]) if l]
-    for key, plat in (("whatsapp", "whatsapp"), ("phone", "phone"), ("email", "email")):
-        raw = _clean(p.get(key), 80)
-        out[key] = raw
-        if raw:
-            l = parse_link(raw, hint=plat)
-            if l is not None and l["platform"] == plat:
-                out[key] = l["display"]
-                if not any(x["platform"] == plat for x in links):
-                    links.append(l)
-            elif key == "phone" and len(_digits(raw)) >= 8:
-                out[key] = format_phone(raw)
-    for l in links:
-        if l["platform"] == "whatsapp" and not out["whatsapp"] and _digits(l["display"]):
-            out["whatsapp"] = l["display"]
-        if l["platform"] == "email" and not out["email"]:
-            out["email"] = l["display"]
-        if l["platform"] == "phone" and not out["phone"]:
-            out["phone"] = l["display"]
+    links = dedupe_links([l for l in (_norm_link(x) for x in (p.get("links") or [])[:40]) if l])
+    # telefono, WhatsApp y correo: el campo y su enlace siempre dicen lo mismo (_field_links)
+    links = _field_links(out, p, links)
     out["address"] = _clean(p.get("address"), 120)
-    links = dedupe_links(links)[:MAX_LINKS]
+    links = links[:MAX_LINKS]
     prim = [l for l in links if l.get("primary")]
     for l in links:
         l["primary"] = False

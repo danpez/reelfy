@@ -249,6 +249,72 @@ print("OK")
     _run(code, tmp_path, env_extra=ON)
 
 
+def test_changing_the_handle_never_keeps_the_old_account_photo(tmp_path):
+    """Reporte de Kevin («no se pueden actualizar / re-generar»): al cambiar el @usuario de Instagram
+    en el Studio, POST /profile/normalize rehace la url al instante y NO trae la foto de la cuenta
+    anterior (la nueva baja en segundo plano y luego llega); guardar con el id actualiza ESE perfil;
+    aplicarlo al proyecto re-genera Seguir con el usuario nuevo y nada usa la foto vieja (tampoco
+    cuando termina la descarga); «Volver a buscar» un solo enlace (forzado) vuelve a pedir SOLO esa
+    pagina aunque ya tenga foto."""
+    code = PRELUDE + r'''
+IG2 = b"""<html><head><meta property="og:image" content="https://instagram.com/pp/otra.jpg"/></head></html>"""
+FILES["/ig/otra.demo"] = (IG2, "text/html")
+FILES["/ig/pp/otra.jpg"] = (cv2.imencode(".jpg", np.full((100, 100, 3), 200, np.uint8))[1].tobytes(), "image/jpeg")
+IG2_URL = "https://instagram.com/otra.demo"
+sv = S.profiles_save({"profile": S.profile_parse({"text": TEXT, "use_llm": False})["profile"]})
+pid = sv["id"]
+wait(idle)
+saved = next(x for x in S.profiles_list()["profiles"] if x["id"] == pid)
+old_sid = link(saved, "instagram")["photo"]["sid"]
+# el Studio cambia el @usuario del enlace (lo demas igual): url nueva, sin la foto vieja
+ig = dict(link(saved, "instagram"), handle="@otra.demo")
+n = S.profile_normalize({"profile": {"links": [ig]}})["profile"]
+l = n["links"][0]
+assert l["url"] == IG2_URL and l["handle"] == "@otra.demo" and l["display"] == "@otra.demo", l
+assert "photo" not in l and n["media_status"] == "fetching", n
+wait(idle)
+l2 = S.profile_normalize({"profile": {"links": [ig]}})["profile"]["links"][0]
+assert l2["photo"]["sid"] != old_sid and l2["photo"]["src"].endswith("/pp/otra.jpg"), l2
+# guardar con el id: el MISMO perfil, con el usuario nuevo y su foto (sin copia)
+edited = dict(saved, links=[l2 if x["platform"] == "instagram" else x for x in saved["links"]])
+up = S.profiles_save({"id": pid, "profile": edited})
+assert up["replaced"] and [x["id"] for x in up["profiles"]] == [pid]
+assert link(up["profile"], "instagram")["photo"]["sid"] == l2["photo"]["sid"]
+# un proyecto con el perfil de ANTES (foto vieja en Seguir) -> aplicar el editado
+plan = directed(saved)
+jid = new_job(plan)
+assert old_sid in json.dumps(plan["fx"])
+r = S.profile_put(jid, {"profile": up["profile"]})
+fol = [g for g in r["plan"]["fx"]["graphics"] if g["kind"] == "cta" and g.get("variant") == "follow"]
+assert fol and all(f["handle"] == "@otra.demo" and f["media"]["sid"] == l2["photo"]["sid"] for f in fol), fol
+assert old_sid not in json.dumps(r["plan"]["fx"]) and "perfil.demo" not in json.dumps(r["plan"]["fx"])
+# aplicado SIN la foto nueva (el Studio aun no la tenia): llega sola y la vieja nunca vuelve
+cut = dict(up["profile"], links=[dict(x, photo=None, media_src={}) if x["platform"] == "instagram" else x
+                                 for x in up["profile"]["links"]])
+r2 = S.profile_put(jid, {"profile": cut})
+assert old_sid not in json.dumps(r2["plan"]["fx"])
+assert all(f["media"]["sid"] == l2["photo"]["sid"] for f in r2["plan"]["fx"]["graphics"]
+           if f["kind"] == "cta" and f.get("variant") == "follow")      # ya estaba en la cache
+# «Volver a buscar» un solo enlace aunque ya tenga foto: solo esa pagina, otra vez
+h0 = HITS.get("/ig/otra.demo", 0)
+rr = S.profile_media_refresh({"profile": {"links": [l2]}})
+assert rr["urls"] == [IG2_URL], rr["urls"]
+wait(idle)
+assert HITS["/ig/otra.demo"] == h0 + 1
+assert S.profile_parse({"text": IG2_URL, "use_llm": False})["profile"]["links"][0]["photo"]["sid"] == l2["photo"]["sid"]
+# /profile/normalize: 400 sin perfil o vacio
+for bad in ({}, {"profile": None}, {"profile": "x"}, {"profile": {"name": " "}}):
+    try:
+        S.profile_normalize(bad)
+        raise AssertionError(bad)
+    except S.HTTPException as e:
+        assert e.status_code == 400
+assert "profile_normalize" in S.get_settings()["features"]
+print("OK")
+'''
+    _run(code, tmp_path, env_extra=ON)
+
+
 def test_user_media_off_and_offline_are_respected(tmp_path):
     """Lo subido por el usuario nunca se pisa ni se re-descarga; lo que quito (media_off) no
     vuelve; una pagina sin red deja media_status 'offline' sin tumbar nada y no borra lo que ya
@@ -321,6 +387,57 @@ wait(idle)
 assert sorted(u for r in out for u in r) == sorted([IG_URL, PC_URL]), out
 assert HITS["/pc/business/negocio-demo"] == 1 and HITS["/ig/perfil.demo"] == 1, HITS
 assert S._lm_status(prof) == "done"
+print("OK")
+'''
+    _run(code, tmp_path, env_extra=ON)
+
+
+def test_refetch_without_an_image_never_wipes_the_photo(tmp_path):
+    """«Volver a buscar la foto» (refresco forzado) cuando la pagina responde SIN imagen (el muro de
+    inicio de sesion de Instagram, una pagina a medias): la foto/logo que ya se tenia de ESA url se
+    queda en la cache, en los perfiles guardados y en los proyectos (antes se borraba de todos). Una
+    imagen NUEVA si la reemplaza, y otra url nunca hereda la de la anterior."""
+    code = PRELUDE + r'''
+sv = S.profiles_save({"profile": S.profile_parse({"text": TEXT, "use_llm": False})["profile"]})
+pid = sv["id"]
+wait(idle)
+saved = next(x for x in S.profiles_list()["profiles"] if x["id"] == pid)
+ig, pc = link(saved, "instagram"), link(saved, "paseoclub")
+old_ig, old_pc, old_logo = ig["photo"]["sid"], pc["photo"]["sid"], pc["logo"]["sid"]
+plan = directed(saved)
+jid = new_job(plan)
+r0 = S.profile_put(jid, {"profile": saved})
+fol = lambda pl: [g for g in pl["fx"]["graphics"] if g["kind"] == "cta" and g.get("variant") == "follow"]
+assert fol(r0["plan"]) and all(f["media"]["sid"] == old_ig for f in fol(r0["plan"]))
+# la pagina ahora responde sin imagen (muro de inicio de sesion) y sin icono
+FILES["/ig/perfil.demo"] = (b"<html><head><title>Inicia sesion</title></head><body>login</body></html>", "text/html")
+FILES["/pc/business/negocio-demo"] = (b"<html><head></head><body>sin vista previa</body></html>", "text/html")
+h0 = dict(HITS)
+rr = S.profile_media_refresh({"profile": {"links": [ig, pc]}})
+assert sorted(rr["urls"]) == sorted([IG_URL, PC_URL]), rr
+wait(idle)
+assert HITS["/ig/perfil.demo"] == h0["/ig/perfil.demo"] + 1          # si se volvio a pedir
+c = S._lm_cache()
+assert c[IG_URL]["ok"] and c[IG_URL]["photo"]["sid"] == old_ig and c[IG_URL]["kept"] == ["photo"], c[IG_URL]
+assert c[PC_URL]["photo"]["sid"] == old_pc and c[PC_URL]["logo"]["sid"] == old_logo
+after = next(x for x in S.profiles_list()["profiles"] if x["id"] == pid)
+assert link(after, "instagram")["photo"]["sid"] == old_ig and link(after, "paseoclub")["photo"]["sid"] == old_pc
+assert link(after, "paseoclub")["logo"]["sid"] == old_logo
+p2, _rev = jobstore.get_plan(jid)
+assert link(p2["profile"], "instagram")["photo"]["sid"] == old_ig
+assert fol(p2) and all(f["media"]["sid"] == old_ig for f in fol(p2))
+# una imagen NUEVA en la pagina: esa si reemplaza a la anterior
+FILES["/ig/perfil.demo"] = (b"""<html><head><meta property="og:image" content="https://instagram.com/pp/nueva.jpg"/></head></html>""", "text/html")
+FILES["/ig/pp/nueva.jpg"] = (cv2.imencode(".jpg", np.full((100, 100, 3), 30, np.uint8))[1].tobytes(), "image/jpeg")
+S.profile_media_refresh({"profile": {"links": [ig]}})
+wait(idle)
+new = link(next(x for x in S.profiles_list()["profiles"] if x["id"] == pid), "instagram")["photo"]
+assert new["sid"] != old_ig and new["src"].endswith("/pp/nueva.jpg") and "kept" not in S._lm_cache()[IG_URL]
+# otra url (otra cuenta) que responde sin imagen no hereda la foto de la anterior
+FILES["/ig/otra.sin.foto"] = (b"<html><head></head></html>", "text/html")
+o = S._profile_param({"links": ["https://instagram.com/otra.sin.foto"]})
+wait(idle)
+assert "photo" not in S._lm_fill(o)["links"][0]
 print("OK")
 '''
     _run(code, tmp_path, env_extra=ON)
